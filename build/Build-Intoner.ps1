@@ -166,7 +166,6 @@ function Invoke-DotNetBuild(
 
 Assert-FileExists $dotnetPath "dotnet.exe"
 Assert-FileExists $projectPath "project file"
-Assert-FileExists $dependencyProjectPath "dependency project file"
 
 try
 {
@@ -184,6 +183,8 @@ try
     {
         Invoke-GitSubmoduleUpdate
     }
+
+    Assert-FileExists $dependencyProjectPath "dependency project file"
 
     switch ($Mode)
     {
