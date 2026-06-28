@@ -4,6 +4,7 @@
   "Punchline": "little plugin that could.",
   "Description": "WIP.",
   "ApplicableVersion": "any",
+  "IconUrl": "https://raw.githubusercontent.com/Abelfreyja/Intoner/main/Intoner/images/intoner.png",
   "Tags": [
     "objects",
     "housing"
