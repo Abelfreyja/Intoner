@@ -1,0 +1,70 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 16
+VisualStudioVersion = 16.0.29709.97
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Intoner", "Intoner\Intoner.csproj", "{13C812E9-0D42-4B95-8646-40EEBF30636F}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Submodules", "Submodules", "{B3E21DB7-3C91-44E0-A2F7-0D2B8DE75B79}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Penumbra", "Penumbra", "{6E13B887-1B42-4231-9564-AF05269B7279}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Penumbra.String", "Submodules\Penumbra.String\Penumbra.String.csproj", "{E1415FFC-CA84-44C3-B1F1-10C1B4292F4D}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Penumbra.Api", "Submodules\Penumbra.Api\Penumbra.Api.csproj", "{4444EC2E-A420-4D70-BA3A-79D85A8B0C99}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Luna", "Luna", "{E393E956-6579-CA32-CA11-EAC16D561793}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Luna.Generators", "Submodules\Luna\Luna.Generators\Luna.Generators.csproj", "{C8554160-E68E-4BAA-8AD1-E62531136BAF}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Luna", "Submodules\Luna\Luna\Luna.csproj", "{60ED326D-BDDB-4DFC-8A77-D1B399530542}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Penumbra.GameData", "Submodules\Penumbra.GameData\Penumbra.GameData.csproj", "{10B66AB7-9BBE-441D-BC4C-B709880DC966}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x64 = Debug|x64
+		Release|x64 = Release|x64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{13C812E9-0D42-4B95-8646-40EEBF30636F}.Debug|x64.ActiveCfg = Debug|x64
+		{13C812E9-0D42-4B95-8646-40EEBF30636F}.Debug|x64.Build.0 = Debug|x64
+		{13C812E9-0D42-4B95-8646-40EEBF30636F}.Release|x64.ActiveCfg = Release|x64
+		{13C812E9-0D42-4B95-8646-40EEBF30636F}.Release|x64.Build.0 = Release|x64
+		{E1415FFC-CA84-44C3-B1F1-10C1B4292F4D}.Debug|x64.ActiveCfg = Debug|x64
+		{E1415FFC-CA84-44C3-B1F1-10C1B4292F4D}.Debug|x64.Build.0 = Debug|x64
+		{E1415FFC-CA84-44C3-B1F1-10C1B4292F4D}.Release|x64.ActiveCfg = Release|x64
+		{E1415FFC-CA84-44C3-B1F1-10C1B4292F4D}.Release|x64.Build.0 = Release|x64
+		{4444EC2E-A420-4D70-BA3A-79D85A8B0C99}.Debug|x64.ActiveCfg = Debug|x64
+		{4444EC2E-A420-4D70-BA3A-79D85A8B0C99}.Debug|x64.Build.0 = Debug|x64
+		{4444EC2E-A420-4D70-BA3A-79D85A8B0C99}.Release|x64.ActiveCfg = Release|x64
+		{4444EC2E-A420-4D70-BA3A-79D85A8B0C99}.Release|x64.Build.0 = Release|x64
+		{C8554160-E68E-4BAA-8AD1-E62531136BAF}.Debug|x64.ActiveCfg = Debug|x64
+		{C8554160-E68E-4BAA-8AD1-E62531136BAF}.Debug|x64.Build.0 = Debug|x64
+		{C8554160-E68E-4BAA-8AD1-E62531136BAF}.Release|x64.ActiveCfg = Release|x64
+		{C8554160-E68E-4BAA-8AD1-E62531136BAF}.Release|x64.Build.0 = Release|x64
+		{60ED326D-BDDB-4DFC-8A77-D1B399530542}.Debug|x64.ActiveCfg = Debug|x64
+		{60ED326D-BDDB-4DFC-8A77-D1B399530542}.Debug|x64.Build.0 = Debug|x64
+		{60ED326D-BDDB-4DFC-8A77-D1B399530542}.Release|x64.ActiveCfg = Release|x64
+		{60ED326D-BDDB-4DFC-8A77-D1B399530542}.Release|x64.Build.0 = Release|x64
+		{10B66AB7-9BBE-441D-BC4C-B709880DC966}.Debug|x64.ActiveCfg = Debug|x64
+		{10B66AB7-9BBE-441D-BC4C-B709880DC966}.Debug|x64.Build.0 = Debug|x64
+		{10B66AB7-9BBE-441D-BC4C-B709880DC966}.Release|x64.ActiveCfg = Release|x64
+		{10B66AB7-9BBE-441D-BC4C-B709880DC966}.Release|x64.Build.0 = Release|x64
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{E1415FFC-CA84-44C3-B1F1-10C1B4292F4D} = {6E13B887-1B42-4231-9564-AF05269B7279}
+		{4444EC2E-A420-4D70-BA3A-79D85A8B0C99} = {6E13B887-1B42-4231-9564-AF05269B7279}
+		{C8554160-E68E-4BAA-8AD1-E62531136BAF} = {E393E956-6579-CA32-CA11-EAC16D561793}
+		{60ED326D-BDDB-4DFC-8A77-D1B399530542} = {E393E956-6579-CA32-CA11-EAC16D561793}
+		{10B66AB7-9BBE-441D-BC4C-B709880DC966} = {6E13B887-1B42-4231-9564-AF05269B7279}
+		{E393E956-6579-CA32-CA11-EAC16D561793} = {B3E21DB7-3C91-44E0-A2F7-0D2B8DE75B79}
+		{6E13B887-1B42-4231-9564-AF05269B7279} = {B3E21DB7-3C91-44E0-A2F7-0D2B8DE75B79}
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {B17E85B1-5F60-4440-9F9A-3DDE877E8CDF}
+	EndGlobalSection
+EndGlobal

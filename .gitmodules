@@ -1,0 +1,12 @@
+[submodule "Submodules/Penumbra.Api"]
+	path = Submodules/Penumbra.Api
+	url = https://github.com/Ottermandias/Penumbra.Api
+[submodule "Submodules/Penumbra.GameData"]
+	path = Submodules/Penumbra.GameData
+	url = https://github.com/Ottermandias/Penumbra.GameData
+[submodule "Submodules/Penumbra.String"]
+	path = Submodules/Penumbra.String
+	url = https://github.com/Ottermandias/Penumbra.String
+[submodule "Submodules/Luna"]
+	path = Submodules/Luna
+	url = https://github.com/Ottermandias/Luna

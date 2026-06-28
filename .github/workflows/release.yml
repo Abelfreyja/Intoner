@@ -1,0 +1,183 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Release channel.
+        required: true
+        type: choice
+        default: testing
+        options:
+        - testing
+        - release
+      bump:
+        description: Version bump used for normal releases when no explicit version is set.
+        required: true
+        type: choice
+        default: patch
+        options:
+        - none
+        - patch
+        - minor
+        - major
+        - build
+      version:
+        description: Explicit assembly version. Leave empty to use the selected bump for release, or the run number for testing.
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: intoner-release-${{ inputs.channel }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_DOWNLOAD_URL: https://github.com/Abelfreyja/Intoner/releases/latest/download/latest.zip
+  TESTING_DOWNLOAD_URL: https://github.com/Abelfreyja/Intoner/releases/download/testing/latest.zip
+
+jobs:
+  release:
+    name: Publish ${{ inputs.channel }}
+    runs-on: windows-2022
+    timeout-minutes: 45
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+
+    - name: Install .NET
+      uses: actions/setup-dotnet@v5
+      with:
+        dotnet-version: 10.0.x
+
+    - name: Cache NuGet packages
+      uses: actions/cache@v4
+      with:
+        path: ~/.nuget/packages
+        key: intoner-nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', '**/packages.lock.json') }}
+        restore-keys: |
+          intoner-nuget-${{ runner.os }}-
+
+    - name: Download Dalamud
+      shell: pwsh
+      run: .\build\Install-Dalamud.ps1
+
+    - name: Resolve version
+      id: version
+      shell: pwsh
+      run: >
+        .\build\Resolve-IntonerReleaseVersion.ps1
+        -ProjectPath "Intoner\Intoner.csproj"
+        -Channel "${{ inputs.channel }}"
+        -Bump "${{ inputs.bump }}"
+        -Version "${{ inputs.version }}"
+        -GitHubOutputPath $env:GITHUB_OUTPUT
+
+    - name: Build dependencies
+      shell: pwsh
+      run: .\build\Build-Intoner.ps1 -Mode deps -Configuration Release -Restore -UpdateSubmodules
+
+    - name: Build Intoner
+      shell: pwsh
+      run: .\build\Build-Intoner.ps1 -Mode verify -Configuration Release -Restore -Version "${{ steps.version.outputs.build_version }}"
+
+    - name: Read existing repo metadata
+      id: existing_repo
+      shell: pwsh
+      run: |
+        $outputPath = Join-Path $env:RUNNER_TEMP "existing-repo.json"
+        git fetch origin repo --depth=1 2>$null
+        if ($LASTEXITCODE -eq 0) {
+          git show FETCH_HEAD:repo.json | Set-Content -LiteralPath $outputPath -Encoding utf8
+          "path=$outputPath" >> $env:GITHUB_OUTPUT
+        } else {
+          "path=" >> $env:GITHUB_OUTPUT
+        }
+
+        exit 0
+
+    - name: Generate repo JSON
+      shell: pwsh
+      run: |
+        $arguments = @{
+          Channel = "${{ inputs.channel }}"
+          PluginManifestPath = "Intoner\bin\x64\Release\Intoner\Intoner.json"
+          OutputPath = "repo.json"
+          ReleaseDownloadUrl = "${{ env.RELEASE_DOWNLOAD_URL }}"
+          TestingDownloadUrl = "${{ env.TESTING_DOWNLOAD_URL }}"
+        }
+
+        $existingRepoPath = "${{ steps.existing_repo.outputs.path }}"
+        if (-not [string]::IsNullOrWhiteSpace($existingRepoPath)) {
+          $arguments.ExistingRepoJsonPath = $existingRepoPath
+        }
+
+        if ("${{ inputs.channel }}" -eq "testing") {
+          $arguments.ReleaseAssemblyVersion = "${{ steps.version.outputs.base_version }}"
+        }
+
+        & .\build\New-DalamudRepoJson.ps1 @arguments
+
+    - name: Configure git author
+      shell: pwsh
+      run: |
+        git config user.name "Intoner Release Bot"
+        git config user.email "actions@github.com"
+
+    - name: Commit release version
+      if: inputs.channel == 'release'
+      shell: pwsh
+      run: |
+        git diff --quiet -- Intoner/Intoner.csproj
+        if ($LASTEXITCODE -ne 0) {
+          git add Intoner/Intoner.csproj
+          git commit -m "Release Intoner v${{ steps.version.outputs.version }}"
+          git push
+        }
+
+    - name: Tag release
+      if: inputs.channel == 'release'
+      shell: pwsh
+      run: |
+        git tag "v${{ steps.version.outputs.version }}"
+        git push origin "v${{ steps.version.outputs.version }}"
+
+    - name: Tag testing release
+      if: inputs.channel == 'testing'
+      shell: pwsh
+      run: |
+        git tag -f testing
+        git push origin testing --force
+
+    - name: Publish normal GitHub release
+      if: inputs.channel == 'release'
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: v${{ steps.version.outputs.version }}
+        name: Intoner v${{ steps.version.outputs.version }}
+        make_latest: true
+        files: |
+          Intoner/bin/x64/Release/Intoner/latest.zip
+          repo.json
+
+    - name: Publish testing GitHub release
+      if: inputs.channel == 'testing'
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: testing
+        name: Intoner Testing
+        prerelease: true
+        make_latest: false
+        overwrite_files: true
+        files: |
+          Intoner/bin/x64/Release/Intoner/latest.zip
+          repo.json
+
+    - name: Publish Dalamud repo branch
+      shell: pwsh
+      run: .\build\Publish-DalamudRepoBranch.ps1 -RepoJsonPath repo.json -Message "Update Intoner ${{ inputs.channel }} metadata"

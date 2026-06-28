@@ -1,0 +1,60 @@
+name: Intoner CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: intoner-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build
+    runs-on: windows-2022
+    timeout-minutes: 30
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+
+    - name: Install .NET
+      uses: actions/setup-dotnet@v5
+      with:
+        dotnet-version: 10.0.x
+
+    - name: Cache NuGet packages
+      uses: actions/cache@v4
+      with:
+        path: ~/.nuget/packages
+        key: intoner-nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', '**/packages.lock.json') }}
+        restore-keys: |
+          intoner-nuget-${{ runner.os }}-
+
+    - name: Download Dalamud
+      shell: pwsh
+      run: .\build\Install-Dalamud.ps1
+
+    - name: Build dependencies
+      shell: pwsh
+      run: .\build\Build-Intoner.ps1 -Mode deps -Configuration Release -Restore -UpdateSubmodules
+
+    - name: Build Intoner
+      shell: pwsh
+      run: .\build\Build-Intoner.ps1 -Mode verify -Configuration Release -Restore
+
+    - name: Store artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: Intoner
+        path: .\Intoner\bin\x64\Release\Intoner\*
+        if-no-files-found: error
+        retention-days: 7
