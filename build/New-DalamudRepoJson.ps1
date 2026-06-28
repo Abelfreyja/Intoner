@@ -164,4 +164,4 @@ if (-not [string]::IsNullOrWhiteSpace($outputDirectory))
     New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
 }
 
-@($manifest) | ConvertTo-Json -Depth 16 -Compress | Set-Content -LiteralPath $OutputPath -Encoding utf8
+ConvertTo-Json -InputObject @($manifest) -Depth 16 -Compress | Set-Content -LiteralPath $OutputPath -Encoding utf8
