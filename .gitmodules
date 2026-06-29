@@ -10,3 +10,6 @@
 [submodule "Submodules/Luna"]
 	path = Submodules/Luna
 	url = https://github.com/Ottermandias/Luna
+[submodule "Intoner.Api"]
+	path = Intoner.Api
+	url = https://github.com/Abelfreyja/Intoner.Api.git

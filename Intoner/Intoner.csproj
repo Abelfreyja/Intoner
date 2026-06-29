@@ -30,7 +30,6 @@
     </PropertyGroup>
   </Target>
   <ItemGroup>
-    <PackageReference Include="MessagePack" Version="3.1.7" />
     <PackageReference Include="Meziantou.Analyzer" Version="3.0.58">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
@@ -49,6 +48,7 @@
     </PackageReference>
   </ItemGroup>
   <ItemGroup>
+    <ProjectReference Include="..\Intoner.Api\Intoner.Api.csproj" />
     <ProjectReference Include="..\Submodules\Penumbra.Api\Penumbra.Api.csproj" />
     <ProjectReference Include="..\Submodules\Penumbra.GameData\Penumbra.GameData.csproj" />
     <ProjectReference Include="..\Submodules\Penumbra.String\Penumbra.String.csproj" />

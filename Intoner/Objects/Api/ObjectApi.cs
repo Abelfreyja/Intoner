@@ -17,9 +17,6 @@ internal sealed class ObjectApi(
     ObjectMutationApi mutation,
     ObjectRuntimeApi runtime)
 {
-    public const int BreakingVersion = 1;
-    public const int FeatureVersion = 0;
-
     public readonly ObjectPluginStateApi          PluginState          = pluginState;
     public readonly ObjectLayoutApi               Layout               = layout;
     public readonly ObjectTemporaryLayoutApi      TemporaryLayouts     = temporaryLayouts;
@@ -34,7 +31,7 @@ internal sealed class ObjectApi(
 internal sealed class ObjectPluginStateApi
 {
     public ObjectApiVersion GetApiVersion()
-        => new(ObjectApi.BreakingVersion, ObjectApi.FeatureVersion);
+        => ObjectApiVersions.Current;
 }
 
 internal sealed class ObjectLayoutApi(IObjectLayoutManager layoutManager, IObjectManager objectManager)

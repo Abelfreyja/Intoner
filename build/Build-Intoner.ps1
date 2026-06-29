@@ -18,6 +18,7 @@ $ErrorActionPreference  = "Stop"
 $repoRoot               = Split-Path -Parent $PSScriptRoot
 $dotnetPath             = "C:\Program Files\dotnet\dotnet.exe"
 $projectPath            = Join-Path $repoRoot "Intoner\Intoner.csproj"
+$apiProjectPath         = Join-Path $repoRoot "Intoner.Api\Intoner.Api.csproj"
 $dependencyProjectPath  = Join-Path $repoRoot "Submodules\Penumbra.GameData\Penumbra.GameData.csproj"
 $mutexName              = "Local\Intoner.Build"
 $mutex                  = $null
@@ -184,6 +185,7 @@ try
         Invoke-GitSubmoduleUpdate
     }
 
+    Assert-FileExists $apiProjectPath "api project file"
     Assert-FileExists $dependencyProjectPath "dependency project file"
 
     switch ($Mode)
@@ -201,12 +203,14 @@ try
         "verify"
         {
             Assert-DependencyOutputs
+            Invoke-DotNetBuild "Intoner API" $apiProjectPath $false $true
             Invoke-DotNetBuild "Intoner verify" $projectPath $false $true
             break
         }
         default
         {
             Assert-DependencyOutputs
+            Invoke-DotNetBuild "Intoner API" $apiProjectPath $false $false
             Invoke-DotNetBuild "Intoner fast" $projectPath $false $false
             break
         }
