@@ -34,6 +34,12 @@ internal sealed class PlacementValidationService(
         }
 
         HousingPlacementContext housingPlacementContext = locationService.ResolveHousingPlacementContext(state);
+        if (!housingPlacementContext.CanEvaluatePlacementPolicy)
+        {
+            ClearCache();
+            return EmptyEvaluations;
+        }
+
         PlacementValidationContext context = contextBuilder.Build(localSnapshots, boundsSnapshots, state, housingPlacementContext);
         Dictionary<Guid, PlacementEvaluation> evaluations = [];
         foreach (ObjectSnapshot snapshot in localSnapshots)

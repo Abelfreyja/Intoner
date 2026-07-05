@@ -53,8 +53,22 @@ internal readonly record struct HousingPlacementContext(
     public bool HasSizeMismatch
         => CurrentSize.HasValue && CurrentSize.Value != TargetSize;
 
+    public bool IsPlayerInOutdoorPlacementArea
+        => CurrentArea == ObjectHousingArea.Outdoor && BlockSource == HousingPlacementBlockSource.PlayerMapRange;
+
+    public bool CanEvaluatePlacementPolicy
+        => TargetArea != ObjectHousingArea.Outdoor
+            || CurrentArea == ObjectHousingArea.Indoor
+            || IsPlayerInOutdoorPlacementArea;
+
     public bool CanCheckContainment
-        => HasCollisionScene && HasCurrentArea && HasCurrentSize && HasHousingBlock && !HasAreaMismatch && !HasSizeMismatch;
+        => HasCollisionScene
+            && HasCurrentArea
+            && HasCurrentSize
+            && HasHousingBlock
+            && !HasAreaMismatch
+            && !HasSizeMismatch
+            && (CurrentArea != ObjectHousingArea.Outdoor || IsPlayerInOutdoorPlacementArea);
 
     public string TargetAreaName
         => HousingFurnitureAreaPolicy.FormatArea(TargetArea);
