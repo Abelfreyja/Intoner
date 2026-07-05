@@ -195,6 +195,7 @@ internal sealed partial class Gizmo
             context.CameraRight,
             SurfaceDragState.PrimaryEntry,
             _surfacePlacementService.ShouldUseNativePlacementOrigin(SurfaceDragState.StartSnapshot, hit),
+            _surfacePlacementService.ShouldAlignWallSurface(SurfaceDragState.StartSnapshot),
             SurfaceAlignToNormal);
 
     private bool TryApplySurfaceDragSingleResult(
@@ -287,19 +288,22 @@ internal sealed partial class Gizmo
 
     private bool TryResolveCurrentPlacementHit(in GizmoContext context, out ObjectSurfaceHit hit)
     {
-        hit = new ObjectSurfaceHit(Vector3.Zero, Vector3.Zero);
+        hit = ObjectSurfaceHit.Empty;
         if (!TryBuildCurrentMouseRay(context.ViewportPos, context.ViewportSize, out var rayOrigin, out var rayDirection))
         {
             return false;
         }
 
         bool hasNativeHit = _surfacePlacementService.TryResolvePlacementHit(
-                                context.PrimarySnapshot,
-                                context.BoundsSnapshot,
-                                rayOrigin,
-                                rayDirection,
-                                out ObjectSurfaceHit nativeHit)
-                            || _placementResolver.TryResolveFromRay(rayOrigin, rayDirection, out nativeHit);
+            context.PrimarySnapshot,
+            context.BoundsSnapshot,
+            rayOrigin,
+            rayDirection,
+            out ObjectSurfaceHit nativeHit);
+        if (!hasNativeHit)
+        {
+            hasNativeHit = _placementResolver.TryResolveFromRay(rayOrigin, rayDirection, out nativeHit);
+        }
         if (SurfaceDragState.ObjectTargetsEnabled
          && TryResolveObjectPlacementHit(context, rayOrigin, rayDirection, hasNativeHit ? nativeHit.Distance : float.PositiveInfinity, out hit))
         {
@@ -322,13 +326,26 @@ internal sealed partial class Gizmo
             return _surfaceTargetService.TryRaycastGeometryTargets(SurfaceDragState.SurfaceTargets, rayOrigin, rayDirection, maxDistance, out hit);
         }
 
-        return GizmoSurfaceObjectRaycastUtility.TryRaycastObjectBounds(
+        return ObjectBoundsRaycaster.TryRaycastNearest(
+            context.BoundsSnapshots,
+            id => IsSelectedSurfaceDragObject(id, SurfaceDragState.SelectionEntries),
             rayOrigin,
             rayDirection,
-            context.BoundsSnapshots,
-            SurfaceDragState.SelectionEntries,
             out hit,
             maxDistance);
+    }
+
+    private static bool IsSelectedSurfaceDragObject(Guid id, IReadOnlyList<GizmoSelectionEntry> entries)
+    {
+        foreach (GizmoSelectionEntry entry in entries)
+        {
+            if (entry.Snapshot.Id == id)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private ObjectSurfaceTargetSnapshot CaptureSurfaceTargets(

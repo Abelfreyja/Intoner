@@ -7,12 +7,39 @@ internal sealed record ObjectBoundsSnapshot(
     Guid Id,
     string Name,
     ObjectKind Kind,
+    nint NativeAddress,
     Vector3 Min,
     Vector3 Max,
     OrientedBounds? LocalBounds,
-    float? PlacementClearanceRadius,
+    ObjectPlacementClearance? PlacementClearance,
     ObjectPlacementSurfaceSupport PlacementSurfaceSupport,
     ObjectOverlayShapeSnapshot? OverlayShape);
+
+internal readonly record struct ObjectPlacementClearance(
+    float Radius,
+    float SnapAboveSurface,
+    float SnapBelowSurface)
+{
+    public static bool TryCreate(float radius, out ObjectPlacementClearance clearance)
+    {
+        if (!IsValidRange(radius))
+        {
+            clearance = default;
+            return false;
+        }
+
+        clearance = new ObjectPlacementClearance(radius, radius, radius);
+        return true;
+    }
+
+    public bool IsValid
+        => IsValidRange(Radius)
+        && IsValidRange(SnapAboveSurface)
+        && IsValidRange(SnapBelowSurface);
+
+    private static bool IsValidRange(float value)
+        => float.IsFinite(value) && value >= 0f;
+}
 
 [Flags]
 internal enum ObjectPlacementSurfaceSupport

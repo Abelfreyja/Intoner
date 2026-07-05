@@ -25,6 +25,7 @@ internal readonly record struct ObjectHousingRuntimeContext(
     HousingPlacementBlockSource BlockSource,
     HousingPlacementSizeSource SizeSource,
     ObjectHousingPlotContext? Plot,
+    ObjectHousingPlotBasis? PlotBasis,
     bool HasCollisionScene)
 {
     public bool HasCurrentArea
@@ -42,6 +43,7 @@ internal readonly record struct ObjectHousingRuntimeContext(
             targetState.Size,
             CurrentArea,
             CurrentSize,
+            PlotBasis,
             HousingBlockId,
             BlockSource,
             SizeSource,

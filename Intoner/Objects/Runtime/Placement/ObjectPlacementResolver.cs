@@ -68,9 +68,9 @@ internal sealed class ObjectPlacementResolver : IObjectPlacementResolver
     {
         var result = ObjectFrameworkUtility.RunOnFrameworkThread(_framework, () =>
         {
-            return ObjectSurfaceRaycastUtility.TryRaycastSurface(rayOrigin, rayDirection, out var resolvedHit)
+            return ObjectNativeSurfaceRaycaster.TryRaycastSurface(rayOrigin, rayDirection, out var resolvedHit)
                 ? (Success: true, Hit: resolvedHit)
-                : (Success: false, Hit: new ObjectSurfaceHit(Vector3.Zero, Vector3.Zero));
+                : (Success: false, Hit: ObjectSurfaceHit.Empty);
         });
 
         hit = result.Hit;

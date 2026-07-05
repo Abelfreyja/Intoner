@@ -85,17 +85,17 @@ internal sealed class ObjectSurfaceTargetService : IObjectSurfaceTargetService
         float maxDistance,
         out ObjectSurfaceHit hit)
     {
-        hit = new ObjectSurfaceHit(Vector3.Zero, Vector3.Zero);
+        hit = ObjectSurfaceHit.Empty;
         if (!targets.HasTargets || !ObjectMathUtility.TryNormalize(rayDirection, out var normalizedDirection))
         {
             return false;
         }
 
-        var closestDistance = ObjectSurfaceRaycastUtility.ResolveMaxDistance(maxDistance);
+        var closestDistance = ObjectRaycastMath.ResolveMaxDistance(maxDistance);
         var hasHit = false;
         foreach (var target in targets.GeometryTargets)
         {
-            if (!ObjectSelectionGeometryRaycastUtility.TryRaycastNormalized(
+            if (!ObjectGeometryRaycaster.TryRaycastNormalized(
                     target.Geometry,
                     target.WorldTransform,
                     rayOrigin,

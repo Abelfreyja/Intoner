@@ -16,6 +16,7 @@ namespace Intoner.Objects.UI;
 internal sealed partial class EditorWindow
 {
     private const string LayoutImportPopupId = "##layoutImportPopup";
+    private const string LayoutExportPopupId = "##layoutExportPopup";
 
     private void DrawLayoutListPanel(IReadOnlyList<ObjectLayoutSnapshot> layouts, Guid? defaultLayoutId)
     {
@@ -183,14 +184,12 @@ internal sealed partial class EditorWindow
                 var centeredX = startX + MathF.Max(0f, (ImGui.GetContentRegionAvail().X - buttonWidth) * 0.5f);
                 ImGui.SetCursorPosX(centeredX);
 
-                if (DrawIconTextButton("##saveCurrentLayout", FontAwesomeIcon.Save, "Save Current Objects As Layout", buttonWidth))
+                if (DrawIconTextButton("##saveCurrentLayout", FontAwesomeIcon.Save, "Save Current Objects As Layout", buttonWidth)
+                    && _objectManager.TrySaveCurrentObjectsAsLayout(_layoutName, out var layoutId))
                 {
-                    if (_objectManager.TrySaveCurrentObjectsAsLayout(_layoutName, out var layoutId))
-                    {
-                        _layoutName = string.Empty;
-                        _selectedLayoutId = layoutId;
-                        HandleSelectionChanged(_editorSelection.TryClear());
-                    }
+                    _layoutName = string.Empty;
+                    _selectedLayoutId = layoutId;
+                    HandleSelectionChanged(_editorSelection.TryClear());
                 }
             });
     }
@@ -248,30 +247,14 @@ internal sealed partial class EditorWindow
             FontAwesomeIcon.Ban,
             FontAwesomeIcon.FolderOpen);
 
-        var openedImportPopup = false;
         if (DrawAccentIconButton("layoutImportJson", FontAwesomeIcon.FileImport, "Import Layout From Json", EditorColors.AccentBlue, actionButtonEdge))
         {
-            ImGui.OpenPopup(LayoutImportPopupId);
-            openedImportPopup = true;
+            OpenPopupBelowLastItem(LayoutImportPopupId);
         }
 
-        if (openedImportPopup)
+        if (DrawLayoutFileKindPopup(LayoutImportPopupId) is { } importFileKind)
         {
-            ImGui.SetNextWindowPos(new Vector2(ImGui.GetItemRectMin().X, ImGui.GetItemRectMax().Y));
-        }
-
-        using var popup = ImRaii.Popup(LayoutImportPopupId, ContextMenuPopupFlags);
-        if (popup)
-        {
-            if (DrawContextMenuItem(FontAwesomeIcon.FolderOpen, "Object Layout (.json)"))
-            {
-                BeginLayoutImportDialog(ObjectLayoutFileImportKind.ObjectLayout);
-            }
-
-            if (DrawContextMenuItem(FontAwesomeIcon.Home, "MakePlace Layout (.json)"))
-            {
-                BeginLayoutImportDialog(ObjectLayoutFileImportKind.MakePlaceLayout);
-            }
+            BeginLayoutImportDialog(importFileKind);
         }
 
         ImGui.SameLine();
@@ -279,45 +262,75 @@ internal sealed partial class EditorWindow
         {
             if (DrawAccentIconButton("layoutExportJson", FontAwesomeIcon.Save, "Export Selected Layout To Json", EditorColors.AccentBlue, actionButtonEdge) && selectedLayout is not null)
             {
-                BeginLayoutExportDialog(selectedLayout);
+                OpenPopupBelowLastItem(LayoutExportPopupId);
+            }
+
+            ObjectLayoutSnapshot? exportLayout = selectedLayout;
+            if (exportLayout is not null
+                && DrawLayoutFileKindPopup(LayoutExportPopupId) is { } exportFileKind)
+            {
+                BeginLayoutExportDialog(exportLayout, exportFileKind);
             }
         }
 
         ImGui.SameLine();
         using (ImRaii.Disabled(!canUseSelected))
         {
-            if (DrawAccentIconButton("layoutDeleteSelected", FontAwesomeIcon.Trash, "Delete Selected Layout", EditorColors.DimRed, actionButtonEdge) && selectedLayout is not null)
+            if (DrawAccentIconButton("layoutDeleteSelected", FontAwesomeIcon.Trash, "Delete Selected Layout", EditorColors.DimRed, actionButtonEdge)
+                && selectedLayout is not null
+                && _objectManager.TryDeleteLayout(selectedLayout.Id))
             {
-                if (_objectManager.TryDeleteLayout(selectedLayout.Id))
-                {
-                    _selectedLayoutId = null;
-                    HandleSelectionChanged(_editorSelection.TryClear());
-                }
+                _selectedLayoutId = null;
+                HandleSelectionChanged(_editorSelection.TryClear());
             }
         }
 
         ImGui.SameLine();
         if (canUnload)
         {
-            if (DrawAccentIconButton("layoutUnload", FontAwesomeIcon.Ban, "Clear Default Layout", EditorColors.AccentYellow, actionButtonEdge))
+            if (DrawAccentIconButton("layoutUnload", FontAwesomeIcon.Ban, "Clear Default Layout", EditorColors.AccentYellow, actionButtonEdge)
+                && _objectManager.TrySelectLayout(null))
             {
-                if (_objectManager.TrySelectLayout(null))
-                {
-                    HandleSelectionChanged(_editorSelection.TryClear());
-                }
+                HandleSelectionChanged(_editorSelection.TryClear());
             }
         }
         else
         {
             using var disabled = ImRaii.Disabled(!canLoadSelected);
-            if (DrawAccentIconButton("layoutLoadSelected", FontAwesomeIcon.FolderOpen, "Set Selected As Default Layout", EditorColors.AccentGreen, actionButtonEdge) && selectedLayout is not null)
+            if (DrawAccentIconButton("layoutLoadSelected", FontAwesomeIcon.FolderOpen, "Set Selected As Default Layout", EditorColors.AccentGreen, actionButtonEdge)
+                && selectedLayout is not null
+                && _objectManager.TrySelectLayout(selectedLayout.Id))
             {
-                if (_objectManager.TrySelectLayout(selectedLayout.Id))
-                {
-                    HandleSelectionChanged(_editorSelection.TryClear());
-                }
+                HandleSelectionChanged(_editorSelection.TryClear());
             }
         }
+    }
+
+    private static ObjectLayoutFileKind? DrawLayoutFileKindPopup(string popupId)
+    {
+        using var popup = ImRaii.Popup(popupId, ContextMenuPopupFlags);
+        if (!popup)
+        {
+            return null;
+        }
+
+        if (DrawContextMenuItem(FontAwesomeIcon.FolderOpen, "Object Layout (.json)"))
+        {
+            return ObjectLayoutFileKind.ObjectLayout;
+        }
+
+        if (DrawContextMenuItem(FontAwesomeIcon.Home, "MakePlace Layout (.json)"))
+        {
+            return ObjectLayoutFileKind.MakePlaceLayout;
+        }
+
+        return null;
+    }
+
+    private static void OpenPopupBelowLastItem(string popupId)
+    {
+        ImGui.OpenPopup(popupId);
+        ImGui.SetNextWindowPos(new Vector2(ImGui.GetItemRectMin().X, ImGui.GetItemRectMax().Y));
     }
 
     private void DrawLayoutFileStatus()
@@ -335,9 +348,9 @@ internal sealed partial class EditorWindow
             _layoutFileStatusMessage);
     }
 
-    private void BeginLayoutImportDialog(ObjectLayoutFileImportKind importKind)
+    private void BeginLayoutImportDialog(ObjectLayoutFileKind fileKind)
     {
-        var dialogTitle = importKind == ObjectLayoutFileImportKind.MakePlaceLayout
+        string dialogTitle = fileKind == ObjectLayoutFileKind.MakePlaceLayout
             ? "Import MakePlace layout from json"
             : "Import object layout from json";
 
@@ -357,12 +370,12 @@ internal sealed partial class EditorWindow
                 }
 
                 RememberLayoutFileDialogDirectory(path);
-                var result = _objectLayoutFileService.ImportLayout(path, importKind);
+                ObjectLayoutFileImportResult result = _objectLayoutFileService.ImportLayout(path, fileKind);
                 if (result.Success && result.Layout is not null)
                 {
                     _selectedLayoutId = result.Layout.Id;
                     HandleSelectionChanged(_editorSelection.TryClear());
-                    var defaultSuccessMessage = importKind == ObjectLayoutFileImportKind.MakePlaceLayout
+                    string defaultSuccessMessage = fileKind == ObjectLayoutFileKind.MakePlaceLayout
                         ? $"Imported MakePlace layout '{result.Layout.Name}'."
                         : $"Imported layout '{result.Layout.Name}' from json.";
                     SetLayoutFileStatus(
@@ -379,11 +392,14 @@ internal sealed partial class EditorWindow
             ResolveLayoutFileDialogDirectory());
     }
 
-    private void BeginLayoutExportDialog(ObjectLayoutSnapshot layout)
+    private void BeginLayoutExportDialog(ObjectLayoutSnapshot layout, ObjectLayoutFileKind fileKind)
     {
-        var defaultFileName = ObjectLayoutFileUtility.BuildExportFileName(layout.Name);
+        string defaultFileName = ObjectLayoutFileUtility.BuildExportFileName(layout.Name);
+        string dialogTitle = fileKind == ObjectLayoutFileKind.MakePlaceLayout
+            ? "Export MakePlace layout to json"
+            : "Export layout to json";
         _uiSharedService.FileDialogManager.SaveFileDialog(
-            "Export layout to json",
+            dialogTitle,
             ".json",
             defaultFileName,
             ".json",
@@ -395,12 +411,15 @@ internal sealed partial class EditorWindow
                 }
 
                 RememberLayoutFileDialogDirectory(path);
-                var result = _objectLayoutFileService.ExportLayout(layout, path);
+                ObjectLayoutFileExportResult result = _objectLayoutFileService.ExportLayout(layout, path, fileKind);
                 if (result.Success)
                 {
+                    string defaultSuccessMessage = fileKind == ObjectLayoutFileKind.MakePlaceLayout
+                        ? $"Exported MakePlace layout '{layout.Name}' to json."
+                        : $"Exported layout '{layout.Name}' to json.";
                     SetLayoutFileStatus(
                         string.IsNullOrWhiteSpace(result.Message)
-                            ? $"Exported layout '{layout.Name}' to json."
+                            ? defaultSuccessMessage
                             : result.Message,
                         isError: false);
                     return;

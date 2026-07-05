@@ -78,8 +78,8 @@ internal sealed unsafe class FurnitureSceneObject : LayoutSceneObject
     public override bool TryGetOrientedBounds(out OrientedBounds bounds)
         => ObjectLayoutInterop.TryGetSharedGroupOrientedBounds(_instance, out bounds);
 
-    public override bool TryGetPlacementClearanceRadius(out float radius)
-        => ObjectLayoutInterop.TryGetSharedGroupPlacementClearanceRadius(_instance, out radius);
+    public override bool TryGetPlacementClearance(out ObjectPlacementClearance clearance)
+        => ObjectLayoutInterop.TryGetSharedGroupPlacementClearance(_instance, out clearance);
 
     public override void AppendSelectionDraws(ObjectSelectionCollector collector)
     {

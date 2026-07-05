@@ -1,6 +1,5 @@
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Graphics;
-using Intoner.Objects;
 using Intoner.Objects.Models;
 using Intoner.Objects.Utils;
 using Microsoft.Extensions.Logging;
@@ -8,35 +7,7 @@ using Penumbra.GameData.Structs;
 using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 
-namespace Intoner.Objects.UI.Services;
-
-/// <summary> provides cached furniture stain options for the object editor </summary>
-internal interface IFurnitureStainService
-{
-    /// <summary> gets whether the stain list has finished loading </summary>
-    bool IsReady { get; }
-
-    /// <summary> gets whether the stain list is currently loading in the background </summary>
-    bool IsLoading { get; }
-
-    /// <summary> gets whether the most recent background load failed </summary>
-    bool HasFailed { get; }
-
-    /// <summary> gets the current warmup status text </summary>
-    string StatusText { get; }
-
-    /// <summary> starts background stain warmup if needed </summary>
-    void EnsureWarmup();
-
-    /// <summary> gets the stain list if it is already ready </summary>
-    /// <param name="stains">the ready stain list when available</param>
-    /// <returns>true when the stain list is already ready</returns>
-    bool TryGetStains([NotNullWhen(true)] out IReadOnlyList<FurnitureStainOption>? stains);
-
-    /// <summary> gets the stain list, blocking until it is ready if needed </summary>
-    /// <returns>the ready stain list</returns>
-    IReadOnlyList<FurnitureStainOption> GetStains();
-}
+namespace Intoner.Objects.Catalog;
 
 internal sealed class FurnitureStainService : IFurnitureStainService, IDisposable
 {
@@ -82,6 +53,53 @@ internal sealed class FurnitureStainService : IFurnitureStainService, IDisposabl
     public IReadOnlyList<FurnitureStainOption> GetStains()
         => _warmupState.GetValue();
 
+    public bool TryFindNearestStain(byte red, byte green, byte blue, out byte stainId)
+    {
+        stainId = 0;
+        int bestDistance = int.MaxValue;
+        foreach (FurnitureStainOption stain in GetStains())
+        {
+            if (stain.Id == 0)
+            {
+                continue;
+            }
+
+            ByteColor stainColor = ObjectColorUtility.ToByteColor(stain.PreviewColor);
+            int distance = ObjectColorUtility.ComputeRgbDistanceSquared(red, green, blue, stainColor.R, stainColor.G, stainColor.B);
+            if (distance >= bestDistance)
+            {
+                continue;
+            }
+
+            bestDistance = distance;
+            stainId = stain.Id;
+        }
+
+        return stainId != 0;
+    }
+
+    public bool TryResolveStainColor(byte stainId, out ByteColor color)
+    {
+        color = default;
+        if (stainId == 0)
+        {
+            return false;
+        }
+
+        foreach (FurnitureStainOption stain in GetStains())
+        {
+            if (stain.Id != stainId)
+            {
+                continue;
+            }
+
+            color = ObjectColorUtility.ToByteColor(stain.PreviewColor);
+            return true;
+        }
+
+        return false;
+    }
+
     public void Dispose()
         => _warmupState.Dispose();
 
@@ -92,8 +110,8 @@ internal sealed class FurnitureStainService : IFurnitureStainService, IDisposabl
     {
         IReadOnlyList<FurnitureStainColor> nativeStainColors = FurnitureStainColorUtility.CaptureNativeColors(framework, cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
-        var sheetStains = BuildSheetFurnitureStains(gameData, cancellationToken);
-        var stains = new List<FurnitureStainOption>(nativeStainColors.Count + 1)
+        IReadOnlyList<SheetFurnitureStainOption> sheetStains = BuildSheetFurnitureStains(gameData, cancellationToken);
+        List<FurnitureStainOption> stains = new(nativeStainColors.Count + 1)
         {
             new(0, "Default", new Vector4(0f, 0f, 0f, 1f), false),
         };
@@ -101,7 +119,7 @@ internal sealed class FurnitureStainService : IFurnitureStainService, IDisposabl
         foreach (FurnitureStainColor nativeStainColor in nativeStainColors)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var match = FindSheetFurnitureStain(nativeStainColor.Color, sheetStains);
+            SheetFurnitureStainOption? match = FindSheetFurnitureStain(nativeStainColor.Color, sheetStains);
             stains.Add(new FurnitureStainOption(
                 nativeStainColor.StainId,
                 match?.Name ?? $"Object Stain {nativeStainColor.StainId}",
@@ -118,7 +136,7 @@ internal sealed class FurnitureStainService : IFurnitureStainService, IDisposabl
         IDataManager gameData,
         CancellationToken cancellationToken)
     {
-        var stains = new List<SheetFurnitureStainOption>();
+        List<SheetFurnitureStainOption> stains = [];
         var sheet = gameData.GetExcelSheet<Lumina.Excel.Sheets.Stain>(gameData.Language);
         if (sheet == null)
         {
@@ -133,15 +151,14 @@ internal sealed class FurnitureStainService : IFurnitureStainService, IDisposabl
                 continue;
             }
 
-            var stain = new Stain(row);
-            var name = stain.Name.ToString();
+            Stain stain = new(row);
+            string name = stain.Name.ToString();
             if (string.IsNullOrWhiteSpace(name))
             {
                 continue;
             }
 
             stains.Add(new SheetFurnitureStainOption(
-                row.RowId,
                 name,
                 ObjectColorUtility.ToOpaqueByteColor(stain.R, stain.G, stain.B),
                 stain.Gloss));
@@ -154,9 +171,9 @@ internal sealed class FurnitureStainService : IFurnitureStainService, IDisposabl
         ByteColor nativeColor,
         IReadOnlyList<SheetFurnitureStainOption> sheetStains)
     {
-        for (var i = 0; i < sheetStains.Count; i++)
+        for (int i = 0; i < sheetStains.Count; i++)
         {
-            var stain = sheetStains[i];
+            SheetFurnitureStainOption stain = sheetStains[i];
             if (stain.Color.R == nativeColor.R
              && stain.Color.G == nativeColor.G
              && stain.Color.B == nativeColor.B)

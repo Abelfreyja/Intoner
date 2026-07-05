@@ -1,5 +1,4 @@
 using Dalamud.Interface;
-using FFXIVClientStructs.FFXIV.Client.Graphics;
 using System.Numerics;
 
 namespace Intoner.Objects.Models;
@@ -52,10 +51,6 @@ internal enum GizmoAxis
     Y,
     Z,
 }
-
-internal readonly record struct FurnitureStainOption(byte Id, string Name, Vector4 PreviewColor, bool IsMetallic);
-
-internal readonly record struct SheetFurnitureStainOption(uint RowId, string Name, ByteColor Color, bool IsMetallic);
 
 internal readonly record struct LightCatalogEntry(LightType Type, string Name, FontAwesomeIcon BadgeIcon, string BadgeTooltip, string Description);
 

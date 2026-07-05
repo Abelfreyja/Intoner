@@ -1,6 +1,7 @@
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine.Group;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine.Node;
+using FFXIVClientStructs.FFXIV.Common.Component.BGCollision;
 using Intoner.Objects.Models;
 using Intoner.Objects.Utils;
 using System.Numerics;
@@ -18,6 +19,20 @@ internal readonly record struct SharedGroupChildState(nint First, nint Last);
 /// </summary>
 internal static unsafe class ObjectLayoutInterop
 {
+    private static readonly InstanceType[] ColliderOwnerTypes =
+    [
+        InstanceType.BgPart,
+        InstanceType.SharedGroup,
+        InstanceType.CollisionBox,
+        InstanceType.SphereCastRange,
+        InstanceType.IndoorObject,
+        InstanceType.OutdoorObject,
+        InstanceType.ColliderLayer7,
+        InstanceType.ColliderLayer8,
+        InstanceType.ColliderLayer9,
+        InstanceType.ColliderLayer10,
+    ];
+
     private const int SharedGroupReadyVtableSlot = 22;
     private const int LayoutGetWorldBoundsVtableSlot = 73;
     private const int LayoutGetTransformExtentsVtableSlot = 74;
@@ -139,6 +154,26 @@ internal static unsafe class ObjectLayoutInterop
                 || HasActiveChildColliders(&instance->Instances));
 
     /// <summary>
+    /// Checks whether one collider belongs to a shared group or any of its children.
+    /// </summary>
+    /// <param name="sharedGroupAddress">The shared group layout instance address.</param>
+    /// <param name="colliderAddress">The native collider address to check.</param>
+    /// <returns>true when the collider belongs to the shared group tree.</returns>
+    public static bool SharedGroupContainsCollider(nint sharedGroupAddress, nint colliderAddress)
+    {
+        if (sharedGroupAddress == 0 || colliderAddress == 0)
+        {
+            return false;
+        }
+
+        ILayoutInstance* root = (ILayoutInstance*)sharedGroupAddress;
+        Collider* collider = (Collider*)colliderAddress;
+        return InstanceTreeContainsCollider(root, collider)
+            || (TryResolveColliderLayoutInstance(collider, out ILayoutInstance* owner)
+                && InstanceTreeContainsInstance(root, owner));
+    }
+
+    /// <summary>
     /// Applies the active and collider state to one layout instance.
     /// </summary>
     /// <param name="instance">The layout instance to update.</param>
@@ -245,20 +280,20 @@ internal static unsafe class ObjectLayoutInterop
     }
 
     /// <summary>
-    /// Tries to resolve the native floor clearance radius for a sgb.
+    /// Tries to resolve the native floor placement clearance for a sgb.
     /// </summary>
     /// <param name="instance">the sgb layout instance to inspect.</param>
-    /// <param name="radius">the resolved clearance radius when available.</param>
-    /// <returns>true when a clearance radius was resolved.</returns>
-    public static bool TryGetSharedGroupPlacementClearanceRadius(SharedGroupLayoutInstance* instance, out float radius)
+    /// <param name="clearance">the resolved placement clearance when available.</param>
+    /// <returns>true when placement clearance was resolved.</returns>
+    public static bool TryGetSharedGroupPlacementClearance(SharedGroupLayoutInstance* instance, out ObjectPlacementClearance clearance)
     {
-        radius = 0f;
+        clearance = default;
         if (instance == null)
         {
             return false;
         }
 
-        return TryGetPlacementClearanceRadius(ResolveSharedGroupPlacementInstance(instance), out radius);
+        return TryGetPlacementClearance(ResolveSharedGroupPlacementInstance(instance), out clearance);
     }
 
     /// <summary>
@@ -343,21 +378,15 @@ internal static unsafe class ObjectLayoutInterop
         return (ILayoutInstance*)instance;
     }
 
-    private static bool TryGetPlacementClearanceRadius(ILayoutInstance* instance, out float radius)
+    private static bool TryGetPlacementClearance(ILayoutInstance* instance, out ObjectPlacementClearance clearance)
     {
-        radius = 0f;
+        clearance = default;
         if (!TryGetLayoutTransformExtents(instance, out LayoutTransformExtents extents))
         {
             return false;
         }
 
-        radius = MathF.Min(extents.ExtentX, extents.ExtentZ);
-        if (!float.IsFinite(radius) || radius < 0f)
-        {
-            return false;
-        }
-
-        return true;
+        return ObjectPlacementClearance.TryCreate(MathF.Min(extents.ExtentX, extents.ExtentZ), out clearance);
     }
 
     private static bool TryGetLayoutTransformExtents(ILayoutInstance* instance, out LayoutTransformExtents extents)
@@ -408,6 +437,114 @@ internal static unsafe class ObjectLayoutInterop
 
             if (instance->Id.Type == InstanceType.SharedGroup
                 && HasActiveChildColliders(&((SharedGroupLayoutInstance*)instance)->Instances))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool InstanceTreeContainsCollider(ILayoutInstance* instance, Collider* collider)
+    {
+        if (instance == null || collider == null)
+        {
+            return false;
+        }
+
+        if (InstanceUsesCollider(instance, collider)
+            || InstanceMatchesColliderLayoutId(instance, collider->LayoutObjectId))
+        {
+            return true;
+        }
+
+        return instance->Id.Type == InstanceType.SharedGroup
+            && ChildContainerContainsCollider(&((SharedGroupLayoutInstance*)instance)->Instances, collider);
+    }
+
+    private static bool InstanceUsesCollider(ILayoutInstance* instance, Collider* collider)
+        => instance->GetCollider() == collider
+           || instance->GetCollider2() == collider;
+
+    private static bool InstanceMatchesColliderLayoutId(ILayoutInstance* instance, ulong layoutObjectId)
+    {
+        if (layoutObjectId == 0)
+        {
+            return false;
+        }
+
+        uint instanceKey = (uint)layoutObjectId;
+        uint subId = (uint)(layoutObjectId >> 32);
+        return instance->Id.InstanceKey == instanceKey
+            && (subId == 0 || instance->SubId == subId);
+    }
+
+    private static bool ChildContainerContainsCollider(ChildNodeContainer* container, Collider* collider)
+    {
+        foreach (var child in container->Instances)
+        {
+            var node = child.Value;
+            if (node == null || node->Instance == null)
+            {
+                continue;
+            }
+
+            if (InstanceTreeContainsCollider(node->Instance, collider))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TryResolveColliderLayoutInstance(Collider* collider, out ILayoutInstance* instance)
+    {
+        instance = null;
+        if (collider == null)
+        {
+            return false;
+        }
+
+        foreach (InstanceType type in ColliderOwnerTypes)
+        {
+            instance = LayoutWorld.GetColliderLayoutInstance(type, collider);
+            if (instance != null)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool InstanceTreeContainsInstance(ILayoutInstance* instance, ILayoutInstance* target)
+    {
+        if (instance == null || target == null)
+        {
+            return false;
+        }
+
+        if (instance == target)
+        {
+            return true;
+        }
+
+        return instance->Id.Type == InstanceType.SharedGroup
+            && ChildContainerContainsInstance(&((SharedGroupLayoutInstance*)instance)->Instances, target);
+    }
+
+    private static bool ChildContainerContainsInstance(ChildNodeContainer* container, ILayoutInstance* target)
+    {
+        foreach (var child in container->Instances)
+        {
+            var node = child.Value;
+            if (node == null || node->Instance == null)
+            {
+                continue;
+            }
+
+            if (InstanceTreeContainsInstance(node->Instance, target))
             {
                 return true;
             }

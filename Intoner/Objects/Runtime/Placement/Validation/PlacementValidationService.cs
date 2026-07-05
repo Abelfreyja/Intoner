@@ -122,7 +122,6 @@ internal sealed class PlacementValidationService(
 
     private static bool IsTransientIssue(PlacementIssueCode issueCode)
         => issueCode is PlacementIssueCode.MissingPlacementSurface
-            or PlacementIssueCode.WallSurfaceUnavailable
             or PlacementIssueCode.HousingAreaUnavailable
             or PlacementIssueCode.HousingSizeUnavailable;
 

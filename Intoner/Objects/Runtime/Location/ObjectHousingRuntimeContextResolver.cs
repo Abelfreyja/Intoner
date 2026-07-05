@@ -17,6 +17,11 @@ internal sealed class ObjectHousingRuntimeContextResolver(
             out ObjectHousingPlotContext resolvedPlot)
             ? resolvedPlot
             : null;
+        ObjectHousingPlotBasis? plotBasis = plot is { } basisPlot
+            && nativeState.Block.Id is { } blockId
+            && ObjectHousingPlotBasisTable.TryResolve(basisPlot.District, basisPlot.Plot, blockId, out ObjectHousingPlotBasis resolvedBasis)
+            ? resolvedBasis
+            : null;
         HousingPlacementSizeResult size = ResolveHousingSize(
             territoryId,
             nativeState.CurrentArea,
@@ -30,6 +35,7 @@ internal sealed class ObjectHousingRuntimeContextResolver(
             nativeState.Block.Source,
             size.Source,
             plot,
+            plotBasis,
             nativeState.HasCollisionScene);
     }
 
@@ -79,25 +85,13 @@ internal sealed class ObjectHousingRuntimeContextResolver(
         plotContext = default;
         if (territoryId == 0
             || block.Id is not { } blockId
-            || !TryConvertNativePlotIndex(blockId, out int plot)
+            || !ObjectHousingPlotIndexUtility.TryConvertNativePlotIndex(blockId, out int plot)
             || !ObjectHousingAddress.TryResolveDistrict(territoryId, out ObjectHousingDistrict district))
         {
             return false;
         }
 
         plotContext = new ObjectHousingPlotContext(district, plot);
-        return true;
-    }
-
-    private static bool TryConvertNativePlotIndex(int nativePlotIndex, out int plot)
-    {
-        plot = 0;
-        if (nativePlotIndex is < 0 or >= 60)
-        {
-            return false;
-        }
-
-        plot = nativePlotIndex + 1;
         return true;
     }
 }

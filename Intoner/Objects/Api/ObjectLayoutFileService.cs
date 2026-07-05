@@ -1,12 +1,12 @@
-using Intoner.Objects.Filesystem.Configuration;
 using Intoner.Objects.Filesystem.Storage;
 using Intoner.Objects.Models;
 using Intoner.Objects.Runtime;
-using Intoner.Objects.Utils;
 using Microsoft.Extensions.Logging;
 using System.Text.Json;
 
 namespace Intoner.Objects.Api;
+
+#pragma warning disable MA0048 // layout file service boundary types stay colocated
 
 /// <summary> imports and exports saved object layouts as json files </summary>
 internal interface IObjectLayoutFileService
@@ -14,21 +14,22 @@ internal interface IObjectLayoutFileService
     /// <summary> writes one saved layout to a json file </summary>
     /// <param name="layout">The saved layout snapshot to export.</param>
     /// <param name="path">The destination file path.</param>
+    /// <param name="fileKind">The export format.</param>
     /// <returns>The export result.</returns>
-    ObjectLayoutFileExportResult ExportLayout(ObjectLayoutSnapshot? layout, string? path);
+    ObjectLayoutFileExportResult ExportLayout(ObjectLayoutSnapshot? layout, string? path, ObjectLayoutFileKind fileKind = ObjectLayoutFileKind.ObjectLayout);
 
     /// <summary> imports one supported json layout file into local layout storage </summary>
     /// <param name="path">The source file path.</param>
-    /// <param name="importKind">Optional explicit import format to require.</param>
+    /// <param name="fileKind">Optional explicit import format to require.</param>
     /// <returns>The import result.</returns>
-    ObjectLayoutFileImportResult ImportLayout(string? path, ObjectLayoutFileImportKind? importKind = null);
+    ObjectLayoutFileImportResult ImportLayout(string? path, ObjectLayoutFileKind? fileKind = null);
 }
 
 internal readonly record struct ObjectLayoutFileExportResult(bool Success, string Message);
 
 internal readonly record struct ObjectLayoutFileImportResult(bool Success, ObjectLayoutSnapshot? Layout, string Message);
 
-internal enum ObjectLayoutFileImportKind
+internal enum ObjectLayoutFileKind
 {
     ObjectLayout,
     MakePlaceLayout,
@@ -47,13 +48,10 @@ internal sealed class ObjectLayoutFileService(
     IObjectRuntimeLocationService locationService,
     IObjectFileSystem fileSystem,
     IObjectHousingModePolicy housingModePolicy,
-    ObjectMakePlaceImportMapper makePlaceImportMapper) : IObjectLayoutFileService
+    MakePlaceImportMapper makePlaceImportMapper,
+    MakePlaceExportMapper makePlaceExportMapper) : IObjectLayoutFileService
 {
-    private readonly record struct ObjectLayoutImportSource(JsonElement Root, string Path);
-
-    private delegate bool ImportPayloadParser(ObjectLayoutImportSource source, out ObjectLayoutImportPayload payload, out string errorMessage);
-
-    public ObjectLayoutFileExportResult ExportLayout(ObjectLayoutSnapshot? layout, string? path)
+    public ObjectLayoutFileExportResult ExportLayout(ObjectLayoutSnapshot? layout, string? path, ObjectLayoutFileKind fileKind = ObjectLayoutFileKind.ObjectLayout)
     {
         if (layout is null)
         {
@@ -67,8 +65,13 @@ internal sealed class ObjectLayoutFileService(
 
         try
         {
-            fileSystem.WriteAllTextAtomic(path, ObjectLayoutJsonSerializer.SerializeLayout(layout));
-            return ExportSuccess();
+            if (!TryBuildExportJson(layout, fileKind, out string json, out string successMessage, out string errorMessage))
+            {
+                return ExportFailure(errorMessage);
+            }
+
+            fileSystem.WriteAllTextAtomic(path, json);
+            return ExportSuccess(successMessage);
         }
         catch (Exception ex)
         {
@@ -77,7 +80,7 @@ internal sealed class ObjectLayoutFileService(
         }
     }
 
-    public ObjectLayoutFileImportResult ImportLayout(string? path, ObjectLayoutFileImportKind? importKind = null)
+    public ObjectLayoutFileImportResult ImportLayout(string? path, ObjectLayoutFileKind? fileKind = null)
     {
         if (string.IsNullOrWhiteSpace(path))
         {
@@ -91,12 +94,12 @@ internal sealed class ObjectLayoutFileService(
                 return ImportFailure("The selected layout file no longer exists.");
             }
 
-            if (!TryBuildImportPayload(path, importKind, out var payload, out var errorMessage))
+            if (!TryBuildImportPayload(path, fileKind, out ObjectLayoutImportPayload payload, out string errorMessage))
             {
                 return ImportFailure(errorMessage);
             }
 
-            if (!housingModePolicy.TryValidateLayout(payload.Snapshots, out var housingModeError))
+            if (!housingModePolicy.TryValidateLayout(payload.Snapshots, out string housingModeError))
             {
                 return ImportFailure(housingModeError);
             }
@@ -117,7 +120,7 @@ internal sealed class ObjectLayoutFileService(
 
     private bool TryBuildImportPayload(
         string path,
-        ObjectLayoutFileImportKind? importKind,
+        ObjectLayoutFileKind? fileKind,
         out ObjectLayoutImportPayload payload,
         out string errorMessage)
     {
@@ -125,20 +128,22 @@ internal sealed class ObjectLayoutFileService(
 
         string json = fileSystem.ReadAllText(path);
         using var rootDocument = JsonDocument.Parse(json);
-        var root = rootDocument.RootElement;
-        if (!TryResolveImportParser(root, importKind, out var parser, out errorMessage))
+        JsonElement root = rootDocument.RootElement;
+        if (!TryResolveImportKind(root, fileKind, out ObjectLayoutFileKind resolvedKind, out errorMessage))
         {
             return false;
         }
 
-        return parser(new ObjectLayoutImportSource(root, path), out payload, out errorMessage);
+        return resolvedKind == ObjectLayoutFileKind.ObjectLayout
+            ? TryParseObjectLayoutImportPayload(root, out payload, out errorMessage)
+            : TryParseMakePlaceImportPayload(root, path, out payload, out errorMessage);
     }
 
-    private bool TryParseObjectLayoutImportPayload(ObjectLayoutImportSource source, out ObjectLayoutImportPayload payload, out string errorMessage)
+    private bool TryParseObjectLayoutImportPayload(JsonElement root, out ObjectLayoutImportPayload payload, out string errorMessage)
     {
         payload = null!;
 
-        if (!ObjectLayoutJsonSerializer.TryDeserializeLayout(source.Root, out ObjectLayoutSnapshot layout, out errorMessage))
+        if (!ObjectLayoutJsonSerializer.TryDeserializeLayout(root, out ObjectLayoutSnapshot layout, out errorMessage))
         {
             return false;
         }
@@ -153,35 +158,55 @@ internal sealed class ObjectLayoutFileService(
         return true;
     }
 
-    private bool TryParseMakePlaceImportPayload(ObjectLayoutImportSource source, out ObjectLayoutImportPayload payload, out string errorMessage)
+    private bool TryParseMakePlaceImportPayload(JsonElement root, string sourcePath, out ObjectLayoutImportPayload payload, out string errorMessage)
     {
         payload = null!;
 
-        if (!TryDeserializeDocument(source.Root, "The selected MakePlace layout file is empty or invalid.", out ObjectMakePlaceLayoutDocument? document, out errorMessage))
+        if (!MakePlaceJsonSerializer.TryDeserializeLayout(root, out MakePlaceLayoutDocument document, out errorMessage))
         {
             return false;
         }
 
         ObjectRuntimeLocationContext currentLocation = locationService.GetCurrentContext();
-        if (currentLocation.Housing.CurrentArea != ObjectHousingArea.Indoor
-            || currentLocation.Housing.CurrentSize is not { } currentSize)
-        {
-            errorMessage = "MakePlace furniture import currently requires standing in an indoor housing territory.";
-            return false;
-        }
 
         return makePlaceImportMapper.TryBuildImportPayload(
-            document!,
-            source.Path,
-            currentLocation.CreationContext,
-            currentSize.ToString(),
+            document,
+            sourcePath,
+            currentLocation,
             out payload,
             out errorMessage);
     }
 
+    private bool TryBuildExportJson(
+        ObjectLayoutSnapshot layout,
+        ObjectLayoutFileKind fileKind,
+        out string json,
+        out string successMessage,
+        out string errorMessage)
+    {
+        json = string.Empty;
+        successMessage = string.Empty;
+        errorMessage = string.Empty;
+
+        if (fileKind == ObjectLayoutFileKind.ObjectLayout)
+        {
+            json = ObjectLayoutJsonSerializer.SerializeLayout(layout);
+            return true;
+        }
+
+        ObjectRuntimeLocationContext currentLocation = locationService.GetCurrentContext();
+        if (!makePlaceExportMapper.TryBuildExportDocument(layout, currentLocation, out MakePlaceLayoutDocument document, out successMessage, out errorMessage))
+        {
+            return false;
+        }
+
+        json = MakePlaceJsonSerializer.Serialize(document);
+        return true;
+    }
+
     private ObjectLayoutFileImportResult CreateImportedLayout(ObjectLayoutImportPayload payload)
     {
-        var layout = layoutManager.CreateLayout(
+        ObjectLayoutSnapshot layout = layoutManager.CreateLayout(
             payload.Name,
             payload.Snapshots,
             payload.Folders,
@@ -189,82 +214,64 @@ internal sealed class ObjectLayoutFileService(
         return ImportSuccess(layout, payload.SuccessMessage);
     }
 
-    private bool TryResolveImportParser(
+    private static bool TryResolveImportKind(
         JsonElement root,
-        ObjectLayoutFileImportKind? importKind,
-        out ImportPayloadParser parser,
+        ObjectLayoutFileKind? fileKind,
+        out ObjectLayoutFileKind resolvedKind,
         out string errorMessage)
     {
-        var looksLikeObjectLayout = ObjectLayoutFileUtility.LooksLikeObjectLayout(root);
-        var looksLikeMakePlaceLayout = ObjectLayoutFileUtility.LooksLikeMakePlaceLayout(root);
+        bool looksLikeObjectLayout = ObjectLayoutFileUtility.LooksLikeObjectLayout(root);
+        bool looksLikeMakePlaceLayout = ObjectLayoutFileUtility.LooksLikeMakePlaceLayout(root);
 
-        if (importKind == ObjectLayoutFileImportKind.ObjectLayout)
+        if (fileKind == ObjectLayoutFileKind.ObjectLayout)
         {
             if (!looksLikeObjectLayout)
             {
-                parser = null!;
+                resolvedKind = default;
                 errorMessage = "The selected file is not a supported object layout json file.";
                 return false;
             }
 
-            parser = TryParseObjectLayoutImportPayload;
+            resolvedKind = ObjectLayoutFileKind.ObjectLayout;
             errorMessage = string.Empty;
             return true;
         }
 
-        if (importKind == ObjectLayoutFileImportKind.MakePlaceLayout)
+        if (fileKind == ObjectLayoutFileKind.MakePlaceLayout)
         {
             if (!looksLikeMakePlaceLayout)
             {
-                parser = null!;
+                resolvedKind = default;
                 errorMessage = "The selected file is not a supported MakePlace layout json file.";
                 return false;
             }
 
-            parser = TryParseMakePlaceImportPayload;
+            resolvedKind = ObjectLayoutFileKind.MakePlaceLayout;
             errorMessage = string.Empty;
             return true;
         }
 
         if (looksLikeObjectLayout)
         {
-            parser = TryParseObjectLayoutImportPayload;
+            resolvedKind = ObjectLayoutFileKind.ObjectLayout;
             errorMessage = string.Empty;
             return true;
         }
 
         if (looksLikeMakePlaceLayout)
         {
-            parser = TryParseMakePlaceImportPayload;
+            resolvedKind = ObjectLayoutFileKind.MakePlaceLayout;
             errorMessage = string.Empty;
             return true;
         }
 
-        parser = null!;
+        resolvedKind = default;
         errorMessage = "The selected json file is not a supported object layout or MakePlace layout format.";
         return false;
     }
 
-    private static bool TryDeserializeDocument<TDocument>(
-        JsonElement root,
-        string invalidMessage,
-        out TDocument? document,
-        out string errorMessage)
-        where TDocument : class
-    {
-        document = root.Deserialize<TDocument>(ObjectLayoutJsonSerializer.JsonOptions);
-        if (document is not null)
-        {
-            errorMessage = string.Empty;
-            return true;
-        }
-
-        errorMessage = invalidMessage;
-        return false;
-    }
-
-    private static ObjectLayoutFileExportResult ExportSuccess()
-        => new(true, string.Empty);
+    private static ObjectLayoutFileExportResult ExportSuccess(string message)
+        => new(true, message);
 
     private static ObjectLayoutFileExportResult ExportFailure(string message)
         => new(false, message);
@@ -276,3 +283,4 @@ internal sealed class ObjectLayoutFileService(
         => new(false, null, message);
 }
 
+#pragma warning restore MA0048

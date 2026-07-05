@@ -1,6 +1,5 @@
 using Intoner.Objects.Catalog;
 using Intoner.Objects.Models;
-using Intoner.Objects.Utils;
 using System.Numerics;
 
 namespace Intoner.Objects.Runtime;
@@ -113,7 +112,7 @@ internal sealed class PlacementFixService(
 
         IReadOnlyList<ObjectSnapshot> snapshots = sceneView.GetPlacedObjectSnapshots();
         IReadOnlyList<ObjectBoundsSnapshot> boundsSnapshots = sceneView.GetObjectBoundsSnapshots();
-        return surfaceAttachmentService.TryResolveAttachedParent(
+        return SurfaceAttachmentService.TryResolveAttachedParent(
                    snapshot,
                    snapshots,
                    boundsSnapshots,

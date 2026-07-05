@@ -1,13 +1,13 @@
-using Intoner.Objects.Api;
+using Intoner.Objects.Utils;
 using System.Text.Json;
 
-namespace Intoner.Objects.Utils;
+namespace Intoner.Objects.Api;
 
 internal static class ObjectLayoutFileUtility
 {
     public static string ResolveImportedLayoutName(string fileName, string path)
     {
-        var sanitizedName = string.IsNullOrWhiteSpace(fileName)
+        string sanitizedName = string.IsNullOrWhiteSpace(fileName)
             ? Path.GetFileNameWithoutExtension(path)
             : ObjectStringUtility.TrimOrEmpty(fileName);
         return string.IsNullOrWhiteSpace(sanitizedName)
@@ -17,7 +17,7 @@ internal static class ObjectLayoutFileUtility
 
     public static string BuildExportFileName(string layoutName)
     {
-        var sanitizedName = string.IsNullOrWhiteSpace(layoutName)
+        string sanitizedName = string.IsNullOrWhiteSpace(layoutName)
             ? "layout"
             : string.Join("_", layoutName.Split(Path.GetInvalidFileNameChars(), StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
         if (string.IsNullOrWhiteSpace(sanitizedName))

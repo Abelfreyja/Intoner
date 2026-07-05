@@ -2,15 +2,14 @@ using Dalamud.Game.ClientState.Objects.SubKinds;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine;
-using FFXIVClientStructs.FFXIV.Client.LayoutEngine.Layer;
-using FFXIVClientStructs.FFXIV.Common.Component.BGCollision;
 using Intoner.Objects.Filesystem.Configuration;
 using Intoner.Objects.Utils;
+using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
-using CollisionSceneWrapper = FFXIVClientStructs.FFXIV.Common.Component.BGCollision.SceneWrapper;
 
 namespace Intoner.Objects.Runtime;
 
+[SuppressMessage("Maintainability", "MA0048:File name must match type name", Justification = "Keep the native placement state colocated with its query boundary.")]
 internal readonly record struct NativeHousingPlacementState(
     ObjectHousingArea? CurrentArea,
     HousingPlacementBlock Block,
@@ -19,17 +18,16 @@ internal readonly record struct NativeHousingPlacementState(
 internal sealed class NativePlacementQuery(
     IFramework framework,
     IObjectTable objectTable,
-    NativePlacementCollisionQuery collisionQuery)
+    NativePlacementCollisionQuery collisionQuery,
+    NativePlacementAreaQuery areaQuery)
 {
-    private const ulong MapRangeCollisionLayerMask = 8;
-
     public bool TryRaycast(Vector3 rayOrigin, Vector3 rayDirection, float maxDistance, out ObjectSurfaceHit hit)
     {
         (bool Success, ObjectSurfaceHit Hit) result = ObjectFrameworkUtility.RunOnFrameworkThread(framework, () =>
         {
             return collisionQuery.TryRaycast(rayOrigin, rayDirection, maxDistance, out ObjectSurfaceHit resolvedHit)
                 ? (Success: true, Hit: resolvedHit)
-                : (Success: false, Hit: new ObjectSurfaceHit(Vector3.Zero, Vector3.Zero));
+                : (Success: false, Hit: ObjectSurfaceHit.Empty);
         });
 
         hit = result.Hit;
@@ -42,7 +40,7 @@ internal sealed class NativePlacementQuery(
         float radius,
         out ObjectSurfaceHit hit)
     {
-        hit = new ObjectSurfaceHit(Vector3.Zero, Vector3.Zero);
+        hit = ObjectSurfaceHit.Empty;
         if (!ObjectMathUtility.TryNormalize(rayDirection, out Vector3 normalizedDirection))
         {
             return false;
@@ -66,7 +64,7 @@ internal sealed class NativePlacementQuery(
                 PlacementValidationConstants.NativeRayMaxDistance,
                 out ObjectSurfaceHit rayHit))
         {
-            return (false, new ObjectSurfaceHit(Vector3.Zero, Vector3.Zero));
+            return (false, ObjectSurfaceHit.Empty);
         }
 
         if (!float.IsFinite(radius) || radius <= ObjectMathUtility.ScalarEpsilon)
@@ -113,7 +111,7 @@ internal sealed class NativePlacementQuery(
                     materialMask,
                     out ObjectSurfaceHit resolvedHit)
                 ? (Success: true, Hit: resolvedHit)
-                : (Success: false, Hit: new ObjectSurfaceHit(Vector3.Zero, Vector3.Zero));
+                : (Success: false, Hit: ObjectSurfaceHit.Empty);
         });
 
         hit = result.Hit;
@@ -130,26 +128,17 @@ internal sealed class NativePlacementQuery(
             return PlacementValidationStatus.Unknown;
         }
 
-        return ObjectFrameworkUtility.RunOnFrameworkThread(framework, () => CheckPlacementAreaContainmentOnFramework(blockId, position));
-    }
-
-    private unsafe PlacementValidationStatus CheckPlacementAreaContainmentOnFramework(byte blockId, Vector3 position)
-    {
-        if (!ObjectSurfaceRaycastUtility.HasCollisionScene())
-        {
-            return PlacementValidationStatus.Unknown;
-        }
-
-        return TryFindContainingHousingBlock(position, blockId)
-            ? PlacementValidationStatus.Valid
-            : PlacementValidationStatus.Invalid;
+        return ObjectFrameworkUtility.RunOnFrameworkThread(framework, () =>
+            context.CurrentArea == ObjectHousingArea.Indoor
+                ? areaQuery.CheckCurrentBlock(position, blockId)
+                : areaQuery.CheckCurrentPlot(position));
     }
 
     private unsafe NativeHousingPlacementState ResolveCurrentHousingStateOnFramework()
         => new(
             TryResolveCurrentHousingAreaOnFramework(out ObjectHousingArea area) ? area : null,
             ResolveCurrentHousingBlockOnFramework(),
-            ObjectSurfaceRaycastUtility.HasCollisionScene());
+            ObjectCollisionSceneQuery.HasScene());
 
     private static unsafe bool TryResolveCurrentHousingAreaOnFramework(out ObjectHousingArea area)
     {
@@ -199,15 +188,12 @@ internal sealed class NativePlacementQuery(
         blockId = 0;
 
         IPlayerCharacter? player = objectTable.LocalPlayer;
-        if (player != null)
+        if (player == null)
         {
-            if (TryFindContainingPlayerHousingBlock(player.Position, out blockId))
-            {
-                return true;
-            }
+            return false;
         }
 
-        return false;
+        return areaQuery.TryResolveBlock(player.Position, out blockId);
     }
 
     private static unsafe bool TryResolveCurrentPlotBlock(out byte blockId)
@@ -226,56 +212,6 @@ internal sealed class NativePlacementQuery(
         return false;
     }
 
-    private unsafe bool TryFindContainingPlayerHousingBlock(Vector3 position, out byte blockId)
-    {
-        blockId = 0;
-        if (!TryResolveContainingColliders(position, out CollisionSceneWrapper.ColliderList colliderList))
-        {
-            return false;
-        }
-
-        foreach (var colliderPointer in colliderList.Colliders[..colliderList.Count])
-        {
-            if (!TryResolvePlacementMapRange(colliderPointer.Value, out MapRangeLayoutInstance* mapRange))
-            {
-                continue;
-            }
-
-            blockId = mapRange->HousingBlockId;
-            return true;
-        }
-
-        return false;
-    }
-
-    private unsafe bool TryFindContainingHousingBlock(Vector3 position, byte blockId)
-    {
-        if (!TryResolveContainingColliders(position, out CollisionSceneWrapper.ColliderList colliderList))
-        {
-            return false;
-        }
-
-        foreach (var colliderPointer in colliderList.Colliders[..colliderList.Count])
-        {
-            if (!TryResolvePlacementMapRange(colliderPointer.Value, out MapRangeLayoutInstance* mapRange))
-            {
-                continue;
-            }
-
-            if (mapRange->HousingBlockId == blockId)
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private static bool TryResolveContainingColliders(
-        Vector3 position,
-        out CollisionSceneWrapper.ColliderList colliderList)
-        => ObjectSurfaceRaycastUtility.TryFindContainingColliders(position, MapRangeCollisionLayerMask, out colliderList);
-
     private static Vector3 ResolveFloorSweepOrigin(Vector3 rayHitPoint, Vector3 normalizedDirection, float radius)
     {
         Vector3 sweepOrigin = rayHitPoint - (normalizedDirection * radius) + (Vector3.UnitY * radius);
@@ -285,7 +221,7 @@ internal sealed class NativePlacementQuery(
         }
 
         float heightFromHit = radius + sweepOrigin.Y - rayHitPoint.Y;
-        float outdoorAdjustment = heightFromHit - 6f;
+        float outdoorAdjustment = heightFromHit - PlacementValidationConstants.NativeOutdoorFloorSweepDistance;
         return outdoorAdjustment > 0f
             ? sweepOrigin + (normalizedDirection * outdoorAdjustment)
             : sweepOrigin;
@@ -299,28 +235,4 @@ internal sealed class NativePlacementQuery(
             : null;
         return activeLayout != null && activeLayout->HousingType == 1;
     }
-
-    private static unsafe bool TryResolvePlacementMapRange(Collider* collider, out MapRangeLayoutInstance* mapRange)
-    {
-        mapRange = null;
-        if (collider == null)
-        {
-            return false;
-        }
-
-        ILayoutInstance* instance = LayoutWorld.GetColliderLayoutInstance(InstanceType.MapRange, collider);
-        if (instance == null)
-        {
-            return false;
-        }
-
-        mapRange = (MapRangeLayoutInstance*)instance;
-        return IsPlacementMapRange(mapRange);
-    }
-
-    private static unsafe bool IsPlacementMapRange(MapRangeLayoutInstance* mapRange)
-        => mapRange != null
-            && (mapRange->MapRangeFlags2 & MapRangeFlag2.HousingEnabled) == MapRangeFlag2.HousingEnabled
-            && ((byte)mapRange->MapRangeFlags1 & 0x0F) == 0
-            && mapRange->HousingBlockId != byte.MaxValue;
 }

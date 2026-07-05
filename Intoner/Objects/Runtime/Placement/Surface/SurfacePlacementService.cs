@@ -1,6 +1,5 @@
 using Intoner.Objects.Catalog;
 using Intoner.Objects.Models;
-using Intoner.Objects.Utils;
 using System.Numerics;
 
 namespace Intoner.Objects.Runtime;
@@ -17,29 +16,47 @@ internal sealed class SurfacePlacementService(
         Vector3 rayDirection,
         out ObjectSurfaceHit hit)
     {
-        hit = new ObjectSurfaceHit(Vector3.Zero, Vector3.Zero);
-        if (!housingModePolicy.GetState().IsHousingMode
-            || boundsSnapshot is null
-            || !metadataResolver.TryResolve(snapshot, out HousingFurnitureMetadata metadata)
-            || metadata is not { Surface: HousingPlacementSurface.Floor }
-            || !PlacementSurfaceResolver.TryResolveNativePlacementClearanceRadius(boundsSnapshot, out float radius))
+        hit = ObjectSurfaceHit.Empty;
+        if (!TryResolveHousingMetadata(snapshot, out HousingFurnitureMetadata metadata))
         {
             return false;
         }
 
-        return nativeQuery.TryResolveFloorPlacementFromRay(rayOrigin, rayDirection, radius, out hit);
+        if (metadata.Surface == HousingPlacementSurface.Floor
+            && boundsSnapshot is not null
+            && PlacementSurfaceResolver.TryResolveNativePlacementClearance(boundsSnapshot, out ObjectPlacementClearance clearance)
+            && nativeQuery.TryResolveFloorPlacementFromRay(rayOrigin, rayDirection, clearance.Radius, out hit))
+        {
+            return true;
+        }
+
+        return nativeQuery.TryRaycastMaterialMask(
+            rayOrigin,
+            rayDirection,
+            PlacementValidationConstants.NativeRayMaxDistance,
+            PlacementSurfacePolicy.ResolveAllowedMaterialMask(metadata),
+            out hit);
     }
 
     public bool ShouldUseNativePlacementOrigin(ObjectSnapshot snapshot, ObjectSurfaceHit hit)
+        => hit.Source == ObjectSurfaceHitSource.Native
+           && TryResolveHousingMetadata(snapshot, out HousingFurnitureMetadata metadata)
+           && metadata.Surface is HousingPlacementSurface.Floor or HousingPlacementSurface.Tabletop
+           && PlacementSurfacePolicy.TryValidateSurface(metadata, hit, out _);
+
+    public bool ShouldAlignWallSurface(ObjectSnapshot snapshot)
+        => TryResolveHousingMetadata(snapshot, out HousingFurnitureMetadata metadata)
+           && metadata.Surface == HousingPlacementSurface.Wall;
+
+    private bool TryResolveHousingMetadata(ObjectSnapshot snapshot, out HousingFurnitureMetadata metadata)
     {
-        if (!housingModePolicy.GetState().IsHousingMode
-            || hit.Source != ObjectSurfaceHitSource.Native
-            || !metadataResolver.TryResolve(snapshot, out HousingFurnitureMetadata metadata))
+        if (!housingModePolicy.GetState().IsHousingMode)
         {
+            metadata = default!;
             return false;
         }
 
-        return metadata is { Surface: HousingPlacementSurface.Floor or HousingPlacementSurface.Tabletop };
+        return metadataResolver.TryResolve(snapshot, out metadata);
     }
 }
 

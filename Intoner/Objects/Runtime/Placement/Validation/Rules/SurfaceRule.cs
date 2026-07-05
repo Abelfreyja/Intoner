@@ -1,12 +1,11 @@
 using Intoner.Objects.Catalog;
+using Intoner.Objects.Filesystem.Configuration;
 using Intoner.Objects.Models;
-using Intoner.Objects.Utils;
 
 namespace Intoner.Objects.Runtime;
 
 internal sealed class SurfaceRule(
     PlacementSurfaceResolver surfaceResolver,
-    PlacementSurfaceContactValidator contactValidator,
     PlacementEvaluationFactory evaluationFactory) : IPlacementRule
 {
     public bool TryEvaluate(
@@ -21,45 +20,18 @@ internal sealed class SurfaceRule(
             return false;
         }
 
+        if (metadata.Surface == HousingPlacementSurface.Wall)
+        {
+            evaluation = default!;
+            return false;
+        }
+
         evaluation = metadata.Surface switch
         {
-            HousingPlacementSurface.Wall  => EvaluateWallFurniture(context, snapshot, boundsSnapshot, metadata),
-            HousingPlacementSurface.Floor => EvaluateFloorFurniture(context, snapshot, boundsSnapshot, metadata),
+            HousingPlacementSurface.Floor => EvaluateFloorContact(context, snapshot, boundsSnapshot, metadata),
             _                             => EvaluateFloorLikeFurniture(context, snapshot, boundsSnapshot, metadata),
         };
         return evaluation.Status != PlacementValidationStatus.Valid;
-    }
-
-    private PlacementEvaluation EvaluateFloorFurniture(
-        PlacementValidationContext context,
-        ObjectSnapshot snapshot,
-        ObjectBoundsSnapshot boundsSnapshot,
-        HousingFurnitureMetadata metadata)
-    {
-        if (!PlacementSurfaceResolver.TryResolveNativePlacementClearanceRadius(boundsSnapshot, out float radius))
-        {
-            return evaluationFactory.Unknown(
-                snapshot.Id,
-                PlacementIssueCode.MissingFloorClearance,
-                "Floor furniture native placement clearance is not available yet.");
-        }
-
-        if (!surfaceResolver.TryResolveSurface(context, snapshot, boundsSnapshot, metadata, out ObjectSurfaceHit hit, out PlacementIssueCode issueCode, out string surfaceError))
-        {
-            return evaluationFactory.Invalid(snapshot, issueCode, surfaceError);
-        }
-
-        if (!contactValidator.IsAlignedToSurface(snapshot, hit))
-        {
-            return evaluationFactory.Invalid(
-                snapshot,
-                PlacementIssueCode.NotAlignedToSurface,
-                "Furniture is not aligned to its placement surface.");
-        }
-
-        return contactValidator.TryEvaluateFloorClearance(context, snapshot, radius, out issueCode, out string clearanceError)
-            ? evaluationFactory.Invalid(snapshot, issueCode, clearanceError)
-            : evaluationFactory.Valid(snapshot.Id);
     }
 
     private PlacementEvaluation EvaluateFloorLikeFurniture(
@@ -74,48 +46,52 @@ internal sealed class SurfaceRule(
             return evaluationFactory.Valid(snapshot.Id);
         }
 
-        if (!surfaceResolver.TryResolveSurface(context, snapshot, boundsSnapshot, metadata, out ObjectSurfaceHit hit, out PlacementIssueCode issueCode, out string surfaceError))
-        {
-            return evaluationFactory.Invalid(snapshot, issueCode, surfaceError);
-        }
-
-        if (!contactValidator.IsAlignedToSurface(snapshot, hit))
-        {
-            return evaluationFactory.Invalid(
-                snapshot,
-                PlacementIssueCode.NotAlignedToSurface,
-                "Furniture is not aligned to its placement surface.");
-        }
-
-        return evaluationFactory.Valid(snapshot.Id);
+        return EvaluateFloorContact(context, snapshot, boundsSnapshot, metadata);
     }
 
-    private PlacementEvaluation EvaluateWallFurniture(
+    private PlacementEvaluation EvaluateFloorContact(
         PlacementValidationContext context,
         ObjectSnapshot snapshot,
         ObjectBoundsSnapshot boundsSnapshot,
         HousingFurnitureMetadata metadata)
     {
-        if (snapshot.Model is FurnitureModel { AttachmentParentId: not null })
+        if (!surfaceResolver.TryResolveSurface(context, snapshot, boundsSnapshot, metadata, out ObjectSurfaceHit hit, out PlacementIssueCode issueCode, out string surfaceError))
         {
-            return evaluationFactory.Valid(snapshot.Id);
+            if (AllowsMissingIndoorSurface(context, metadata, issueCode))
+            {
+                return evaluationFactory.Valid(snapshot.Id);
+            }
+
+            return evaluationFactory.Invalid(snapshot, issueCode, surfaceError);
         }
 
-        if (!WallPlacementGeometry.TryResolveProbe(snapshot, boundsSnapshot, out WallPlacementProbe probe))
+        PlacementValidationStatus contactStatus = PlacementSurfaceContactValidator.ValidateFloorContact(
+            context,
+            snapshot,
+            boundsSnapshot,
+            metadata,
+            hit,
+            out issueCode,
+            out string contactError);
+        if (contactStatus == PlacementValidationStatus.Unknown)
         {
-            return evaluationFactory.Unknown(
-                snapshot.Id,
-                PlacementIssueCode.WallBoundsUnavailable,
-                "Wall-mounted placement validation needs furniture bounds.");
+            return evaluationFactory.Unknown(snapshot.Id, issueCode, contactError);
         }
 
-        if (contactValidator.TryValidateWallContact(context, snapshot, metadata, probe.Origin, probe.Direction, probe.ExpectedDistance, out PlacementIssueCode issueCode, out string errorMessage)
-            || contactValidator.TryValidateWallContact(context, snapshot, metadata, probe.Origin, -probe.Direction, probe.ExpectedDistance, out issueCode, out errorMessage))
+        if (contactStatus == PlacementValidationStatus.Invalid)
         {
-            return evaluationFactory.Valid(snapshot.Id);
+            return evaluationFactory.Invalid(snapshot, issueCode, contactError);
         }
 
-        return evaluationFactory.Invalid(snapshot, issueCode, errorMessage);
+        return evaluationFactory.Valid(snapshot.Id);
     }
+
+    private static bool AllowsMissingIndoorSurface(
+        PlacementValidationContext context,
+        HousingFurnitureMetadata metadata,
+        PlacementIssueCode issueCode)
+        => issueCode == PlacementIssueCode.MissingPlacementSurface
+        && metadata.IsIndoor
+        && context.HousingPlacementContext.CurrentArea == ObjectHousingArea.Indoor;
 }
 

@@ -19,11 +19,6 @@ internal enum PlacementIssueCode
     MissingPlacementSurface,
     InvalidPlacementSurface,
     NotAlignedToSurface,
-    MissingFloorClearance,
-    WallBoundsUnavailable,
-    WallSurfaceUnavailable,
-    WallFloatingFromSurface,
-    WallNormalMismatch,
     HousingAreaUnavailable,
     HousingMapAreaMismatch,
     HousingSizeUnavailable,
@@ -67,6 +62,8 @@ internal static class PlacementValidationConstants
 {
     public const float NativeRayLift = 0.20f;
     public const float NativeRayMaxDistance = 100f;
+    public const float NativeOutdoorFloorSweepDistance = 6f;
+    public const float OutdoorFloorMinimumFloatOffset = 1f;
+    public const float OutdoorFloorMaximumFloatOffset = 7f;
     public const float SurfaceAlignmentTolerance = 0.02f;
 }
-

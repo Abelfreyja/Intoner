@@ -1,10 +1,9 @@
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Graphics;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine.Group;
+using Intoner.Objects.Utils;
 
-namespace Intoner.Objects.Utils;
-
-internal readonly record struct FurnitureStainColor(byte StainId, ByteColor Color);
+namespace Intoner.Objects.Catalog;
 
 internal static class FurnitureStainColorUtility
 {

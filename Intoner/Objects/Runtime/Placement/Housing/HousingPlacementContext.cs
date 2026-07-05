@@ -32,6 +32,7 @@ internal readonly record struct HousingPlacementContext(
     ObjectHousingSize TargetSize,
     ObjectHousingArea? CurrentArea,
     ObjectHousingSize? CurrentSize,
+    ObjectHousingPlotBasis? PlotBasis,
     byte? HousingBlockId,
     HousingPlacementBlockSource BlockSource,
     HousingPlacementSizeSource SizeSource,

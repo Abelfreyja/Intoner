@@ -107,11 +107,11 @@ internal interface ISceneObject : IDisposable
     bool TryGetOrientedBounds(out OrientedBounds bounds);
 
     /// <summary>
-    /// Tries to resolve the native clearance radius used by housing floor placement checks.
+    /// Tries to resolve the native clearance used by housing floor placement checks.
     /// </summary>
-    /// <param name="radius">the resolved clearance radius when available</param>
-    /// <returns>true when a clearance radius was available</returns>
-    bool TryGetPlacementClearanceRadius(out float radius);
+    /// <param name="clearance">the resolved clearance when available</param>
+    /// <returns>true when clearance was available</returns>
+    bool TryGetPlacementClearance(out ObjectPlacementClearance clearance);
 
     /// <summary>
     /// gets native placement surfaces exposed by this scene object
@@ -209,9 +209,9 @@ internal abstract class SceneObject : ISceneObject
 
     public abstract bool TryGetBounds(out AxisAlignedBounds bounds);
     public abstract bool TryGetOrientedBounds(out OrientedBounds bounds);
-    public virtual bool TryGetPlacementClearanceRadius(out float radius)
+    public virtual bool TryGetPlacementClearance(out ObjectPlacementClearance clearance)
     {
-        radius = 0f;
+        clearance = default;
         return false;
     }
 

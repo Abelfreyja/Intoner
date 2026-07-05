@@ -1,4 +1,5 @@
 using Intoner.Objects.Models;
+using Intoner.Objects.Runtime;
 using Intoner.Objects.Utils;
 using System.Numerics;
 
@@ -25,6 +26,7 @@ internal static class GizmoSurfaceDragSolver
         Vector3? cameraRight,
         in GizmoSelectionEntry primaryEntry,
         bool usePlacementOrigin,
+        bool alignWallSurface,
         bool alignToSurfaceNormal)
     {
         var rotationQuaternion = ObjectTransformMath.NormalizeQuaternion(startRotationQuaternion);
@@ -32,14 +34,18 @@ internal static class GizmoSurfaceDragSolver
 
         if (TryResolveSurfaceNormal(hit, out var surfaceNormal))
         {
-            Vector3? rotationSurfaceNormal = alignToSurfaceNormal ? surfaceNormal : null;
-            if (alignToSurfaceNormal)
+            Vector3? rotationSurfaceNormal = alignToSurfaceNormal || alignWallSurface ? surfaceNormal : null;
+            if (alignWallSurface)
+            {
+                rotationQuaternion = ObjectTransformMath.AlignLocalAxisToDirection(rotationQuaternion, -Vector3.UnitZ, -surfaceNormal);
+            }
+            else if (alignToSurfaceNormal)
             {
                 rotationQuaternion = ObjectTransformMath.AlignUpToNormal(rotationQuaternion, surfaceNormal);
             }
 
             rotationQuaternion = ResolveRotationSequence(rotationQuaternion, rotationSteps, rotationSurfaceNormal, cameraRight);
-            if (!usePlacementOrigin)
+            if (!alignWallSurface && !usePlacementOrigin)
             {
                 var minimumSupport = ResolveEntrySurfaceSupport(primaryEntry, rotationQuaternion, surfaceNormal);
                 position = hit.Point - (surfaceNormal * minimumSupport);

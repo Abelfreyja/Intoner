@@ -42,7 +42,7 @@ internal sealed class SurfaceAttachmentService(FurnitureMetadataResolver metadat
         => TryResolveSurfaceDragAttachment(snapshot, hit, boundsSnapshots, out FurnitureModel furnitureModel, out Guid? parentId)
            && furnitureModel.AttachmentParentId != parentId;
 
-    public bool TryResolveAttachedParent(
+    public static bool TryResolveAttachedParent(
         ObjectSnapshot snapshot,
         IReadOnlyDictionary<Guid, ObjectSnapshot> snapshotsById,
         IReadOnlyDictionary<Guid, ObjectBoundsSnapshot> boundsById,
@@ -77,7 +77,7 @@ internal sealed class SurfaceAttachmentService(FurnitureMetadataResolver metadat
             out errorMessage);
     }
 
-    public bool TryResolveAttachedParent(
+    public static bool TryResolveAttachedParent(
         ObjectSnapshot snapshot,
         IReadOnlyList<ObjectSnapshot> snapshots,
         IReadOnlyList<ObjectBoundsSnapshot> boundsSnapshots,
@@ -98,7 +98,7 @@ internal sealed class SurfaceAttachmentService(FurnitureMetadataResolver metadat
             return false;
         }
 
-        TryFindSnapshot(snapshots, parentId, out ObjectSnapshot? resolvedParentSnapshot);
+        ObjectSnapshot? resolvedParentSnapshot = FindSnapshot(snapshots, parentId);
         TryFindBoundsSnapshot(boundsSnapshots, snapshot.Id, out ObjectBoundsSnapshot? resolvedChildBounds);
         TryFindBoundsSnapshot(boundsSnapshots, parentId, out ObjectBoundsSnapshot? resolvedParentBounds);
         return TryUseAttachedParent(
@@ -112,32 +112,19 @@ internal sealed class SurfaceAttachmentService(FurnitureMetadataResolver metadat
             out errorMessage);
     }
 
-    public bool TryValidateAttachedPlacement(
-        HousingPlacementSurface surface,
-        ObjectSnapshot snapshot,
+    public static bool TryValidateAttachedTabletopPlacement(
         ObjectBoundsSnapshot childBounds,
         ObjectBoundsSnapshot parentBounds,
         out PlacementIssueCode issueCode,
         out string errorMessage)
     {
-        if (!PlacementSurfacePolicy.SupportsObjectSurface(parentBounds.PlacementSurfaceSupport, surface))
+        if (!PlacementSurfacePolicy.SupportsObjectSurface(parentBounds.PlacementSurfaceSupport, HousingPlacementSurface.Tabletop))
         {
             issueCode = PlacementIssueCode.InvalidPlacementSurface;
-            errorMessage = ResolveAttachmentSurfaceError(surface);
+            errorMessage = "Tabletop furniture requires an attached tabletop surface.";
             return false;
         }
 
-        return surface == HousingPlacementSurface.Wall
-            ? TryValidateAttachedWallPlacement(snapshot, childBounds, parentBounds, out issueCode, out errorMessage)
-            : TryValidateAttachedTabletopPlacement(childBounds, parentBounds, out issueCode, out errorMessage);
-    }
-
-    public bool TryValidateAttachedTabletopPlacement(
-        ObjectBoundsSnapshot childBounds,
-        ObjectBoundsSnapshot parentBounds,
-        out PlacementIssueCode issueCode,
-        out string errorMessage)
-    {
         issueCode = PlacementIssueCode.BoundsUnavailable;
         if (!TryResolveVerticalRange(childBounds, out float childBottom, out _)
             || !TryResolveVerticalRange(parentBounds, out _, out float parentTop)
@@ -164,29 +151,6 @@ internal sealed class SurfaceAttachmentService(FurnitureMetadataResolver metadat
         issueCode = PlacementIssueCode.None;
         errorMessage = string.Empty;
         return true;
-    }
-
-    public bool TryValidateAttachedWallPlacement(
-        ObjectSnapshot snapshot,
-        ObjectBoundsSnapshot childBounds,
-        ObjectBoundsSnapshot parentBounds,
-        out PlacementIssueCode issueCode,
-        out string errorMessage)
-    {
-        issueCode = PlacementIssueCode.BoundsUnavailable;
-        if (!WallPlacementGeometry.TryResolveProbe(snapshot, childBounds, out WallPlacementProbe probe))
-        {
-            errorMessage = "Attached wall-mounted placement needs furniture bounds.";
-            return false;
-        }
-
-        if (TryValidateAttachedWallProbe(parentBounds, probe.Origin, probe.Direction, probe.ExpectedDistance, out issueCode, out errorMessage)
-            || TryValidateAttachedWallProbe(parentBounds, probe.Origin, -probe.Direction, probe.ExpectedDistance, out issueCode, out errorMessage))
-        {
-            return true;
-        }
-
-        return false;
     }
 
     public bool TrySnapToAttachedParentSurface(
@@ -340,56 +304,17 @@ internal sealed class SurfaceAttachmentService(FurnitureMetadataResolver metadat
                hit.Normal,
                ParentSurfaceBoundsTolerance);
 
-    private static bool TryValidateAttachedWallProbe(
-        ObjectBoundsSnapshot parentBounds,
-        Vector3 probeOrigin,
-        Vector3 direction,
-        float expectedDistance,
-        out PlacementIssueCode issueCode,
-        out string errorMessage)
-    {
-        Vector3 contactPoint = probeOrigin + (direction * expectedDistance);
-        Vector3 expectedNormal = -direction;
-        if (expectedDistance <= 0f
-            || !WallPlacementGeometry.IsWallSurfaceNormal(expectedNormal))
-        {
-            issueCode = PlacementIssueCode.WallBoundsUnavailable;
-            errorMessage = "Attached wall-mounted placement needs furniture bounds.";
-            return false;
-        }
-
-        if (!WallPlacementGeometry.ContainsWallSurfacePoint(
-                parentBounds,
-                contactPoint,
-                expectedNormal,
-                ParentSurfaceBoundsTolerance))
-        {
-            issueCode = PlacementIssueCode.OutsideAttachmentParentSurface;
-            errorMessage = "Wall-mounted furniture is not aligned to its attached wall surface.";
-            return false;
-        }
-
-        issueCode = PlacementIssueCode.None;
-        errorMessage = string.Empty;
-        return true;
-    }
-
-    private static bool TryFindSnapshot(
-        IReadOnlyList<ObjectSnapshot> snapshots,
-        Guid objectId,
-        out ObjectSnapshot? snapshot)
+    private static ObjectSnapshot? FindSnapshot(IReadOnlyList<ObjectSnapshot> snapshots, Guid objectId)
     {
         foreach (ObjectSnapshot candidate in snapshots)
         {
             if (candidate.Id == objectId)
             {
-                snapshot = candidate;
-                return true;
+                return candidate;
             }
         }
 
-        snapshot = null;
-        return false;
+        return null;
     }
 
     private static bool TryFindBoundsSnapshot(
@@ -468,10 +393,5 @@ internal sealed class SurfaceAttachmentService(FurnitureMetadataResolver metadat
            && worldPoint.X <= parentBounds.Max.X + ParentSurfaceBoundsTolerance
            && worldPoint.Z >= parentBounds.Min.Z - ParentSurfaceBoundsTolerance
            && worldPoint.Z <= parentBounds.Max.Z + ParentSurfaceBoundsTolerance;
-
-    private static string ResolveAttachmentSurfaceError(HousingPlacementSurface surface)
-        => surface == HousingPlacementSurface.Wall
-            ? "Wall-mounted furniture requires an attached wall surface."
-            : "Tabletop furniture requires an attached tabletop surface.";
 }
 

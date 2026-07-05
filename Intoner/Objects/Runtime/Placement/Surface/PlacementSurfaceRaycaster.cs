@@ -1,17 +1,9 @@
 using Intoner.Objects.Models;
-using Intoner.Objects.Utils;
 using System.Numerics;
 
 namespace Intoner.Objects.Runtime;
 
-internal readonly record struct PlacementSceneRaycastRequest(
-    Guid ObjectId,
-    Vector3 Origin,
-    Vector3 Direction,
-    float MaxDistance,
-    ulong NativeMaterialMask = 0);
-
-internal sealed class PlacementSceneRaycaster(NativePlacementQuery nativeQuery)
+internal sealed class PlacementSurfaceRaycaster(NativePlacementQuery nativeQuery)
 {
     public bool TryRaycastNative(
         Vector3 origin,
@@ -28,33 +20,32 @@ internal sealed class PlacementSceneRaycaster(NativePlacementQuery nativeQuery)
         out ObjectSurfaceHit hit)
         => nativeQuery.TryRaycastMaterialMask(origin, direction, maxDistance, materialMask, out hit);
 
-    public bool TryRaycastObjectBounds(
+    public static bool TryRaycastObjectBounds(
         PlacementValidationContext context,
-        PlacementSceneRaycastRequest request,
+        PlacementSurfaceRaycastRequest request,
         out ObjectSurfaceHit hit)
         => TryRaycastObjectBounds(context, request, requirePlacementSurface: true, out hit);
 
     public bool TryRaycastAny(
         PlacementValidationContext context,
-        PlacementSceneRaycastRequest request,
+        PlacementSurfaceRaycastRequest request,
         out ObjectSurfaceHit hit)
     {
-        hit = new ObjectSurfaceHit(Vector3.Zero, Vector3.Zero);
-        float closestDistance = ObjectSurfaceRaycastUtility.ResolveMaxDistance(request.MaxDistance);
+        hit = ObjectSurfaceHit.Empty;
+        float closestDistance = ObjectRaycastMath.ResolveMaxDistance(request.MaxDistance);
         bool hasHit = false;
-
-        if (nativeQuery.TryRaycast(request.Origin, request.Direction, closestDistance, out ObjectSurfaceHit nativeHit))
-        {
-            closestDistance = nativeHit.Distance;
-            hit = nativeHit;
-            hasHit = true;
-        }
 
         if (request.NativeMaterialMask != 0
             && TryRaycastNativeMaterial(request.Origin, request.Direction, closestDistance, request.NativeMaterialMask, out ObjectSurfaceHit filteredHit))
         {
             closestDistance = filteredHit.Distance;
             hit = filteredHit;
+            hasHit = true;
+        }
+        else if (nativeQuery.TryRaycast(request.Origin, request.Direction, closestDistance, out ObjectSurfaceHit nativeHit))
+        {
+            closestDistance = nativeHit.Distance;
+            hit = nativeHit;
             hasHit = true;
         }
 
@@ -73,14 +64,14 @@ internal sealed class PlacementSceneRaycaster(NativePlacementQuery nativeQuery)
 
     private static bool TryRaycastObjectBounds(
         PlacementValidationContext context,
-        PlacementSceneRaycastRequest request,
+        PlacementSurfaceRaycastRequest request,
         bool requirePlacementSurface,
         out ObjectSurfaceHit hit)
     {
         Func<ObjectBoundsSnapshot, ObjectSurfaceHit, bool> acceptsHit = requirePlacementSurface
             ? HasSupportedObjectSurface
             : static (_, _) => true;
-        if (!ObjectPlacementBoundsRaycaster.TryRaycastNearest(
+        if (!ObjectBoundsRaycaster.TryRaycastNearest(
                 context.BoundsById.Values,
                 targetObjectId => !CanUseObjectBoundsTarget(context, request.ObjectId, targetObjectId),
                 acceptsHit,
@@ -132,4 +123,3 @@ internal sealed class PlacementSceneRaycaster(NativePlacementQuery nativeQuery)
            && context.SnapshotsById.TryGetValue(targetObjectId, out ObjectSnapshot? targetSnapshot)
            && targetSnapshot is { Kind: ObjectKind.Furniture };
 }
-

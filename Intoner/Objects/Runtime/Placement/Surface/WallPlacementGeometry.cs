@@ -44,6 +44,25 @@ internal static class WallPlacementGeometry
         return true;
     }
 
+    public static bool TryResolveContactPoints(
+        ObjectSnapshot snapshot,
+        ObjectBoundsSnapshot boundsSnapshot,
+        out Vector3 forwardContactPoint,
+        out Vector3 backwardContactPoint)
+    {
+        forwardContactPoint = default;
+        backwardContactPoint = default;
+        if (!TryResolveProbe(snapshot, boundsSnapshot, out WallPlacementProbe probe)
+            || probe.ExpectedDistance <= ObjectMathUtility.ScalarEpsilon)
+        {
+            return false;
+        }
+
+        forwardContactPoint = probe.Origin + (probe.Direction * probe.ExpectedDistance);
+        backwardContactPoint = probe.Origin - (probe.Direction * probe.ExpectedDistance);
+        return true;
+    }
+
     public static bool IsWallSurfaceNormal(Vector3 normal)
         => ObjectMathUtility.TryNormalize(normal, out Vector3 normalizedNormal)
            && MathF.Abs(normalizedNormal.Y) <= WallNormalYThreshold;

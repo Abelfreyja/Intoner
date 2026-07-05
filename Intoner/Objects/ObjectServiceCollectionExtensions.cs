@@ -63,6 +63,8 @@ internal static class ObjectServiceCollectionExtensions
         services.AddSingleton<IObjectAssetCacheService, ObjectAssetCacheService>();
         services.AddSingleton<IObjectAssetIndex, ObjectAssetIndex>();
         services.AddSingleton<IObjectCatalogService, ObjectCatalogService>();
+        services.AddScoped<FurnitureCatalogResolver>();
+        services.AddScoped<IFurnitureStainService, FurnitureStainService>();
         services.AddSingleton<IObjectPathResolver, ObjectPathResolver>();
         return services;
     }
@@ -121,7 +123,6 @@ internal static class ObjectServiceCollectionExtensions
         services.AddSingleton<PrimitiveService>();
         services.AddSingleton<ObjectNativeBindings>();
         services.AddSingleton<FurnitureEmoteGuard>();
-        services.AddScoped<ObjectMakePlaceImportMapper>();
         services.AddScoped<ObjectHousingRuntimeContextResolver>();
         services.AddScoped<IObjectRuntimeLocationService, ObjectRuntimeLocationService>();
         services.AddScoped<ObjectSelectionGeometryCache>();
@@ -138,20 +139,20 @@ internal static class ObjectServiceCollectionExtensions
     {
         services.AddScoped<FurnitureMetadataResolver>();
         services.AddScoped<NativePlacementCollisionQuery>();
+        services.AddScoped<NativePlacementAreaQuery>();
         services.AddScoped<NativePlacementQuery>();
-        services.AddScoped<PlacementSceneRaycaster>();
+        services.AddScoped<PlacementSurfaceRaycaster>();
         services.AddScoped<SurfacePlacementService>();
         services.AddScoped<PlacementSurfaceResolver>();
-        services.AddScoped<PlacementSurfaceContactValidator>();
         services.AddScoped<SurfaceAttachmentService>();
         services.AddScoped<PlacementValidationContextBuilder>();
         services.AddScoped<PlacementFixService>();
         services.AddScoped<PlacementEvaluationFactory>();
         services.AddScoped<IPlacementRule, HousingPolicyRule>();
-        services.AddScoped<IPlacementRule, AreaContainmentRule>();
         services.AddScoped<IPlacementRule, SurfaceRule>();
-        services.AddScoped<IPlacementRule, FootprintRule>();
         services.AddScoped<IPlacementRule, AttachedSurfaceRule>();
+        services.AddScoped<IPlacementRule, AreaContainmentRule>();
+        services.AddScoped<IPlacementRule, FootprintRule>();
         services.AddScoped<PlacementRuleRunner>();
         services.AddScoped<AttachmentHierarchyRule>();
         services.AddScoped<PlacementValidationService>();
@@ -187,13 +188,15 @@ internal static class ObjectServiceCollectionExtensions
         services.AddScoped<ObjectRuntimeApi>();
         services.AddScoped<ObjectApi>();
         services.AddScoped<ObjectIpcProviders>();
+        services.AddScoped<MakePlaceColorMapper>();
+        services.AddScoped<MakePlaceImportMapper>();
+        services.AddScoped<MakePlaceExportMapper>();
         return services;
     }
 
     private static IServiceCollection AddObjectEditorServices(this IServiceCollection services)
     {
         services.AddScoped<IGameInputSuppressionService, GameInputSuppressionService>();
-        services.AddScoped<IFurnitureStainService, FurnitureStainService>();
         services.AddScoped<HousingContextIndicatorProvider>();
         services.AddScoped<HousingFurnitureLimitIndicatorProvider>();
         services.AddScoped<EditorTitleBarIndicatorService>(provider => new EditorTitleBarIndicatorService(

@@ -1,5 +1,5 @@
-using System.Numerics;
 using Intoner.Objects.Models;
+using System.Numerics;
 using ObjectOutlineColorApi = Intoner.Objects.Api.ObjectOutlineColor;
 using ObjectOutlineColorModel = Intoner.Objects.Models.ObjectOutlineColor;
 using RuntimeObjectStateKindDto = Intoner.Objects.Api.RuntimeObjectStateKind;
@@ -543,7 +543,8 @@ internal static class ObjectApiMapper
             ToDto(model.OutlineColor),
             model.HousingRowId,
             model.ItemRowId,
-            model.AttachmentParentId));
+            model.AttachmentParentId,
+            ToFurnitureMaterialItemDto(model.MaterialItem)));
 
     private static WorldObjectModelData ToDto(VfxModel model)
         => new(Vfx: new VfxModelData(
@@ -606,6 +607,7 @@ internal static class ObjectApiMapper
             HousingRowId = model.HousingRowId,
             ItemRowId = model.ItemRowId,
             AttachmentParentId = model.AttachmentParentId,
+            MaterialItem = ToFurnitureMaterialItemModel(model.MaterialItem),
         };
 
     private static FurnitureColorModel ToModel(FurnitureColorData color)
@@ -615,6 +617,20 @@ internal static class ObjectApiMapper
             UseCustomColor = color.UseCustomColor,
             CustomColor = ToVector4(color.CustomColor),
         };
+
+    private static FurnitureMaterialItemData? ToFurnitureMaterialItemDto(FurnitureMaterialItemModel? material)
+        => material is null
+            ? null
+            : new FurnitureMaterialItemData(material.Name, material.ItemId);
+
+    private static FurnitureMaterialItemModel? ToFurnitureMaterialItemModel(FurnitureMaterialItemData? material)
+        => material is null
+            ? null
+            : new FurnitureMaterialItemModel
+            {
+                Name = material.Name,
+                ItemId = material.ItemId,
+            };
 
     private static VfxModel ToModel(VfxModelData model)
         => new()

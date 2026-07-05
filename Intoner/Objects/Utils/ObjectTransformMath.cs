@@ -36,20 +36,24 @@ internal static class ObjectTransformMath
     }
 
     public static Quaternion AlignUpToNormal(Quaternion rotation, Vector3 normal)
+        => AlignLocalAxisToDirection(rotation, Vector3.UnitY, normal);
+
+    public static Quaternion AlignLocalAxisToDirection(Quaternion rotation, Vector3 localAxis, Vector3 direction)
     {
-        if (!ObjectMathUtility.HasLength(rotation) || !ObjectMathUtility.HasLength(normal))
+        if (!ObjectMathUtility.HasLength(rotation) || !ObjectMathUtility.HasLength(localAxis) || !ObjectMathUtility.HasLength(direction))
         {
             return rotation;
         }
 
         rotation = NormalizeQuaternion(rotation);
-        var currentUp = Vector3.Transform(Vector3.UnitY, rotation);
-        if (!ObjectMathUtility.TryNormalize(normal, out var normalizedNormal)
-            || !ObjectMathUtility.TryNormalize(currentUp, out currentUp))
+        var currentAxis = Vector3.Transform(localAxis, rotation);
+        if (!ObjectMathUtility.TryNormalize(direction, out var normalizedDirection)
+            || !ObjectMathUtility.TryNormalize(currentAxis, out currentAxis))
         {
             return rotation;
         }
-        var delta = CreateShortestArcQuaternion(currentUp, normalizedNormal);
+
+        var delta = CreateShortestArcQuaternion(currentAxis, normalizedDirection);
         return NormalizeQuaternion(delta * rotation);
     }
 

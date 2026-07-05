@@ -2,7 +2,6 @@ using Dalamud.Bindings.ImGui;
 using Intoner.Objects.Models;
 using Intoner.Objects.Runtime;
 using Intoner.Objects.Utils;
-using System;
 using System.Globalization;
 using System.Numerics;
 
@@ -158,7 +157,7 @@ internal sealed partial class Gizmo
         Vector2 viewportSize,
         out Vector3 rayOrigin,
         out Vector3 rayDirection)
-        => ObjectSurfaceRaycastUtility.TryBuildScreenRay(viewportPos, viewportSize, ImGui.GetIO().MousePos, out rayOrigin, out rayDirection);
+        => ObjectScreenRaycaster.TryBuildScreenRay(viewportPos, viewportSize, ImGui.GetIO().MousePos, out rayOrigin, out rayDirection);
 
     private static bool HasDragValueChanged(Vector3 nextValue, Vector3 lastValue)
         => ObjectMathUtility.HasMeaningfulChange(nextValue, lastValue);
@@ -355,7 +354,7 @@ internal sealed partial class Gizmo
                 context.CameraUp,
                 out var planeNormal)
             || !TryBuildCurrentMouseRay(context.ViewportPos, context.ViewportSize, out var rayOrigin, out var rayDirection)
-            || !ObjectSurfaceRaycastUtility.TryIntersectRayPlane(rayOrigin, rayDirection, context.PivotPosition, planeNormal, out var startPlanePoint))
+            || !ObjectRaycastMath.TryIntersectRayPlane(rayOrigin, rayDirection, context.PivotPosition, planeNormal, out var startPlanePoint))
         {
             return;
         }
@@ -405,7 +404,7 @@ internal sealed partial class Gizmo
 
         var translationPlane = dragState.TranslationPlane.Value;
         if (!TryBuildCurrentMouseRay(translationPlane.ViewportPos, translationPlane.ViewportSize, out var rayOrigin, out var rayDirection)
-            || !ObjectSurfaceRaycastUtility.TryIntersectRayPlane(rayOrigin, rayDirection, translationPlane.PlanePoint, translationPlane.PlaneNormal, out var planePoint))
+            || !ObjectRaycastMath.TryIntersectRayPlane(rayOrigin, rayDirection, translationPlane.PlanePoint, translationPlane.PlaneNormal, out var planePoint))
         {
             return false;
         }

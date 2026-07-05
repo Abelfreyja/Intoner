@@ -77,6 +77,13 @@ internal static unsafe class ObjectSignatures
     public const string HousingPlacementSweepSphere =
         "48 8B C4 48 89 58 08 48 89 70 10 48 89 78 18 55 48 8D 68 D8 48 81 EC ?? ?? ?? ?? F3 0F 10 41 0C";
 
+    public const string HousingPlacementAreaContainment =
+        "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 81 EC C0 00 00 00 48 8B 05 ?? ?? ?? ?? 48 8B D9 48 8B 50 20 48 85 D2 0F 84 ?? ?? ?? ?? 83 BA 90 01 00 00 01 0F 85 ?? ?? ?? ?? E8 ?? ?? ?? ?? 0F B6 F0 81 FE FF 00 00 00 0F 84 ?? ?? ?? ?? F3 0F 10 03";
+
+    // this one is horrible but will deal with it later..
+    public const string HousingPlacementBlockForPosition =
+        "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 41 56 41 57 48 81 EC D0 00 00 00 F3 0F 10 01 4C 8D 44 24 30 F3 0F 10 49 04 48 8D 54 24 40 48 8B 05 ?? ?? ?? ?? 41 B9 08 00 00 00 F3 0F 11 44 24 30 F3 0F 10 41 08 F3 0F 11 44 24 38 F3 0F 11 4C 24 34 48 8B 88 58 2B 00 00 E8 ?? ?? ?? ?? 84 C0 0F 84 ?? ?? ?? ?? 44 8B B4 24 C0 00 00 00 33 DB 45 85 F6 74 ?? 4C 8B 3D ?? ?? ?? ?? 49 8B 6F 20 48 85 ED 74 ?? 48 8B 4C DC 40 81 79 50 00 30 00 00 75 ?? 48 8B 71 58 B2 2B 48 8B FE C6 44 24 20 00 48 C1 EF 20 44 8B C6 44 8B CF 48 8B CD E8 ?? ?? ?? ?? 48 85 C0 75 ?? 49 8B 4F 18 44 8B CF 44 8B C6 88 44 24 20 B2 2B E8 ?? ?? ?? ?? 48 85 C0 74 ?? F6 80 97 00 00 00 20 74 ?? F6 80 96 00 00 00 0F 74";
+
     public const string ContextSetRenderTargets =
         "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 48 89 7C 24 20 41 56 48 83 EC 20 8B EA 4D 8B F1 BA 40 00 00 00 49 8B D8 48 8B F1 E8";
 
@@ -174,6 +181,10 @@ internal static unsafe class ObjectSignatures
         new(HousingPlacementRaycast, "object native housing placement raycast");
     public static readonly SignatureDelegateTarget NativeHousingPlacementSweepSphere =
         new(HousingPlacementSweepSphere, "object native housing placement sphere sweep");
+    public static readonly SignatureDelegateTarget NativeHousingPlacementAreaContainment =
+        new(HousingPlacementAreaContainment, "object native housing placement area containment");
+    public static readonly SignatureDelegateTarget NativeHousingPlacementBlockForPosition =
+        new(HousingPlacementBlockForPosition, "object native housing placement block for position");
 
     // native draw targets
     public static readonly SignatureHookTarget NativeContextSetRenderTargets =
@@ -231,6 +242,8 @@ internal static unsafe class ObjectSignatures
         // furniture and housing
         NativeHousingPlacementRaycast,
         NativeHousingPlacementSweepSphere,
+        NativeHousingPlacementAreaContainment,
+        NativeHousingPlacementBlockForPosition,
 
         // native draw
         NativeContextAllocateCommand,

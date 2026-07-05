@@ -34,10 +34,10 @@ internal sealed unsafe class NativePlacementCollisionQuery
         float maxDistance,
         out ObjectSurfaceHit hit)
     {
-        hit = new ObjectSurfaceHit(Vector3.Zero, Vector3.Zero);
+        hit = ObjectSurfaceHit.Empty;
         if (_raycast is null
             || !ObjectMathUtility.TryNormalize(direction, out Vector3 normalizedDirection)
-            || !ObjectSurfaceRaycastUtility.HasCollisionScene())
+            || !ObjectCollisionSceneQuery.HasScene())
         {
             return false;
         }
@@ -52,7 +52,7 @@ internal sealed unsafe class NativePlacementCollisionQuery
         Vector3 hitNormal = default;
         ulong material = 0;
         Collider* collider = null;
-        float resolvedMaxDistance = ObjectSurfaceRaycastUtility.ResolveMaxDistance(maxDistance);
+        float resolvedMaxDistance = ObjectRaycastMath.ResolveMaxDistance(maxDistance);
         if (_raycast(&ray, resolvedMaxDistance, &hitPoint, &hitNormal, &material, &collider) == 0)
         {
             return false;
@@ -69,10 +69,10 @@ internal sealed unsafe class NativePlacementCollisionQuery
         ulong materialMask,
         out ObjectSurfaceHit hit)
     {
-        hit = new ObjectSurfaceHit(Vector3.Zero, Vector3.Zero);
+        hit = ObjectSurfaceHit.Empty;
         if (materialMask == 0
             || !ObjectMathUtility.TryNormalize(direction, out Vector3 normalizedDirection)
-            || !ObjectSurfaceRaycastUtility.TryResolveCollisionModule(out BGCollisionModule* collisionModule))
+            || !ObjectCollisionSceneQuery.TryResolveModule(out BGCollisionModule* collisionModule))
         {
             return false;
         }
@@ -87,7 +87,7 @@ internal sealed unsafe class NativePlacementCollisionQuery
 
         Vector3 rayOrigin = origin;
         Vector3 rayDirection = normalizedDirection;
-        float resolvedMaxDistance = ObjectSurfaceRaycastUtility.ResolveMaxDistance(maxDistance);
+        float resolvedMaxDistance = ObjectRaycastMath.ResolveMaxDistance(maxDistance);
         if (!collisionModule->RaycastMaterialFilter(
                 &raycastHit,
                 &rayOrigin,
@@ -111,13 +111,13 @@ internal sealed unsafe class NativePlacementCollisionQuery
         out ObjectSurfaceHit hit,
         out bool surfaceHit)
     {
-        hit = new ObjectSurfaceHit(Vector3.Zero, Vector3.Zero);
+        hit = ObjectSurfaceHit.Empty;
         surfaceHit = false;
         if (_sweepSphere is null
             || !ObjectMathUtility.TryNormalize(direction, out Vector3 normalizedDirection)
             || !float.IsFinite(radius)
             || radius <= ObjectMathUtility.ScalarEpsilon
-            || !ObjectSurfaceRaycastUtility.HasCollisionScene())
+            || !ObjectCollisionSceneQuery.HasScene())
         {
             return false;
         }
@@ -132,7 +132,7 @@ internal sealed unsafe class NativePlacementCollisionQuery
         Vector3 hitNormal = default;
         ulong material = 0;
         Collider* collider = null;
-        float resolvedMaxDistance = ObjectSurfaceRaycastUtility.ResolveMaxDistance(maxDistance);
+        float resolvedMaxDistance = ObjectRaycastMath.ResolveMaxDistance(maxDistance);
         surfaceHit = _sweepSphere(&sphere, &normalizedDirection, resolvedMaxDistance, &hitPoint, &hitNormal, &material, &collider) != 0;
 
         hit = CreateHit(origin, normalizedDirection, hitPoint, hitNormal, material, collider);
@@ -145,10 +145,10 @@ internal sealed unsafe class NativePlacementCollisionQuery
         in RaycastHit raycastHit)
         => new(
             raycastHit.Point,
-            ObjectSurfaceRaycastUtility.ResolveSurfaceNormal(raycastHit, direction),
+            ObjectRaycastMath.ResolveSurfaceNormal(raycastHit, direction),
             raycastHit.Material,
             (nint)raycastHit.Object,
-            raycastHit.Distance > ObjectSurfaceRaycastUtility.MinimumHitDistance
+            raycastHit.Distance > ObjectRaycastMath.MinimumHitDistance
                 ? raycastHit.Distance
                 : Vector3.Distance(origin, raycastHit.Point),
             ObjectSurfaceHitSource.Native);
@@ -162,7 +162,7 @@ internal sealed unsafe class NativePlacementCollisionQuery
         Collider* collider)
         => new(
             hitPoint,
-            ObjectSurfaceRaycastUtility.OrientSurfaceNormal(hitNormal, direction),
+            ObjectRaycastMath.OrientSurfaceNormal(hitNormal, direction),
             material,
             (nint)collider,
             Vector3.Distance(origin, hitPoint),

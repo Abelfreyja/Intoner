@@ -1,6 +1,5 @@
 using Intoner.Objects.Catalog;
 using Intoner.Objects.Models;
-using Intoner.Objects.Utils;
 using System.Numerics;
 
 namespace Intoner.Objects.Runtime;
@@ -18,16 +17,16 @@ internal static class PlacementSurfacePolicy
         ObjectSurfaceHit hit,
         out string errorMessage)
     {
-        if (hit.Material == 0)
-        {
-            errorMessage = "Housing mode requires a collision material hit.";
-            return false;
-        }
-
         if (AllowsSurface(metadata, hit))
         {
             errorMessage = string.Empty;
             return true;
+        }
+
+        if (hit.Material == 0)
+        {
+            errorMessage = "Housing mode requires a collision material hit.";
+            return false;
         }
 
         errorMessage = metadata.Surface switch
@@ -40,14 +39,16 @@ internal static class PlacementSurfacePolicy
     }
 
     public static bool AllowsSurface(HousingFurnitureMetadata metadata, ObjectSurfaceHit hit)
-        => hit.HasMaterial(ResolveAllowedMaterialMask(metadata));
+        => metadata.Surface == HousingPlacementSurface.Floor
+            ? AllowsFloorSurface(hit)
+            : hit.HasMaterial(ResolveAllowedMaterialMask(metadata));
 
     public static ulong ResolveAllowedMaterialMask(HousingFurnitureMetadata metadata)
         => metadata.Surface switch
         {
             HousingPlacementSurface.Wall     => WallMaterial,
             HousingPlacementSurface.Tabletop => FloorMaterial | TabletopMaterial,
-            _                                => FloorMaterial,
+            _                                => FloorMaterial | TabletopMaterial,
         };
 
     public static bool SupportsObjectSurface(
@@ -74,7 +75,18 @@ internal static class PlacementSurfacePolicy
             : 0;
     }
 
+    private static bool AllowsFloorSurface(ObjectSurfaceHit hit)
+    {
+        if (hit.HasMaterial(FloorMaterial))
+        {
+            return true;
+        }
+
+        return hit.Source == ObjectSurfaceHitSource.Native
+            && hit.Normal.Y >= TabletopNormalThreshold;
+    }
+
     private static bool HasSurfaceSupport(ObjectPlacementSurfaceSupport support, ObjectPlacementSurfaceSupport required)
-        => (support & required) != 0;
+        => (support & required) != ObjectPlacementSurfaceSupport.None;
 }
 

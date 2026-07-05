@@ -22,6 +22,7 @@ internal sealed record FurnitureModel : ObjectData
     public uint HousingRowId { get; init; }
     public uint ItemRowId { get; init; }
     public Guid? AttachmentParentId { get; init; }
+    public FurnitureMaterialItemModel? MaterialItem { get; init; }
 
     public bool NeedsVisualState(FurnitureModel? previousModel)
     {

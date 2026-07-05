@@ -515,10 +515,10 @@ internal sealed class ObjectScene : IObjectScene
         var snapshot = sceneObject.Snapshot;
         var hasWorldBounds = sceneObject.TryGetBounds(out var worldBounds);
         var hasLocalBounds = sceneObject.TryGetOrientedBounds(out var localBounds);
-        var hasPlacementClearanceRadius = sceneObject.TryGetPlacementClearanceRadius(out float placementClearanceRadius);
+        var hasPlacementClearance = sceneObject.TryGetPlacementClearance(out ObjectPlacementClearance placementClearance);
         var overlayShape = CreateOverlayShape(snapshot);
 
-        if (!hasWorldBounds && !hasLocalBounds && !hasPlacementClearanceRadius && overlayShape is null)
+        if (!hasWorldBounds && !hasLocalBounds && !hasPlacementClearance && overlayShape is null)
         {
             boundsSnapshot = default!;
             return false;
@@ -542,10 +542,11 @@ internal sealed class ObjectScene : IObjectScene
             snapshot.Id,
             snapshot.Name,
             snapshot.Kind,
+            sceneObject.Address,
             min,
             max,
             hasLocalBounds ? localBounds : null,
-            hasPlacementClearanceRadius ? placementClearanceRadius : null,
+            hasPlacementClearance ? placementClearance : null,
             sceneObject.PlacementSurfaceSupport,
             overlayShape);
         return true;

@@ -4,7 +4,6 @@ using Intoner.Objects.Models;
 namespace Intoner.Objects.Runtime;
 
 internal sealed class AttachedSurfaceRule(
-    SurfaceAttachmentService surfaceAttachmentService,
     PlacementEvaluationFactory evaluationFactory) : IPlacementRule
 {
     public bool TryEvaluate(
@@ -15,13 +14,13 @@ internal sealed class AttachedSurfaceRule(
     {
         evaluation = default!;
         if (!context.TryGetMetadata(snapshot.Id, out HousingFurnitureMetadata metadata)
-            || metadata.Surface is not (HousingPlacementSurface.Tabletop or HousingPlacementSurface.Wall)
+            || metadata.Surface != HousingPlacementSurface.Tabletop
             || snapshot.Model is not FurnitureModel { AttachmentParentId: not null })
         {
             return false;
         }
 
-        if (!surfaceAttachmentService.TryResolveAttachedParent(
+        if (!SurfaceAttachmentService.TryResolveAttachedParent(
                 snapshot,
                 context.SnapshotsById,
                 context.BoundsById,
@@ -38,9 +37,7 @@ internal sealed class AttachedSurfaceRule(
             return true;
         }
 
-        if (!surfaceAttachmentService.TryValidateAttachedPlacement(
-                metadata.Surface,
-                snapshot,
+        if (!SurfaceAttachmentService.TryValidateAttachedTabletopPlacement(
                 childBounds,
                 parentBounds,
                 out issueCode,

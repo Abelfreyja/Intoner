@@ -1,20 +1,86 @@
+using Intoner.Objects.Models;
+using Intoner.Objects.Utils;
 using System.Numerics;
 using OrientedBounds = FFXIVClientStructs.FFXIV.Common.Math.OrientedBounds;
 
-namespace Intoner.Objects.Utils;
+namespace Intoner.Objects.Runtime;
 
-internal static class ObjectBoundsRaycastUtility
+internal static class ObjectBoundsRaycaster
 {
-    public static bool TryRaycastOrientedBounds(
+    public static bool TryRaycastNearest(
+        IEnumerable<ObjectBoundsSnapshot> boundsSnapshots,
+        Func<Guid, bool> shouldSkipObject,
+        Vector3 rayOrigin,
+        Vector3 rayDirection,
+        out ObjectSurfaceHit hit,
+        float maxDistance)
+        => TryRaycastNearest(
+            boundsSnapshots,
+            shouldSkipObject,
+            static (_, _) => true,
+            rayOrigin,
+            rayDirection,
+            out hit,
+            maxDistance);
+
+    public static bool TryRaycastNearest(
+        IEnumerable<ObjectBoundsSnapshot> boundsSnapshots,
+        Func<Guid, bool> shouldSkipObject,
+        Func<ObjectBoundsSnapshot, ObjectSurfaceHit, bool> acceptsHit,
+        Vector3 rayOrigin,
+        Vector3 rayDirection,
+        out ObjectSurfaceHit hit,
+        float maxDistance)
+    {
+        hit = ObjectSurfaceHit.Empty;
+        if (!ObjectMathUtility.TryNormalize(rayDirection, out Vector3 normalizedDirection))
+        {
+            return false;
+        }
+
+        float closestDistance = ObjectRaycastMath.ResolveMaxDistance(maxDistance);
+        bool hasHit = false;
+        foreach (ObjectBoundsSnapshot boundsSnapshot in boundsSnapshots)
+        {
+            if (shouldSkipObject(boundsSnapshot.Id)
+                || !TryRaycastBounds(rayOrigin, normalizedDirection, boundsSnapshot, out ObjectSurfaceHit candidate, closestDistance)
+                || !acceptsHit(boundsSnapshot, candidate))
+            {
+                continue;
+            }
+
+            closestDistance = candidate.Distance;
+            hit = candidate with
+            {
+                Source = ObjectSurfaceHitSource.ObjectBounds,
+                TargetObjectId = boundsSnapshot.Id,
+            };
+            hasHit = true;
+        }
+
+        return hasHit;
+    }
+
+    public static bool TryRaycastBounds(
+        Vector3 rayOrigin,
+        Vector3 rayDirection,
+        ObjectBoundsSnapshot boundsSnapshot,
+        out ObjectSurfaceHit hit,
+        float maxDistance)
+        => boundsSnapshot.LocalBounds is { } localBounds
+            ? TryRaycastOrientedBounds(rayOrigin, rayDirection, localBounds, out hit, maxDistance)
+            : TryRaycastAxisAlignedBounds(rayOrigin, rayDirection, boundsSnapshot.Min, boundsSnapshot.Max, out hit, maxDistance);
+
+    private static bool TryRaycastOrientedBounds(
         Vector3 rayOrigin,
         Vector3 rayDirection,
         OrientedBounds bounds,
         out ObjectSurfaceHit hit,
         float maxDistance)
     {
-        hit = new ObjectSurfaceHit(Vector3.Zero, Vector3.Zero);
-        if (!ObjectMathUtility.TryNormalize(rayDirection, out var normalizedDirection)
-            || !Matrix4x4.Invert(bounds.Transform, out var inverseTransform))
+        hit = ObjectSurfaceHit.Empty;
+        if (!ObjectMathUtility.TryNormalize(rayDirection, out Vector3 normalizedDirection)
+            || !Matrix4x4.Invert(bounds.Transform, out Matrix4x4 inverseTransform))
         {
             return false;
         }
@@ -41,13 +107,13 @@ internal static class ObjectBoundsRaycastUtility
         Vector3 localPoint = localOrigin + (localDirection * localDistance);
         Vector3 worldPoint = Vector3.Transform(localPoint, bounds.Transform);
         float worldDistance = Vector3.Dot(worldPoint - rayOrigin, normalizedDirection);
-        if (worldDistance <= ObjectSurfaceRaycastUtility.MinimumHitDistance || worldDistance >= maxDistance)
+        if (worldDistance <= ObjectRaycastMath.MinimumHitDistance || worldDistance >= maxDistance)
         {
             return false;
         }
 
         Vector3 worldNormal = Vector3.TransformNormal(localNormal, bounds.Transform);
-        Vector3 orientedNormal = ObjectSurfaceRaycastUtility.OrientSurfaceNormal(worldNormal, normalizedDirection);
+        Vector3 orientedNormal = ObjectRaycastMath.OrientSurfaceNormal(worldNormal, normalizedDirection);
         if (!ObjectMathUtility.HasLength(orientedNormal))
         {
             return false;
@@ -57,7 +123,7 @@ internal static class ObjectBoundsRaycastUtility
         return true;
     }
 
-    public static bool TryRaycastAxisAlignedBounds(
+    private static bool TryRaycastAxisAlignedBounds(
         Vector3 rayOrigin,
         Vector3 rayDirection,
         Vector3 min,
@@ -65,16 +131,16 @@ internal static class ObjectBoundsRaycastUtility
         out ObjectSurfaceHit hit,
         float maxDistance)
     {
-        hit = new ObjectSurfaceHit(Vector3.Zero, Vector3.Zero);
-        if (!ObjectMathUtility.TryNormalize(rayDirection, out var normalizedDirection)
+        hit = ObjectSurfaceHit.Empty;
+        if (!ObjectMathUtility.TryNormalize(rayDirection, out Vector3 normalizedDirection)
             || !TryRaycastBox(rayOrigin, normalizedDirection, min, max, out float distance, out Vector3 normal)
-            || distance <= ObjectSurfaceRaycastUtility.MinimumHitDistance
+            || distance <= ObjectRaycastMath.MinimumHitDistance
             || distance >= maxDistance)
         {
             return false;
         }
 
-        Vector3 orientedNormal = ObjectSurfaceRaycastUtility.OrientSurfaceNormal(normal, normalizedDirection);
+        Vector3 orientedNormal = ObjectRaycastMath.OrientSurfaceNormal(normal, normalizedDirection);
         if (!ObjectMathUtility.HasLength(orientedNormal))
         {
             return false;
@@ -94,7 +160,7 @@ internal static class ObjectBoundsRaycastUtility
     {
         distance = 0f;
         normal = Vector3.Zero;
-        var exitDistance = float.PositiveInfinity;
+        float exitDistance = float.PositiveInfinity;
 
         return ClipSlab(rayOrigin.X, rayDirection.X, min.X, max.X, -Vector3.UnitX, Vector3.UnitX, ref distance, ref exitDistance, ref normal)
             && ClipSlab(rayOrigin.Y, rayDirection.Y, min.Y, max.Y, -Vector3.UnitY, Vector3.UnitY, ref distance, ref exitDistance, ref normal)
@@ -134,7 +200,6 @@ internal static class ObjectBoundsRaycastUtility
         }
 
         exitDistance = MathF.Min(exitDistance, farDistance);
-        return enterDistance <= exitDistance && exitDistance > ObjectSurfaceRaycastUtility.MinimumHitDistance;
+        return enterDistance <= exitDistance && exitDistance > ObjectRaycastMath.MinimumHitDistance;
     }
 }
-
