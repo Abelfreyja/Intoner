@@ -24,6 +24,12 @@ internal static class GameDataAssetPathUtility
         return false;
     }
 
+    public static string BuildIndoorHousingSharedGroupPath(ushort modelKey)
+        => $"bgcommon/hou/indoor/general/{modelKey:D4}/asset/fun_b0_m{modelKey:D4}.sgb";
+
+    public static string BuildOutdoorHousingSharedGroupPath(ushort modelKey)
+        => $"bgcommon/hou/outdoor/general/{modelKey:D4}/asset/gar_b0_m{modelKey:D4}.sgb";
+
     public static string BuildTerritoryLayoutPath(string bgToken)
     {
         string normalizedToken = ObjectPathRules.NormalizeGamePath(bgToken);

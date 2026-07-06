@@ -1,50 +1,11 @@
 using Intoner.Objects.Resources;
 using Intoner.Objects.Utils;
-using Intoner.Objects.Assets;
-using Common = Lumina.Data.Parsing.Common;
 using Lumina.Data.Files;
 using Lumina.Data.Parsing.Layer;
 using System.Numerics;
+using Common = Lumina.Data.Parsing.Common;
 
 namespace Intoner.Objects.Assets;
-
-internal sealed record PreviewModelInfo(string ModelPath, Matrix4x4 Transform);
-
-internal sealed class SharedGroupAssetInfo(
-    IReadOnlyList<PreviewModelInfo> previewModels,
-    IReadOnlyList<string> bgObjectModelPaths,
-    IReadOnlyList<string> nestedSharedGroupPaths,
-    IReadOnlyList<string> standaloneVfxPaths,
-    IReadOnlyList<string>? referencedVfxPaths = null)
-{
-    public IReadOnlyList<PreviewModelInfo> PreviewModels { get; } = previewModels;
-    public IReadOnlyList<string> PreviewModelPaths { get; } = previewModels
-        .Select(static model => model.ModelPath)
-        .Distinct(StringComparer.OrdinalIgnoreCase)
-        .ToArray();
-    public IReadOnlyList<string> BgObjectModelPaths { get; } = bgObjectModelPaths;
-    public IReadOnlyList<string> NestedSharedGroupPaths { get; } = nestedSharedGroupPaths;
-    public IReadOnlyList<string> StandaloneVfxPaths { get; } = standaloneVfxPaths;
-    public IReadOnlyList<string> ReferencedVfxPaths { get; } = referencedVfxPaths ?? standaloneVfxPaths;
-    public IReadOnlyList<string> CollectionDependencyPaths { get; } = ObjectPathCollectionUtility.MergeGamePaths(
-        previewModels.Select(static model => model.ModelPath),
-        nestedSharedGroupPaths,
-        referencedVfxPaths ?? standaloneVfxPaths);
-}
-
-internal sealed class SharedGroupDependencyInfo(
-    IReadOnlyList<string> modelPaths,
-    IReadOnlyList<string> nestedSharedGroupPaths,
-    IReadOnlyList<string> referencedVfxPaths)
-{
-    public IReadOnlyList<string> ModelPaths { get; } = modelPaths;
-    public IReadOnlyList<string> NestedSharedGroupPaths { get; } = nestedSharedGroupPaths;
-    public IReadOnlyList<string> ReferencedVfxPaths { get; } = referencedVfxPaths;
-    public IReadOnlyList<string> DependencyPaths { get; } = ObjectPathCollectionUtility.MergeGamePaths(
-        modelPaths,
-        nestedSharedGroupPaths,
-        referencedVfxPaths);
-}
 
 internal static class SharedGroupAssetResolver
 {
@@ -53,7 +14,7 @@ internal static class SharedGroupAssetResolver
         var normalizedPath = ObjectPathRules.NormalizeGamePath(sharedGroupPath);
         if (!ObjectPathRules.IsCatalogSharedGroupPath(normalizedPath) || !gameData.FileExists(normalizedPath))
         {
-            return new SharedGroupAssetInfo([], [], [], []);
+            return new SharedGroupAssetInfo([], [], [], [], []);
         }
 
         return new SharedGroupAssetCollector(gameData, SharedGroupCollectionPolicy.Catalog).CollectGame(normalizedPath);
@@ -162,7 +123,7 @@ internal static class SharedGroupAssetResolver
                     CollectBgObject(bgInstance, worldTransform);
                     break;
                 case LayerCommon.VFXInstanceObject vfxInstance:
-                    CollectStandaloneVfx(vfxInstance);
+                    CollectVfx(vfxInstance);
                     break;
                 case LayerCommon.SharedGroupInstanceObject sharedGroupInstance:
                     CollectNestedSharedGroup(sharedGroupInstance, worldTransform);
@@ -203,7 +164,7 @@ internal static class SharedGroupAssetResolver
             }
         }
 
-        private void CollectStandaloneVfx(LayerCommon.VFXInstanceObject vfxInstance)
+        private void CollectVfx(LayerCommon.VFXInstanceObject vfxInstance)
         {
             var vfxPath = ObjectPathRules.NormalizeGamePath(vfxInstance.AssetPath);
             if (!CanUseVfxPath(vfxPath))
@@ -285,6 +246,30 @@ internal static class SharedGroupAssetResolver
                 return null;
             }
         }
+
+        private static Matrix4x4 BuildPreviewTransform(Common.Transformation transform)
+        {
+            var translation = ToNumericsVector3(transform.Translation);
+            var rotation = ToNumericsVector3(transform.Rotation);
+            var scale = ToNumericsVector3(transform.Scale);
+
+            scale = new Vector3(
+                NormalizeScaleComponent(scale.X),
+                NormalizeScaleComponent(scale.Y),
+                NormalizeScaleComponent(scale.Z));
+
+            return Matrix4x4.CreateScale(scale)
+                 * Matrix4x4.CreateFromQuaternion(ObjectTransformMath.CreateRotationQuaternion(rotation))
+                 * Matrix4x4.CreateTranslation(translation);
+        }
+
+        private static Vector3 ToNumericsVector3(Common.Vector3 vector)
+            => new(vector.X, vector.Y, vector.Z);
+
+        private static float NormalizeScaleComponent(float value)
+            => !float.IsFinite(value) || ObjectMathUtility.IsNearlyZero(value, 0.0001f)
+                ? 1f
+                : value;
     }
 
     private readonly record struct SharedGroupCollectionPolicy(
@@ -300,31 +285,7 @@ internal static class SharedGroupAssetResolver
         public static SharedGroupCollectionPolicy CollectionDependencies { get; } = new(
             RequireExistingGamePaths: false,
             CollectPreviewModels: false,
-            RecurseNestedSharedGroups: false);
+            RecurseNestedSharedGroups: true);
     }
-
-    private static Matrix4x4 BuildPreviewTransform(Common.Transformation transform)
-    {
-        var translation = ToNumericsVector3(transform.Translation);
-        var rotation = ToNumericsVector3(transform.Rotation);
-        var scale = ToNumericsVector3(transform.Scale);
-
-        scale = new Vector3(
-            NormalizeScaleComponent(scale.X),
-            NormalizeScaleComponent(scale.Y),
-            NormalizeScaleComponent(scale.Z));
-
-        return Matrix4x4.CreateScale(scale)
-             * Matrix4x4.CreateFromQuaternion(ObjectTransformMath.CreateRotationQuaternion(rotation))
-             * Matrix4x4.CreateTranslation(translation);
-    }
-
-    private static Vector3 ToNumericsVector3(Common.Vector3 vector)
-        => new(vector.X, vector.Y, vector.Z);
-
-    private static float NormalizeScaleComponent(float value)
-        => !float.IsFinite(value) || ObjectMathUtility.IsNearlyZero(value, 0.0001f)
-            ? 1f
-            : value;
 }
 

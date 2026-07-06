@@ -249,7 +249,17 @@ internal static class TerritoryLayoutAssetResolver
                 _referencedSharedGroupPaths.Add(nestedSharedGroupPath);
             }
 
-            IReadOnlyList<string> searchTerms = ObjectSearchTermUtility.BuildStableTerms("layout autoplay", sharedGroupPath);
+            IReadOnlyList<string> searchTerms = ObjectSearchTermUtility.BuildStableTerms("shared group autoplay", sharedGroupPath);
+            foreach (string vfxPath in sharedGroupAssets.ReferencedVfxPaths)
+            {
+                _ = TryMergeResolvedVfxPath(
+                    vfxPath,
+                    RuntimeVfxEvidence.LayoutInstance,
+                    AssetPathSource.SharedGroup,
+                    AssetPathContract.ParsedFileReference,
+                    ObjectSearchTermUtility.BuildStableTerms("shared group vfx", "shared group", sharedGroupPath));
+            }
+
             foreach (string vfxPath in sharedGroupAssets.StandaloneVfxPaths)
             {
                 _ = TryMergeResolvedVfxPath(

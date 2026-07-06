@@ -278,6 +278,22 @@ internal sealed class ObjectAssetStateIngestor(
         }
 
         bool runtimeObserved = string.Equals(source, ObjectAssetCaptureSources.ObservedSharedGroup, StringComparison.OrdinalIgnoreCase);
+        bool addedReferencedVfx = false;
+        foreach (string vfxPath in sharedGroupAssets.ReferencedVfxPaths)
+        {
+            addedReferencedVfx |= AddKnowledgePath(
+                state,
+                vfxPath,
+                AssetPathSource.SharedGroup,
+                AssetPathContract.ParsedFileReference,
+                ["shared group vfx", "shared group"]);
+        }
+
+        if (addedReferencedVfx)
+        {
+            result = Combine(result, ObservationApplyResult.MetadataChanged);
+        }
+
         foreach (string vfxPath in sharedGroupAssets.StandaloneVfxPaths)
         {
             result = Combine(
@@ -287,7 +303,7 @@ internal sealed class ObjectAssetStateIngestor(
                     vfxPath,
                     AssetPathSource.SharedGroup,
                     AssetPathContract.ParsedFileReference,
-                    ["layout autoplay", "shared group"],
+                    ["shared group autoplay", "shared group"],
                     RuntimeVfxEvidence.LayoutAutoplay,
                     runtimeObserved));
         }

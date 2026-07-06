@@ -36,6 +36,8 @@ internal sealed class GameDataLayoutAssetResolver
                 _gameData.GetExcelSheet<ExportedSG>(),
                 _gameData.GetExcelSheet<HousingExterior>(),
                 _gameData.GetExcelSheet<HousingInterior>(),
+                _gameData.GetExcelSheet<HousingFurniture>(),
+                _gameData.GetExcelSheet<HousingYardObject>(),
                 territorySheet,
                 placeNameSheet,
                 cancellationToken);
@@ -58,6 +60,8 @@ internal sealed class GameDataLayoutAssetResolver
         private const string ExportedSharedGroupSource = "exported shared group";
         private const string HousingExteriorSource = "housing exterior";
         private const string HousingInteriorSource = "housing interior";
+        private const string HousingFurnitureSource = "housing furniture";
+        private const string HousingYardObjectSource = "housing yard object";
         private const string TerritoryZoneSharedGroupSource = "territory zone shared group";
         private const string TerritoryLayoutSource = "territory layout";
 
@@ -71,6 +75,8 @@ internal sealed class GameDataLayoutAssetResolver
             IEnumerable<ExportedSG>? exportedSharedGroups,
             IEnumerable<HousingExterior>? housingExteriors,
             IEnumerable<HousingInterior>? housingInteriors,
+            IEnumerable<HousingFurniture>? housingFurniture,
+            IEnumerable<HousingYardObject>? housingYardObjects,
             IEnumerable<TerritoryType>? territories,
             ExcelSheet<PlaceName>? placeNames,
             CancellationToken cancellationToken)
@@ -88,6 +94,8 @@ internal sealed class GameDataLayoutAssetResolver
                 static row => ObjectPathRules.NormalizeGamePath(row.Model.ExtractText()),
                 cancellationToken);
             CollectHousingInteriorAssets(housingInteriors, cancellationToken);
+            CollectHousingFurnitureAssets(housingFurniture, cancellationToken);
+            CollectHousingYardObjectAssets(housingYardObjects, cancellationToken);
             CollectTerritoryZoneSharedGroupAssets(territories, placeNames, cancellationToken);
             CollectTerritoryLayoutAssets(territories, placeNames, cancellationToken);
 
@@ -166,6 +174,56 @@ internal sealed class GameDataLayoutAssetResolver
                     row.RowId,
                     HousingInteriorSource,
                     sourcePath,
+                    ObjectTerritoryMetadata.Empty);
+            }
+        }
+
+        private void CollectHousingFurnitureAssets(
+            IEnumerable<HousingFurniture>? rows,
+            CancellationToken cancellationToken)
+        {
+            if (rows is null)
+            {
+                return;
+            }
+
+            foreach (HousingFurniture row in rows)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (row.RowId == 0 || row.ModelKey == 0)
+                {
+                    continue;
+                }
+
+                TryCollectSharedGroupAssets(
+                    row.RowId,
+                    HousingFurnitureSource,
+                    GameDataAssetPathUtility.BuildIndoorHousingSharedGroupPath(row.ModelKey),
+                    ObjectTerritoryMetadata.Empty);
+            }
+        }
+
+        private void CollectHousingYardObjectAssets(
+            IEnumerable<HousingYardObject>? rows,
+            CancellationToken cancellationToken)
+        {
+            if (rows is null)
+            {
+                return;
+            }
+
+            foreach (HousingYardObject row in rows)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (row.RowId == 0 || row.ModelKey == 0)
+                {
+                    continue;
+                }
+
+                TryCollectSharedGroupAssets(
+                    row.RowId,
+                    HousingYardObjectSource,
+                    GameDataAssetPathUtility.BuildOutdoorHousingSharedGroupPath(row.ModelKey),
                     ObjectTerritoryMetadata.Empty);
             }
         }
@@ -297,6 +355,20 @@ internal sealed class GameDataLayoutAssetResolver
                 sharedGroupPath,
                 territoryMetadata.SearchTerms,
                 sharedGroupAssets.NestedSharedGroupPaths);
+            foreach (string vfxPath in sharedGroupAssets.ReferencedVfxPaths)
+            {
+                _ = VfxResolvedPathUtility.TryMergeResolvedPath(
+                    _resolvedVfxPaths,
+                    _gameData,
+                    vfxPath,
+                    sqpackIndexSnapshot: null,
+                    KnownVfxFamily.None,
+                    RuntimeVfxEvidence.LayoutInstance,
+                    AssetPathSource.SharedGroup,
+                    AssetPathContract.ParsedFileReference,
+                    ObjectSearchTermUtility.MergeTerms(vfxSearchTerms, ["shared group vfx", "shared group"]));
+            }
+
             foreach (string vfxPath in sharedGroupAssets.StandaloneVfxPaths)
             {
                 _ = VfxResolvedPathUtility.TryMergeResolvedPath(
@@ -308,7 +380,7 @@ internal sealed class GameDataLayoutAssetResolver
                     RuntimeVfxEvidence.LayoutAutoplay,
                     AssetPathSource.SharedGroup,
                     AssetPathContract.ParsedFileReference,
-                    vfxSearchTerms);
+                    ObjectSearchTermUtility.MergeTerms(vfxSearchTerms, ["shared group autoplay", "shared group"]));
             }
         }
 

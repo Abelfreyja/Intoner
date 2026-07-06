@@ -10,7 +10,7 @@ internal sealed class ObjectCatalogBuilder
 {
     private readonly record struct CatalogCandidate(ObjectCatalogEntry Entry, int Priority);
 
-    private static readonly SharedGroupAssetInfo EmptySharedGroupAssets = new([], [], [], []);
+    private static readonly SharedGroupAssetInfo EmptySharedGroupAssets = new([], [], [], [], []);
     private static readonly IComparer<ObjectCatalogEntry> NameSourcePathComparer = Comparer<ObjectCatalogEntry>.Create(static (left, right) =>
     {
         var nameComparison = StringComparer.OrdinalIgnoreCase.Compare(left.Name, right.Name);
@@ -111,7 +111,13 @@ internal sealed class ObjectCatalogBuilder
                 continue;
             }
 
-            AddFurnitureEntry(entries, "housing furniture", 0, row, BuildIndoorHousingSharedGroupPath(row.ModelKey), pileFootprints);
+            AddFurnitureEntry(
+                entries,
+                "housing furniture",
+                0,
+                row,
+                GameDataAssetPathUtility.BuildIndoorHousingSharedGroupPath(row.ModelKey),
+                pileFootprints);
         }
 
         foreach (HousingYardObject row in housingYardObjects)
@@ -122,7 +128,12 @@ internal sealed class ObjectCatalogBuilder
                 continue;
             }
 
-            AddFurnitureEntry(entries, "housing yard object", 1, row, BuildOutdoorHousingSharedGroupPath(row.ModelKey));
+            AddFurnitureEntry(
+                entries,
+                "housing yard object",
+                1,
+                row,
+                GameDataAssetPathUtility.BuildOutdoorHousingSharedGroupPath(row.ModelKey));
         }
 
         return MaterializeEntries(entries, NameSourcePathComparer);
@@ -369,6 +380,41 @@ internal sealed class ObjectCatalogBuilder
                 null),
             GetHousingPlacementLabel(row.Placement.ValueNullable));
 
+    private static ObjectCatalogFurnitureInfo BuildFurnitureInfo(
+        Item? item,
+        uint housingRowId,
+        string name,
+        ushort modelKey,
+        bool destroyOnRemoval,
+        HousingFurnitureMetadata housingMetadata,
+        string? placement)
+    {
+        uint itemRowId = 0;
+        uint iconId = 0;
+        byte dyeCount = 0;
+        string? category = null;
+        if (item is { } resolvedItem)
+        {
+            itemRowId = resolvedItem.RowId;
+            iconId = resolvedItem.Icon;
+            dyeCount = resolvedItem.DyeCount;
+            category = GetItemCategoryLabel(resolvedItem);
+        }
+
+        ObjectCatalogFurnitureVariant variant = new(
+            housingRowId,
+            itemRowId,
+            name,
+            iconId,
+            dyeCount,
+            housingMetadata,
+            category ?? string.Empty,
+            placement ?? string.Empty,
+            destroyOnRemoval);
+
+        return new ObjectCatalogFurnitureInfo(modelKey, variant);
+    }
+
     private static Dictionary<uint, HousingPileFootprint> BuildPileFootprints(IEnumerable<HousingPileLimit> rows)
     {
         Dictionary<uint, HousingPileFootprint> pileFootprints = [];
@@ -418,41 +464,6 @@ internal sealed class ObjectCatalogBuilder
             ? footprint
             : null;
 
-    private static ObjectCatalogFurnitureInfo BuildFurnitureInfo(
-        Item? item,
-        uint housingRowId,
-        string name,
-        ushort modelKey,
-        bool destroyOnRemoval,
-        HousingFurnitureMetadata housingMetadata,
-        string? placement)
-    {
-        uint itemRowId = 0;
-        uint iconId = 0;
-        byte dyeCount = 0;
-        string? category = null;
-        if (item is { } resolvedItem)
-        {
-            itemRowId = resolvedItem.RowId;
-            iconId = resolvedItem.Icon;
-            dyeCount = resolvedItem.DyeCount;
-            category = GetItemCategoryLabel(resolvedItem);
-        }
-
-        ObjectCatalogFurnitureVariant variant = new(
-            housingRowId,
-            itemRowId,
-            name,
-            iconId,
-            dyeCount,
-            housingMetadata,
-            category ?? string.Empty,
-            placement ?? string.Empty,
-            destroyOnRemoval);
-
-        return new ObjectCatalogFurnitureInfo(modelKey, variant);
-    }
-
     private static string BuildFurnitureLabel(Item? item, string fallback)
     {
         if (item is { } resolvedItem)
@@ -469,8 +480,9 @@ internal sealed class ObjectCatalogBuilder
 
     private static IReadOnlyList<string> BuildFurnitureSearchTerms(SharedGroupAssetInfo sharedGroupAssets)
         => ObjectSearchTermUtility.BuildStableTerms(
-            sharedGroupAssets.PreviewModelPaths,
-            sharedGroupAssets.NestedSharedGroupPaths);
+            sharedGroupAssets.BgObjectModelPaths,
+            sharedGroupAssets.NestedSharedGroupPaths,
+            sharedGroupAssets.ReferencedVfxPaths);
 
     private static ObjectCatalogEntry[] MaterializeEntries(
         Dictionary<string, CatalogCandidate> candidates,
@@ -537,10 +549,5 @@ internal sealed class ObjectCatalogBuilder
             : label;
     }
 
-    private static string BuildIndoorHousingSharedGroupPath(ushort modelKey)
-        => $"bgcommon/hou/indoor/general/{modelKey:D4}/asset/fun_b0_m{modelKey:D4}.sgb";
-
-    private static string BuildOutdoorHousingSharedGroupPath(ushort modelKey)
-        => $"bgcommon/hou/outdoor/general/{modelKey:D4}/asset/gar_b0_m{modelKey:D4}.sgb";
 }
 
