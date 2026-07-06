@@ -1,4 +1,3 @@
-using Intoner.Objects.Assets;
 using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 
@@ -90,6 +89,13 @@ internal static class ObjectAssetCacheSectionSetExtensions
         Dictionary<ObjectAssetCacheSectionKind, ObjectAssetCacheManifestSection> map = [];
         foreach (ObjectAssetCacheManifestSection section in manifest.Sections)
         {
+            if (string.IsNullOrWhiteSpace(section.Kind))
+            {
+                error = "missing cache section kind";
+                sectionMap = null;
+                return false;
+            }
+
             if (!TryParseSectionKind(section.Kind, out ObjectAssetCacheSectionKind kind))
             {
                 error = $"unknown cache section kind '{section.Kind}'";
@@ -109,6 +115,43 @@ internal static class ObjectAssetCacheSectionSetExtensions
         sectionMap = map;
         return true;
     }
+
+    public static bool MatchesBuildIdentity(
+        this ObjectAssetCacheManifest manifest,
+        string? gameVersion,
+        string? sqpackIndexFingerprint)
+        => !string.IsNullOrWhiteSpace(gameVersion)
+        && !string.IsNullOrWhiteSpace(sqpackIndexFingerprint)
+        && string.Equals(manifest.GameVersion, gameVersion, StringComparison.OrdinalIgnoreCase)
+        && string.Equals(manifest.SqpackIndexFingerprint, sqpackIndexFingerprint, StringComparison.Ordinal);
+
+    public static ObjectAssetCacheSectionSet GetReusableSections(
+        this ObjectAssetCacheManifest manifest,
+        ObjectAssetCacheSectionSet requestedSections)
+    {
+        if (requestedSections == ObjectAssetCacheSectionSet.None
+         || !manifest.TryBuildSectionMap(out IReadOnlyDictionary<ObjectAssetCacheSectionKind, ObjectAssetCacheManifestSection>? sectionMap, out _))
+        {
+            return ObjectAssetCacheSectionSet.None;
+        }
+
+        ObjectAssetCacheSectionSet reusableSections = ObjectAssetCacheSectionSet.None;
+        foreach (ObjectAssetCacheSectionDescriptor descriptor in requestedSections.EnumerateDescriptors())
+        {
+            if (!sectionMap.TryGetValue(descriptor.Kind, out ObjectAssetCacheManifestSection? section)
+             || !section.HasReusablePayload())
+            {
+                continue;
+            }
+
+            reusableSections |= descriptor.SectionSet;
+        }
+
+        return reusableSections;
+    }
+
+    private static bool HasReusablePayload(this ObjectAssetCacheManifestSection section)
+        => section.Length > 0 && !string.IsNullOrWhiteSpace(section.Hash);
 }
 
 internal readonly record struct ObjectAssetCacheSectionDescriptor(

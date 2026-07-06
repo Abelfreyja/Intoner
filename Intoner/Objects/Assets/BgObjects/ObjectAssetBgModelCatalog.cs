@@ -1,21 +1,26 @@
 using Intoner.Objects.Utils;
+using static Intoner.Objects.Assets.ObjectAssetStateChange;
 
 namespace Intoner.Objects.Assets;
 
-internal sealed partial class ObjectAssetIndex
+internal static class ObjectAssetBgModelCatalog
 {
-    private static ObservedBgAsset[] BuildObservedBgSnapshot(CatalogAssetState state)
-        => BgAssetProjection.BuildObservedSnapshot(
-            state.BgModels.Values,
-            state.KnowledgeBase,
-            ObservedBgAssetComparer);
+    public static ObservationApplyResult ObservePath(
+        CatalogAssetState state,
+        string path,
+        AssetPathSource source,
+        AssetPathContract contract,
+        IReadOnlyList<string> searchTerms,
+        string catalogSource,
+        in ObjectTerritoryMetadata territoryMetadata)
+    {
+        _ = AddKnowledgePath(state, path, source, contract, searchTerms);
+        return TryAddBgModel(state, path, catalogSource, territoryMetadata)
+            ? ObservationApplyResult.ProjectionChanged
+            : ObservationApplyResult.None;
+    }
 
-    private static GameDataBgObjectAsset[] BuildGameDataBgSnapshot(CatalogAssetState state)
-        => BgAssetProjection.BuildGameDataSnapshot(
-            state.GameDataBgObjects.Values,
-            GameDataBgObjectAssetComparer);
-
-    private static bool TryAddBgModel(
+    public static bool TryAddBgModel(
         CatalogAssetState state,
         string path,
         string source,
@@ -53,7 +58,7 @@ internal sealed partial class ObjectAssetIndex
         return true;
     }
 
-    private static bool RemoveGameDataBgDuplicates(CatalogAssetState state)
+    public static bool RemoveGameDataDuplicates(CatalogAssetState state)
     {
         if (state.GameDataBgObjects.Count == 0 || state.BgModels.Count == 0)
         {
@@ -73,7 +78,4 @@ internal sealed partial class ObjectAssetIndex
 
         return removedAny;
     }
-
-    private ObjectTerritoryMetadata GetCurrentTerritoryMetadata()
-        => ObjectTerritoryMetadataUtility.BuildForTerritoryId(_clientState.TerritoryType, _dataManager);
 }

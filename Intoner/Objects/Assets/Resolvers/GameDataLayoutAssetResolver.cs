@@ -5,42 +5,55 @@ using Microsoft.Extensions.Logging;
 
 namespace Intoner.Objects.Assets;
 
-internal sealed record GameDataBgObjectAsset(
-    string ModelPath,
-    string Source,
-    uint RowId,
-    string SourcePath,
-    IReadOnlyList<uint> TerritoryIds,
-    IReadOnlyList<string> TerritoryNames,
-    IReadOnlyList<string> SearchTerms);
-
-internal sealed class GameDataBgObjectResolver
+internal sealed class GameDataLayoutAssetResolver
 {
-    private readonly ILogger<GameDataBgObjectResolver> _logger;
+    private readonly ILogger<GameDataLayoutAssetResolver> _logger;
     private readonly IObjectAssetGameData _gameData;
+    private readonly Lock _loadLock = new();
 
-    public GameDataBgObjectResolver(ILogger<GameDataBgObjectResolver> logger, IObjectAssetGameData gameData)
+    private Snapshot? _snapshot;
+
+    public GameDataLayoutAssetResolver(ILogger<GameDataLayoutAssetResolver> logger, IObjectAssetGameData gameData)
     {
-        _logger = logger;
+        _logger   = logger;
         _gameData = gameData;
     }
 
-    public IReadOnlyList<GameDataBgObjectAsset> Resolve()
+    public Snapshot Resolve(CancellationToken cancellationToken = default)
     {
-        ExcelSheet<TerritoryType>? territorySheet = _gameData.GetCurrentLanguageExcelSheet<TerritoryType>();
-        ExcelSheet<PlaceName>? placeNameSheet = _gameData.GetCurrentLanguageExcelSheet<PlaceName>();
-        IReadOnlyList<GameDataBgObjectAsset> snapshot = new GameDataBgObjectCollector(_gameData).Collect(
-            _gameData.GetExcelSheet<ExportedSG>(),
-            _gameData.GetExcelSheet<HousingExterior>(),
-            _gameData.GetExcelSheet<HousingInterior>(),
-            territorySheet,
-            placeNameSheet);
+        lock (_loadLock)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (_snapshot is not null)
+            {
+                return _snapshot;
+            }
 
-        _logger.LogInformation("resolved {BgObjectCount} bgobject models from game data sources", snapshot.Count);
-        return snapshot;
+            ExcelSheet<TerritoryType>? territorySheet = _gameData.GetCurrentLanguageExcelSheet<TerritoryType>();
+            ExcelSheet<PlaceName>? placeNameSheet = _gameData.GetCurrentLanguageExcelSheet<PlaceName>();
+
+            _snapshot = new Collector(_gameData).Collect(
+                _gameData.GetExcelSheet<ExportedSG>(),
+                _gameData.GetExcelSheet<HousingExterior>(),
+                _gameData.GetExcelSheet<HousingInterior>(),
+                territorySheet,
+                placeNameSheet,
+                cancellationToken);
+
+            _logger.LogInformation(
+                "resolved {BgObjectCount} bgobject models and {VfxCount} vfx paths from shared game data layout sources",
+                _snapshot.BgObjects.Count,
+                _snapshot.ResolvedVfxPaths.Count);
+
+            return _snapshot;
+        }
     }
 
-    private sealed class GameDataBgObjectCollector(IObjectAssetGameData gameData)
+    internal sealed record Snapshot(
+        IReadOnlyList<GameDataBgObjectAsset> BgObjects,
+        IReadOnlyList<ResolvedVfxPath> ResolvedVfxPaths);
+
+    private sealed class Collector(IObjectAssetGameData gameData)
     {
         private const string ExportedSharedGroupSource = "exported shared group";
         private const string HousingExteriorSource = "housing exterior";
@@ -50,41 +63,48 @@ internal sealed class GameDataBgObjectResolver
 
         private readonly IObjectAssetGameData _gameData = gameData;
         private readonly Dictionary<string, BgObjectDiscoveryState> _bgObjects = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, ResolvedVfxPathAccumulator> _resolvedVfxPaths = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, SharedGroupAssetInfo> _sharedGroupCache = new(StringComparer.OrdinalIgnoreCase);
-        private readonly Dictionary<string, TerritoryLayoutAssetInfo> _territoryLayoutCache = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, TerritoryLayoutAssetResolver.AssetInfo> _territoryLayoutCache = new(StringComparer.OrdinalIgnoreCase);
 
-        public IReadOnlyList<GameDataBgObjectAsset> Collect(
+        public Snapshot Collect(
             IEnumerable<ExportedSG>? exportedSharedGroups,
             IEnumerable<HousingExterior>? housingExteriors,
             IEnumerable<HousingInterior>? housingInteriors,
             IEnumerable<TerritoryType>? territories,
-            ExcelSheet<PlaceName>? placeNames)
+            ExcelSheet<PlaceName>? placeNames,
+            CancellationToken cancellationToken)
         {
             CollectSharedGroupRows(
                 exportedSharedGroups,
                 ExportedSharedGroupSource,
                 static row => row.RowId,
-                static row => ObjectPathRules.NormalizeGamePath(row.SgbPath.ToString()));
+                static row => ObjectPathRules.NormalizeGamePath(row.SgbPath.ToString()),
+                cancellationToken);
             CollectAssetPathRows(
                 housingExteriors,
                 HousingExteriorSource,
                 static row => row.RowId,
-                static row => ObjectPathRules.NormalizeGamePath(row.Model.ExtractText()));
-            CollectHousingInteriorAssets(housingInteriors);
-            CollectTerritoryZoneSharedGroupAssets(territories, placeNames);
-            CollectTerritoryLayoutAssets(territories, placeNames);
+                static row => ObjectPathRules.NormalizeGamePath(row.Model.ExtractText()),
+                cancellationToken);
+            CollectHousingInteriorAssets(housingInteriors, cancellationToken);
+            CollectTerritoryZoneSharedGroupAssets(territories, placeNames, cancellationToken);
+            CollectTerritoryLayoutAssets(territories, placeNames, cancellationToken);
 
-            return _bgObjects.Values
-                .Select(static state => state.ToAsset())
-                .OrderBy(static asset => asset.ModelPath, StringComparer.OrdinalIgnoreCase)
-                .ToArray();
+            return new Snapshot(
+                _bgObjects.Values
+                    .Select(static state => state.ToAsset())
+                    .OrderBy(static asset => asset.ModelPath, StringComparer.OrdinalIgnoreCase)
+                    .ToArray(),
+                ResolvedVfxPathAccumulator.BuildSnapshot(_resolvedVfxPaths.Values));
         }
 
         private void CollectAssetPathRows<T>(
             IEnumerable<T>? rows,
             string source,
             Func<T, uint> rowIdSelector,
-            Func<T, string> pathSelector)
+            Func<T, string> pathSelector,
+            CancellationToken cancellationToken)
         {
             if (rows is null)
             {
@@ -93,6 +113,7 @@ internal sealed class GameDataBgObjectResolver
 
             foreach (T row in rows)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 TryCollectGameDataAssetPath(
                     rowIdSelector(row),
                     source,
@@ -105,7 +126,8 @@ internal sealed class GameDataBgObjectResolver
             IEnumerable<T>? rows,
             string source,
             Func<T, uint> rowIdSelector,
-            Func<T, string> pathSelector)
+            Func<T, string> pathSelector,
+            CancellationToken cancellationToken)
         {
             if (rows is null)
             {
@@ -114,6 +136,7 @@ internal sealed class GameDataBgObjectResolver
 
             foreach (T row in rows)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 TryCollectSharedGroupAssets(
                     rowIdSelector(row),
                     source,
@@ -122,7 +145,9 @@ internal sealed class GameDataBgObjectResolver
             }
         }
 
-        private void CollectHousingInteriorAssets(IEnumerable<HousingInterior>? rows)
+        private void CollectHousingInteriorAssets(
+            IEnumerable<HousingInterior>? rows,
+            CancellationToken cancellationToken)
         {
             if (rows is null)
             {
@@ -131,6 +156,7 @@ internal sealed class GameDataBgObjectResolver
 
             foreach (HousingInterior row in rows)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 if (!GameDataAssetPathUtility.TryBuildHousingInteriorSourcePath(row, out string sourcePath))
                 {
                     continue;
@@ -146,7 +172,8 @@ internal sealed class GameDataBgObjectResolver
 
         private void CollectTerritoryZoneSharedGroupAssets(
             IEnumerable<TerritoryType>? territories,
-            ExcelSheet<PlaceName>? placeNames)
+            ExcelSheet<PlaceName>? placeNames,
+            CancellationToken cancellationToken)
         {
             if (territories is null)
             {
@@ -155,6 +182,7 @@ internal sealed class GameDataBgObjectResolver
 
             foreach (TerritoryType territory in territories)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 if (!territory.IsInUse)
                 {
                     continue;
@@ -180,7 +208,8 @@ internal sealed class GameDataBgObjectResolver
 
         private void CollectTerritoryLayoutAssets(
             IEnumerable<TerritoryType>? territories,
-            ExcelSheet<PlaceName>? placeNames)
+            ExcelSheet<PlaceName>? placeNames,
+            CancellationToken cancellationToken)
         {
             if (territories is null)
             {
@@ -189,6 +218,7 @@ internal sealed class GameDataBgObjectResolver
 
             foreach (TerritoryType territory in territories)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 if (!territory.IsInUse)
                 {
                     continue;
@@ -246,7 +276,7 @@ internal sealed class GameDataBgObjectResolver
                 _sharedGroupCache.Add(sharedGroupPath, sharedGroupAssets);
             }
 
-            IReadOnlyList<string> searchTerms = ObjectSearchTermUtility.BuildStableTerms(
+            IReadOnlyList<string> bgSearchTerms = ObjectSearchTermUtility.BuildStableTerms(
                 [source, sharedGroupPath],
                 territoryMetadata.SearchTerms,
                 sharedGroupAssets.NestedSharedGroupPaths);
@@ -257,8 +287,28 @@ internal sealed class GameDataBgObjectResolver
                     source,
                     sharedGroupPath,
                     modelPath,
-                    searchTerms,
+                    bgSearchTerms,
                     territoryMetadata);
+            }
+
+            IReadOnlyList<string> vfxSearchTerms = BuildSearchTerms(
+                source,
+                rowId.ToString(),
+                sharedGroupPath,
+                territoryMetadata.SearchTerms,
+                sharedGroupAssets.NestedSharedGroupPaths);
+            foreach (string vfxPath in sharedGroupAssets.StandaloneVfxPaths)
+            {
+                _ = VfxResolvedPathUtility.TryMergeResolvedPath(
+                    _resolvedVfxPaths,
+                    _gameData,
+                    vfxPath,
+                    sqpackIndexSnapshot: null,
+                    KnownVfxFamily.None,
+                    RuntimeVfxEvidence.LayoutAutoplay,
+                    AssetPathSource.SharedGroup,
+                    AssetPathContract.ParsedFileReference,
+                    vfxSearchTerms);
             }
         }
 
@@ -273,13 +323,13 @@ internal sealed class GameDataBgObjectResolver
                 return;
             }
 
-            if (!_territoryLayoutCache.TryGetValue(territoryLayoutPath, out TerritoryLayoutAssetInfo? territoryLayoutAssets))
+            if (!_territoryLayoutCache.TryGetValue(territoryLayoutPath, out TerritoryLayoutAssetResolver.AssetInfo? territoryLayoutAssets))
             {
                 territoryLayoutAssets = TerritoryLayoutAssetResolver.AnalyzeTerritoryLayout(_gameData, territoryLayoutPath);
                 _territoryLayoutCache.Add(territoryLayoutPath, territoryLayoutAssets);
             }
 
-            IReadOnlyList<string> searchTerms = ObjectSearchTermUtility.BuildStableTerms(
+            IReadOnlyList<string> bgSearchTerms = ObjectSearchTermUtility.BuildStableTerms(
                 [TerritoryLayoutSource, territoryLayoutPath],
                 territoryMetadata.SearchTerms,
                 territoryLayoutAssets.ReferencedLayoutPaths,
@@ -291,8 +341,24 @@ internal sealed class GameDataBgObjectResolver
                     TerritoryLayoutSource,
                     territoryLayoutPath,
                     modelPath,
-                    searchTerms,
+                    bgSearchTerms,
                     territoryMetadata);
+            }
+
+            IReadOnlyList<string> vfxSearchTerms = BuildSearchTerms(
+                TerritoryLayoutSource,
+                rowId.ToString(),
+                territoryLayoutPath,
+                territoryMetadata.SearchTerms,
+                territoryLayoutAssets.ReferencedLayoutPaths,
+                territoryLayoutAssets.ReferencedSharedGroupPaths);
+            foreach (ResolvedVfxPath resolvedVfxPath in territoryLayoutAssets.ResolvedVfxPaths)
+            {
+                _ = VfxResolvedPathUtility.TryMergeResolvedPath(
+                    _resolvedVfxPaths,
+                    _gameData,
+                    resolvedVfxPath,
+                    extraSearchTerms: vfxSearchTerms);
             }
         }
 
@@ -324,6 +390,13 @@ internal sealed class GameDataBgObjectResolver
             _bgObjects.Add(modelPath, state);
             return state;
         }
+
+        private static IReadOnlyList<string> BuildSearchTerms(
+            string source,
+            string rowId,
+            string sourcePath,
+            params IReadOnlyList<string>?[] relatedTerms)
+            => ObjectSearchTermUtility.BuildStableTerms([source, rowId, sourcePath], relatedTerms);
     }
 
     private sealed class BgObjectDiscoveryState
@@ -367,4 +440,3 @@ internal sealed class GameDataBgObjectResolver
         }
     }
 }
-

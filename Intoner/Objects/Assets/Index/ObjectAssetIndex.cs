@@ -1,9 +1,7 @@
 using Dalamud.Plugin.Services;
 using Intoner.Objects.Assets.Cache;
 using Intoner.Objects.Filesystem.Configuration;
-using Intoner.Objects.Models;
 using Intoner.Objects.Resources;
-using Intoner.Objects.Utils;
 using Microsoft.Extensions.Logging;
 using System.Diagnostics.CodeAnalysis;
 
@@ -69,19 +67,16 @@ internal interface IObjectAssetIndex
     IReadOnlyList<string> GetCollectionPathDependencies(string requestedPath, ObjectResolvedPath effectivePath);
 }
 
-internal sealed partial class ObjectAssetIndex : IObjectAssetIndex, IDisposable
+internal sealed class ObjectAssetIndex : IObjectAssetIndex, IDisposable
 {
-    internal const string ObservedResourceSource = "observed resource";
-    internal const string ObservedSharedGroupSource = "observed shared group";
-    internal const string SqpackCollisionSource = "sqpack collision";
-    internal const string SqpackSharedGroupSource = "sqpack collision shared group";
-
     private readonly ILogger<ObjectAssetIndex> _logger;
-    private readonly IDataManager _dataManager;
-    private readonly IObjectAssetGameData _gameData;
-    private readonly IClientState _clientState;
     private readonly IObjectAssetCacheService _cacheService;
     private readonly IObjectAssetCacheInvalidationService _cacheInvalidationService;
+    private readonly ObjectAssetCacheWriter _cacheWriter;
+    private readonly ObjectAssetDependencyResolver _dependencyResolver;
+    private readonly ObjectAssetSharedGroupCache _sharedGroupCache;
+    private readonly ObjectAssetStateIngestor _stateIngestor;
+    private readonly ObjectAssetStandaloneVfxCatalog _standaloneVfxCatalog;
     private readonly Lock _stateLock = new();
     private readonly ObjectWarmupState<CatalogAssetState> _warmupState;
     private readonly ObjectAssetObserver? _observer;
@@ -109,28 +104,30 @@ internal sealed partial class ObjectAssetIndex : IObjectAssetIndex, IDisposable
             : StringComparer.OrdinalIgnoreCase.Compare(left.Path, right.Path);
     });
 
-    private Task? _cacheSaveTask;
-    private bool _cacheSaveQueued;
     private int _disposeRequested;
 
     public ObjectAssetIndex(
         ILogger<ObjectAssetIndex> logger,
         ILoggerFactory loggerFactory,
-        IDataManager gameData,
-        IClientState clientState,
         IObjectAssetCacheService cacheService,
         IObjectAssetCacheInvalidationService cacheInvalidationService,
+        ObjectAssetDependencyResolver dependencyResolver,
+        ObjectAssetSharedGroupCache sharedGroupCache,
+        ObjectAssetStateIngestor stateIngestor,
+        ObjectAssetStandaloneVfxCatalog standaloneVfxCatalog,
         IObjectConfigurationService configurationService,
-        IObjectAssetGameVersionService gameVersionService,
+        ObjectAssetStaticDiscovery staticDiscovery,
         IGameInteropProvider gameInteropProvider,
         ISigScanner sigScanner)
     {
         _logger = logger;
-        _dataManager = gameData;
-        _gameData = new DalamudObjectAssetGameData(gameData);
-        _clientState = clientState;
         _cacheService = cacheService;
         _cacheInvalidationService = cacheInvalidationService;
+        _dependencyResolver = dependencyResolver;
+        _sharedGroupCache = sharedGroupCache;
+        _stateIngestor = stateIngestor;
+        _standaloneVfxCatalog = standaloneVfxCatalog;
+        _staticDiscovery = staticDiscovery;
         _runtimeCaptureEnabled = configurationService.Current.AssetCapture.EnableRuntimeCapture;
         _warmupState = new ObjectWarmupState<CatalogAssetState>(
             logger,
@@ -140,6 +137,12 @@ internal sealed partial class ObjectAssetIndex : IObjectAssetIndex, IDisposable
             "object assets ready",
             "object asset load failed",
             "failed to load object assets");
+        _cacheWriter = new ObjectAssetCacheWriter(
+            loggerFactory.CreateLogger<ObjectAssetCacheWriter>(),
+            cacheService,
+            _stateLock,
+            IsDisposed,
+            TryGetLoadedState);
         if (_runtimeCaptureEnabled)
         {
             _observer = new ObjectAssetObserver(
@@ -148,29 +151,6 @@ internal sealed partial class ObjectAssetIndex : IObjectAssetIndex, IDisposable
                 sigScanner,
                 HandleObservationBatch);
         }
-
-        RootExlResolver rootExlResolver = new(
-            loggerFactory.CreateLogger<RootExlResolver>(),
-            _gameData);
-        _staticDiscovery = new ObjectAssetStaticDiscovery(
-            loggerFactory.CreateLogger<ObjectAssetStaticDiscovery>(),
-            _gameData,
-            new SqpackIndexStore(
-                loggerFactory.CreateLogger<SqpackIndexStore>(),
-                gameVersionService),
-            new GameDataBgObjectResolver(
-                loggerFactory.CreateLogger<GameDataBgObjectResolver>(),
-                _gameData),
-            new GameDataVfxResolver(
-                loggerFactory.CreateLogger<GameDataVfxResolver>(),
-                _gameData),
-            rootExlResolver,
-            new RootExlVfxFamilyResolver(
-                loggerFactory.CreateLogger<RootExlVfxFamilyResolver>(),
-                _gameData),
-            new NativeVfxFamilyResolver(
-                loggerFactory.CreateLogger<NativeVfxFamilyResolver>(),
-                _gameData));
         _logger.LogInformation(
             "object asset runtime capture is {State}",
             _runtimeCaptureEnabled ? "enabled" : "disabled");
@@ -201,43 +181,24 @@ internal sealed partial class ObjectAssetIndex : IObjectAssetIndex, IDisposable
         }
 
         _observer?.Dispose();
-        FlushCache();
+        _cacheWriter.Dispose();
         _warmupState.Dispose();
     }
 
     public bool TryGetSharedGroupAssets(string sharedGroupPath, [NotNullWhen(true)] out SharedGroupAssetInfo? sharedGroupAssets)
     {
-        var normalizedPath = ObjectPathRules.NormalizeGamePath(sharedGroupPath);
-        if (!ObjectPathRules.IsCatalogSharedGroupPath(normalizedPath)
-         || !_gameData.FileExists(normalizedPath))
-        {
-            sharedGroupAssets = null;
-            return false;
-        }
+        CatalogAssetState state = _warmupState.GetValue();
+        return _sharedGroupCache.TryGetOrAnalyzeThreadSafe(state, _stateLock, sharedGroupPath, out sharedGroupAssets);
+    }
 
-        var state = _warmupState.GetValue();
-        lock (_stateLock)
-        {
-            if (state.SharedGroups.TryGetValue(normalizedPath, out sharedGroupAssets))
-            {
-                return true;
-            }
-        }
-
-        sharedGroupAssets = SharedGroupAssetResolver.AnalyzeSharedGroup(_gameData, normalizedPath);
-        lock (_stateLock)
-        {
-            if (!state.SharedGroups.TryGetValue(normalizedPath, out var cachedAssets))
-            {
-                state.SharedGroups[normalizedPath] = sharedGroupAssets;
-            }
-            else
-            {
-                sharedGroupAssets = cachedAssets;
-            }
-        }
-
-        return true;
+    public IReadOnlyList<string> GetCollectionPathDependencies(string requestedPath, ObjectResolvedPath effectivePath)
+    {
+        CatalogAssetState state = _warmupState.GetValue();
+        return _dependencyResolver.GetCollectionPathDependencies(
+            requestedPath,
+            effectivePath,
+            state,
+            _stateLock);
     }
 
     public IReadOnlyList<ObservedBgAsset> GetObservedBgObjectAssets(CancellationToken cancellationToken = default)
@@ -250,7 +211,10 @@ internal sealed partial class ObjectAssetIndex : IObjectAssetIndex, IDisposable
                 return state.ObservedBgSnapshot;
             }
 
-            ObservedBgAsset[] snapshot = BuildObservedBgSnapshot(state);
+            ObservedBgAsset[] snapshot = BgAssetProjection.BuildObservedSnapshot(
+                state.BgModels.Values,
+                state.KnowledgeBase,
+                ObservedBgAssetComparer);
             state.ObservedBgSnapshot = snapshot;
             state.ObservedBgSnapshotDirty = false;
             return snapshot;
@@ -267,10 +231,44 @@ internal sealed partial class ObjectAssetIndex : IObjectAssetIndex, IDisposable
                 return state.GameDataBgSnapshot;
             }
 
-            GameDataBgObjectAsset[] snapshot = BuildGameDataBgSnapshot(state);
+            GameDataBgObjectAsset[] snapshot = BgAssetProjection.BuildGameDataSnapshot(
+                state.GameDataBgObjects.Values,
+                GameDataBgObjectAssetComparer);
             state.GameDataBgSnapshot = snapshot;
             state.GameDataBgSnapshotDirty = false;
             return snapshot;
+        }
+    }
+
+    public IReadOnlyList<RuntimeVfxAsset> GetStandaloneVfxAssets(CancellationToken cancellationToken = default)
+    {
+        CatalogAssetState state = _warmupState.GetValue(cancellationToken);
+        lock (_stateLock)
+        {
+            if (!state.StandaloneVfxSnapshotDirty && state.StandaloneVfxSnapshot is not null)
+            {
+                return state.StandaloneVfxSnapshot;
+            }
+
+            RuntimeVfxAsset[] snapshot = ObjectAssetStandaloneVfxCatalog.BuildSnapshot(state, RuntimeVfxAssetComparer);
+            state.StandaloneVfxSnapshot = snapshot;
+            state.StandaloneVfxSnapshotDirty = false;
+            return snapshot;
+        }
+    }
+
+    public bool TryGetStandaloneVfxReport(string vfxPath, [NotNullWhen(true)] out VfxStandaloneReport? report)
+    {
+        CatalogAssetState state = _warmupState.GetValue();
+        lock (_stateLock)
+        {
+            return _standaloneVfxCatalog.TryBuildReport(
+                state,
+                vfxPath,
+                RuntimeVfxEvidence.None,
+                analysis: null,
+                runtimeObserved: false,
+                out report);
         }
     }
 
@@ -312,7 +310,7 @@ internal sealed partial class ObjectAssetIndex : IObjectAssetIndex, IDisposable
         if (_runtimeCaptureEnabled
          && cacheLoadResult.LoadedSections.HasAny(ObjectAssetCacheSectionSet.RuntimeOverlay))
         {
-            LoadCachedRuntimeState(state, cacheLoadResult.Snapshot);
+            _stateIngestor.LoadCachedRuntimeState(state, cacheLoadResult.Snapshot);
             state.DirtyCacheSections = ObjectAssetCacheSectionSet.None;
             state.CacheRevision = 0;
         }
@@ -323,7 +321,11 @@ internal sealed partial class ObjectAssetIndex : IObjectAssetIndex, IDisposable
             cacheLoadResult,
             loadedStaticSections,
             cancellationToken);
-        ObjectAssetCacheSectionSet overlayDirtySections = ApplyStaticDiscovery(state, staticDiscoverySnapshot, cancellationToken);
+        ObjectAssetCacheSectionSet overlayDirtySections = _stateIngestor.ApplyStaticDiscovery(
+            state,
+            staticDiscoverySnapshot,
+            currentGameVersion,
+            cancellationToken);
         state.SqpackIndexFingerprint = currentSqpackIndexFingerprint;
         ObjectAssetCacheSectionSet startupDirtySections = (ObjectAssetCacheSectionSet.AllStatic & ~loadedStaticSections) | overlayDirtySections;
         state.DirtyCacheSections = startupDirtySections;
@@ -332,7 +334,7 @@ internal sealed partial class ObjectAssetIndex : IObjectAssetIndex, IDisposable
         if (startupDirtySections != ObjectAssetCacheSectionSet.None)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            TrySaveCacheImmediately(
+            _cacheWriter.SaveImmediately(
                 state,
                 loadedStaticSections != ObjectAssetCacheSectionSet.AllStatic
                     ? "saved object asset cache after rebuilding static discovery"
@@ -403,7 +405,7 @@ internal sealed partial class ObjectAssetIndex : IObjectAssetIndex, IDisposable
 
             foreach (var observation in observations)
             {
-                var result = ApplyObservation(state, observation);
+                ObservationApplyResult result = _stateIngestor.ApplyObservation(state, observation);
                 if (result == ObservationApplyResult.None)
                 {
                     continue;
@@ -427,272 +429,11 @@ internal sealed partial class ObjectAssetIndex : IObjectAssetIndex, IDisposable
             return;
         }
 
-        ScheduleCacheSave();
+        _cacheWriter.Schedule();
         if (projectionChanged)
         {
             RaiseAssetsChanged();
         }
-    }
-
-    private ObservationApplyResult ApplyObservation(CatalogAssetState state, ObjectAssetObservation observation)
-    {
-        return observation.Kind switch
-        {
-            ObjectAssetObservationKind.ResourceLoad => ApplyResourceLoad(state, observation.Path),
-            ObjectAssetObservationKind.StaticVfxCreate => ObserveStaticVfxCreate(state, observation.Path),
-            ObjectAssetObservationKind.ActorVfxCreate => ObserveActorVfxCreate(state, observation.Path),
-            ObjectAssetObservationKind.TriggerUse => ObserveTriggerUse(state, observation.Path),
-            _ => ObservationApplyResult.None,
-        };
-    }
-
-    private ObservationApplyResult ApplyResourceLoad(CatalogAssetState state, string path)
-    {
-        ObjectTerritoryMetadata territoryMetadata = GetCurrentTerritoryMetadata();
-        if (ObjectPathRules.IsCatalogSharedGroupPath(path))
-        {
-            _ = AddKnowledgePath(state, path, AssetPathSource.RuntimeObserved, AssetPathContract.RuntimeObservation, [ObservedSharedGroupSource]);
-            return ObserveSharedGroup(state, path, ObservedSharedGroupSource, territoryMetadata);
-        }
-
-        if (ObjectPathRules.IsCatalogModelPath(path))
-        {
-            return ObserveBgModelPath(
-                state,
-                path,
-                AssetPathSource.RuntimeObserved,
-                AssetPathContract.RuntimeObservation,
-                [ObservedResourceSource],
-                ObservedResourceSource,
-                territoryMetadata);
-        }
-
-        if (ObjectPathRules.IsVfxPath(path))
-        {
-            return ObserveStandaloneVfxPath(
-                state,
-                path,
-                AssetPathSource.RuntimeObserved,
-                AssetPathContract.RuntimeObservation,
-                ["resource load"],
-                RuntimeVfxEvidence.ResourceLoad);
-        }
-
-        if (ObjectPathRules.IsCatalogTimelinePath(path))
-        {
-            _ = AddKnowledgePath(state, path, AssetPathSource.RuntimeObserved, AssetPathContract.RuntimeObservation, ["timeline"]);
-            return ApplyTimelineVfxReferences(
-                state,
-                path,
-                AssetPathSource.RuntimeObserved,
-                ["timeline referenced"],
-                runtimeObserved: true);
-        }
-
-        return ObservationApplyResult.None;
-    }
-
-    private bool ApplySqpackSeedPath(CatalogAssetState state, string path)
-    {
-        if (ObjectPathRules.IsCatalogSharedGroupPath(path))
-        {
-            _ = AddKnowledgePath(state, path, AssetPathSource.SqpackCollision, AssetPathContract.SqpackNamedLeak, [SqpackSharedGroupSource]);
-            return ObserveSharedGroup(state, path, SqpackSharedGroupSource, ObjectTerritoryMetadata.Empty) != ObservationApplyResult.None;
-        }
-
-        if (ObjectPathRules.IsCatalogModelPath(path))
-        {
-            return ObserveBgModelPath(
-                state,
-                path,
-                AssetPathSource.SqpackCollision,
-                AssetPathContract.SqpackNamedLeak,
-                [SqpackCollisionSource],
-                SqpackCollisionSource,
-                ObjectTerritoryMetadata.Empty) != ObservationApplyResult.None;
-        }
-
-        if (ObjectPathRules.IsCatalogTimelinePath(path))
-        {
-            _ = AddKnowledgePath(state, path, AssetPathSource.SqpackCollision, AssetPathContract.SqpackNamedLeak, ["sqpack collision", "timeline"]);
-            return ApplyTimelineVfxReferences(
-                state,
-                path,
-                AssetPathSource.SqpackCollision,
-                ["sqpack collision", "timeline referenced"],
-                runtimeObserved: false) != ObservationApplyResult.None;
-        }
-
-        if (ObjectPathRules.IsVfxPath(path) || ObjectPathRules.IsEidPath(path))
-        {
-            return AddKnowledgePath(state, path, AssetPathSource.SqpackCollision, AssetPathContract.SqpackNamedLeak, ["sqpack collision"]);
-        }
-
-        return false;
-    }
-
-    private ObservationApplyResult ObserveSharedGroup(
-        CatalogAssetState state,
-        string sharedGroupPath,
-        string source,
-        in ObjectTerritoryMetadata territoryMetadata)
-    {
-        var normalizedPath = ObjectPathRules.NormalizeGamePath(sharedGroupPath);
-        if (!ObjectPathRules.IsCatalogSharedGroupPath(normalizedPath)
-         || !_gameData.FileExists(normalizedPath))
-        {
-            return ObservationApplyResult.None;
-        }
-
-        if (!state.SharedGroups.TryGetValue(normalizedPath, out var sharedGroupAssets))
-        {
-            sharedGroupAssets = SharedGroupAssetResolver.AnalyzeSharedGroup(_gameData, normalizedPath);
-            state.SharedGroups[normalizedPath] = sharedGroupAssets;
-        }
-
-        var result = ObservationApplyResult.None;
-        foreach (var modelPath in sharedGroupAssets.BgObjectModelPaths)
-        {
-            result = Combine(
-                result,
-                ObserveBgModelPath(
-                    state,
-                    modelPath,
-                    AssetPathSource.SharedGroup,
-                    AssetPathContract.ParsedFileReference,
-                    [source, "shared group"],
-                    source,
-                    territoryMetadata));
-        }
-
-        foreach (var vfxPath in sharedGroupAssets.StandaloneVfxPaths)
-        {
-            result = Combine(
-                result,
-                ObserveStandaloneVfxPath(
-                    state,
-                    vfxPath,
-                    AssetPathSource.SharedGroup,
-                    AssetPathContract.ParsedFileReference,
-                    ["layout autoplay", "shared group"],
-                    RuntimeVfxEvidence.LayoutAutoplay,
-                    runtimeObserved: string.Equals(source, ObservedSharedGroupSource, StringComparison.OrdinalIgnoreCase)));
-        }
-
-        return result;
-    }
-
-    private ObservationApplyResult ApplyTimelineVfxReferences(
-        CatalogAssetState state,
-        string tmbPath,
-        AssetPathSource source,
-        IReadOnlyList<string> searchTerms,
-        bool runtimeObserved)
-    {
-        var normalizedPath = ObjectPathRules.NormalizeGamePath(tmbPath);
-        if (!state.ProcessedTimelinePaths.Add(normalizedPath))
-        {
-            return ObservationApplyResult.None;
-        }
-
-        var result = ObservationApplyResult.None;
-        foreach (TmbVfxReference reference in VfxAssetAnalyzer.CollectTmbVfxReferences(_gameData, normalizedPath))
-        {
-            result = Combine(
-                result,
-                MergeTimelineVfxReference(
-                    state,
-                    reference.Path,
-                    new VfxTimelineReferenceInfo(reference.Evidence, reference.ContextFlags),
-                    source,
-                    AssetPathContract.ParsedFileReference,
-                    ObjectSearchTermUtility.MergeTerms(searchTerms, reference.SearchTerms),
-                    runtimeObserved));
-        }
-
-        return result;
-    }
-
-    private ObjectAssetCacheSectionSet ApplyStaticDiscovery(
-        CatalogAssetState state,
-        StaticAssetDiscoverySnapshot snapshot,
-        CancellationToken cancellationToken)
-    {
-        state.GameVersion = string.IsNullOrWhiteSpace(snapshot.GameVersion)
-            ? _cacheInvalidationService.CurrentGameVersion
-            : snapshot.GameVersion;
-        state.StaticCollisionPaths.Clear();
-        state.StaticTimelineReferencedVfx.Clear();
-        state.GameDataBgObjects.Clear();
-        state.StaticResolvedVfxPaths.Clear();
-        state.KnowledgeBase.MergeFrom(snapshot.BuildKnowledgeBase());
-        int seededCollisionPathCount = 0;
-        int resolvedVfxCount = 0;
-        int analyzedVfxCount = 0;
-        int promotedStandaloneVfxCount = 0;
-
-        foreach (string collisionPath in snapshot.StaticCollisionPaths)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            _ = state.StaticCollisionPaths.Add(collisionPath);
-            _ = ApplySqpackSeedPath(state, collisionPath);
-            seededCollisionPathCount++;
-        }
-
-        foreach (GameDataBgObjectAsset gameDataBgObjectAsset in snapshot.StaticGameDataBgObjects.Values)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            state.GameDataBgObjects[gameDataBgObjectAsset.ModelPath] = gameDataBgObjectAsset;
-        }
-        if (snapshot.StaticGameDataBgObjects.Count > 0)
-        {
-            MarkGameDataBgChanged(state);
-        }
-
-        ObjectAssetCacheSectionSet overlayDirtySections = RemoveGameDataBgDuplicates(state)
-            ? ObjectAssetCacheSectionSet.BgModels
-            : ObjectAssetCacheSectionSet.None;
-
-        foreach (ResolvedVfxPath resolvedVfxPath in snapshot.StaticResolvedVfxPaths.Values)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            bool hadRuntimeObservedStandalone = state.VfxAssets.TryGetValue(resolvedVfxPath.Path, out RuntimeVfxAssetState? existingStandalone)
-                && existingStandalone.SeenFromRuntime;
-            state.StaticResolvedVfxPaths[resolvedVfxPath.Path] = resolvedVfxPath;
-            resolvedVfxCount++;
-            if (resolvedVfxPath.Analysis is not null)
-            {
-                analyzedVfxCount++;
-            }
-
-            ObservationApplyResult promotionResult = TryPromoteStandaloneVfx(state, resolvedVfxPath.Path, resolvedVfxPath.Evidence, resolvedVfxPath.Analysis);
-            if (promotionResult == ObservationApplyResult.ProjectionChanged)
-            {
-                promotedStandaloneVfxCount++;
-            }
-
-            bool hasRuntimeObservedStandalone = state.VfxAssets.TryGetValue(resolvedVfxPath.Path, out RuntimeVfxAssetState? promotedStandalone)
-                && promotedStandalone.SeenFromRuntime;
-            if (promotionResult != ObservationApplyResult.None
-             && (hadRuntimeObservedStandalone || hasRuntimeObservedStandalone))
-            {
-                overlayDirtySections |= ObjectAssetCacheSectionSet.StandaloneVfx;
-            }
-        }
-
-        _logger.LogInformation(
-            "applied static asset discovery with {SeededCollisionPathCount} collision seed paths, {ResolvedVfxCount} resolved vfx paths, {AnalyzedVfxCount} analyzed standalone vfx paths, and {PromotedStandaloneVfxCount} promoted standalone vfx assets",
-            seededCollisionPathCount,
-            resolvedVfxCount,
-            analyzedVfxCount,
-            promotedStandaloneVfxCount);
-
-        if (RemoveStaticTimelineReferencedDuplicates(state))
-        {
-            overlayDirtySections |= ObjectAssetCacheSectionSet.TimelineReferencedVfx;
-        }
-
-        return overlayDirtySections;
     }
 
     private void RaiseAssetsChanged()
@@ -706,4 +447,10 @@ internal sealed partial class ObjectAssetIndex : IObjectAssetIndex, IDisposable
             _logger.LogWarning(ex, "object asset change handler failed");
         }
     }
+
+    private bool TryGetLoadedState([NotNullWhen(true)] out CatalogAssetState? state)
+        => _warmupState.TryGetValue(out state);
+
+    private bool IsDisposed()
+        => Volatile.Read(ref _disposeRequested) != 0;
 }

@@ -21,14 +21,16 @@ internal sealed class NativeVfxFamilyResolver
         _gameData = gameData;
     }
 
-    public IReadOnlyList<ResolvedVfxPath> Resolve(SqpackIndexSnapshot sqpackIndexSnapshot)
+    public IReadOnlyList<ResolvedVfxPath> Resolve(
+        SqpackIndexSnapshot sqpackIndexSnapshot,
+        CancellationToken cancellationToken = default)
     {
         Dictionary<string, ResolvedVfxPathAccumulator> resolvedPaths = new(StringComparer.OrdinalIgnoreCase);
 
-        ResolveItemFamilies(sqpackIndexSnapshot, resolvedPaths);
-        ResolveModelCharaFamilies(sqpackIndexSnapshot, resolvedPaths);
-        ResolveGlassesFamily(sqpackIndexSnapshot, resolvedPaths);
-        ResolveLoVmFamilies(sqpackIndexSnapshot, resolvedPaths);
+        ResolveItemFamilies(sqpackIndexSnapshot, resolvedPaths, cancellationToken);
+        ResolveModelCharaFamilies(sqpackIndexSnapshot, resolvedPaths, cancellationToken);
+        ResolveGlassesFamily(sqpackIndexSnapshot, resolvedPaths, cancellationToken);
+        ResolveLoVmFamilies(sqpackIndexSnapshot, resolvedPaths, cancellationToken);
 
         IReadOnlyList<ResolvedVfxPath> snapshot = ResolvedVfxPathAccumulator.BuildSnapshot(resolvedPaths.Values);
 
@@ -38,7 +40,8 @@ internal sealed class NativeVfxFamilyResolver
 
     private void ResolveItemFamilies(
         SqpackIndexSnapshot sqpackIndexSnapshot,
-        IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths)
+        IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
+        CancellationToken cancellationToken)
     {
         ExcelSheet<Item>? sheet = _gameData.GetExcelSheet<Item>();
         if (sheet is null)
@@ -48,6 +51,7 @@ internal sealed class NativeVfxFamilyResolver
 
         foreach (Item row in sheet)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             EquipSlot slot = ((EquipSlot)row.EquipSlotCategory.RowId).ToSlot();
             ulong modelMain = row.ModelMain;
             ulong modelSub = row.ModelSub;
@@ -98,7 +102,8 @@ internal sealed class NativeVfxFamilyResolver
 
     private void ResolveModelCharaFamilies(
         SqpackIndexSnapshot sqpackIndexSnapshot,
-        IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths)
+        IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
+        CancellationToken cancellationToken)
     {
         ExcelSheet<ModelChara>? sheet = _gameData.GetExcelSheet<ModelChara>();
         if (sheet is null)
@@ -108,6 +113,7 @@ internal sealed class NativeVfxFamilyResolver
 
         foreach (ModelChara row in sheet)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (row.Model == 0 || row.Base == 0 || row.Variant == 0)
             {
                 continue;
@@ -139,7 +145,8 @@ internal sealed class NativeVfxFamilyResolver
 
     private void ResolveGlassesFamily(
         SqpackIndexSnapshot sqpackIndexSnapshot,
-        IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths)
+        IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
+        CancellationToken cancellationToken)
     {
         ExcelSheet<Glasses>? sheet = _gameData.GetCurrentLanguageExcelSheet<Glasses>();
         if (sheet is null)
@@ -149,6 +156,7 @@ internal sealed class NativeVfxFamilyResolver
 
         foreach (Glasses row in sheet)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             PrimaryId equipmentId = (PrimaryId)(ushort)row.Unknown_70_8;
             Variant variant = (Variant)(row.Unknown_70_8 >> 16);
             if (equipmentId.Id == 0 || variant.Id == 0)
@@ -175,16 +183,18 @@ internal sealed class NativeVfxFamilyResolver
 
     private void ResolveLoVmFamilies(
         SqpackIndexSnapshot sqpackIndexSnapshot,
-        IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths)
+        IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
+        CancellationToken cancellationToken)
     {
-        ResolveLoVmCompanionFamily(sqpackIndexSnapshot, resolvedPaths);
-        ResolveLoVmKnownConstantFamily(sqpackIndexSnapshot, resolvedPaths);
-        ResolveLoVmStageFamily(sqpackIndexSnapshot, resolvedPaths);
+        ResolveLoVmCompanionFamily(sqpackIndexSnapshot, resolvedPaths, cancellationToken);
+        ResolveLoVmKnownConstantFamily(sqpackIndexSnapshot, resolvedPaths, cancellationToken);
+        ResolveLoVmStageFamily(sqpackIndexSnapshot, resolvedPaths, cancellationToken);
     }
 
     private void ResolveLoVmCompanionFamily(
         SqpackIndexSnapshot sqpackIndexSnapshot,
-        IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths)
+        IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
+        CancellationToken cancellationToken)
     {
         ExcelSheet<Companion>? sheet = _gameData.GetExcelSheet<Companion>();
         if (sheet is null)
@@ -194,6 +204,7 @@ internal sealed class NativeVfxFamilyResolver
 
         foreach (Companion row in sheet)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (row.Unknown1 == 0)
             {
                 continue;
@@ -210,11 +221,13 @@ internal sealed class NativeVfxFamilyResolver
 
     private void ResolveLoVmKnownConstantFamily(
         SqpackIndexSnapshot sqpackIndexSnapshot,
-        IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths)
+        IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
+        CancellationToken cancellationToken)
     {
         // these ids are used directly by native lovm callers without a sheet lookup
         foreach (ushort effectId in LoVmKnownConstantEffectIds)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             TryAddLoVmPath(
                 sqpackIndexSnapshot,
                 resolvedPaths,
@@ -225,7 +238,8 @@ internal sealed class NativeVfxFamilyResolver
 
     private void ResolveLoVmStageFamily(
         SqpackIndexSnapshot sqpackIndexSnapshot,
-        IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths)
+        IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
+        CancellationToken cancellationToken)
     {
         ExcelSheet<MinionStage>? sheet = _gameData.GetExcelSheet<MinionStage>();
         if (sheet is null)
@@ -235,6 +249,7 @@ internal sealed class NativeVfxFamilyResolver
 
         foreach (MinionStage row in sheet)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (row.Unknown1 == 0)
             {
                 continue;

@@ -154,7 +154,7 @@ internal sealed class ObjectPathResolver : IObjectPathResolver
         {
             ObjectRootPathKind.BgModel => resolvedPath.Kind == ObjectResolvedPathKind.GamePath
                 ? ObjectPathRules.IsCatalogModelPath(resourcePath)
-                : AssetPathClassifier.IsModelPath(resourcePath),
+                : ObjectPathRules.IsModelPath(resourcePath),
             ObjectRootPathKind.FurnitureSharedGroup => resolvedPath.Kind == ObjectResolvedPathKind.GamePath
                 ? ObjectPathRules.IsCatalogSharedGroupPath(resourcePath)
                 : ObjectPathRules.IsSharedGroupPath(resourcePath),

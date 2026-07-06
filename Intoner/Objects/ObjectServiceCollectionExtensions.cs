@@ -55,11 +55,23 @@ internal static class ObjectServiceCollectionExtensions
 
     private static IServiceCollection AddObjectAssetServices(this IServiceCollection services)
     {
+        services.AddSingleton<IObjectAssetGameData, DalamudObjectAssetGameData>();
         services.AddSingleton<IObjectAssetGameVersionService, ObjectAssetGameVersionService>();
         services.AddSingleton<ISqpackIndexFingerprintService, SqpackIndexFingerprintService>();
         services.AddSingleton<SqpackIndexStore>();
+        services.AddSingleton<GameDataLayoutAssetResolver>();
+        services.AddSingleton<GameDataVfxResolver>();
+        services.AddSingleton<RootExlResolver>();
+        services.AddSingleton<RootExlVfxFamilyResolver>();
+        services.AddSingleton<NativeVfxFamilyResolver>();
+        services.AddSingleton<ObjectAssetStaticDiscovery>();
+        services.AddSingleton<ObjectAssetStandaloneVfxCatalog>();
+        services.AddSingleton<ObjectAssetSharedGroupCache>();
+        services.AddSingleton<ObjectAssetStateIngestor>();
+        services.AddSingleton<ObjectAssetDependencyResolver>();
         services.AddSingleton<IObjectAssetCacheInvalidationService, ObjectAssetCacheInvalidationService>();
         services.AddSingleton<ObjectAssetCacheSerializer>();
+        services.AddSingleton<ObjectAssetCachePayloadReader>();
         services.AddSingleton<IObjectAssetCacheService, ObjectAssetCacheService>();
         services.AddSingleton<IObjectAssetIndex, ObjectAssetIndex>();
         services.AddSingleton<IObjectCatalogService, ObjectCatalogService>();

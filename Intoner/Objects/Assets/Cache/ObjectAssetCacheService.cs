@@ -1,6 +1,5 @@
 using Intoner.Objects.Filesystem.Storage;
 using Microsoft.Extensions.Logging;
-using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
 
 namespace Intoner.Objects.Assets.Cache;
@@ -36,17 +35,20 @@ internal sealed class ObjectAssetCacheService : IObjectAssetCacheService
     private readonly IObjectStoragePathService _pathService;
     private readonly IObjectFileSystem _fileSystem;
     private readonly ObjectAssetCacheSerializer _serializer;
+    private readonly ObjectAssetCachePayloadReader _payloadReader;
 
     public ObjectAssetCacheService(
         ILogger<ObjectAssetCacheService> logger,
         IObjectStoragePathService pathService,
         IObjectFileSystem fileSystem,
-        ObjectAssetCacheSerializer serializer)
+        ObjectAssetCacheSerializer serializer,
+        ObjectAssetCachePayloadReader payloadReader)
     {
         _logger = logger;
         _pathService = pathService;
         _fileSystem = fileSystem;
         _serializer = serializer;
+        _payloadReader = payloadReader;
     }
 
     public ObjectAssetCacheManifest? TryLoadManifest()
@@ -125,7 +127,7 @@ internal sealed class ObjectAssetCacheService : IObjectAssetCacheService
                 return ObjectAssetCacheLoadResult.Empty;
             }
 
-            if (!TryReadSectionPayloads(manifest, sections, out Dictionary<ObjectAssetCacheSectionKind, ObjectAssetCacheSerializer.ObjectAssetCacheSectionPayload>? sectionPayloads))
+            if (!_payloadReader.TryReadSectionPayloads(manifest, sections, out Dictionary<ObjectAssetCacheSectionKind, ObjectAssetCacheSerializer.ObjectAssetCacheSectionPayload>? sectionPayloads))
             {
                 return ObjectAssetCacheLoadResult.Empty;
             }
@@ -169,8 +171,8 @@ internal sealed class ObjectAssetCacheService : IObjectAssetCacheService
         ObjectAssetCacheSectionSet reusableSections = ObjectAssetCacheSectionSet.All & ~request.Sections;
         if (reusableSections != ObjectAssetCacheSectionSet.None
          && TryLoadManifest() is { } existingManifest
-         && CanReuseExistingSections(existingManifest, request.GameVersion, request.SqpackIndexFingerprint)
-         && TryReadSectionPayloads(existingManifest, reusableSections, out Dictionary<ObjectAssetCacheSectionKind, ObjectAssetCacheSerializer.ObjectAssetCacheSectionPayload>? existingSections))
+         && existingManifest.MatchesBuildIdentity(request.GameVersion, request.SqpackIndexFingerprint)
+         && _payloadReader.TryReadSectionPayloads(existingManifest, reusableSections, out Dictionary<ObjectAssetCacheSectionKind, ObjectAssetCacheSerializer.ObjectAssetCacheSectionPayload>? existingSections))
         {
             foreach ((ObjectAssetCacheSectionKind kind, ObjectAssetCacheSerializer.ObjectAssetCacheSectionPayload section) in existingSections)
             {
@@ -204,129 +206,6 @@ internal sealed class ObjectAssetCacheService : IObjectAssetCacheService
             GetSectionCount(manifestSections, ObjectAssetCacheSectionKind.StandaloneVfx),
             GetSectionCount(manifestSections, ObjectAssetCacheSectionKind.TimelineReferencedVfx));
     }
-
-    private bool TryReadSectionPayloads(
-        ObjectAssetCacheManifest manifest,
-        ObjectAssetCacheSectionSet sections,
-        [NotNullWhen(true)] out Dictionary<ObjectAssetCacheSectionKind, ObjectAssetCacheSerializer.ObjectAssetCacheSectionPayload>? loadedSectionPayloads)
-    {
-        loadedSectionPayloads = [];
-        if (sections == ObjectAssetCacheSectionSet.None)
-        {
-            return true;
-        }
-
-        long payloadLength = manifest.PayloadLength > 0
-            ? manifest.PayloadLength
-            : _fileSystem.GetFileLength(_pathService.AssetCachePayloadPath);
-        if (!manifest.TryBuildSectionMap(out IReadOnlyDictionary<ObjectAssetCacheSectionKind, ObjectAssetCacheManifestSection>? manifestSections, out string? error))
-        {
-            _logger.LogInformation("ignoring object asset cache with invalid section metadata: {Error}", error);
-            loadedSectionPayloads = null;
-            return false;
-        }
-
-        bool readWholePayload = sections.CountSections() > 1;
-        if (readWholePayload)
-        {
-            byte[] payload = _fileSystem.ReadAllBytes(_pathService.AssetCachePayloadPath);
-            if (!string.IsNullOrWhiteSpace(manifest.PayloadHash)
-             && !string.Equals(
-                 ObjectAssetHashUtility.ComputeSha256Hex(payload),
-                 manifest.PayloadHash,
-                 StringComparison.OrdinalIgnoreCase))
-            {
-                _logger.LogInformation("ignoring object asset cache with payload hash mismatch");
-                loadedSectionPayloads = null;
-                return false;
-            }
-
-            foreach ((ObjectAssetCacheSectionKind kind, ObjectAssetCacheManifestSection section) in manifestSections)
-            {
-                if (!sections.Contains(kind) || !TrySliceSectionPayload(payload, section, out ReadOnlyMemory<byte> sectionPayload))
-                {
-                    continue;
-                }
-
-                if (!ValidateSectionHash(section, sectionPayload.Span))
-                {
-                    _logger.LogInformation("ignoring object asset cache section {SectionKind} with hash mismatch", section.Kind);
-                    continue;
-                }
-
-                loadedSectionPayloads[kind] = new ObjectAssetCacheSerializer.ObjectAssetCacheSectionPayload(kind, section.Count, sectionPayload);
-            }
-
-            return true;
-        }
-
-        foreach ((ObjectAssetCacheSectionKind kind, ObjectAssetCacheManifestSection section) in manifestSections)
-        {
-            if (!sections.Contains(kind))
-            {
-                continue;
-            }
-
-            if (!TryValidateSectionRange(payloadLength, section))
-            {
-                continue;
-            }
-
-            byte[] sectionPayload = _fileSystem.ReadBytes(
-                _pathService.AssetCachePayloadPath,
-                section.Offset,
-                section.Length);
-            if (!ValidateSectionHash(section, sectionPayload))
-            {
-                _logger.LogInformation("ignoring object asset cache section {SectionKind} with hash mismatch", section.Kind);
-                continue;
-            }
-
-            loadedSectionPayloads[kind] = new ObjectAssetCacheSerializer.ObjectAssetCacheSectionPayload(kind, section.Count, sectionPayload);
-        }
-
-        return true;
-    }
-
-    private static bool TrySliceSectionPayload(
-        ReadOnlyMemory<byte> payload,
-        ObjectAssetCacheManifestSection section,
-        out ReadOnlyMemory<byte> sectionPayload)
-    {
-        sectionPayload = ReadOnlyMemory<byte>.Empty;
-        if (!TryValidateSectionRange(payload.Length, section))
-        {
-            return false;
-        }
-
-        sectionPayload = payload.Slice((int)section.Offset, section.Length);
-        return true;
-    }
-
-    private static bool TryValidateSectionRange(long payloadLength, ObjectAssetCacheManifestSection section)
-    {
-        long sectionEnd = section.Offset + section.Length;
-        return section.Offset >= 0
-            && section.Length >= 0
-            && sectionEnd >= section.Offset
-            && sectionEnd <= payloadLength;
-    }
-
-    private static bool ValidateSectionHash(ObjectAssetCacheManifestSection section, ReadOnlySpan<byte> payload)
-        => string.IsNullOrWhiteSpace(section.Hash)
-         || string.Equals(
-             ObjectAssetHashUtility.ComputeSha256Hex(payload),
-             section.Hash,
-             StringComparison.OrdinalIgnoreCase);
-
-    private static bool CanReuseExistingSections(
-        ObjectAssetCacheManifest manifest,
-        string? requestedGameVersion,
-        string? requestedSqpackIndexFingerprint)
-        => !string.IsNullOrWhiteSpace(requestedGameVersion)
-        && !string.IsNullOrWhiteSpace(requestedSqpackIndexFingerprint)
-        && string.Equals(manifest.GameVersion, requestedGameVersion, StringComparison.OrdinalIgnoreCase)
-        && string.Equals(manifest.SqpackIndexFingerprint, requestedSqpackIndexFingerprint, StringComparison.Ordinal);
 
     private static int GetSectionCount(
         IReadOnlyDictionary<ObjectAssetCacheSectionKind, ObjectAssetCacheManifestSection>? manifestSections,

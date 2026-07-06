@@ -7,9 +7,9 @@ internal sealed class ObservedBgModelState(string path)
 {
     private static readonly string[] PreferredPrimarySources =
     [
-        ObjectAssetIndex.ObservedSharedGroupSource,
-        ObjectAssetIndex.SqpackSharedGroupSource,
-        ObjectAssetIndex.SqpackCollisionSource,
+        ObjectAssetCaptureSources.ObservedSharedGroup,
+        ObjectAssetCaptureSources.SqpackSharedGroup,
+        ObjectAssetCaptureSources.SqpackCollision,
     ];
 
     private IReadOnlyList<string>? _searchTerms;
@@ -19,8 +19,8 @@ internal sealed class ObservedBgModelState(string path)
     public HashSet<string> Sources { get; } = new(StringComparer.OrdinalIgnoreCase);
 
     public bool IsRuntimeObserved
-        => Sources.Contains(ObjectAssetIndex.ObservedResourceSource)
-        || Sources.Contains(ObjectAssetIndex.ObservedSharedGroupSource);
+        => Sources.Contains(ObjectAssetCaptureSources.ObservedResource)
+        || Sources.Contains(ObjectAssetCaptureSources.ObservedSharedGroup);
 
     public bool AddSource(string source)
     {
@@ -58,18 +58,15 @@ internal sealed class ObservedBgModelState(string path)
     public static ObservedBgModelState FromCache(ObjectAssetCacheBgModel bgModel)
     {
         ObservedBgModelState asset = new(bgModel.Path);
-        foreach (string source in bgModel.Sources)
+        foreach (string source in bgModel.Sources.Where(static source => !string.IsNullOrWhiteSpace(source)))
         {
-            if (!string.IsNullOrWhiteSpace(source))
-            {
-                _ = asset.AddSource(source);
-            }
+            _ = asset.AddSource(source);
         }
 
         _ = asset.AddTerritoryMetadata(bgModel.TerritoryIds, bgModel.TerritoryNames);
         if (asset.Sources.Count == 0)
         {
-            _ = asset.AddSource(ObjectAssetIndex.ObservedResourceSource);
+            _ = asset.AddSource(ObjectAssetCaptureSources.ObservedResource);
         }
 
         return asset;
@@ -97,15 +94,8 @@ internal sealed class ObservedBgModelState(string path)
 
     private string GetPrimarySource()
     {
-        foreach (string source in PreferredPrimarySources)
-        {
-            if (Sources.Contains(source))
-            {
-                return source;
-            }
-        }
-
-        return ObjectAssetIndex.ObservedResourceSource;
+        return PreferredPrimarySources.FirstOrDefault(Sources.Contains)
+            ?? ObjectAssetCaptureSources.ObservedResource;
     }
 
     private IReadOnlyList<string> BuildSearchTerms()

@@ -46,37 +46,11 @@ internal sealed class ObjectAssetCacheInvalidationService : IObjectAssetCacheInv
         string currentGameVersion = CurrentGameVersion;
         string currentSqpackIndexFingerprint = CurrentSqpackIndexFingerprint;
         if (manifest is null
-         || requestedSections == ObjectAssetCacheSectionSet.None
-         || string.IsNullOrWhiteSpace(currentGameVersion)
-         || string.IsNullOrWhiteSpace(currentSqpackIndexFingerprint)
-         || !string.Equals(manifest.GameVersion, currentGameVersion, StringComparison.OrdinalIgnoreCase)
-         || !string.Equals(manifest.SqpackIndexFingerprint, currentSqpackIndexFingerprint, StringComparison.Ordinal))
+         || !manifest.MatchesBuildIdentity(currentGameVersion, currentSqpackIndexFingerprint))
         {
             return ObjectAssetCacheSectionSet.None;
         }
 
-        if (!manifest.TryBuildSectionMap(out IReadOnlyDictionary<ObjectAssetCacheSectionKind, ObjectAssetCacheManifestSection>? sectionMap, out _))
-        {
-            return ObjectAssetCacheSectionSet.None;
-        }
-
-        ObjectAssetCacheSectionSet reusableSections = ObjectAssetCacheSectionSet.None;
-        foreach (ObjectAssetCacheSectionKind kind in Enum.GetValues<ObjectAssetCacheSectionKind>())
-        {
-            if (!requestedSections.Contains(kind)
-             || !sectionMap.TryGetValue(kind, out ObjectAssetCacheManifestSection? section))
-            {
-                continue;
-            }
-
-            if (section.Length <= 0 || string.IsNullOrWhiteSpace(section.Hash))
-            {
-                continue;
-            }
-
-            reusableSections |= kind.ToSectionSet();
-        }
-
-        return reusableSections;
+        return manifest.GetReusableSections(requestedSections);
     }
 }

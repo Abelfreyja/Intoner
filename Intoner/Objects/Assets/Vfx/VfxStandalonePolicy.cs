@@ -1,3 +1,5 @@
+using System.Runtime.InteropServices;
+
 namespace Intoner.Objects.Assets;
 
 [Flags]
@@ -63,6 +65,7 @@ internal enum VfxStandaloneValidatedSupportShape
     GroupPoseCameraOrigin,
 }
 
+[StructLayout(LayoutKind.Auto)]
 internal readonly record struct VfxStandalonePolicyResult(
     VfxStandaloneSupportClass SupportClass,
     RuntimeVfxEvidence AnalysisEvidence,
@@ -353,17 +356,10 @@ internal static class VfxStandalonePolicy
         VfxAnalysis analysis,
         RuntimeVfxEvidence sourceEvidence,
         AssetPathContract pathContracts)
-    {
-        foreach (ValidatedSupportRule rule in ValidatedSupportRules)
-        {
-            if (MatchesValidatedSupportRule(path, analysis, sourceEvidence, pathContracts, rule))
-            {
-                return rule.Shape;
-            }
-        }
-
-        return VfxStandaloneValidatedSupportShape.None;
-    }
+        => ValidatedSupportRules
+            .Where(rule => MatchesValidatedSupportRule(path, analysis, sourceEvidence, pathContracts, rule))
+            .Select(static rule => rule.Shape)
+            .FirstOrDefault();
 
     private static bool MatchesValidatedSupportRule(
         string path,
@@ -476,49 +472,25 @@ internal static class VfxStandaloneClassificationLabelExtensions
     private static IReadOnlyList<string> BuildLabels(
         VfxStandaloneUnsupportedReason reasons,
         IReadOnlyList<UnsupportedReasonLabelRule> rules)
-    {
-        List<string> labels = [];
-        foreach (UnsupportedReasonLabelRule rule in rules)
-        {
-            if (reasons.HasAny(rule.Reason))
-            {
-                labels.Add(rule.Label);
-            }
-        }
-
-        return labels;
-    }
+        => rules
+            .Where(rule => reasons.HasAny(rule.Reason))
+            .Select(static rule => rule.Label)
+            .ToArray();
 
     private static IReadOnlyList<string> BuildLabels(
         VfxStandaloneContextClue clues,
         IReadOnlyList<ContextClueLabelRule> rules)
-    {
-        List<string> labels = [];
-        foreach (ContextClueLabelRule rule in rules)
-        {
-            if (clues.HasAny(rule.Clue))
-            {
-                labels.Add(rule.Label);
-            }
-        }
-
-        return labels;
-    }
+        => rules
+            .Where(rule => clues.HasAny(rule.Clue))
+            .Select(static rule => rule.Label)
+            .ToArray();
 
     private static IReadOnlyList<string> BuildLabels(
         VfxStandaloneUnknownReason reasons,
         IReadOnlyList<UnknownReasonLabelRule> rules)
-    {
-        List<string> labels = [];
-        foreach (UnknownReasonLabelRule rule in rules)
-        {
-            if (reasons.HasAny(rule.Reason))
-            {
-                labels.Add(rule.Label);
-            }
-        }
-
-        return labels;
-    }
+        => rules
+            .Where(rule => reasons.HasAny(rule.Reason))
+            .Select(static rule => rule.Label)
+            .ToArray();
 }
 

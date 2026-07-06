@@ -7,7 +7,7 @@ internal sealed class ObjectAssetStaticDiscovery
     private readonly ILogger<ObjectAssetStaticDiscovery> _logger;
     private readonly IObjectAssetGameData _gameData;
     private readonly SqpackIndexStore _sqpackIndexStore;
-    private readonly GameDataBgObjectResolver _gameDataBgObjectResolver;
+    private readonly GameDataLayoutAssetResolver _gameDataLayoutAssetResolver;
     private readonly GameDataVfxResolver _gameDataVfxResolver;
     private readonly RootExlResolver _rootExlResolver;
     private readonly RootExlVfxFamilyResolver _rootExlVfxFamilyResolver;
@@ -17,7 +17,7 @@ internal sealed class ObjectAssetStaticDiscovery
         ILogger<ObjectAssetStaticDiscovery> logger,
         IObjectAssetGameData gameData,
         SqpackIndexStore sqpackIndexStore,
-        GameDataBgObjectResolver gameDataBgObjectResolver,
+        GameDataLayoutAssetResolver gameDataLayoutAssetResolver,
         GameDataVfxResolver gameDataVfxResolver,
         RootExlResolver rootExlResolver,
         RootExlVfxFamilyResolver rootExlVfxFamilyResolver,
@@ -26,7 +26,7 @@ internal sealed class ObjectAssetStaticDiscovery
         _logger = logger;
         _gameData = gameData;
         _sqpackIndexStore = sqpackIndexStore;
-        _gameDataBgObjectResolver = gameDataBgObjectResolver;
+        _gameDataLayoutAssetResolver = gameDataLayoutAssetResolver;
         _gameDataVfxResolver = gameDataVfxResolver;
         _rootExlResolver = rootExlResolver;
         _rootExlVfxFamilyResolver = rootExlVfxFamilyResolver;
@@ -52,7 +52,7 @@ internal sealed class ObjectAssetStaticDiscovery
             cancellationToken);
 
         IReadOnlyDictionary<string, GameDataBgObjectAsset> resolvedGameDataBgObjectAssets = BuildStaticGameDataBgObjects(
-            reuseInput?.GameDataBgObjects ?? _gameDataBgObjectResolver.Resolve(),
+            reuseInput?.GameDataBgObjects ?? _gameDataLayoutAssetResolver.Resolve(cancellationToken).BgObjects,
             cancellationToken);
 
         IReadOnlyDictionary<string, ResolvedVfxPath> resolvedVfxAssets = BuildStaticResolvedVfxPaths(
@@ -88,17 +88,17 @@ internal sealed class ObjectAssetStaticDiscovery
         CancellationToken cancellationToken)
     {
         List<ResolvedVfxPath> staticResolvedVfxPaths = [];
-        staticResolvedVfxPaths.AddRange(_gameDataVfxResolver.Resolve(indexSnapshot));
+        staticResolvedVfxPaths.AddRange(_gameDataVfxResolver.Resolve(indexSnapshot, cancellationToken));
 
         cancellationToken.ThrowIfCancellationRequested();
-        RootExlDatasetIndex? rootExlDatasetIndex = _rootExlResolver.Load();
+        RootExlDatasetIndex? rootExlDatasetIndex = _rootExlResolver.Load(cancellationToken);
         if (rootExlDatasetIndex is not null)
         {
-            staticResolvedVfxPaths.AddRange(_rootExlVfxFamilyResolver.Resolve(rootExlDatasetIndex, indexSnapshot));
+            staticResolvedVfxPaths.AddRange(_rootExlVfxFamilyResolver.Resolve(rootExlDatasetIndex, indexSnapshot, cancellationToken));
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        staticResolvedVfxPaths.AddRange(_nativeVfxFamilyResolver.Resolve(indexSnapshot));
+        staticResolvedVfxPaths.AddRange(_nativeVfxFamilyResolver.Resolve(indexSnapshot, cancellationToken));
         return BuildStaticResolvedVfxPaths(staticResolvedVfxPaths, cancellationToken);
     }
 

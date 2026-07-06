@@ -1,5 +1,4 @@
 using Intoner.Objects.Utils;
-using Intoner.Objects.Assets;
 
 namespace Intoner.Objects.Assets;
 
@@ -19,6 +18,9 @@ internal static class ObjectPathRules
 
     public static bool IsVfxPath(string vfxPath)
         => HasExtension(vfxPath, ".avfx");
+
+    public static bool IsModelPath(string modelPath)
+        => HasExtension(modelPath, ".mdl");
 
     public static bool IsMaterialPath(string materialPath)
         => HasExtension(materialPath, ".mtrl");
@@ -51,7 +53,7 @@ internal static class ObjectPathRules
         => !string.IsNullOrWhiteSpace(modelPath)
             && (modelPath.StartsWith("bg/", StringComparison.OrdinalIgnoreCase)
                 || modelPath.StartsWith("bgcommon/", StringComparison.OrdinalIgnoreCase))
-            && AssetPathClassifier.IsModelPath(modelPath);
+            && IsModelPath(modelPath);
 
     public static bool IsCatalogSharedGroupPath(string sharedGroupPath)
         => !string.IsNullOrWhiteSpace(sharedGroupPath)
@@ -105,7 +107,7 @@ internal static class ObjectPathRules
 
     public static ObjectResourcePathKind ClassifyObjectResourcePath(string path)
     {
-        if (AssetPathClassifier.IsModelPath(path) || HasExtension(path, ".mdl"))
+        if (IsModelPath(path))
         {
             return ObjectResourcePathKind.Model;
         }
@@ -186,7 +188,7 @@ internal static class ObjectPathRules
     public static IEnumerable<string> CollectBgModelAnimationResourcePaths(string modelPath)
     {
         string normalizedModelPath = NormalizeGamePath(modelPath);
-        if (!AssetPathClassifier.IsModelPath(normalizedModelPath))
+        if (!IsModelPath(normalizedModelPath))
         {
             yield break;
         }

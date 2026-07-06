@@ -55,7 +55,7 @@ internal sealed class ObjectSelectionCollector
     public void AddModel(ObjectSnapshot snapshot, string modelPath, Matrix4x4 worldTransform)
     {
         var normalizedPath = ObjectResourcePathUtility.NormalizeTrackedPath(modelPath);
-        if (string.IsNullOrWhiteSpace(normalizedPath) || !AssetPathClassifier.IsModelPath(normalizedPath))
+        if (string.IsNullOrWhiteSpace(normalizedPath) || !ObjectPathRules.IsModelPath(normalizedPath))
         {
             return;
         }

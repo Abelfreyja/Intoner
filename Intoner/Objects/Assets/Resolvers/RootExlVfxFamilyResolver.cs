@@ -35,15 +35,18 @@ internal sealed class RootExlVfxFamilyResolver
         _gameData = gameData;
     }
 
-    public IReadOnlyList<ResolvedVfxPath> Resolve(RootExlDatasetIndex rootExlDatasetIndex, SqpackIndexSnapshot sqpackIndexSnapshot)
+    public IReadOnlyList<ResolvedVfxPath> Resolve(
+        RootExlDatasetIndex rootExlDatasetIndex,
+        SqpackIndexSnapshot sqpackIndexSnapshot,
+        CancellationToken cancellationToken = default)
     {
         Dictionary<string, ResolvedVfxPathAccumulator> resolvedPaths = new(StringComparer.OrdinalIgnoreCase);
 
-        ResolveCommon(rootExlDatasetIndex, sqpackIndexSnapshot, resolvedPaths);
-        ResolveOmen(rootExlDatasetIndex, sqpackIndexSnapshot, resolvedPaths);
-        ResolveChanneling(rootExlDatasetIndex, sqpackIndexSnapshot, resolvedPaths);
-        ResolveLockon(rootExlDatasetIndex, sqpackIndexSnapshot, resolvedPaths);
-        ResolveEvent(rootExlDatasetIndex, sqpackIndexSnapshot, resolvedPaths);
+        ResolveCommon(rootExlDatasetIndex, sqpackIndexSnapshot, resolvedPaths, cancellationToken);
+        ResolveOmen(rootExlDatasetIndex, sqpackIndexSnapshot, resolvedPaths, cancellationToken);
+        ResolveChanneling(rootExlDatasetIndex, sqpackIndexSnapshot, resolvedPaths, cancellationToken);
+        ResolveLockon(rootExlDatasetIndex, sqpackIndexSnapshot, resolvedPaths, cancellationToken);
+        ResolveEvent(rootExlDatasetIndex, sqpackIndexSnapshot, resolvedPaths, cancellationToken);
 
         IReadOnlyList<ResolvedVfxPath> snapshot = ResolvedVfxPathAccumulator.BuildSnapshot(resolvedPaths.Values);
 
@@ -74,7 +77,8 @@ internal sealed class RootExlVfxFamilyResolver
     private void ResolveCommon(
         RootExlDatasetIndex rootExlDatasetIndex,
         SqpackIndexSnapshot sqpackIndexSnapshot,
-        IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths)
+        IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
+        CancellationToken cancellationToken)
     {
         if (!TryRequireDataset(rootExlDatasetIndex, "VFX", VfxDatasetId))
         {
@@ -89,6 +93,7 @@ internal sealed class RootExlVfxFamilyResolver
 
         foreach (VFX row in sheet)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             string token = row.Location.ExtractText();
             TryAddTokenResolvedPath(
                 sqpackIndexSnapshot,
@@ -104,7 +109,8 @@ internal sealed class RootExlVfxFamilyResolver
     private void ResolveOmen(
         RootExlDatasetIndex rootExlDatasetIndex,
         SqpackIndexSnapshot sqpackIndexSnapshot,
-        IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths)
+        IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
+        CancellationToken cancellationToken)
     {
         if (!TryRequireDataset(rootExlDatasetIndex, "Omen", OmenDatasetId))
         {
@@ -119,6 +125,7 @@ internal sealed class RootExlVfxFamilyResolver
 
         foreach (Omen row in sheet)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             string token = row.Path.ExtractText();
             TryAddTokenResolvedPath(
                 sqpackIndexSnapshot,
@@ -144,7 +151,8 @@ internal sealed class RootExlVfxFamilyResolver
     private void ResolveChanneling(
         RootExlDatasetIndex rootExlDatasetIndex,
         SqpackIndexSnapshot sqpackIndexSnapshot,
-        IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths)
+        IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
+        CancellationToken cancellationToken)
     {
         if (!TryRequireDataset(rootExlDatasetIndex, "Channeling", ChannelingDatasetId))
         {
@@ -159,6 +167,7 @@ internal sealed class RootExlVfxFamilyResolver
 
         foreach (Channeling row in sheet)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             string token = row.File.ExtractText();
             TryAddTokenResolvedPath(
                 sqpackIndexSnapshot,
@@ -174,7 +183,8 @@ internal sealed class RootExlVfxFamilyResolver
     private void ResolveLockon(
         RootExlDatasetIndex rootExlDatasetIndex,
         SqpackIndexSnapshot sqpackIndexSnapshot,
-        IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths)
+        IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
+        CancellationToken cancellationToken)
     {
         if (!TryRequireDataset(rootExlDatasetIndex, "Lockon", LockonDatasetId))
         {
@@ -189,6 +199,7 @@ internal sealed class RootExlVfxFamilyResolver
 
         foreach (Lockon row in sheet)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             string token = row.IconName.ExtractText();
             TryAddTokenResolvedPath(
                 sqpackIndexSnapshot,
@@ -204,7 +215,8 @@ internal sealed class RootExlVfxFamilyResolver
     private void ResolveEvent(
         RootExlDatasetIndex rootExlDatasetIndex,
         SqpackIndexSnapshot sqpackIndexSnapshot,
-        IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths)
+        IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
+        CancellationToken cancellationToken)
     {
         if (!TryRequireDataset(rootExlDatasetIndex, "EventVfx", EventVfxDatasetId))
         {
@@ -219,6 +231,7 @@ internal sealed class RootExlVfxFamilyResolver
 
         foreach (EventVfx row in sheet)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             string token = row.Unknown1.ExtractText();
             string label = row.Unknown0.ExtractText();
             if (!TryResolveEventPathPrefix((EventVfxPathType)row.Unknown2, out string pathPrefix))

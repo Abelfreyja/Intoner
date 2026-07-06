@@ -1,15 +1,28 @@
 using Intoner.Objects.Resources;
-using Intoner.Objects.Assets;
 using System.Collections.Immutable;
 
 namespace Intoner.Objects.Assets;
 
-internal sealed partial class ObjectAssetIndex
+internal sealed class ObjectAssetDependencyResolver(
+    IObjectAssetGameData gameData,
+    ObjectAssetSharedGroupCache sharedGroupCache)
 {
-    public IReadOnlyList<string> GetCollectionPathDependencies(string requestedPath, ObjectResolvedPath effectivePath)
+    private readonly IObjectAssetGameData _gameData = gameData;
+    private readonly ObjectAssetSharedGroupCache _sharedGroupCache = sharedGroupCache;
+
+    public IReadOnlyList<string> GetCollectionPathDependencies(
+        string requestedPath,
+        ObjectResolvedPath effectivePath,
+        CatalogAssetState state,
+        Lock stateLock)
     {
         HashSet<string> dependencyPaths = new(StringComparer.OrdinalIgnoreCase);
-        foreach (string dependencyPath in CollectRequestedPathDependencies(ObjectPathRules.NormalizeGamePath(requestedPath), effectivePath))
+        string normalizedRequestedPath = ObjectPathRules.NormalizeGamePath(requestedPath);
+        foreach (string dependencyPath in CollectRequestedPathDependencies(
+            normalizedRequestedPath,
+            effectivePath,
+            state,
+            stateLock))
         {
             string normalizedDependencyPath = ObjectPathRules.NormalizeGamePath(dependencyPath);
             if (normalizedDependencyPath.Length > 0)
@@ -27,11 +40,13 @@ internal sealed partial class ObjectAssetIndex
 
     private IEnumerable<string> CollectRequestedPathDependencies(
         string requestedPath,
-        ObjectResolvedPath effectivePath)
+        ObjectResolvedPath effectivePath,
+        CatalogAssetState state,
+        Lock stateLock)
         => ClassifyScopePath(requestedPath) switch
         {
             RedirectScopePathKind.Model => CollectModelDependencies(requestedPath, effectivePath),
-            RedirectScopePathKind.SharedGroup => CollectSharedGroupDependencies(requestedPath, effectivePath),
+            RedirectScopePathKind.SharedGroup => CollectSharedGroupDependencies(requestedPath, effectivePath, state, stateLock),
             RedirectScopePathKind.Vfx => CollectVfxDependencies(effectivePath),
             RedirectScopePathKind.Material => CollectMaterialDependencies(effectivePath),
             _ => [],
@@ -58,7 +73,11 @@ internal sealed partial class ObjectAssetIndex
         }
     }
 
-    private IEnumerable<string> CollectSharedGroupDependencies(string requestedPath, ObjectResolvedPath effectivePath)
+    private IEnumerable<string> CollectSharedGroupDependencies(
+        string requestedPath,
+        ObjectResolvedPath effectivePath,
+        CatalogAssetState state,
+        Lock stateLock)
     {
         if (effectivePath.Kind == ObjectResolvedPathKind.LocalFile)
         {
@@ -68,7 +87,7 @@ internal sealed partial class ObjectAssetIndex
         }
 
         if (effectivePath.Kind != ObjectResolvedPathKind.GamePath
-         || !TryGetSharedGroupAssets(effectivePath.Path, out SharedGroupAssetInfo? sharedGroupAssets))
+         || !_sharedGroupCache.TryGetOrAnalyzeThreadSafe(state, stateLock, effectivePath.Path, out SharedGroupAssetInfo? sharedGroupAssets))
         {
             return [];
         }
@@ -98,7 +117,7 @@ internal sealed partial class ObjectAssetIndex
 
     private static RedirectScopePathKind ClassifyScopePath(string path)
     {
-        if (AssetPathClassifier.IsModelPath(path))
+        if (ObjectPathRules.IsModelPath(path))
         {
             return RedirectScopePathKind.Model;
         }
@@ -130,4 +149,3 @@ internal sealed partial class ObjectAssetIndex
         Material,
     }
 }
-

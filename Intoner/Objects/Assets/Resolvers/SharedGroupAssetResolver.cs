@@ -226,7 +226,7 @@ internal static class SharedGroupAssetResolver
         {
             if (!_policy.RequireExistingGamePaths)
             {
-                return AssetPathClassifier.IsModelPath(modelPath);
+                return ObjectPathRules.IsModelPath(modelPath);
             }
 
             return ObjectPathRules.IsCatalogModelPath(modelPath) && _gameData.FileExists(modelPath);
@@ -236,7 +236,7 @@ internal static class SharedGroupAssetResolver
         {
             if (!_policy.RequireExistingGamePaths)
             {
-                return AssetPathClassifier.IsModelPath(modelPath);
+                return ObjectPathRules.IsModelPath(modelPath);
             }
 
             return ObjectPathRules.IsBgObjectModelPath(modelPath) && _gameData.FileExists(modelPath);

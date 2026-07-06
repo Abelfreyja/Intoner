@@ -13,6 +13,7 @@ using ShaderNames = Penumbra.GameData.Files.ShaderStructs.Names;
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.Numerics;
+using System.Runtime.InteropServices;
 using System.Text;
 using MdlDecimator = Intoner.Objects.Assets.ModelPreviewGeometryReader;
 
@@ -41,6 +42,7 @@ internal sealed class CatalogPreviewService : IDisposable
     private const long MaxPreviewTextureCacheBytes = 32L * 1024 * 1024;
     private const int MaxTextureUploadsPerBudgetWindow = 2;
 
+    [StructLayout(LayoutKind.Auto)]
     private readonly record struct PreviewModePolicy(
         int MinDimension,
         int MaxWidth,
@@ -51,6 +53,7 @@ internal sealed class CatalogPreviewService : IDisposable
         int MaxTextureCount,
         long MaxTextureBytes);
 
+    [StructLayout(LayoutKind.Auto)]
     internal readonly record struct PreviewDebugSnapshot(
         int AssetStateCount,
         int LoadedAssetStateCount,
@@ -169,6 +172,7 @@ internal sealed class CatalogPreviewService : IDisposable
 
     private readonly ILogger<CatalogPreviewService>       _logger;
     private readonly IDataManager                         _gameData;
+    private readonly IObjectAssetGameData                 _objectAssetGameData;
     private readonly IObjectCatalogService                _objectCatalog;
     private readonly ITextureProvider                     _textureProvider;
 
@@ -200,13 +204,16 @@ internal sealed class CatalogPreviewService : IDisposable
     public CatalogPreviewService(
         ILogger<CatalogPreviewService> logger,
         IDataManager gameData,
+        IObjectAssetGameData objectAssetGameData,
         IObjectCatalogService objectCatalog,
         ITextureProvider textureProvider)
     {
-        _logger          = logger;
-        _gameData        = gameData;
-        _objectCatalog   = objectCatalog;
-        _textureProvider = textureProvider;
+        _logger              = logger;
+        _gameData            = gameData;
+        _objectAssetGameData = objectAssetGameData;
+        _objectCatalog       = objectCatalog;
+        _textureProvider     = textureProvider;
+
         _loadWorkers = Enumerable.Range(0, LoadWorkerCount)
             .Select(_ => Task.Factory.StartNew(
                 RunLoadWorker,
@@ -1068,7 +1075,7 @@ internal sealed class CatalogPreviewService : IDisposable
 
         if (kind == ObjectCatalogKind.Furniture && ObjectPathRules.IsCatalogSharedGroupPath(path))
         {
-            return SharedGroupAssetResolver.AnalyzeSharedGroup(new DalamudObjectAssetGameData(_gameData), path).PreviewModels;
+            return SharedGroupAssetResolver.AnalyzeSharedGroup(_objectAssetGameData, path).PreviewModels;
         }
 
         return [];
@@ -1345,7 +1352,7 @@ internal sealed class CatalogPreviewService : IDisposable
             string materialName = materials[i].Name;
             if (!TryResolveMaterialPath(modelPath, materialName, out string materialPath)
              || !TryLoadMaterial(materialPath, out PenumbraMtrlFile material)
-             || !TextureMetadataHelper.TryGetTexturePath(material, TextureMapKind.Diffuse, out string texturePath))
+             || !TextureMapKindResolver.TryGetTexturePath(material, TextureMapKind.Diffuse, out string texturePath))
             {
                 resolvedMaterials[i] = new MdlDecimator.PreviewMaterial(materialName, null, null, false, false, 1f);
                 continue;
@@ -1720,12 +1727,9 @@ internal sealed class CatalogPreviewService : IDisposable
             return false;
         }
 
-        foreach (PreviewRenderState renderState in state.RenderStates.Values)
+        if (state.RenderStates.Values.Any(HasActiveRenderResources))
         {
-            if (HasActiveRenderResources(renderState))
-            {
-                return false;
-            }
+            return false;
         }
 
         return IsExpired(state.LastThumbnailAccessAtMs, now, ThumbnailPolicy.AssetRetention)

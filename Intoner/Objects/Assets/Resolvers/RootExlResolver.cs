@@ -35,10 +35,11 @@ internal sealed class RootExlResolver
         _gameData = gameData;
     }
 
-    public RootExlDatasetIndex? Load()
+    public RootExlDatasetIndex? Load(CancellationToken cancellationToken = default)
     {
         lock (_loadLock)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (_datasetIndex is not null)
             {
                 return _datasetIndex;
@@ -54,6 +55,7 @@ internal sealed class RootExlResolver
             Dictionary<string, uint> datasetIds = new(StringComparer.OrdinalIgnoreCase);
             foreach ((string name, int id) in rootExl.ExdMap)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 if (string.IsNullOrWhiteSpace(name) || id < 0)
                 {
                     continue;

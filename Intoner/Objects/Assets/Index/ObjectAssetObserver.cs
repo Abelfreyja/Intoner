@@ -146,8 +146,8 @@ internal sealed unsafe class ObjectAssetObserver : IDisposable
 
     private SceneVfxObject* StaticVfxCreateDetour(byte* path, byte* pool)
     {
-        var result = _staticVfxCreateHook!.Original(path, pool);
         var normalizedPath = ReadAnsiPath(path);
+        var result = _staticVfxCreateHook!.Original(path, pool);
         TrackActiveVfx((nint)result, normalizedPath);
         Enqueue(ObjectAssetObservationKind.StaticVfxCreate, normalizedPath);
         return result;
@@ -161,8 +161,8 @@ internal sealed unsafe class ObjectAssetObserver : IDisposable
 
     private nint ActorVfxCreateDetour(byte* path, nint a2, nint a3, float a4, byte a5, ushort a6, byte a7)
     {
-        var result = _actorVfxCreateHook!.Original(path, a2, a3, a4, a5, a6, a7);
         var normalizedPath = ReadAnsiPath(path);
+        var result = _actorVfxCreateHook!.Original(path, a2, a3, a4, a5, a6, a7);
         TrackActiveVfx(result, normalizedPath);
         Enqueue(ObjectAssetObservationKind.ActorVfxCreate, normalizedPath);
         return result;
@@ -252,7 +252,7 @@ internal sealed unsafe class ObjectAssetObserver : IDisposable
             while (!IsDisposing)
             {
                 var batch = new List<ObjectAssetObservation>();
-                var seenObservations = new HashSet<ObjectAssetObservation>();
+                var seenObservations = new HashSet<ObjectAssetObservation>(ObjectAssetObservationComparer.Instance);
                 while (_queue.TryDequeue(out var observation))
                 {
                     if (seenObservations.Add(observation))
@@ -304,5 +304,19 @@ internal sealed unsafe class ObjectAssetObserver : IDisposable
 
     private static bool IsAscii(string value)
         => value.All(static c => c <= 0x7F);
+
+    private sealed class ObjectAssetObservationComparer : IEqualityComparer<ObjectAssetObservation>
+    {
+        public static ObjectAssetObservationComparer Instance { get; } = new();
+
+        public bool Equals(ObjectAssetObservation left, ObjectAssetObservation right)
+            => left.Kind == right.Kind
+            && string.Equals(left.Path, right.Path, StringComparison.OrdinalIgnoreCase);
+
+        public int GetHashCode(ObjectAssetObservation observation)
+            => HashCode.Combine(
+                observation.Kind,
+                StringComparer.OrdinalIgnoreCase.GetHashCode(observation.Path));
+    }
 }
 

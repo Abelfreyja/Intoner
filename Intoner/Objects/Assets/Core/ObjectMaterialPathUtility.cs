@@ -1,6 +1,4 @@
 using Dalamud.Plugin.Services;
-using Lumina.Data.Files;
-using Intoner.Objects.Assets;
 using PenumbraMdlFile = Penumbra.GameData.Files.MdlFile;
 using PenumbraMtrlFile = Penumbra.GameData.Files.MtrlFile;
 
@@ -19,7 +17,7 @@ internal static class ObjectMaterialPathUtility
         List<string> materialPaths = [];
         HashSet<string> seenPaths = new(StringComparer.OrdinalIgnoreCase);
         string normalizedModelPath = ObjectPathRules.NormalizeGamePath(modelPath);
-        if (!AssetPathClassifier.IsModelPath(normalizedModelPath))
+        if (!ObjectPathRules.IsModelPath(normalizedModelPath))
         {
             return materialPaths;
         }
@@ -48,7 +46,7 @@ internal static class ObjectMaterialPathUtility
         List<string> materialPaths = [];
         HashSet<string> seenPaths = new(StringComparer.OrdinalIgnoreCase);
         string normalizedRequestedModelPath = ObjectPathRules.NormalizeGamePath(requestedModelPath);
-        if (!AssetPathClassifier.IsModelPath(normalizedRequestedModelPath))
+        if (!ObjectPathRules.IsModelPath(normalizedRequestedModelPath))
         {
             return materialPaths;
         }

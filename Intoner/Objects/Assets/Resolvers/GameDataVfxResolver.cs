@@ -8,11 +8,6 @@ namespace Intoner.Objects.Assets;
 
 internal sealed class GameDataVfxResolver
 {
-    private const string ExportedSharedGroupSource = "exported shared group";
-    private const string HousingExteriorSource = "housing exterior";
-    private const string HousingInteriorSource = "housing interior";
-    private const string TerritoryZoneSharedGroupSource = "territory zone shared group";
-    private const string TerritoryLayoutSource = "territory layout";
     private const string StatusEffectSource = "status effect";
     private const string ActionSource = "action effect";
     private const string ActionTimelineSource = "action timeline";
@@ -21,220 +16,55 @@ internal sealed class GameDataVfxResolver
 
     private readonly ILogger<GameDataVfxResolver> _logger;
     private readonly IObjectAssetGameData _gameData;
+    private readonly GameDataLayoutAssetResolver _layoutAssetResolver;
 
-    public GameDataVfxResolver(ILogger<GameDataVfxResolver> logger, IObjectAssetGameData gameData)
+    public GameDataVfxResolver(
+        ILogger<GameDataVfxResolver> logger,
+        IObjectAssetGameData gameData,
+        GameDataLayoutAssetResolver layoutAssetResolver)
     {
-        _logger = logger;
-        _gameData = gameData;
+        _logger              = logger;
+        _gameData            = gameData;
+        _layoutAssetResolver = layoutAssetResolver;
     }
 
-    public IReadOnlyList<ResolvedVfxPath> Resolve(SqpackIndexSnapshot sqpackIndexSnapshot)
+    public IReadOnlyList<ResolvedVfxPath> Resolve(
+        SqpackIndexSnapshot sqpackIndexSnapshot,
+        CancellationToken cancellationToken = default)
     {
         Dictionary<string, ResolvedVfxPathAccumulator> resolvedPaths = new(StringComparer.OrdinalIgnoreCase);
-        Dictionary<string, SharedGroupAssetInfo> sharedGroupCache = new(StringComparer.OrdinalIgnoreCase);
-        Dictionary<string, TerritoryLayoutAssetInfo> territoryLayoutCache = new(StringComparer.OrdinalIgnoreCase);
         VfxTimelineReferenceCache timelineReferenceCache = new(_gameData);
-        ExcelSheet<TerritoryType>? territorySheet = _gameData.GetCurrentLanguageExcelSheet<TerritoryType>();
-        ExcelSheet<PlaceName>? placeNameSheet = _gameData.GetCurrentLanguageExcelSheet<PlaceName>();
-
-        CollectSharedGroupRows(
-            resolvedPaths,
-            sqpackIndexSnapshot,
-            sharedGroupCache,
-            _gameData.GetExcelSheet<ExportedSG>(),
-            ExportedSharedGroupSource,
-            static row => row.RowId,
-            static row => ObjectPathRules.NormalizeGamePath(row.SgbPath.ToString()));
-        CollectAssetPathRows(
-            resolvedPaths,
-            sqpackIndexSnapshot,
-            sharedGroupCache,
-            _gameData.GetExcelSheet<HousingExterior>(),
-            HousingExteriorSource,
-            static row => row.RowId,
-            static row => ObjectPathRules.NormalizeGamePath(row.Model.ExtractText()));
-        CollectHousingInteriorVfx(
-            resolvedPaths,
-            sqpackIndexSnapshot,
-            sharedGroupCache,
-            _gameData.GetExcelSheet<HousingInterior>());
-        CollectTerritoryZoneSharedGroupVfx(
-            resolvedPaths,
-            sqpackIndexSnapshot,
-            sharedGroupCache,
-            territorySheet,
-            placeNameSheet);
-        CollectTerritoryLayoutVfx(
-            resolvedPaths,
-            territoryLayoutCache,
-            territorySheet,
-            placeNameSheet);
-        CollectStatusVfx(resolvedPaths, sqpackIndexSnapshot);
-        CollectActionVfx(resolvedPaths, sqpackIndexSnapshot, timelineReferenceCache);
-        CollectEmoteTimelineVfx(resolvedPaths, sqpackIndexSnapshot, timelineReferenceCache);
-        CollectGimmickTimelineVfx(resolvedPaths, sqpackIndexSnapshot, timelineReferenceCache);
+        MergeLayoutVfx(resolvedPaths, sqpackIndexSnapshot, cancellationToken);
+        CollectStatusVfx(resolvedPaths, sqpackIndexSnapshot, cancellationToken);
+        CollectActionVfx(resolvedPaths, sqpackIndexSnapshot, timelineReferenceCache, cancellationToken);
+        CollectEmoteTimelineVfx(resolvedPaths, sqpackIndexSnapshot, timelineReferenceCache, cancellationToken);
+        CollectGimmickTimelineVfx(resolvedPaths, sqpackIndexSnapshot, timelineReferenceCache, cancellationToken);
 
         IReadOnlyList<ResolvedVfxPath> snapshot = ResolvedVfxPathAccumulator.BuildSnapshot(resolvedPaths.Values);
         _logger.LogInformation("resolved {VfxCount} static vfx paths from game data sources", snapshot.Count);
         return snapshot;
     }
 
-    private void CollectAssetPathRows<T>(
+    private void MergeLayoutVfx(
         IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
         SqpackIndexSnapshot sqpackIndexSnapshot,
-        IDictionary<string, SharedGroupAssetInfo> sharedGroupCache,
-        IEnumerable<T>? rows,
-        string source,
-        Func<T, uint> rowIdSelector,
-        Func<T, string> pathSelector)
+        CancellationToken cancellationToken)
     {
-        if (rows is null)
+        foreach (ResolvedVfxPath resolvedVfxPath in _layoutAssetResolver.Resolve(cancellationToken).ResolvedVfxPaths)
         {
-            return;
-        }
-
-        foreach (T row in rows)
-        {
-            TryCollectGameDataAssetPath(
+            cancellationToken.ThrowIfCancellationRequested();
+            _ = VfxResolvedPathUtility.TryMergeResolvedPath(
                 resolvedPaths,
-                sqpackIndexSnapshot,
-                sharedGroupCache,
-                rowIdSelector(row),
-                source,
-                pathSelector(row),
-                ObjectTerritoryMetadata.Empty);
-        }
-    }
-
-    private void CollectSharedGroupRows<T>(
-        IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
-        SqpackIndexSnapshot sqpackIndexSnapshot,
-        IDictionary<string, SharedGroupAssetInfo> sharedGroupCache,
-        IEnumerable<T>? rows,
-        string source,
-        Func<T, uint> rowIdSelector,
-        Func<T, string> pathSelector)
-    {
-        if (rows is null)
-        {
-            return;
-        }
-
-        foreach (T row in rows)
-        {
-            TryCollectSharedGroupVfx(
-                resolvedPaths,
-                sqpackIndexSnapshot,
-                sharedGroupCache,
-                rowIdSelector(row),
-                source,
-                pathSelector(row),
-                ObjectTerritoryMetadata.Empty);
-        }
-    }
-
-    private void CollectHousingInteriorVfx(
-        IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
-        SqpackIndexSnapshot sqpackIndexSnapshot,
-        IDictionary<string, SharedGroupAssetInfo> sharedGroupCache,
-        IEnumerable<HousingInterior>? rows)
-    {
-        if (rows is null)
-        {
-            return;
-        }
-
-        foreach (HousingInterior row in rows)
-        {
-            if (!GameDataAssetPathUtility.TryBuildHousingInteriorSourcePath(row, out string sourcePath))
-            {
-                continue;
-            }
-
-            TryCollectGameDataAssetPath(
-                resolvedPaths,
-                sqpackIndexSnapshot,
-                sharedGroupCache,
-                row.RowId,
-                HousingInteriorSource,
-                sourcePath,
-                ObjectTerritoryMetadata.Empty);
-        }
-    }
-
-    private void CollectTerritoryZoneSharedGroupVfx(
-        IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
-        SqpackIndexSnapshot sqpackIndexSnapshot,
-        IDictionary<string, SharedGroupAssetInfo> sharedGroupCache,
-        IEnumerable<TerritoryType>? territories,
-        ExcelSheet<PlaceName>? placeNames)
-    {
-        if (territories is null)
-        {
-            return;
-        }
-
-        foreach (TerritoryType territory in territories)
-        {
-            if (!territory.IsInUse)
-            {
-                continue;
-            }
-
-            var zoneSharedGroups = territory.ZoneSharedGroup.ValueNullable;
-            if (zoneSharedGroups is null)
-            {
-                continue;
-            }
-
-            ObjectTerritoryMetadata territoryMetadata = ObjectTerritoryMetadataUtility.BuildFromTerritory(territory, placeNames);
-            foreach (ZoneSharedGroup zoneSharedGroup in zoneSharedGroups)
-            {
-                string sharedGroupPath = ObjectPathRules.NormalizeGamePath(zoneSharedGroup.LGBSharedGroup.ToString());
-                TryCollectSharedGroupVfx(
-                    resolvedPaths,
-                    sqpackIndexSnapshot,
-                    sharedGroupCache,
-                    territory.RowId,
-                    TerritoryZoneSharedGroupSource,
-                    sharedGroupPath,
-                    territoryMetadata);
-            }
-        }
-    }
-
-    private void CollectTerritoryLayoutVfx(
-        IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
-        IDictionary<string, TerritoryLayoutAssetInfo> territoryLayoutCache,
-        IEnumerable<TerritoryType>? territories,
-        ExcelSheet<PlaceName>? placeNames)
-    {
-        if (territories is null)
-        {
-            return;
-        }
-
-        foreach (TerritoryType territory in territories)
-        {
-            if (!territory.IsInUse)
-            {
-                continue;
-            }
-
-            string territoryLayoutPath = GameDataAssetPathUtility.BuildTerritoryLayoutPath(territory.Bg.ExtractText());
-            ObjectTerritoryMetadata territoryMetadata = ObjectTerritoryMetadataUtility.BuildFromTerritory(territory, placeNames);
-            TryCollectTerritoryLayoutVfx(
-                resolvedPaths,
-                territoryLayoutCache,
-                territory.RowId,
-                territoryLayoutPath,
-                territoryMetadata);
+                _gameData,
+                resolvedVfxPath,
+                sqpackIndexSnapshot);
         }
     }
 
     private void CollectStatusVfx(
         IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
-        SqpackIndexSnapshot sqpackIndexSnapshot)
+        SqpackIndexSnapshot sqpackIndexSnapshot,
+        CancellationToken cancellationToken)
     {
         ExcelSheet<Status>? sheet = _gameData.GetCurrentLanguageExcelSheet<Status>();
         if (sheet is null)
@@ -244,6 +74,7 @@ internal sealed class GameDataVfxResolver
 
         foreach (Status row in sheet)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             string rowName = row.Name.ExtractText();
             IReadOnlyList<string> rowSearchTerms = BuildSearchTerms(StatusEffectSource, row.RowId.ToString(), rowName);
 
@@ -295,7 +126,8 @@ internal sealed class GameDataVfxResolver
     private void CollectActionVfx(
         IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
         SqpackIndexSnapshot sqpackIndexSnapshot,
-        VfxTimelineReferenceCache timelineReferenceCache)
+        VfxTimelineReferenceCache timelineReferenceCache,
+        CancellationToken cancellationToken)
     {
         ExcelSheet<LuminaAction>? sheet = _gameData.GetCurrentLanguageExcelSheet<LuminaAction>();
         if (sheet is null)
@@ -305,6 +137,7 @@ internal sealed class GameDataVfxResolver
 
         foreach (LuminaAction row in sheet)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             string rowName = row.Name.ExtractText();
             IReadOnlyList<string> rowSearchTerms = BuildSearchTerms(ActionSource, row.RowId.ToString(), rowName);
 
@@ -347,7 +180,8 @@ internal sealed class GameDataVfxResolver
                 AssetPathSource.GameData,
                 [.. rowSearchTerms, ActionTimelineSource],
                 row.AnimationStart.ValueNullable?.Name.ValueNullable?.Key.ToString() ?? string.Empty,
-                timelineReferenceCache);
+                timelineReferenceCache,
+                cancellationToken);
             CollectTimelineReferences(
                 resolvedPaths,
                 sqpackIndexSnapshot,
@@ -355,7 +189,8 @@ internal sealed class GameDataVfxResolver
                 AssetPathSource.GameData,
                 [.. rowSearchTerms, ActionTimelineSource],
                 row.AnimationEnd.ValueNullable?.Key.ToString() ?? string.Empty,
-                timelineReferenceCache);
+                timelineReferenceCache,
+                cancellationToken);
             CollectTimelineReferences(
                 resolvedPaths,
                 sqpackIndexSnapshot,
@@ -363,7 +198,8 @@ internal sealed class GameDataVfxResolver
                 AssetPathSource.GameData,
                 [.. rowSearchTerms, ActionTimelineSource],
                 row.ActionTimelineHit.ValueNullable?.Key.ToString() ?? string.Empty,
-                timelineReferenceCache);
+                timelineReferenceCache,
+                cancellationToken);
             CollectTimelineReferences(
                 resolvedPaths,
                 sqpackIndexSnapshot,
@@ -371,14 +207,16 @@ internal sealed class GameDataVfxResolver
                 AssetPathSource.GameData,
                 [.. rowSearchTerms, ActionTimelineSource],
                 row.AnimationEnd.ValueNullable?.WeaponTimeline.ValueNullable?.File.ToString() ?? string.Empty,
-                timelineReferenceCache);
+                timelineReferenceCache,
+                cancellationToken);
         }
     }
 
     private void CollectEmoteTimelineVfx(
         IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
         SqpackIndexSnapshot sqpackIndexSnapshot,
-        VfxTimelineReferenceCache timelineReferenceCache)
+        VfxTimelineReferenceCache timelineReferenceCache,
+        CancellationToken cancellationToken)
     {
         ExcelSheet<Emote>? sheet = _gameData.GetCurrentLanguageExcelSheet<Emote>();
         if (sheet is null)
@@ -388,6 +226,7 @@ internal sealed class GameDataVfxResolver
 
         foreach (Emote row in sheet)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             string rowName = row.Name.ExtractText();
             IReadOnlyList<string> rowSearchTerms = BuildSearchTerms(EmoteTimelineSource, row.RowId.ToString(), rowName);
 
@@ -400,7 +239,8 @@ internal sealed class GameDataVfxResolver
                     AssetPathSource.GameData,
                     rowSearchTerms,
                     timeline.ValueNullable?.Key.ToString() ?? string.Empty,
-                    timelineReferenceCache);
+                    timelineReferenceCache,
+                    cancellationToken);
             }
         }
     }
@@ -408,7 +248,8 @@ internal sealed class GameDataVfxResolver
     private void CollectGimmickTimelineVfx(
         IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
         SqpackIndexSnapshot sqpackIndexSnapshot,
-        VfxTimelineReferenceCache timelineReferenceCache)
+        VfxTimelineReferenceCache timelineReferenceCache,
+        CancellationToken cancellationToken)
     {
         ExcelSheet<ActionTimeline>? sheet = _gameData.GetCurrentLanguageExcelSheet<ActionTimeline>();
         if (sheet is null)
@@ -418,6 +259,7 @@ internal sealed class GameDataVfxResolver
 
         foreach (ActionTimeline row in sheet)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             string key = row.Key.ToString();
             if (string.IsNullOrWhiteSpace(key)
              || !key.Contains("gimmick", StringComparison.OrdinalIgnoreCase))
@@ -432,107 +274,8 @@ internal sealed class GameDataVfxResolver
                 AssetPathSource.GameData,
                 BuildSearchTerms(GimmickTimelineSource, row.RowId.ToString(), key),
                 key,
-                timelineReferenceCache);
-        }
-    }
-
-    private void TryCollectGameDataAssetPath(
-        IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
-        SqpackIndexSnapshot sqpackIndexSnapshot,
-        IDictionary<string, SharedGroupAssetInfo> sharedGroupCache,
-        uint rowId,
-        string source,
-        string sourcePath,
-        in ObjectTerritoryMetadata territoryMetadata)
-    {
-        if (ObjectPathRules.IsCatalogSharedGroupPath(sourcePath))
-        {
-            TryCollectSharedGroupVfx(
-                resolvedPaths,
-                sqpackIndexSnapshot,
-                sharedGroupCache,
-                rowId,
-                source,
-                sourcePath,
-                territoryMetadata);
-        }
-    }
-
-    private void TryCollectSharedGroupVfx(
-        IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
-        SqpackIndexSnapshot sqpackIndexSnapshot,
-        IDictionary<string, SharedGroupAssetInfo> sharedGroupCache,
-        uint rowId,
-        string source,
-        string sharedGroupPath,
-        in ObjectTerritoryMetadata territoryMetadata)
-    {
-        if (!ObjectPathRules.IsCatalogSharedGroupPath(sharedGroupPath)
-         || !_gameData.FileExists(sharedGroupPath))
-        {
-            return;
-        }
-
-        if (!sharedGroupCache.TryGetValue(sharedGroupPath, out SharedGroupAssetInfo? sharedGroupAssets))
-        {
-            sharedGroupAssets = SharedGroupAssetResolver.AnalyzeSharedGroup(_gameData, sharedGroupPath);
-            sharedGroupCache.Add(sharedGroupPath, sharedGroupAssets);
-        }
-
-        IReadOnlyList<string> searchTerms = BuildSearchTerms(
-            source,
-            rowId.ToString(),
-            sharedGroupPath,
-            territoryMetadata.SearchTerms,
-            sharedGroupAssets.NestedSharedGroupPaths);
-        foreach (string vfxPath in sharedGroupAssets.StandaloneVfxPaths)
-        {
-            _ = VfxResolvedPathUtility.TryMergeResolvedPath(
-                resolvedPaths,
-                _gameData,
-                vfxPath,
-                sqpackIndexSnapshot,
-                KnownVfxFamily.None,
-                RuntimeVfxEvidence.LayoutAutoplay,
-                AssetPathSource.SharedGroup,
-                AssetPathContract.ParsedFileReference,
-                searchTerms);
-        }
-    }
-
-    private void TryCollectTerritoryLayoutVfx(
-        IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
-        IDictionary<string, TerritoryLayoutAssetInfo> territoryLayoutCache,
-        uint rowId,
-        string territoryLayoutPath,
-        in ObjectTerritoryMetadata territoryMetadata)
-    {
-        if (string.IsNullOrWhiteSpace(territoryLayoutPath)
-         || !_gameData.FileExists(territoryLayoutPath))
-        {
-            return;
-        }
-
-        if (!territoryLayoutCache.TryGetValue(territoryLayoutPath, out TerritoryLayoutAssetInfo? territoryLayoutAssets))
-        {
-            territoryLayoutAssets = TerritoryLayoutAssetResolver.AnalyzeTerritoryLayout(_gameData, territoryLayoutPath);
-            territoryLayoutCache.Add(territoryLayoutPath, territoryLayoutAssets);
-        }
-
-        IReadOnlyList<string> searchTerms = BuildSearchTerms(
-            TerritoryLayoutSource,
-            rowId.ToString(),
-            territoryLayoutPath,
-            territoryMetadata.SearchTerms,
-            territoryLayoutAssets.ReferencedLayoutPaths,
-            territoryLayoutAssets.ReferencedSharedGroupPaths);
-        foreach (ResolvedVfxPath resolvedVfxPath in territoryLayoutAssets.ResolvedVfxPaths)
-        {
-            _ = VfxResolvedPathUtility.TryMergeResolvedPath(
-                resolvedPaths,
-                _gameData,
-                resolvedVfxPath,
-                extraSearchTerms: searchTerms);
+                timelineReferenceCache,
+                cancellationToken);
         }
     }
 
@@ -543,7 +286,8 @@ internal sealed class GameDataVfxResolver
         AssetPathSource recoverySource,
         IReadOnlyList<string> baseSearchTerms,
         string timelineKey,
-        VfxTimelineReferenceCache timelineReferenceCache)
+        VfxTimelineReferenceCache timelineReferenceCache,
+        CancellationToken cancellationToken)
     {
         if (!GameDataAssetPathUtility.TryBuildActionTimelinePath(timelineKey, out string timelinePath))
         {
@@ -560,6 +304,7 @@ internal sealed class GameDataVfxResolver
         IReadOnlyList<string> searchTerms = ObjectSearchTermUtility.MergeTerms(baseSearchTerms, [normalizedTimelinePath]);
         foreach (TmbVfxReference reference in timelineReferenceCache.Get(normalizedTimelinePath))
         {
+            cancellationToken.ThrowIfCancellationRequested();
             _ = VfxResolvedPathUtility.TryMergeResolvedPath(
                 resolvedPaths,
                 _gameData,

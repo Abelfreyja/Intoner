@@ -718,7 +718,7 @@ internal static class VfxAssetAnalyzer
             return;
         }
 
-        if (AssetPathClassifier.IsModelPath(normalizedPath)
+        if (ObjectPathRules.IsModelPath(normalizedPath)
          && (!requireExistingModelPath
           || (gameData is not null && gameData.FileExists(normalizedPath))))
         {

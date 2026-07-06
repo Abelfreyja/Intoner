@@ -16,34 +16,14 @@ internal sealed record StaticAssetDiscoveryReuseInput(
                 : null,
             loadedSections.Contains(ObjectAssetCacheSectionKind.StaticBgObjects)
                 ? snapshot.StaticGameDataBgObjects
-                    .Select(ToGameDataBgObjectAsset)
+                    .Select(ObjectAssetCacheProjection.ToGameDataBgObjectAsset)
                     .ToArray()
                 : null,
             loadedSections.Contains(ObjectAssetCacheSectionKind.StaticResolvedVfx)
                 ? snapshot.StaticResolvedVfxEntries
-                    .Select(ToResolvedVfxPath)
+                    .Select(ObjectAssetCacheProjection.ToResolvedVfxPath)
                     .ToArray()
                 : null);
-
-    internal static GameDataBgObjectAsset ToGameDataBgObjectAsset(ObjectAssetCacheStaticBgObject asset)
-        => new(
-            asset.ModelPath,
-            asset.Source,
-            asset.RowId,
-            asset.SourcePath,
-            asset.TerritoryIds,
-            asset.TerritoryNames,
-            asset.SearchTerms);
-
-    internal static ResolvedVfxPath ToResolvedVfxPath(ObjectAssetCacheResolvedVfxEntry asset)
-        => new(
-            asset.Path,
-            asset.Family,
-            asset.Evidence,
-            asset.Sources,
-            asset.Contracts,
-            asset.SearchTerms,
-            asset.Analysis);
 }
 
 internal sealed record StaticAssetDiscoverySnapshot(
@@ -57,10 +37,10 @@ internal sealed record StaticAssetDiscoverySnapshot(
             gameVersion,
             snapshot.StaticCollisionPaths,
             snapshot.StaticGameDataBgObjects
-                .Select(StaticAssetDiscoveryReuseInput.ToGameDataBgObjectAsset)
+                .Select(ObjectAssetCacheProjection.ToGameDataBgObjectAsset)
                 .ToDictionary(static asset => asset.ModelPath, static asset => asset, StringComparer.OrdinalIgnoreCase),
             snapshot.StaticResolvedVfxEntries
-                .Select(StaticAssetDiscoveryReuseInput.ToResolvedVfxPath)
+                .Select(ObjectAssetCacheProjection.ToResolvedVfxPath)
                 .ToDictionary(static asset => asset.Path, static asset => asset, StringComparer.OrdinalIgnoreCase));
 
     public PathKnowledgeBase BuildKnowledgeBase()

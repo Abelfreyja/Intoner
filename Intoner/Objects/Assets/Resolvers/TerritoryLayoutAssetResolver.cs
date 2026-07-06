@@ -5,19 +5,20 @@ using System.Runtime.InteropServices;
 
 namespace Intoner.Objects.Assets;
 
-internal sealed class TerritoryLayoutAssetInfo(
-    IReadOnlyList<string> bgObjectModelPaths,
-    IReadOnlyList<string> referencedLayoutPaths,
-    IReadOnlyList<string> referencedSharedGroupPaths,
-    IReadOnlyList<ResolvedVfxPath> resolvedVfxPaths)
-{
-    public IReadOnlyList<string> BgObjectModelPaths { get; } = bgObjectModelPaths;
-    public IReadOnlyList<string> ReferencedLayoutPaths { get; } = referencedLayoutPaths;
-    public IReadOnlyList<string> ReferencedSharedGroupPaths { get; } = referencedSharedGroupPaths;
-    public IReadOnlyList<ResolvedVfxPath> ResolvedVfxPaths { get; } = resolvedVfxPaths;
-}
 internal static class TerritoryLayoutAssetResolver
 {
+    internal sealed class AssetInfo(
+        IReadOnlyList<string> bgObjectModelPaths,
+        IReadOnlyList<string> referencedLayoutPaths,
+        IReadOnlyList<string> referencedSharedGroupPaths,
+        IReadOnlyList<ResolvedVfxPath> resolvedVfxPaths)
+    {
+        public IReadOnlyList<string> BgObjectModelPaths { get; } = bgObjectModelPaths;
+        public IReadOnlyList<string> ReferencedLayoutPaths { get; } = referencedLayoutPaths;
+        public IReadOnlyList<string> ReferencedSharedGroupPaths { get; } = referencedSharedGroupPaths;
+        public IReadOnlyList<ResolvedVfxPath> ResolvedVfxPaths { get; } = resolvedVfxPaths;
+    }
+
     private static readonly uint LvbSectionMagic = MakeSectionMagic('S', 'C', 'N', '1');
     private static readonly uint LgbSectionMagic = MakeSectionMagic('L', 'G', 'P', '1');
     private static readonly uint TmlbSectionMagic = MakeSectionMagic('T', 'M', 'L', 'B');
@@ -31,20 +32,20 @@ internal static class TerritoryLayoutAssetResolver
         public byte* Path => OffsetPath > 0 ? (byte*)Unsafe.AsPointer(ref this) + OffsetPath : null;
     }
 
-    public static TerritoryLayoutAssetInfo AnalyzeTerritoryLayout(IObjectAssetGameData gameData, string territoryLayoutPath)
+    public static AssetInfo AnalyzeTerritoryLayout(IObjectAssetGameData gameData, string territoryLayoutPath)
     {
         string normalizedPath = ObjectPathRules.NormalizeGamePath(territoryLayoutPath);
         if (string.IsNullOrWhiteSpace(normalizedPath)
          || !normalizedPath.EndsWith(".lvb", StringComparison.OrdinalIgnoreCase)
          || !gameData.FileExists(normalizedPath))
         {
-            return new TerritoryLayoutAssetInfo([], [], [], []);
+            return new AssetInfo([], [], [], []);
         }
 
         byte[]? fileData = gameData.GetFile(normalizedPath)?.Data;
         if (fileData is null || fileData.Length < Unsafe.SizeOf<FileHeader>())
         {
-            return new TerritoryLayoutAssetInfo([], [], [], []);
+            return new AssetInfo([], [], [], []);
         }
 
         return new TerritoryLayoutAssetCollector(gameData).Collect(normalizedPath, fileData);
@@ -55,11 +56,6 @@ internal static class TerritoryLayoutAssetResolver
          | ((uint)(byte)b << 8)
          | ((uint)(byte)c << 16)
          | ((uint)(byte)d << 24);
-
-    private static unsafe string ReadCString(byte* pointer)
-        => pointer is null
-            ? string.Empty
-            : ObjectStringUtility.TrimOrEmpty(Marshal.PtrToStringUTF8((nint)pointer));
 
     private sealed unsafe class TerritoryLayoutAssetCollector(IObjectAssetGameData gameData)
     {
@@ -74,10 +70,10 @@ internal static class TerritoryLayoutAssetResolver
         private readonly HashSet<string> _seenSharedGroupPaths = new(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> _seenTimelinePaths = new(StringComparer.OrdinalIgnoreCase);
 
-        public TerritoryLayoutAssetInfo Collect(string territoryLayoutPath, byte[] fileData)
+        public AssetInfo Collect(string territoryLayoutPath, byte[] fileData)
         {
             CollectLvb(territoryLayoutPath, fileData);
-            return new TerritoryLayoutAssetInfo(
+            return new AssetInfo(
                 _bgObjectModelPaths,
                 _referencedLayoutPaths,
                 _referencedSharedGroupPaths,
@@ -197,7 +193,7 @@ internal static class TerritoryLayoutAssetResolver
                     case InstanceType.Vfx:
                         CollectVfx((FileLayerGroupInstanceVfx*)instance);
                         break;
-                    case InstanceType.LineVfx: // what the fuck does this do?
+                    case InstanceType.LineVfx:
                         break;
                     case InstanceType.SharedGroup:
                     case InstanceType.HelperObject:
@@ -243,20 +239,14 @@ internal static class TerritoryLayoutAssetResolver
             _referencedSharedGroupPaths.Add(sharedGroupPath);
 
             SharedGroupAssetInfo sharedGroupAssets = SharedGroupAssetResolver.AnalyzeSharedGroup(_gameData, sharedGroupPath);
-            foreach (string modelPath in sharedGroupAssets.BgObjectModelPaths)
+            foreach (string modelPath in sharedGroupAssets.BgObjectModelPaths.Where(_seenBgObjectModels.Add))
             {
-                if (_seenBgObjectModels.Add(modelPath))
-                {
-                    _bgObjectModelPaths.Add(modelPath);
-                }
+                _bgObjectModelPaths.Add(modelPath);
             }
 
-            foreach (string nestedSharedGroupPath in sharedGroupAssets.NestedSharedGroupPaths)
+            foreach (string nestedSharedGroupPath in sharedGroupAssets.NestedSharedGroupPaths.Where(_seenSharedGroupPaths.Add))
             {
-                if (_seenSharedGroupPaths.Add(nestedSharedGroupPath))
-                {
-                    _referencedSharedGroupPaths.Add(nestedSharedGroupPath);
-                }
+                _referencedSharedGroupPaths.Add(nestedSharedGroupPath);
             }
 
             IReadOnlyList<string> searchTerms = ObjectSearchTermUtility.BuildStableTerms("layout autoplay", sharedGroupPath);
@@ -363,6 +353,11 @@ internal static class TerritoryLayoutAssetResolver
                 source,
                 contract,
                 searchTerms);
+
+        private static string ReadCString(byte* pointer)
+            => pointer is null
+                ? string.Empty
+                : ObjectStringUtility.TrimOrEmpty(Marshal.PtrToStringUTF8((nint)pointer));
     }
 }
 
