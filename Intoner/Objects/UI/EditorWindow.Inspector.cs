@@ -63,50 +63,47 @@ internal sealed partial class EditorWindow
 
     private void DrawInspectorHero(ObjectSnapshot? selected, bool selectedActive)
     {
-        DrawPanelCard(
+        EditorHeroCard.Status? placementStatus = null;
+        PlacementFixProposal? placementFix = null;
+        if (TryResolveHousingPlacementEvaluation(selected, out PlacementEvaluation resolvedPlacementEvaluation))
+        {
+            placementFix = ResolveHousingPlacementHeroFix(resolvedPlacementEvaluation);
+            placementStatus = CreateHousingPlacementHeroStatus(resolvedPlacementEvaluation, placementFix);
+        }
+
+        bool statusActionClicked = EditorHeroCard.Draw(
             "inspector-hero",
-            EditorColors.ButtonDefault with { W = 0.30f },
-            EditorColors.AccentPurple with { W = 0.24f },
-            8f * ImGuiHelpers.GlobalScale,
-            new Vector2(10f * ImGuiHelpers.GlobalScale, 8f * ImGuiHelpers.GlobalScale),
-            () =>
-            {
-                using var table = ImRaii.Table("##objectInspectorHeroHeader", 1, ImGuiTableFlags.SizingStretchSame);
-                if (!table)
-                {
-                    return;
-                }
+            new EditorHeroCard.Content(
+                FontAwesomeIcon.SlidersH,
+                "Edit Selected",
+                ResolveInspectorHeroSubtitle(selected),
+                EditorColors.AccentPurple,
+                placementStatus),
+            new EditorHeroCard.Actions(
+                () => DrawSelectedObjectActions(selected, selectedActive),
+                ResolveSelectedObjectActionsSize()));
 
-                ImGui.TableSetupColumn("Content", ImGuiTableColumnFlags.WidthStretch);
+        if (selected is null || !statusActionClicked || !placementFix.HasValue)
+        {
+            return;
+        }
 
-                ImGui.TableNextRow();
-                ImGui.TableNextColumn();
-                using (ImRaii.PushFont(UiBuilder.IconFont))
-                using (ImRaii.PushColor(ImGuiCol.Text, EditorColors.AccentPurple))
-                {
-                    ImGui.TextUnformatted(FontAwesomeIcon.SlidersH.ToIconString());
-                }
+        _ = TryApplyPlacementFix(selected, placementFix.Value);
+    }
 
-                ImGui.SameLine();
-                using (ImRaii.Group())
-                {
-                    ImGui.TextUnformatted("Edit Selected");
-                    ImGui.TextDisabled(selected is null
-                        ? "No selection"
-                        : _editorSelection.Count == 1
-                            ? $"{selected.Kind} | {selected.Name}"
-                            : $"{_editorSelection.Count} selected | primary {selected.Name}");
-                }
+    private string ResolveInspectorHeroSubtitle(ObjectSnapshot? selected)
+    {
+        if (selected is null)
+        {
+            return "No selection";
+        }
 
-                ImGui.TableNextRow();
-                ImGui.TableNextColumn();
-                ImGui.Dummy(new Vector2(0f, 4f * ImGuiHelpers.GlobalScale));
+        if (_editorSelection.Count == 1)
+        {
+            return $"{selected.Kind} | {selected.Name}";
+        }
 
-                ImGui.TableNextRow();
-                ImGui.TableNextColumn();
-                DrawSelectedObjectActions(selected, selectedActive);
-
-            });
+        return $"{_editorSelection.Count} selected | primary {selected.Name}";
     }
 
     private void DrawInspectorDetailsCard(ObjectSnapshot? selected, bool selectedActive)
@@ -153,11 +150,6 @@ internal sealed partial class EditorWindow
             UiSharedService.AttachToolTip(BuildObjectCreationContextTooltip(snapshot.CreatedIn));
         }
         ImGuiHelpers.ScaledDummy(6f);
-
-        if (DrawHousingPlacementInspector(snapshot))
-        {
-            ImGuiHelpers.ScaledDummy(6f);
-        }
 
         DrawSelectedObjectState(snapshot, selectedActive);
         ImGuiHelpers.ScaledDummy(6f);
@@ -1327,6 +1319,23 @@ internal sealed partial class EditorWindow
         DrawToggleLockSelectedButton();
         ImGui.SameLine();
         DrawRemoveSelectedButton();
+    }
+
+    private static Vector2 ResolveSelectedObjectActionsSize()
+    {
+        static float Edge(FontAwesomeIcon icon)
+            => ResolveSquareIconButtonMetrics(icon.ToIconString()).Edge;
+
+        float clipboardEdge = Edge(FontAwesomeIcon.Clipboard);
+        float copyEdge = Edge(FontAwesomeIcon.Copy);
+        float runningEdge = Edge(FontAwesomeIcon.Running);
+        float lockEdge = MathF.Max(
+            Edge(FontAwesomeIcon.Lock),
+            Edge(FontAwesomeIcon.Unlock));
+        float trashEdge = Edge(FontAwesomeIcon.Trash);
+        float width = clipboardEdge + copyEdge + runningEdge + lockEdge + trashEdge + (ImGui.GetStyle().ItemSpacing.X * 4f);
+        float height = MathF.Max(MathF.Max(MathF.Max(clipboardEdge, copyEdge), MathF.Max(runningEdge, lockEdge)), trashEdge);
+        return new Vector2(width, height);
     }
 
     private void DrawSelectedObjectState(ObjectSnapshot snapshot, bool selectedActive)
