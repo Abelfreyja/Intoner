@@ -1,7 +1,6 @@
 using Dalamud.Interface;
 using Intoner.Services.Gpu;
 using Microsoft.Extensions.Logging;
-using SharpDX.D3DCompiler;
 using SharpDX.Direct3D;
 using SharpDX.Direct3D11;
 using SharpDX.DXGI;
@@ -14,7 +13,7 @@ using SharpDXUtilities = SharpDX.Utilities;
 
 namespace Intoner.Objects.Rendering.Primitives;
 
-internal sealed class PrimitiveRenderResources : IDisposable
+internal sealed class PrimitiveRenderResources : GpuUiDeviceResourceHost
 {
     private const string ShaderResourceName = "Objects.Rendering.Primitives.Shaders.ObjectPrimitives.hlsl";
 
@@ -28,35 +27,27 @@ internal sealed class PrimitiveRenderResources : IDisposable
         new(0f, -1f),
     ];
 
-    private static readonly Lazy<byte[]> LineVertexShaderBytecode = new(
-        () => GpuShaderCompileService.CreateVertexShaderBytecode(
-            typeof(PrimitiveRenderResources),
-            ShaderResourceName,
-            "object native line primitive vertex shader",
-            "VSLineMain"));
+    private static readonly GpuShaderBytecode LineVertexShader = GpuShaderCompileService.CreateVertexShader(
+        typeof(PrimitiveRenderResources),
+        ShaderResourceName,
+        "object native line primitive vertex shader",
+        "VSLineMain");
 
-    private static readonly Lazy<byte[]> PointVertexShaderBytecode = new(
-        () => GpuShaderCompileService.CreateVertexShaderBytecode(
-            typeof(PrimitiveRenderResources),
-            ShaderResourceName,
-            "object native point primitive vertex shader",
-            "VSPointMain"));
+    private static readonly GpuShaderBytecode PointVertexShader = GpuShaderCompileService.CreateVertexShader(
+        typeof(PrimitiveRenderResources),
+        ShaderResourceName,
+        "object native point primitive vertex shader",
+        "VSPointMain");
 
-    private static readonly Lazy<byte[]> PixelShaderBytecode = new(
-        () => GpuShaderCompileService.CreatePixelShaderBytecode(
-            typeof(PrimitiveRenderResources),
-            ShaderResourceName,
-            "object native primitive pixel shader"));
+    private static readonly GpuShaderBytecode PixelShader = GpuShaderCompileService.CreatePixelShader(
+        typeof(PrimitiveRenderResources),
+        ShaderResourceName,
+        "object native primitive pixel shader");
 
     private static readonly int LineCornerStride = Marshal.SizeOf<PrimitiveLineCorner>();
     private static readonly int LineInstanceStride = Marshal.SizeOf<PrimitiveLineInstance>();
     private static readonly int PrimitiveVertexStride = Marshal.SizeOf<PrimitiveVertex>();
 
-    private readonly ILogger    _logger;
-    private readonly IUiBuilder _uiBuilder;
-
-    private Device? _device;
-    private DeviceContext? _context;
     private VertexShader? _lineVertexShader;
     private VertexShader? _pointVertexShader;
     private PixelShader? _pixelShader;
@@ -73,91 +64,52 @@ internal sealed class PrimitiveRenderResources : IDisposable
     private int _lineInstanceCapacity;
     private int _pointVertexCapacity;
     private int _screenVertexCapacity;
-    private bool _loggedInitializationFailure;
 
     public PrimitiveRenderResources(
         ILogger logger,
         IUiBuilder uiBuilder)
-    {
-        _logger    = logger;
-        _uiBuilder = uiBuilder;
-    }
+        : base(logger, uiBuilder, "object native primitive renderer initialization failed")
+    { }
 
     public DeviceContext? Context
-        => _context;
+        => ActiveContext;
 
     public bool TryEnsure()
+        => TryEnsureDevice(out _);
+
+    protected override void CreateDeviceResources(Device device, DeviceContext context)
     {
-        if (_device != null && _context != null)
+        _lineVertexShader = LineVertexShader.CreateVertexShader(device);
+        _pointVertexShader = PointVertexShader.CreateVertexShader(device);
+        _pixelShader = PixelShader.CreatePixelShader(device);
+        _lineInputLayout = CreateLineInputLayout(device);
+        _pointInputLayout = CreatePointInputLayout(device);
+        _lineCornerBuffer = Buffer.Create(device, BindFlags.VertexBuffer, LineCorners);
+        _constantBuffer = new Buffer(
+            device,
+            Marshal.SizeOf<PrimitiveConstants>(),
+            ResourceUsage.Default,
+            BindFlags.ConstantBuffer,
+            CpuAccessFlags.None,
+            ResourceOptionFlags.None,
+            0);
+        _rasterizerState = new RasterizerState(device, new RasterizerStateDescription
         {
-            return true;
-        }
-
-        var deviceHandle = _uiBuilder.DeviceHandle;
-        if (deviceHandle == nint.Zero)
+            CullMode = CullMode.None,
+            FillMode = FillMode.Solid,
+            IsDepthClipEnabled = false,
+            IsFrontCounterClockwise = false,
+            IsMultisampleEnabled = false,
+            IsScissorEnabled = false,
+        });
+        _depthStencilState = new DepthStencilState(device, new DepthStencilStateDescription
         {
-            return false;
-        }
-
-        Device? device = null;
-        DeviceContext? context = null;
-        try
-        {
-            Marshal.AddRef(deviceHandle);
-            device = new Device(deviceHandle);
-            context = device.ImmediateContext;
-
-            _lineVertexShader = new VertexShader(device, LineVertexShaderBytecode.Value);
-            _pointVertexShader = new VertexShader(device, PointVertexShaderBytecode.Value);
-            _pixelShader = new PixelShader(device, PixelShaderBytecode.Value);
-            _lineInputLayout = CreateLineInputLayout(device);
-            _pointInputLayout = CreatePointInputLayout(device);
-            _lineCornerBuffer = Buffer.Create(device, BindFlags.VertexBuffer, LineCorners);
-            _constantBuffer = new Buffer(
-                device,
-                Marshal.SizeOf<PrimitiveConstants>(),
-                ResourceUsage.Default,
-                BindFlags.ConstantBuffer,
-                CpuAccessFlags.None,
-                ResourceOptionFlags.None,
-                0);
-            _rasterizerState = new RasterizerState(device, new RasterizerStateDescription
-            {
-                CullMode = CullMode.None,
-                FillMode = FillMode.Solid,
-                IsDepthClipEnabled = false,
-                IsFrontCounterClockwise = false,
-                IsMultisampleEnabled = false,
-                IsScissorEnabled = false,
-            });
-            _depthStencilState = new DepthStencilState(device, new DepthStencilStateDescription
-            {
-                IsDepthEnabled = false,
-                DepthWriteMask = DepthWriteMask.Zero,
-                DepthComparison = Comparison.Always,
-                IsStencilEnabled = false,
-            });
-            _blendState = CreateBlendState(device);
-
-            _device = device;
-            _context = context;
-            _loggedInitializationFailure = false;
-            return true;
-        }
-        catch (Exception ex)
-        {
-            DisposeResources();
-            context?.Dispose();
-            device?.Dispose();
-
-            if (!_loggedInitializationFailure)
-            {
-                _loggedInitializationFailure = true;
-                _logger.LogWarning(ex, "object native primitive renderer initialization failed");
-            }
-
-            return false;
-        }
+            IsDepthEnabled = false,
+            DepthWriteMask = DepthWriteMask.Zero,
+            DepthComparison = Comparison.Always,
+            IsStencilEnabled = false,
+        });
+        _blendState = CreateBlendState(device);
     }
 
     public bool TryUploadLineInstances(DeviceContext context, PrimitiveLineInstance[] instances, int instanceCount)
@@ -229,13 +181,9 @@ internal sealed class PrimitiveRenderResources : IDisposable
         context.Draw(vertexCount, 0);
     }
 
-    public void Dispose()
-        => DisposeResources();
-
     private static InputLayout CreateLineInputLayout(Device device)
-        => new(
+        => LineVertexShader.CreateInputLayout(
             device,
-            ShaderSignature.GetInputSignature(LineVertexShaderBytecode.Value),
             [
                 new InputElement("POSITION", 0, Format.R32G32_Float, 0, 0),
                 new InputElement("TEXCOORD", 0, Format.R32G32_Float, 0, 1, InputClassification.PerInstanceData, 1),
@@ -249,9 +197,8 @@ internal sealed class PrimitiveRenderResources : IDisposable
             ]);
 
     private static InputLayout CreatePointInputLayout(Device device)
-        => new(
+        => PointVertexShader.CreateInputLayout(
             device,
-            ShaderSignature.GetInputSignature(PointVertexShaderBytecode.Value),
             [
                 new InputElement("POSITION", 0, Format.R32G32_Float, 0, 0),
                 new InputElement("TEXCOORD", 0, Format.R32_Float, InputElement.AppendAligned, 0),
@@ -290,7 +237,7 @@ internal sealed class PrimitiveRenderResources : IDisposable
             return true;
         }
 
-        if (_device == null || !TryEnsureDynamicVertexBuffer(valueCount, valueStride, ref buffer, ref capacity))
+        if (ActiveDevice == null || !TryEnsureDynamicVertexBuffer(valueCount, valueStride, ref buffer, ref capacity))
         {
             return false;
         }
@@ -315,7 +262,8 @@ internal sealed class PrimitiveRenderResources : IDisposable
 
     private bool TryEnsureDynamicVertexBuffer(int valueCount, int valueStride, ref Buffer? buffer, ref int capacity)
     {
-        if (_device == null)
+        Device? device = ActiveDevice;
+        if (device == null)
         {
             return false;
         }
@@ -328,7 +276,7 @@ internal sealed class PrimitiveRenderResources : IDisposable
         buffer?.Dispose();
         capacity = Math.Max(valueCount, Math.Max(capacity * 2, 256));
         buffer = new Buffer(
-            _device,
+            device,
             new BufferDescription(
                 valueStride * capacity,
                 ResourceUsage.Dynamic,
@@ -339,7 +287,7 @@ internal sealed class PrimitiveRenderResources : IDisposable
         return true;
     }
 
-    private void DisposeResources()
+    protected override void DisposeDeviceResources()
     {
         _blendState?.Dispose();
         _blendState = null;
@@ -367,10 +315,6 @@ internal sealed class PrimitiveRenderResources : IDisposable
         _pointVertexShader = null;
         _lineVertexShader?.Dispose();
         _lineVertexShader = null;
-        _context?.Dispose();
-        _context = null;
-        _device?.Dispose();
-        _device = null;
         _pointVertexCapacity = 0;
         _lineInstanceCapacity = 0;
         _screenVertexCapacity = 0;

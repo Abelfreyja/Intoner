@@ -191,7 +191,7 @@ internal sealed class ObjectCollectionResolver : IObjectCollectionResolver
         Queue<string> pendingPaths,
         string path)
     {
-        if (!ObjectPathRules.TryNormalizeSupportedObjectResourcePath(path, out string normalizedPath)
+        if (!ObjectAssetPathRules.TryNormalizeSupportedResourcePath(path, out string normalizedPath)
             || !reachablePaths.Add(normalizedPath))
         {
             return;
@@ -207,7 +207,7 @@ internal sealed class ObjectCollectionResolver : IObjectCollectionResolver
         Dictionary<string, CollectionResourceView> viewsByRoot = new(StringComparer.OrdinalIgnoreCase);
         foreach (ObjectSnapshot snapshot in usageSnapshots)
         {
-            if (!ObjectPathRules.TryNormalizeGamePath(ObjectSnapshotUtility.GetRootResourcePath(snapshot), out string rootPath)
+            if (!GameAssetPathRules.TryNormalizeGamePath(ObjectSnapshotUtility.GetRootResourcePath(snapshot), out string rootPath)
              || viewsByRoot.ContainsKey(rootPath))
             {
                 continue;

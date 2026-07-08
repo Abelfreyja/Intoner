@@ -1,8 +1,8 @@
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
+using Intoner.Objects.Rendering.Drawing;
 using Intoner.Services.Gpu;
 using Microsoft.Extensions.Logging;
-using SharpDX.Direct3D;
 using SharpDX.Direct3D11;
 using SharpDX.DXGI;
 using System.Numerics;
@@ -15,7 +15,7 @@ using KernelDevice = FFXIVClientStructs.FFXIV.Client.Graphics.Kernel.Device;
 namespace Intoner.Objects.UI.Services.Backdrop;
 
 // adapted from https://github.com/itsRythem/ImGui-Blur
-internal sealed unsafe class BackdropRenderer : IDisposable
+internal sealed unsafe class BackdropRenderer : GpuUiDeviceResourceHost
 {
     internal const string ShaderResourceName = "Objects.UI.Shaders.Window.ObjectWindowBlur.hlsl";
     private const int BlurIterations = 3;
@@ -23,49 +23,39 @@ internal sealed unsafe class BackdropRenderer : IDisposable
     private const float BlurNoise = 0.01f;
     private const float BlurScale = 0.42f;
 
-    private static readonly Lazy<byte[]> VertexShaderBytecode = new(
-        () => GpuShaderCompileService.CreateVertexShaderBytecode(
-            typeof(BackdropRenderer),
-            ShaderResourceName,
-            "object window blur vertex shader"));
+    private static readonly GpuShaderBytecode VertexShader = GpuShaderCompileService.CreateVertexShader(
+        typeof(BackdropRenderer),
+        ShaderResourceName,
+        "object window blur vertex shader");
 
-    private static readonly Lazy<byte[]> DownsampleShaderBytecode = new(
-        () => GpuShaderCompileService.CreatePixelShaderBytecode(
-            typeof(BackdropRenderer),
-            ShaderResourceName,
-            "object window blur downsample shader",
-            "PSDownsample"));
+    private static readonly GpuShaderBytecode DownsampleShader = GpuShaderCompileService.CreatePixelShader(
+        typeof(BackdropRenderer),
+        ShaderResourceName,
+        "object window blur downsample shader",
+        "PSDownsample");
 
-    private static readonly Lazy<byte[]> UpsampleShaderBytecode = new(
-        () => GpuShaderCompileService.CreatePixelShaderBytecode(
-            typeof(BackdropRenderer),
-            ShaderResourceName,
-            "object window blur upsample shader",
-            "PSUpsample"));
+    private static readonly GpuShaderBytecode UpsampleShader = GpuShaderCompileService.CreatePixelShader(
+        typeof(BackdropRenderer),
+        ShaderResourceName,
+        "object window blur upsample shader",
+        "PSUpsample");
 
-    private static readonly Lazy<byte[]> CompositeShaderBytecode = new(
-        () => GpuShaderCompileService.CreatePixelShaderBytecode(
-            typeof(BackdropRenderer),
-            ShaderResourceName,
-            "object window blur composite shader",
-            "PSComposite"));
-
-    private static readonly ImDrawCallback BlurProcessCallback = ProcessBlurCallback;
+    private static readonly GpuShaderBytecode CompositeShader = GpuShaderCompileService.CreatePixelShader(
+        typeof(BackdropRenderer),
+        ShaderResourceName,
+        "object window blur composite shader",
+        "PSComposite");
 
     private readonly ILogger<BackdropRenderer> _logger;
-    private readonly IUiBuilder _uiBuilder;
     private readonly BackdropEffectRegistry _effects;
+    private readonly ImGuiDrawCallbackQueue<IDrawJob> _callbackJobs = new(static job => job.Process());
     private readonly List<BackdropFramebuffer> _blurFramebuffers = [];
     private BackdropBlurConstants _blurConstants;
 
-    private Device? _device;
-    private DeviceContext? _context;
-    private VertexShader? _vertexShader;
     private PixelShader? _downsampleShader;
     private PixelShader? _upsampleShader;
     private PixelShader? _compositeShader;
-    private InputLayout? _inputLayout;
-    private Buffer? _vertexBuffer;
+    private GpuFullscreenQuad? _fullscreenQuad;
     private Buffer? _blurConstantBuffer;
     private Buffer? _surfaceConstantBuffer;
     private SamplerState? _mirrorSampler;
@@ -90,19 +80,28 @@ internal sealed unsafe class BackdropRenderer : IDisposable
     private int _preparedFrame = -1;
     private int _processedFrame = -1;
     private int _queuedFrame = -1;
-    private bool _disposed;
-    private bool _loggedInitializationFailure;
     private bool _loggedGameBackBufferFailure;
-    private bool _pendingRuntimeReset;
 
     public BackdropRenderer(
         ILogger<BackdropRenderer> logger,
         IUiBuilder uiBuilder,
         BackdropEffectRegistrationService effectRegistrations)
+        : base(logger, uiBuilder, "object window blur renderer initialization failed")
     {
         _logger = logger;
-        _uiBuilder = uiBuilder;
         _effects = effectRegistrations.CreateRegistry(this);
+    }
+
+    /// <summary> draw list callback work queued by backdrop effects </summary>
+    internal interface IDrawJob
+    {
+        void Process();
+    }
+
+    private sealed class BackdropProcessFrameJob(BackdropRenderer renderer) : IDrawJob
+    {
+        public void Process()
+            => renderer.ProcessBackdropFrame();
     }
 
     /// <summary> registers a lazy backdrop effect factory and resets any cached effect instance for that type </summary>
@@ -118,44 +117,14 @@ internal sealed unsafe class BackdropRenderer : IDisposable
         where T : BackdropEffectBase
         => _effects.Get<T>();
 
-    public void Dispose()
-    {
-        if (_disposed)
-        {
-            return;
-        }
-
-        _disposed = true;
-        DisposeRuntimeResources();
-    }
-
-    private static unsafe void ProcessBlurCallback(ImDrawList* _, ImDrawCmd* cmd)
-    {
-        var handle = GCHandle.FromIntPtr((nint)cmd->UserCallbackData);
-        try
-        {
-            if (handle.Target is BackdropRenderer renderer)
-            {
-                renderer.ProcessBackdropFrame();
-            }
-        }
-        finally
-        {
-            handle.Free();
-        }
-    }
+    protected override void DisposeManagedResources()
+        => _callbackJobs.Dispose();
 
     private bool TryPrepareFrame()
     {
         if (!OperatingSystem.IsWindows())
         {
             return false;
-        }
-
-        if (_pendingRuntimeReset)
-        {
-            DisposeRuntimeResources();
-            _pendingRuntimeReset = false;
         }
 
         var frame = ImGui.GetFrameCount();
@@ -186,7 +155,7 @@ internal sealed unsafe class BackdropRenderer : IDisposable
     }
 
     internal bool CanDrawRegion(ImDrawListPtr drawList, Vector2 min, Vector2 max)
-        => !_disposed
+        => !IsDisposed
             && !drawList.IsNull
             && max.X > min.X
             && max.Y > min.Y
@@ -239,7 +208,13 @@ internal sealed unsafe class BackdropRenderer : IDisposable
     /// <summary> ensures an effect framebuffer exists at full viewport size </summary>
     internal bool TryEnsureEffectFramebuffer(ref BackdropFramebuffer? framebuffer)
     {
-        if (_device is null || !TryPrepareFrame())
+        if (!TryPrepareFrame())
+        {
+            return false;
+        }
+
+        Device? device = ActiveDevice;
+        if (device is null)
         {
             return false;
         }
@@ -252,18 +227,19 @@ internal sealed unsafe class BackdropRenderer : IDisposable
         }
 
         framebuffer?.Dispose();
-        framebuffer = CreateFramebuffer(_device, _frameWidth, _frameHeight);
+        framebuffer = CreateFramebuffer(device, _frameWidth, _frameHeight);
         return true;
     }
 
-    internal bool TryEnsureEffectShader(Lazy<byte[]> shaderBytecode, ref PixelShader? shader)
+    internal bool TryEnsureEffectShader(GpuShaderBytecode shaderBytecode, ref PixelShader? shader)
     {
-        if (_device is null && !TryPrepareFrame())
+        if (ActiveDevice is null && !TryPrepareFrame())
         {
             return false;
         }
 
-        if (_device is null)
+        Device? device = ActiveDevice;
+        if (device is null)
         {
             return false;
         }
@@ -275,13 +251,13 @@ internal sealed unsafe class BackdropRenderer : IDisposable
 
         try
         {
-            shader = new PixelShader(_device, shaderBytecode.Value);
+            shader = shaderBytecode.CreatePixelShader(device);
             return true;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "object window backdrop effect shader initialization failed");
-            _pendingRuntimeReset = true;
+            RequestDeviceReset();
             return false;
         }
     }
@@ -299,10 +275,8 @@ internal sealed unsafe class BackdropRenderer : IDisposable
         ref int clearedFrame,
         string failureLogMessage)
     {
-        if (_context is null
-            || _vertexShader is null
-            || _inputLayout is null
-            || _vertexBuffer is null
+        if (ActiveContext is null
+            || _fullscreenQuad is null
             || _surfaceConstantBuffer is null
             || _mirrorSampler is null
             || _rasterizerState is null
@@ -323,15 +297,15 @@ internal sealed unsafe class BackdropRenderer : IDisposable
 
         try
         {
-            using var state = D3D11RenderStateSnapshot.Capture(
-                _context,
+            using var state = D3D11DrawStateScope.Capture(
+                ActiveContext,
                 pixelConstantBufferCount: 1,
                 pixelShaderResourceViewCount: 2,
                 captureScissorRectangles: true);
             ApplyFullscreenPipeline();
             if (clearedFrame != ImGui.GetFrameCount())
             {
-                _context.ClearRenderTargetView(framebuffer.RenderTargetView, new SharpDX.Mathematics.Interop.RawColor4(0f, 0f, 0f, 0f));
+                ActiveContext.ClearRenderTargetView(framebuffer.RenderTargetView, new SharpDX.Mathematics.Interop.RawColor4(0f, 0f, 0f, 0f));
                 clearedFrame = ImGui.GetFrameCount();
             }
 
@@ -341,7 +315,7 @@ internal sealed unsafe class BackdropRenderer : IDisposable
         catch (Exception ex)
         {
             _logger.LogWarning(ex, failureLogMessage);
-            _pendingRuntimeReset = true;
+            RequestDeviceReset();
             return false;
         }
     }
@@ -362,20 +336,20 @@ internal sealed unsafe class BackdropRenderer : IDisposable
             return;
         }
 
-        var handle = GCHandle.Alloc(this);
-        drawList.AddCallback(BlurProcessCallback, (void*)GCHandle.ToIntPtr(handle));
+        _callbackJobs.QueueCallback(drawList, new BackdropProcessFrameJob(this));
         _queuedFrame = frame;
     }
 
     internal bool TryEnsureEffectConstantBuffer<TConstants>(ref Buffer? constantBuffer)
         where TConstants : unmanaged
     {
-        if (_device is null && !TryPrepareFrame())
+        if (ActiveDevice is null && !TryPrepareFrame())
         {
             return false;
         }
 
-        if (_device is null)
+        Device? device = ActiveDevice;
+        if (device is null)
         {
             return false;
         }
@@ -388,7 +362,7 @@ internal sealed unsafe class BackdropRenderer : IDisposable
 
         constantBuffer?.Dispose();
         constantBuffer = new Buffer(
-            _device,
+            device,
             requiredSize,
             ResourceUsage.Dynamic,
             BindFlags.ConstantBuffer,
@@ -401,12 +375,12 @@ internal sealed unsafe class BackdropRenderer : IDisposable
     internal bool TryUpdateConstantBuffer<TConstants>(Buffer constantBuffer, in TConstants constants)
         where TConstants : unmanaged
     {
-        if (_context is null)
+        if (ActiveContext is null)
         {
             return false;
         }
 
-        var dataBox = _context.MapSubresource(constantBuffer, 0, MapMode.WriteDiscard, D3D11MapFlags.None);
+        var dataBox = ActiveContext.MapSubresource(constantBuffer, 0, MapMode.WriteDiscard, D3D11MapFlags.None);
         try
         {
             *(TConstants*)dataBox.DataPointer = constants;
@@ -414,134 +388,80 @@ internal sealed unsafe class BackdropRenderer : IDisposable
         }
         finally
         {
-            _context.UnmapSubresource(constantBuffer, 0);
+            ActiveContext.UnmapSubresource(constantBuffer, 0);
         }
     }
-    internal void QueueEffectCallback(ImDrawListPtr drawList, ImDrawCallback callback, object callbackData)
-    {
-        var handle = GCHandle.Alloc(callbackData);
-        drawList.AddCallback(callback, (void*)GCHandle.ToIntPtr(handle));
-    }
+
+    internal void QueueEffectDraw(ImDrawListPtr drawList, IDrawJob callbackJob, Action drawContent)
+        => _callbackJobs.QueueDraw(drawList, callbackJob, drawContent);
 
     private bool TryEnsureDeviceResources()
+        => TryEnsureDevice(out _);
+
+    protected override void CreateDeviceResources(Device device, DeviceContext context)
     {
-        if (_device is not null && _context is not null)
+        _fullscreenQuad = new GpuFullscreenQuad(device, VertexShader);
+        _downsampleShader = DownsampleShader.CreatePixelShader(device);
+        _upsampleShader = UpsampleShader.CreatePixelShader(device);
+        _compositeShader = CompositeShader.CreatePixelShader(device);
+        _blurConstantBuffer = new Buffer(
+            device,
+            Marshal.SizeOf<BackdropBlurConstants>(),
+            ResourceUsage.Dynamic,
+            BindFlags.ConstantBuffer,
+            CpuAccessFlags.Write,
+            ResourceOptionFlags.None,
+            0);
+        _surfaceConstantBuffer = new Buffer(
+            device,
+            Marshal.SizeOf<BackdropSurfaceConstants>(),
+            ResourceUsage.Dynamic,
+            BindFlags.ConstantBuffer,
+            CpuAccessFlags.Write,
+            ResourceOptionFlags.None,
+            0);
+
+        var samplerDescription = new SamplerStateDescription
         {
-            return true;
-        }
+            Filter = Filter.MinMagMipLinear,
+            AddressU = TextureAddressMode.Clamp,
+            AddressV = TextureAddressMode.Clamp,
+            AddressW = TextureAddressMode.Clamp,
+            ComparisonFunction = Comparison.Never,
+            MaximumLod = float.MaxValue,
+        };
+        _mirrorSampler = new SamplerState(device, samplerDescription);
 
-        var deviceHandle = _uiBuilder.DeviceHandle;
-        if (deviceHandle == nint.Zero)
+        _rasterizerState = new RasterizerState(device, new RasterizerStateDescription
         {
-            return false;
-        }
-
-        Device? device = null;
-        DeviceContext? context = null;
-        try
+            CullMode = CullMode.None,
+            FillMode = FillMode.Solid,
+            IsDepthClipEnabled = false,
+            IsScissorEnabled = false,
+            IsFrontCounterClockwise = false,
+            IsMultisampleEnabled = false,
+        });
+        _scissorRasterizerState = new RasterizerState(device, new RasterizerStateDescription
         {
-            Marshal.AddRef(deviceHandle);
-            device = new Device(deviceHandle);
-            context = device.ImmediateContext;
+            CullMode = CullMode.None,
+            FillMode = FillMode.Solid,
+            IsDepthClipEnabled = false,
+            IsScissorEnabled = true,
+            IsFrontCounterClockwise = false,
+            IsMultisampleEnabled = false,
+        });
 
-            _vertexShader = new VertexShader(device, VertexShaderBytecode.Value);
-            _downsampleShader = new PixelShader(device, DownsampleShaderBytecode.Value);
-            _upsampleShader = new PixelShader(device, UpsampleShaderBytecode.Value);
-            _compositeShader = new PixelShader(device, CompositeShaderBytecode.Value);
-            _inputLayout = new InputLayout(
-                device,
-                SharpDX.D3DCompiler.ShaderSignature.GetInputSignature(VertexShaderBytecode.Value),
-                [
-                    new InputElement("POSITION", 0, Format.R32G32_Float, 0, 0),
-                    new InputElement("TEXCOORD", 0, Format.R32G32_Float, 8, 0),
-                ]);
-
-            FullscreenVertex[] vertices =
-            [
-                new(new Vector2(-1f, 1f), new Vector2(0f, 0f)),
-                new(new Vector2(1f, 1f), new Vector2(1f, 0f)),
-                new(new Vector2(-1f, -1f), new Vector2(0f, 1f)),
-                new(new Vector2(1f, -1f), new Vector2(1f, 1f)),
-            ];
-
-            _vertexBuffer = Buffer.Create(device, BindFlags.VertexBuffer, vertices);
-            _blurConstantBuffer = new Buffer(
-                device,
-                Marshal.SizeOf<BackdropBlurConstants>(),
-                ResourceUsage.Dynamic,
-                BindFlags.ConstantBuffer,
-                CpuAccessFlags.Write,
-                ResourceOptionFlags.None,
-                0);
-            _surfaceConstantBuffer = new Buffer(
-                device,
-                Marshal.SizeOf<BackdropSurfaceConstants>(),
-                ResourceUsage.Dynamic,
-                BindFlags.ConstantBuffer,
-                CpuAccessFlags.Write,
-                ResourceOptionFlags.None,
-                0);
-
-            var samplerDescription = new SamplerStateDescription
-            {
-                Filter = Filter.MinMagMipLinear,
-                AddressU = TextureAddressMode.Clamp,
-                AddressV = TextureAddressMode.Clamp,
-                AddressW = TextureAddressMode.Clamp,
-                ComparisonFunction = Comparison.Never,
-                MaximumLod = float.MaxValue,
-            };
-            _mirrorSampler = new SamplerState(device, samplerDescription);
-
-            _rasterizerState = new RasterizerState(device, new RasterizerStateDescription
-            {
-                CullMode = CullMode.None,
-                FillMode = FillMode.Solid,
-                IsDepthClipEnabled = false,
-                IsScissorEnabled = false,
-                IsFrontCounterClockwise = false,
-                IsMultisampleEnabled = false,
-            });
-            _scissorRasterizerState = new RasterizerState(device, new RasterizerStateDescription
-            {
-                CullMode = CullMode.None,
-                FillMode = FillMode.Solid,
-                IsDepthClipEnabled = false,
-                IsScissorEnabled = true,
-                IsFrontCounterClockwise = false,
-                IsMultisampleEnabled = false,
-            });
-
-            _depthStencilState = new DepthStencilState(device, new DepthStencilStateDescription
-            {
-                IsDepthEnabled = false,
-                DepthWriteMask = DepthWriteMask.Zero,
-                DepthComparison = Comparison.Always,
-                IsStencilEnabled = false,
-            });
-
-            var blendStateDescription = BlendStateDescription.Default();
-            blendStateDescription.RenderTarget[0].IsBlendEnabled = false;
-            _blendState = new BlendState(device, blendStateDescription);
-
-            _device = device;
-            _context = context;
-            return true;
-        }
-        catch (Exception ex)
+        _depthStencilState = new DepthStencilState(device, new DepthStencilStateDescription
         {
-            context?.Dispose();
-            device?.Dispose();
-            DisposeRuntimeResources();
+            IsDepthEnabled = false,
+            DepthWriteMask = DepthWriteMask.Zero,
+            DepthComparison = Comparison.Always,
+            IsStencilEnabled = false,
+        });
 
-            if (!_loggedInitializationFailure)
-            {
-                _loggedInitializationFailure = true;
-                _logger.LogWarning(ex, "object window blur renderer initialization failed");
-            }
-
-            return false;
-        }
+        var blendStateDescription = BlendStateDescription.Default();
+        blendStateDescription.RenderTarget[0].IsBlendEnabled = false;
+        _blendState = new BlendState(device, blendStateDescription);
     }
 
     private static bool TryGetFrameSizeFromViewport(out int width, out int height)
@@ -574,7 +494,8 @@ internal sealed unsafe class BackdropRenderer : IDisposable
 
     private void EnsureFramebuffers()
     {
-        if (_device is null)
+        Device? device = ActiveDevice;
+        if (device is null)
         {
             return;
         }
@@ -596,11 +517,11 @@ internal sealed unsafe class BackdropRenderer : IDisposable
         for (var index = 0; index <= BlurIterations; index++)
         {
             var divisor = 1 << index;
-            _blurFramebuffers.Add(CreateFramebuffer(_device, Math.Max(1, scaledWidth / divisor), Math.Max(1, scaledHeight / divisor)));
+            _blurFramebuffers.Add(CreateFramebuffer(device, Math.Max(1, scaledWidth / divisor), Math.Max(1, scaledHeight / divisor)));
         }
 
-        _compositedSourceFramebuffer = CreateFramebuffer(_device, _frameWidth, _frameHeight);
-        _outputFramebuffer = CreateFramebuffer(_device, scaledWidth, scaledHeight);
+        _compositedSourceFramebuffer = CreateFramebuffer(device, _frameWidth, _frameHeight);
+        _outputFramebuffer = CreateFramebuffer(device, scaledWidth, scaledHeight);
     }
 
     private void ProcessBackdropFrame()
@@ -612,13 +533,11 @@ internal sealed unsafe class BackdropRenderer : IDisposable
         }
 
         if (_preparedFrame != frame
-            || _context is null
-            || _vertexShader is null
+            || ActiveContext is null
+            || _fullscreenQuad is null
             || _downsampleShader is null
             || _upsampleShader is null
             || _compositeShader is null
-            || _inputLayout is null
-            || _vertexBuffer is null
             || _surfaceConstantBuffer is null
             || _mirrorSampler is null
             || _rasterizerState is null
@@ -633,8 +552,8 @@ internal sealed unsafe class BackdropRenderer : IDisposable
 
         try
         {
-            using var state = D3D11RenderStateSnapshot.Capture(
-                _context,
+            using var state = D3D11DrawStateScope.Capture(
+                ActiveContext,
                 pixelConstantBufferCount: 1,
                 pixelShaderResourceViewCount: 2,
                 captureScissorRectangles: true);
@@ -668,7 +587,7 @@ internal sealed unsafe class BackdropRenderer : IDisposable
         {
             _logger.LogWarning(ex, "object window blur frame processing failed");
             _processedFrame = -1;
-            _pendingRuntimeReset = true;
+            RequestDeviceReset();
         }
     }
 
@@ -723,7 +642,7 @@ internal sealed unsafe class BackdropRenderer : IDisposable
 
     private bool TryCaptureCurrentRenderTarget(RenderTargetView? renderTargetView)
     {
-        if (_context is null || renderTargetView is null)
+        if (ActiveContext is null || renderTargetView is null)
         {
             return false;
         }
@@ -744,11 +663,11 @@ internal sealed unsafe class BackdropRenderer : IDisposable
 
         if (sourceDescription.SampleDescription.Count > 1)
         {
-            _context.ResolveSubresource(sourceTexture, 0, _capturedSourceTexture, 0, sourceFormat);
+            ActiveContext.ResolveSubresource(sourceTexture, 0, _capturedSourceTexture, 0, sourceFormat);
         }
         else
         {
-            _context.CopyResource(sourceTexture, _capturedSourceTexture);
+            ActiveContext.CopyResource(sourceTexture, _capturedSourceTexture);
         }
 
         return true;
@@ -756,7 +675,7 @@ internal sealed unsafe class BackdropRenderer : IDisposable
 
     private bool TryCaptureGameBackBuffer()
     {
-        if (_context is null)
+        if (ActiveContext is null)
         {
             return false;
         }
@@ -801,11 +720,11 @@ internal sealed unsafe class BackdropRenderer : IDisposable
 
             if (backBufferDescription.SampleDescription.Count > 1)
             {
-                _context.ResolveSubresource(backBufferTexture, 0, _gameSourceCopyTexture, 0, backBufferDescription.Format);
+                ActiveContext.ResolveSubresource(backBufferTexture, 0, _gameSourceCopyTexture, 0, backBufferDescription.Format);
             }
             else
             {
-                _context.CopyResource(backBufferTexture, _gameSourceCopyTexture);
+                ActiveContext.CopyResource(backBufferTexture, _gameSourceCopyTexture);
             }
 
             return true;
@@ -828,7 +747,7 @@ internal sealed unsafe class BackdropRenderer : IDisposable
 
     private bool TryEnsureCapturedSourceTexture(int width, int height, Format format)
     {
-        if (_device is null)
+        if (ActiveDevice is null)
         {
             return false;
         }
@@ -844,7 +763,7 @@ internal sealed unsafe class BackdropRenderer : IDisposable
 
         DisposeCapturedSourceTexture();
 
-        _capturedSourceTexture = new Texture2D(_device, new Texture2DDescription
+        _capturedSourceTexture = new Texture2D(ActiveDevice, new Texture2DDescription
         {
             Width = width,
             Height = height,
@@ -857,7 +776,7 @@ internal sealed unsafe class BackdropRenderer : IDisposable
             CpuAccessFlags = CpuAccessFlags.None,
             OptionFlags = ResourceOptionFlags.None,
         });
-        _capturedSourceShaderResourceView = new ShaderResourceView(_device, _capturedSourceTexture);
+        _capturedSourceShaderResourceView = new ShaderResourceView(ActiveDevice, _capturedSourceTexture);
         _capturedSourceWidth = width;
         _capturedSourceHeight = height;
         _capturedSourceFormat = format;
@@ -866,7 +785,7 @@ internal sealed unsafe class BackdropRenderer : IDisposable
 
     private bool TryEnsureGameSourceTexture(int width, int height, Format format)
     {
-        if (_device is null)
+        if (ActiveDevice is null)
         {
             return false;
         }
@@ -882,7 +801,7 @@ internal sealed unsafe class BackdropRenderer : IDisposable
 
         DisposeGameSourceTexture();
 
-        _gameSourceCopyTexture = new Texture2D(_device, new Texture2DDescription
+        _gameSourceCopyTexture = new Texture2D(ActiveDevice, new Texture2DDescription
         {
             Width = width,
             Height = height,
@@ -895,7 +814,7 @@ internal sealed unsafe class BackdropRenderer : IDisposable
             CpuAccessFlags = CpuAccessFlags.None,
             OptionFlags = ResourceOptionFlags.None,
         });
-        _gameSourceShaderResourceView = new ShaderResourceView(_device, _gameSourceCopyTexture);
+        _gameSourceShaderResourceView = new ShaderResourceView(ActiveDevice, _gameSourceCopyTexture);
         _gameSourceWidth = width;
         _gameSourceHeight = height;
         _gameSourceFormat = format;
@@ -909,10 +828,8 @@ internal sealed unsafe class BackdropRenderer : IDisposable
 
     private void ApplyFullscreenPipeline()
     {
-        if (_context is null
-            || _inputLayout is null
-            || _vertexBuffer is null
-            || _vertexShader is null
+        if (ActiveContext is null
+            || _fullscreenQuad is null
             || _blendState is null
             || _depthStencilState is null
             || _rasterizerState is null)
@@ -920,18 +837,15 @@ internal sealed unsafe class BackdropRenderer : IDisposable
             return;
         }
 
-        _context.InputAssembler.InputLayout = _inputLayout;
-        _context.InputAssembler.PrimitiveTopology = PrimitiveTopology.TriangleStrip;
-        _context.InputAssembler.SetVertexBuffers(0, new VertexBufferBinding(_vertexBuffer, Marshal.SizeOf<FullscreenVertex>(), 0));
-        _context.VertexShader.Set(_vertexShader);
-        _context.OutputMerger.BlendState = _blendState;
-        _context.OutputMerger.SetDepthStencilState(_depthStencilState, 0);
-        _context.Rasterizer.State = _rasterizerState;
+        _fullscreenQuad.Apply(ActiveContext);
+        ActiveContext.OutputMerger.BlendState = _blendState;
+        ActiveContext.OutputMerger.SetDepthStencilState(_depthStencilState, 0);
+        ActiveContext.Rasterizer.State = _rasterizerState;
     }
 
     private void RenderShaderPass(BackdropFramebuffer framebuffer, ShaderResourceView inputView, PixelShader shader)
     {
-        if (_context is null || _blurConstantBuffer is null || _mirrorSampler is null)
+        if (ActiveContext is null || _blurConstantBuffer is null || _mirrorSampler is null)
         {
             return;
         }
@@ -942,33 +856,33 @@ internal sealed unsafe class BackdropRenderer : IDisposable
             return;
         }
 
-        _context.OutputMerger.SetTargets(framebuffer.RenderTargetView);
-        _context.Rasterizer.SetViewport(0f, 0f, framebuffer.Width, framebuffer.Height);
-        _context.PixelShader.Set(shader);
-        _context.PixelShader.SetConstantBuffer(0, _blurConstantBuffer);
-        _context.PixelShader.SetShaderResource(0, inputView);
-        _context.PixelShader.SetSampler(0, _mirrorSampler);
-        _context.Draw(4, 0);
-        _context.PixelShader.SetConstantBuffer(0, null);
-        _context.PixelShader.SetShaderResource(0, null);
+        ActiveContext.OutputMerger.SetTargets(framebuffer.RenderTargetView);
+        ActiveContext.Rasterizer.SetViewport(0f, 0f, framebuffer.Width, framebuffer.Height);
+        ActiveContext.PixelShader.Set(shader);
+        ActiveContext.PixelShader.SetConstantBuffer(0, _blurConstantBuffer);
+        ActiveContext.PixelShader.SetShaderResource(0, inputView);
+        ActiveContext.PixelShader.SetSampler(0, _mirrorSampler);
+        ActiveContext.Draw(4, 0);
+        ActiveContext.PixelShader.SetConstantBuffer(0, null);
+        ActiveContext.PixelShader.SetShaderResource(0, null);
     }
 
     private void RenderCompositePass(BackdropFramebuffer framebuffer, ShaderResourceView gameView, ShaderResourceView overlayView)
     {
-        if (_context is null || _compositeShader is null || _mirrorSampler is null)
+        if (ActiveContext is null || _compositeShader is null || _mirrorSampler is null)
         {
             return;
         }
 
-        _context.OutputMerger.SetTargets(framebuffer.RenderTargetView);
-        _context.Rasterizer.SetViewport(0f, 0f, framebuffer.Width, framebuffer.Height);
-        _context.PixelShader.Set(_compositeShader);
-        _context.PixelShader.SetShaderResource(0, gameView);
-        _context.PixelShader.SetShaderResource(1, overlayView);
-        _context.PixelShader.SetSampler(0, _mirrorSampler);
-        _context.Draw(4, 0);
-        _context.PixelShader.SetShaderResource(0, null);
-        _context.PixelShader.SetShaderResource(1, null);
+        ActiveContext.OutputMerger.SetTargets(framebuffer.RenderTargetView);
+        ActiveContext.Rasterizer.SetViewport(0f, 0f, framebuffer.Width, framebuffer.Height);
+        ActiveContext.PixelShader.Set(_compositeShader);
+        ActiveContext.PixelShader.SetShaderResource(0, gameView);
+        ActiveContext.PixelShader.SetShaderResource(1, overlayView);
+        ActiveContext.PixelShader.SetSampler(0, _mirrorSampler);
+        ActiveContext.Draw(4, 0);
+        ActiveContext.PixelShader.SetShaderResource(0, null);
+        ActiveContext.PixelShader.SetShaderResource(1, null);
     }
 
     private void RenderEffectPass(
@@ -981,7 +895,7 @@ internal sealed unsafe class BackdropRenderer : IDisposable
         int scissorMaxX,
         int scissorMaxY)
     {
-        if (_context is null
+        if (ActiveContext is null
             || _surfaceConstantBuffer is null
             || _mirrorSampler is null
             || _scissorRasterizerState is null
@@ -997,20 +911,20 @@ internal sealed unsafe class BackdropRenderer : IDisposable
             return;
         }
 
-        _context.OutputMerger.SetTargets(framebuffer.RenderTargetView);
-        _context.Rasterizer.State = _scissorRasterizerState;
-        _context.Rasterizer.SetViewport(0f, 0f, _frameWidth, _frameHeight);
-        _context.Rasterizer.SetScissorRectangle(scissorMinX, scissorMinY, scissorMaxX, scissorMaxY);
-        _context.PixelShader.Set(shader);
-        _context.PixelShader.SetConstantBuffer(0, _surfaceConstantBuffer);
-        _context.PixelShader.SetConstantBuffer(1, effectConstantBuffer);
-        _context.PixelShader.SetShaderResource(0, _compositedSourceFramebuffer.ShaderResourceView);
-        _context.PixelShader.SetShaderResource(1, _outputFramebuffer.ShaderResourceView);
-        _context.PixelShader.SetSampler(0, _mirrorSampler);
-        _context.Draw(4, 0);
-        _context.PixelShader.SetConstantBuffer(1, null);
-        _context.PixelShader.SetShaderResource(0, null);
-        _context.PixelShader.SetShaderResource(1, null);
+        ActiveContext.OutputMerger.SetTargets(framebuffer.RenderTargetView);
+        ActiveContext.Rasterizer.State = _scissorRasterizerState;
+        ActiveContext.Rasterizer.SetViewport(0f, 0f, _frameWidth, _frameHeight);
+        ActiveContext.Rasterizer.SetScissorRectangle(scissorMinX, scissorMinY, scissorMaxX, scissorMaxY);
+        ActiveContext.PixelShader.Set(shader);
+        ActiveContext.PixelShader.SetConstantBuffer(0, _surfaceConstantBuffer);
+        ActiveContext.PixelShader.SetConstantBuffer(1, effectConstantBuffer);
+        ActiveContext.PixelShader.SetShaderResource(0, _compositedSourceFramebuffer.ShaderResourceView);
+        ActiveContext.PixelShader.SetShaderResource(1, _outputFramebuffer.ShaderResourceView);
+        ActiveContext.PixelShader.SetSampler(0, _mirrorSampler);
+        ActiveContext.Draw(4, 0);
+        ActiveContext.PixelShader.SetConstantBuffer(1, null);
+        ActiveContext.PixelShader.SetShaderResource(0, null);
+        ActiveContext.PixelShader.SetShaderResource(1, null);
     }
 
     private static Vector4 ResolveCornerRadii(float rounding, ImDrawFlags cornerFlags)
@@ -1023,7 +937,7 @@ internal sealed unsafe class BackdropRenderer : IDisposable
     }
 
     private static bool HasCorner(ImDrawFlags flags, ImDrawFlags corner)
-        => (flags & corner) != 0;
+        => (flags & corner) != ImDrawFlags.None;
 
     private static BackdropFramebuffer CreateFramebuffer(Device device, int width, int height)
     {
@@ -1046,7 +960,7 @@ internal sealed unsafe class BackdropRenderer : IDisposable
         return new BackdropFramebuffer(texture, renderTargetView, shaderResourceView, width, height);
     }
 
-    private bool IsMainViewportWindow()
+    private static bool IsMainViewportWindow()
     {
         var currentViewport = ImGui.GetWindowViewport();
         var mainViewport = ImGui.GetMainViewport();
@@ -1069,7 +983,7 @@ internal sealed unsafe class BackdropRenderer : IDisposable
         _outputFramebuffer = null;
     }
 
-    private void DisposeRuntimeResources()
+    protected override void DisposeDeviceResources()
     {
         _effects.DisposeResources();
         DisposeFramebuffers();
@@ -1089,22 +1003,14 @@ internal sealed unsafe class BackdropRenderer : IDisposable
         _blurConstantBuffer = null;
         _surfaceConstantBuffer?.Dispose();
         _surfaceConstantBuffer = null;
-        _vertexBuffer?.Dispose();
-        _vertexBuffer = null;
-        _inputLayout?.Dispose();
-        _inputLayout = null;
+        _fullscreenQuad?.Dispose();
+        _fullscreenQuad = null;
         _compositeShader?.Dispose();
         _compositeShader = null;
         _upsampleShader?.Dispose();
         _upsampleShader = null;
         _downsampleShader?.Dispose();
         _downsampleShader = null;
-        _vertexShader?.Dispose();
-        _vertexShader = null;
-        _context?.Dispose();
-        _context = null;
-        _device?.Dispose();
-        _device = null;
         _frameWidth = 0;
         _frameHeight = 0;
         _preparedFrame = -1;
@@ -1132,19 +1038,6 @@ internal sealed unsafe class BackdropRenderer : IDisposable
         _gameSourceWidth = 0;
         _gameSourceHeight = 0;
         _gameSourceFormat = Format.Unknown;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct FullscreenVertex
-    {
-        public Vector2 Position;
-        public Vector2 Uv;
-
-        public FullscreenVertex(Vector2 position, Vector2 uv)
-        {
-            Position = position;
-            Uv = uv;
-        }
     }
 
 #pragma warning disable S4487 // gpu constant buffer fields are read by native shader upload

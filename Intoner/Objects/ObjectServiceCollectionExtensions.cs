@@ -9,6 +9,9 @@ using Intoner.Objects.Filesystem.Storage;
 using Intoner.Objects.Filesystem.Watching;
 using Intoner.Objects.Interop;
 using Intoner.Objects.Interop.Ipc;
+using Intoner.Objects.Preview;
+using Intoner.Objects.Preview.Assets;
+using Intoner.Objects.Preview.Rendering;
 using Intoner.Objects.Rendering.Drawing;
 using Intoner.Objects.Rendering.Primitives;
 using Intoner.Objects.Resources;
@@ -75,6 +78,7 @@ internal static class ObjectServiceCollectionExtensions
         services.AddSingleton<IObjectAssetCacheService, ObjectAssetCacheService>();
         services.AddSingleton<IObjectAssetIndex, ObjectAssetIndex>();
         services.AddSingleton<IObjectCatalogService, ObjectCatalogService>();
+        services.AddSingleton<PreviewAssetService>();
         services.AddScoped<FurnitureCatalogResolver>();
         services.AddScoped<IFurnitureStainService, FurnitureStainService>();
         services.AddSingleton<IObjectPathResolver, ObjectPathResolver>();
@@ -176,7 +180,9 @@ internal static class ObjectServiceCollectionExtensions
     private static IServiceCollection AddObjectRenderingServices(this IServiceCollection services)
     {
         services.AddScoped<IRenderer, NativeRenderer>();
-        services.AddScoped<CatalogPreviewService>();
+        services.AddScoped<PreviewService>();
+        services.AddScoped<ViewportRenderer>();
+        services.AddScoped<ViewportService>();
         services.AddSingleton(_ => new BackdropEffectRegistrationService()
             .Register(static renderer => new BlurEffect(renderer))
             .Register(static renderer => new GlassEffect(renderer))

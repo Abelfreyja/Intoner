@@ -2,7 +2,6 @@ using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
-using Dalamud.Interface.Windowing;
 using Dalamud.Plugin;
 using Intoner.Objects.Api;
 using Intoner.Objects.Assets;
@@ -12,6 +11,8 @@ using Intoner.Objects.Filesystem.Configuration;
 using Intoner.Objects.Filesystem.Layouts;
 using Intoner.Objects.Interop;
 using Intoner.Objects.Models;
+using Intoner.Objects.Preview;
+using Intoner.Objects.Preview.Rendering;
 using Intoner.Objects.Rendering.Drawing;
 using Intoner.Objects.Runtime;
 using Intoner.Objects.UI.Components;
@@ -24,7 +25,6 @@ using Intoner.Services;
 using Intoner.UI;
 using Intoner.UI.Performance;
 using Intoner.UI.Windows;
-using Intoner.Utils;
 using Microsoft.Extensions.Logging;
 using System.Numerics;
 using System.Text.Json;
@@ -100,11 +100,11 @@ internal sealed partial class EditorWindow : IntonerWindow, IGizmoHost, IDisposa
         public float Yaw { get; private set; } = DefaultYaw;
         public float Pitch { get; private set; } = DefaultPitch;
         public float Zoom { get; private set; } = DefaultZoom;
-        public ObjectPreviewBackgroundStyle BackgroundStyle { get; set; } = ObjectPreviewBackgroundStyle.White;
+        public PreviewRender.BackgroundStyle BackgroundStyle { get; set; } = PreviewRender.BackgroundStyle.White;
 
         public void SyncAsset(string assetPath)
         {
-            var normalizedPath = ObjectPathRules.NormalizeGamePath(assetPath);
+            var normalizedPath = GameAssetPathRules.NormalizeGamePath(assetPath);
             if (string.Equals(AssetPath, normalizedPath, StringComparison.OrdinalIgnoreCase))
             {
                 return;
@@ -138,7 +138,7 @@ internal sealed partial class EditorWindow : IntonerWindow, IGizmoHost, IDisposa
             Zoom = DefaultZoom;
         }
 
-        public ObjectCatalogPreviewRequest CreateRequest(int width, int height, ObjectCatalogPreviewMode mode = ObjectCatalogPreviewMode.Detail)
+        public PreviewRender.Request CreateRequest(int width, int height, PreviewRender.Mode mode = PreviewRender.Mode.Detail)
             => new(
                 Math.Clamp(width, 96, 640),
                 Math.Clamp(height, 96, 480),
@@ -169,40 +169,41 @@ internal sealed partial class EditorWindow : IntonerWindow, IGizmoHost, IDisposa
         new("##objectModeDebug", FontAwesomeIcon.Bug, "Debug", WorkspaceMode.Debug),
     ];
 
-    private readonly IDalamudPluginInterface             _pluginInterface;
-    private readonly ILogger<EditorWindow>               _logger;
-    private readonly IObjectManager                      _objectManager;
-    private readonly IObjectFolderService                _objectFolderService;
-    private readonly IObjectMutationService              _mutationService;
-    private readonly IObjectSceneView                    _sceneView;
-    private readonly IObjectSelectionService             _objectSelectionService;
-    private readonly IObjectHistoryManager               _objectHistoryManager;
-    private readonly IHistoryCoordinator                 _historyCoordinator;
-    private readonly IObjectLayoutManager                _layoutManager;
-    private readonly IObjectLayoutFileService            _objectLayoutFileService;
-    private readonly IObjectLayoutRecoveryService        _objectLayoutRecoveryService;
-    private readonly IObjectKindService                  _objectKindService;
-    private readonly IObjectHousingModePolicy            _housingModePolicy;
-    private readonly PlacementValidationService          _placementValidationService;
-    private readonly PlacementFixExecutor                _placementFixExecutor;
-    private readonly IObjectCatalogService               _objectCatalog;
-    private readonly IFurnitureStainService              _furnitureStainService;
-    private readonly IObjectCollectionManager            _objectCollectionManager;
-    private readonly IObjectModDataSource                _objectModDataSource;
-    private readonly IClipboardExportService             _clipboardExportService;
-    private readonly IObjectConfigurationService          _objectConfigurationService;
-    private readonly SettingsPage                        _settingsPage;
-    private readonly CatalogPreviewService               _previewService;
-    private readonly DrawManager                         _drawManager;
-    private readonly Gizmo                               _gizmo;
-    private readonly EdgeGlowRenderer                    _edgeGlowRenderer;
-    private readonly BackdropRenderer                    _windowBackdropRenderer;
-    private readonly UiSharedService                     _uiSharedService;
-    private readonly EditorTitleBarIndicatorService      _titleBarIndicatorService;
-    private readonly TitleBarIconRenderer                _titleBarIconRenderer;
-    private readonly TitleBarWindowMetrics               _titleBarWindowMetrics;
-    private readonly IDisposable                         _mainWindowRequestSubscription;
-    private IReadOnlyList<FurnitureStainOption>          _furnitureStains = [];
+    private readonly IDalamudPluginInterface               _pluginInterface;
+    private readonly ILogger<EditorWindow>                 _logger;
+    private readonly IObjectManager                        _objectManager;
+    private readonly IObjectFolderService                  _objectFolderService;
+    private readonly IObjectMutationService                _mutationService;
+    private readonly IObjectSceneView                      _sceneView;
+    private readonly IObjectSelectionService               _objectSelectionService;
+    private readonly IObjectHistoryManager                 _objectHistoryManager;
+    private readonly IHistoryCoordinator                   _historyCoordinator;
+    private readonly IObjectLayoutManager                  _layoutManager;
+    private readonly IObjectLayoutFileService              _objectLayoutFileService;
+    private readonly IObjectLayoutRecoveryService          _objectLayoutRecoveryService;
+    private readonly IObjectKindService                    _objectKindService;
+    private readonly IObjectHousingModePolicy              _housingModePolicy;
+    private readonly PlacementValidationService            _placementValidationService;
+    private readonly PlacementFixExecutor                  _placementFixExecutor;
+    private readonly IObjectCatalogService                 _objectCatalog;
+    private readonly IFurnitureStainService                _furnitureStainService;
+    private readonly IObjectCollectionManager              _objectCollectionManager;
+    private readonly IObjectModDataSource                  _objectModDataSource;
+    private readonly IClipboardExportService               _clipboardExportService;
+    private readonly IObjectConfigurationService           _objectConfigurationService;
+    private readonly SettingsPage                          _settingsPage;
+    private readonly PreviewService                        _previewService;
+    private readonly ViewportService                       _viewportService;
+    private readonly DrawManager                           _drawManager;
+    private readonly Gizmo                                 _gizmo;
+    private readonly EdgeGlowRenderer                      _edgeGlowRenderer;
+    private readonly BackdropRenderer                      _windowBackdropRenderer;
+    private readonly UiSharedService                       _uiSharedService;
+    private readonly EditorTitleBarIndicatorService        _titleBarIndicatorService;
+    private readonly TitleBarIconRenderer                  _titleBarIconRenderer;
+    private readonly TitleBarWindowMetrics                 _titleBarWindowMetrics;
+    private readonly IDisposable                           _mainWindowRequestSubscription;
+    private IReadOnlyList<FurnitureStainOption>            _furnitureStains = [];
     private IReadOnlyDictionary<Guid, PlacementEvaluation> _placementEvaluations =
         new Dictionary<Guid, PlacementEvaluation>();
 
@@ -302,7 +303,8 @@ internal sealed partial class EditorWindow : IntonerWindow, IGizmoHost, IDisposa
         IObjectConfigurationService objectConfigurationService,
         IObjectHousingCullingService housingCullingService,
         IIntonerMediator mediator,
-        CatalogPreviewService previewService,
+        PreviewService previewService,
+        ViewportService viewportService,
         IRenderer renderer,
         EdgeGlowRenderer edgeGlowRenderer,
         BackdropRenderer windowBackdropRenderer,
@@ -336,6 +338,7 @@ internal sealed partial class EditorWindow : IntonerWindow, IGizmoHost, IDisposa
         _objectConfigurationService     = objectConfigurationService;
         _settingsPage                   = new SettingsPage(objectConfigurationService, housingCullingService, housingModePolicy, _editorOverlayLayer);
         _previewService                 = previewService;
+        _viewportService                = viewportService;
         _drawManager                    = new DrawManager(renderer);
         _gizmo                          = new Gizmo(
             this,

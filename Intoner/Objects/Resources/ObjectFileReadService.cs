@@ -19,6 +19,12 @@ namespace Intoner.Objects.Resources;
 internal interface IObjectFileReadService : IDisposable
 {
     /// <summary>
+    /// Checks whether scoped game resource paths can be restored before native file jobs read them.
+    /// </summary>
+    /// <returns>true when scoped game paths can be routed to their real game paths</returns>
+    bool CanRouteScopedGamePaths();
+
+    /// <summary>
     /// Checks whether one rooted local file path can be loaded by the active object resource hooks.
     /// </summary>
     /// <param name="localFilePath">The rooted local file path in object resource format</param>
@@ -176,6 +182,9 @@ internal sealed unsafe class ObjectFileReadService : IObjectFileReadService
     public bool CanLoadLocalFilePath(string localFilePath)
         => TryGetLoadableLocalFileKind(localFilePath, out _, out _);
 
+    public bool CanRouteScopedGamePaths()
+        => TryEnableHooks() && CanHandleScopedGamePaths();
+
     public bool CanLoadMemoryResourcePath(string memoryResourcePath)
         => TryEnableHooks()
             && MemoryResourceService.TryGetResource(memoryResourcePath, out ObjectMemoryResource memoryResource)
@@ -188,7 +197,7 @@ internal sealed unsafe class ObjectFileReadService : IObjectFileReadService
 
     private bool TryGetLoadableLocalFileKind(string localFilePath, out string normalizedLocalFilePath, out ObjectLocalFileKind kind)
     {
-        normalizedLocalFilePath = ObjectResourcePathUtility.NormalizeLocalFilePath(localFilePath);
+        normalizedLocalFilePath = ObjectLocalFilePathUtility.NormalizeLocalFilePath(localFilePath);
         kind = ObjectLocalFileKind.DirectRead;
         if (IsDisposing)
         {
@@ -236,48 +245,31 @@ internal sealed unsafe class ObjectFileReadService : IObjectFileReadService
                 return CallFileJobOriginal(fileThread, fileDescriptor, priority, isSync);
             }
 
-            if (ObjectScopedResourcePathUtility.IsForeignScopedPath(handlePath))
+            if (ObjectScopedResourcePathUtility.TryParse(handlePath, out ObjectScopedResourcePath scopedPath))
             {
-                return CallFileJobOriginal(fileThread, fileDescriptor, priority, isSync);
+                return _collectionStore.TryGetCollectionByResourceScopeId(scopedPath.ResourceScopeId, out _)
+                    ? RouteFileJobPath(fileThread, fileDescriptor, priority, isSync, scopedPath.Path, restoreScopedPath: true)
+                    : (byte)0;
             }
 
-            bool isObjectScopedPath = ObjectScopedResourcePathUtility.IsObjectScopedPath(handlePath);
-            bool hasScopedPath = ObjectScopedResourcePathUtility.TryParse(handlePath, out ObjectScopedResourcePath scopedPath);
-            if (isObjectScopedPath
-                && (!hasScopedPath || !_collectionStore.TryGetCollectionByResourceScopeId(scopedPath.ResourceScopeId, out _)))
+            if (ObjectScopedResourcePathUtility.IsObjectScopedPath(handlePath))
             {
                 return 0;
             }
 
-            string normalizedPath = hasScopedPath
-                ? scopedPath.Path
-                : ObjectResourcePathUtility.NormalizeTrackedPath(handlePath);
-            if (ObjectMemoryResourcePathUtility.IsMemoryResourcePath(normalizedPath))
+            if (ObjectScopedResourcePathUtility.IsForeignScopedPath(handlePath)
+                || !ShouldRouteUnscopedFileJobPath(handlePath))
             {
-                return MemoryResourceService.TryGetResource(normalizedPath, out ObjectMemoryResource memoryResource)
-                    && CanLoadMemoryResource(memoryResource)
-                    ? MemoryResourceService.ReadResource(fileDescriptor, memoryResource)
-                    : (byte)0;
+                return CallFileJobOriginal(fileThread, fileDescriptor, priority, isSync);
             }
 
-            if (!ObjectResourcePathUtility.IsLocalFilePath(normalizedPath))
+            string normalizedPath = ObjectResourcePathUtility.NormalizeTrackedPath(handlePath);
+            if (normalizedPath.Length == 0)
             {
-                return hasScopedPath
-                    ? RunFileJobWithTemporaryResourcePath(fileThread, fileDescriptor, priority, isSync, normalizedPath)
-                    : CallFileJobOriginal(fileThread, fileDescriptor, priority, isSync);
+                return CallFileJobOriginal(fileThread, fileDescriptor, priority, isSync);
             }
 
-            if (_readFile != null
-                && (hasScopedPath || _localFileTracker.ContainsLocalFilePath(normalizedPath)))
-            {
-                ObjectLocalFileKind kind = ClassifyCustomLocalFile(normalizedPath);
-                using IDisposable activeJob = EnterActiveLocalFileJob(fileDescriptor->ResourceHandle, normalizedPath, kind);
-                return ReadLocalFile(fileThread, fileDescriptor, priority, isSync, normalizedPath, hasScopedPath);
-            }
-
-            return hasScopedPath
-                ? (byte)0
-                : CallFileJobOriginal(fileThread, fileDescriptor, priority, isSync);
+            return RouteFileJobPath(fileThread, fileDescriptor, priority, isSync, normalizedPath, restoreScopedPath: false);
         }
         catch (Exception ex)
         {
@@ -287,6 +279,51 @@ internal sealed unsafe class ObjectFileReadService : IObjectFileReadService
                 : CallFileJobOriginal(fileThread, fileDescriptor, priority, isSync);
         }
     }
+
+    private byte RouteFileJobPath(
+        ClientFileThread* fileThread,
+        ClientFileDescriptor* fileDescriptor,
+        int priority,
+        bool isSync,
+        string normalizedPath,
+        bool restoreScopedPath)
+    {
+        if (fileDescriptor == null)
+        {
+            return CallFileJobOriginal(fileThread, fileDescriptor, priority, isSync);
+        }
+
+        if (ObjectMemoryResourcePathUtility.IsMemoryResourcePath(normalizedPath))
+        {
+            return MemoryResourceService.TryGetResource(normalizedPath, out ObjectMemoryResource memoryResource)
+                && CanLoadMemoryResource(memoryResource)
+                ? MemoryResourceService.ReadResource(fileDescriptor, memoryResource)
+                : (byte)0;
+        }
+
+        if (!ObjectLocalFilePathUtility.IsLocalFilePath(normalizedPath))
+        {
+            return restoreScopedPath
+                ? RunFileJobWithTemporaryResourcePath(fileThread, fileDescriptor, priority, isSync, normalizedPath)
+                : CallFileJobOriginal(fileThread, fileDescriptor, priority, isSync);
+        }
+
+        if (_readFile != null
+            && (restoreScopedPath || _localFileTracker.ContainsLocalFilePath(normalizedPath)))
+        {
+            ObjectLocalFileKind kind = ClassifyCustomLocalFile(normalizedPath);
+            using IDisposable activeJob = EnterActiveLocalFileJob(fileDescriptor->ResourceHandle, normalizedPath, kind);
+            return ReadLocalFile(fileThread, fileDescriptor, priority, isSync, normalizedPath, restoreScopedPath);
+        }
+
+        return restoreScopedPath
+            ? (byte)0
+            : CallFileJobOriginal(fileThread, fileDescriptor, priority, isSync);
+    }
+
+    private static bool ShouldRouteUnscopedFileJobPath(string path)
+        => ObjectMemoryResourcePathUtility.IsMemoryResourcePath(path)
+            || ObjectLocalFilePathUtility.IsLocalFilePath(path);
 
     private static bool ShouldFailClosedFileJob(ClientFileDescriptor* fileDescriptor)
     {
@@ -616,8 +653,8 @@ internal sealed unsafe class ObjectFileReadService : IObjectFileReadService
         }
 
         if (TryResolveHandleActualPath(handle, out string actualPath)
-            && ObjectResourcePathUtility.IsLocalFilePath(actualPath)
-            && !string.Equals(ObjectResourcePathUtility.NormalizeLocalFilePath(actualPath), job.Path, StringComparison.OrdinalIgnoreCase))
+            && ObjectLocalFilePathUtility.IsLocalFilePath(actualPath)
+            && !string.Equals(ObjectLocalFilePathUtility.NormalizeLocalFilePath(actualPath), job.Path, StringComparison.OrdinalIgnoreCase))
         {
             return false;
         }
@@ -711,7 +748,7 @@ internal sealed unsafe class ObjectFileReadService : IObjectFileReadService
         => _memoryResourceServiceFactory();
 
     private bool CanRouteMemoryResourceKind(string gamePath)
-        => ObjectPathRules.ClassifyObjectResourcePath(gamePath) switch
+        => ObjectAssetPathRules.ClassifyResourcePath(gamePath) switch
         {
             ObjectResourcePathKind.Texture or ObjectResourcePathKind.Atex => _textureOnLoadHook != null,
             ObjectResourcePathKind.Sound => _soundOnLoadHook != null,
@@ -721,28 +758,20 @@ internal sealed unsafe class ObjectFileReadService : IObjectFileReadService
     private bool CanLoadRootedLocalFiles()
         => CanHandleCustomFileJobs() && _readFile != null;
 
+    private bool CanHandleScopedGamePaths()
+        => !IsDisposing && _fileJobHook != null;
+
     private bool CanHandleCustomFileJobs()
         => !IsDisposing && _fileJobHook != null;
 
     private static ObjectLocalFileKind ClassifyCustomLocalFile(string path)
-    {
-        if (ObjectResourcePathUtility.HasExtension(path, ".mdl"))
+        => GameAssetPathRules.ClassifyFilePath(path) switch
         {
-            return ObjectLocalFileKind.Model;
-        }
-
-        if (ObjectResourcePathUtility.HasExtension(path, ".tex"))
-        {
-            return ObjectLocalFileKind.Texture;
-        }
-
-        if (ObjectResourcePathUtility.HasExtension(path, ".scd"))
-        {
-            return ObjectLocalFileKind.Sound;
-        }
-
-        return ObjectLocalFileKind.DirectRead;
-    }
+            GameAssetFileKind.Mdl => ObjectLocalFileKind.Model,
+            GameAssetFileKind.Tex => ObjectLocalFileKind.Texture,
+            GameAssetFileKind.Scd => ObjectLocalFileKind.Sound,
+            _ => ObjectLocalFileKind.DirectRead,
+        };
 
     private readonly struct ActiveLocalFileJobToken(ObjectFileReadService? owner, ActiveLocalFileJob? previousJob) : IDisposable
     {

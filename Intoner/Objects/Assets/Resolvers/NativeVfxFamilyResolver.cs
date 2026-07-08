@@ -438,7 +438,7 @@ internal sealed class NativeVfxFamilyResolver
     {
         effectId = 0;
 
-        string normalizedPath = ObjectPathRules.NormalizeGamePath(imcPath);
+        string normalizedPath = GameAssetPathRules.NormalizeGamePath(imcPath);
         if (string.IsNullOrWhiteSpace(normalizedPath)
          || !_gameData.FileExists(normalizedPath))
         {

@@ -46,6 +46,15 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         Rejected,
     }
 
+    private enum RedirectRejectionReason
+    {
+        None,
+        UnsupportedResourceKind,
+        MissingResolvedPath,
+        UnsupportedLocalFile,
+        UnsupportedMemoryResource,
+    }
+
     private readonly record struct ScopedResourceRequest(
         ObjectCollectionResolveData Collection,
         string RequestedPath,
@@ -54,8 +63,24 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
     private readonly record struct ResolvedResourceLoad(
         string ResourceCollectionId,
         string LoadPath,
-        string HashPath,
+        string HandlePath,
         string TrackedPath);
+
+    private readonly record struct RedirectResolution(
+        RedirectResolutionStatus Status,
+        ResolvedResourceLoad ResolvedLoad,
+        RedirectRejectionReason RejectionReason,
+        ObjectResolvedPath RejectedPath)
+    {
+        public static RedirectResolution NotFound()
+            => new(RedirectResolutionStatus.NotFound, default, RedirectRejectionReason.None, default);
+
+        public static RedirectResolution Resolved(ResolvedResourceLoad resolvedLoad)
+            => new(RedirectResolutionStatus.Resolved, resolvedLoad, RedirectRejectionReason.None, default);
+
+        public static RedirectResolution Rejected(RedirectRejectionReason reason, ObjectResolvedPath rejectedPath)
+            => new(RedirectResolutionStatus.Rejected, default, reason, rejectedPath);
+    }
 
     private readonly struct ResourceRequest(
         bool isSync,
@@ -172,7 +197,9 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
 
     public bool CanResolveCollectionResources(ObjectRootPathKind kind)
     {
-        if (IsDisposing || !_hooks.CanResolveCollectionResources(kind))
+        if (IsDisposing
+            || !_hooks.CanResolveCollectionResources(kind)
+            || !FileReadService.CanRouteScopedGamePaths())
         {
             return false;
         }
@@ -565,52 +592,44 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         }
 
         using var scope = EnterCollectionScopeToken(scopedRequest.Collection.CollectionId);
-        var redirectStatus = ResolveResourceLoad(
-            scopedRequest,
-            request.Type,
-            out ResolvedResourceLoad resolvedLoad);
-        if (redirectStatus == RedirectResolutionStatus.NotFound)
+        RedirectResolution redirect = ResolveResourceLoad(scopedRequest, request.Type);
+        if (redirect.Status == RedirectResolutionStatus.NotFound)
         {
             return CallOriginal(request);
         }
 
-        if (redirectStatus == RedirectResolutionStatus.Rejected)
+        if (redirect.Status == RedirectResolutionStatus.Rejected)
         {
+            LogRejectedResourceRedirect(scopedRequest, request.Type, redirect);
             return null;
         }
 
-        ResourceHandle* resourceHandle = CallOriginalWithPath(request, resolvedLoad.LoadPath, resolvedLoad.HashPath);
-        RegisterLoadedHandle(resourceHandle, resolvedLoad);
+        ResourceHandle* resourceHandle = CallOriginalWithPath(request, redirect.ResolvedLoad.HandlePath);
+        RegisterLoadedHandle(resourceHandle, redirect.ResolvedLoad);
         return resourceHandle;
     }
 
-    private RedirectResolutionStatus ResolveResourceLoad(
-        ScopedResourceRequest request,
-        uint resourceType,
-        out ResolvedResourceLoad resolvedLoad)
+    private RedirectResolution ResolveResourceLoad(ScopedResourceRequest request, uint resourceType)
     {
-        resolvedLoad = default;
-
         string normalizedRequestedPath = ObjectResourcePathUtility.NormalizeTrackedPath(request.RequestedPath);
         if (normalizedRequestedPath.Length == 0)
         {
-            return RedirectResolutionStatus.NotFound;
+            return RedirectResolution.NotFound();
         }
 
-        bool requestedLocalFile = ObjectResourcePathUtility.IsLocalFilePath(normalizedRequestedPath);
+        bool requestedLocalFile = ObjectLocalFilePathUtility.IsLocalFilePath(normalizedRequestedPath);
         if (request.Collection.Redirects.Count == 0)
         {
             if (!request.WasScoped)
             {
-                return RedirectResolutionStatus.NotFound;
+                return RedirectResolution.NotFound();
             }
 
-            resolvedLoad = new ResolvedResourceLoad(
+            return RedirectResolution.Resolved(new ResolvedResourceLoad(
                 request.Collection.CollectionId,
                 normalizedRequestedPath,
-                CreateResourceHashPath(request.Collection, normalizedRequestedPath, resourceType),
-                normalizedRequestedPath);
-            return RedirectResolutionStatus.Resolved;
+                CreateResourceHandlePath(request.Collection, normalizedRequestedPath, resourceType),
+                normalizedRequestedPath));
         }
 
         string loadPath = normalizedRequestedPath;
@@ -619,24 +638,24 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         {
             if (!ObjectResourcePathUtility.IsSupportedRedirection(normalizedRequestedPath, redirectedPath))
             {
-                return RedirectResolutionStatus.Rejected;
+                return RedirectResolution.Rejected(RedirectRejectionReason.UnsupportedResourceKind, redirectedPath);
             }
 
             if (!ObjectResourcePathUtility.Exists(_gameData, redirectedPath))
             {
-                return RedirectResolutionStatus.Rejected;
+                return RedirectResolution.Rejected(RedirectRejectionReason.MissingResolvedPath, redirectedPath);
             }
 
             if (redirectedPath.IsLocalFile
                 && !FileReadService.CanLoadLocalFilePath(redirectedPath.Path))
             {
-                return RedirectResolutionStatus.Rejected;
+                return RedirectResolution.Rejected(RedirectRejectionReason.UnsupportedLocalFile, redirectedPath);
             }
 
             if (redirectedPath.IsMemory
                 && !FileReadService.CanLoadMemoryResourcePath(redirectedPath.Path))
             {
-                return RedirectResolutionStatus.Rejected;
+                return RedirectResolution.Rejected(RedirectRejectionReason.UnsupportedMemoryResource, redirectedPath);
             }
 
             loadPath = redirectedPath.Path;
@@ -644,15 +663,14 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         }
         else if (!request.WasScoped && !ShouldIsolateResourceCache(resourceType))
         {
-            return RedirectResolutionStatus.NotFound;
+            return RedirectResolution.NotFound();
         }
 
-        resolvedLoad = new ResolvedResourceLoad(
+        return RedirectResolution.Resolved(new ResolvedResourceLoad(
             request.Collection.CollectionId,
             loadPath,
-            CreateResourceHashPath(request.Collection, loadPath, resourceType),
-            trackedPath);
-        return RedirectResolutionStatus.Resolved;
+            CreateResourceHandlePath(request.Collection, loadPath, resourceType),
+            trackedPath));
     }
 
     private bool TryResolveScopedResourceRequest(string requestedPath, out ScopedResourceRequest request)
@@ -682,9 +700,14 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
 
     private ObjectResourceLoadScopeToken EnterRegisteredHandleScopeToken(nint resourceHandleAddress)
     {
-        if (IsDisposing || resourceHandleAddress == nint.Zero)
+        if (IsDisposing)
         {
             return default;
+        }
+
+        if (resourceHandleAddress == nint.Zero)
+        {
+            return EnterActiveCollectionScopeToken();
         }
 
         if (TryEnterScopedHandleScope(resourceHandleAddress, out ObjectResourceLoadScopeToken scopedHandleScope))
@@ -694,7 +717,7 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
 
         if (!_resourceTracker.TryGetHandleScope(resourceHandleAddress, out var handleScope))
         {
-            return default;
+            return EnterActiveCollectionScopeToken();
         }
 
         if (!DoesTrackedHandleMatch(resourceHandleAddress, handleScope.ResolvedPath))
@@ -732,7 +755,7 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
     {
         if (instance == null)
         {
-            return default;
+            return EnterActiveCollectionScopeToken();
         }
 
         if (TryEnterTrackedSharedGroupInstanceScope(instance, out ObjectResourceLoadScopeToken instanceScope))
@@ -784,16 +807,21 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
 
     private ObjectResourceLoadScopeToken EnterBgObjectModelScopeToken(SceneBgObject* bgObject)
         => bgObject == null
-            ? default
+            ? EnterActiveCollectionScopeToken()
             : EnterRegisteredHandleScopeToken((nint)bgObject->ModelResourceHandle);
 
     private ObjectResourceLoadScopeToken EnterSchedulerTimelineResourceScopeToken(SchedulerTimeline* timeline)
     {
         ResourceHandle* resourceHandle = ResolveSchedulerTimelineResourceHandle(timeline);
         return resourceHandle == null
-            ? default
+            ? EnterActiveCollectionScopeToken()
             : EnterRegisteredHandleScopeToken((nint)resourceHandle);
     }
+
+    private ObjectResourceLoadScopeToken EnterActiveCollectionScopeToken()
+        => TryReadActiveCollectionId(out string activeCollectionId) && activeCollectionId.Length > 0
+            ? EnterCollectionScopeToken(activeCollectionId)
+            : default;
 
     private ObjectResourceLoadScopeToken EnterCollectionScopeToken(string resourceCollectionId)
         => IsDisposing ? default : _loadScope.EnterCollectionScope(resourceCollectionId);
@@ -845,9 +873,9 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
             or ResourceType.Sgb
             or ResourceType.Tmb;
 
-    private static string CreateResourceHashPath(ObjectCollectionResolveData collection, string loadPath, uint resourceType)
+    private static string CreateResourceHandlePath(ObjectCollectionResolveData collection, string loadPath, uint resourceType)
     {
-        // isolate dependency handles without exposing private scope paths to file readers
+        // scoped handle paths let async callbacks recover the collection before tracker registration
         return ShouldIsolateResourceCache(resourceType)
             ? ObjectScopedResourcePathUtility.Create(collection.ResourceScopeId, loadPath)
             : loadPath;
@@ -893,10 +921,10 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         }
     }
 
-    private ResourceHandle* CallOriginalWithPath(ResourceRequest request, string resourcePath, string hashPath)
+    private ResourceHandle* CallOriginalWithPath(ResourceRequest request, string resourcePath)
         => (ResourceHandle*)ObjectResourcePathEncoding.WithNullTerminatedUtf8(
             resourcePath,
-            (Owner: this, Request: request, ResourcePath: resourcePath, HashPath: hashPath),
+            (Owner: this, Request: request, ResourcePath: resourcePath),
             static (pathPointer, _, state) =>
             {
                 ResourceHandleType resolvedHandleType = default;
@@ -906,7 +934,7 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
                     out resolvedHandleType)
                     ? &resolvedHandleType
                     : state.Request.HandleType;
-                var resourceHash = unchecked((uint)ComputeResourceHash(state.HashPath, state.Request.Parameters));
+                var resourceHash = unchecked((uint)ComputeResourceHash(state.ResourcePath, state.Request.Parameters));
                 return (nint)state.Owner.CallOriginal(new ResourceRequest(
                     state.Request.IsSync,
                     state.Request.ResourceManager,
@@ -933,7 +961,7 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
 
         string unscopedPath = ObjectScopedResourcePathUtility.Strip(resourcePath);
         string typePath = ObjectMemoryResourcePathUtility.GetGamePathOrSelf(unscopedPath);
-        if (typePath.Length == 0 || ObjectResourcePathUtility.IsLocalFilePath(typePath))
+        if (typePath.Length == 0 || ObjectLocalFilePathUtility.IsLocalFilePath(typePath))
         {
             return false;
         }
@@ -1058,6 +1086,23 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
     private bool IsObjectScopedHandle(ResourceHandle* handle)
         => ObjectResourcePathEncoding.TryReadHandlePath(handle, out string handlePath)
             && ObjectScopedResourcePathUtility.IsObjectScopedPath(handlePath);
+
+    private void LogRejectedResourceRedirect(
+        ScopedResourceRequest request,
+        uint resourceType,
+        RedirectResolution redirect)
+    {
+        _logger.LogWarning(
+            "object resource redirect rejected: {Reason}; collection={CollectionId}; revision={Revision}; requested={RequestedPath}; resolved={ResolvedPath}; resolvedKind={ResolvedKind}; resourceType=0x{ResourceType:X8}; scoped={WasScoped}",
+            redirect.RejectionReason,
+            request.Collection.CollectionId,
+            request.Collection.Revision,
+            request.RequestedPath,
+            redirect.RejectedPath.Path,
+            redirect.RejectedPath.Kind,
+            resourceType,
+            request.WasScoped);
+    }
 
     private void LogNativeHookFailure(Exception exception, string hook, ResourceHandle* handle)
     {

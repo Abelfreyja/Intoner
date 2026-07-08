@@ -294,8 +294,8 @@ internal sealed class GameDataVfxResolver
             return;
         }
 
-        string normalizedTimelinePath = ObjectPathRules.NormalizeGamePath(timelinePath);
-        if (!ObjectPathRules.IsCatalogTimelinePath(normalizedTimelinePath)
+        string normalizedTimelinePath = GameAssetPathRules.NormalizeGamePath(timelinePath);
+        if (!GameAssetPathRules.IsFileKind(normalizedTimelinePath, GameAssetFileKind.Tmb)
          || !_gameData.FileExists(normalizedTimelinePath))
         {
             return;

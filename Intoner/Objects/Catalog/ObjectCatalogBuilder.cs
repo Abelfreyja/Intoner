@@ -10,7 +10,7 @@ internal sealed class ObjectCatalogBuilder
 {
     private readonly record struct CatalogCandidate(ObjectCatalogEntry Entry, int Priority);
 
-    private static readonly SharedGroupAssetInfo EmptySharedGroupAssets = new([], [], [], [], []);
+    private static readonly SharedGroupAssetInfo EmptySharedGroups = new([], [], [], [], []);
     private static readonly IComparer<ObjectCatalogEntry> NameSourcePathComparer = Comparer<ObjectCatalogEntry>.Create(static (left, right) =>
     {
         var nameComparison = StringComparer.OrdinalIgnoreCase.Compare(left.Name, right.Name);
@@ -329,17 +329,17 @@ internal sealed class ObjectCatalogBuilder
             additionalSearchTerms: BuildFurnitureSearchTerms(sharedGroupAssets));
 
     private bool IsCatalogSharedGroupPathAvailable(string sharedGroupPath)
-        => ObjectPathRules.IsCatalogSharedGroupPath(sharedGroupPath)
+        => ObjectAssetPathRules.IsCatalogSharedGroupPath(sharedGroupPath)
         && _gameData.FileExists(sharedGroupPath);
 
     private SharedGroupAssetInfo GetSharedGroupAssetsOrEmpty(string sharedGroupPath)
     {
-        if (_assetIndex.TryGetSharedGroupAssets(sharedGroupPath, out SharedGroupAssetInfo? resolvedSharedGroupAssets))
+        if (_assetIndex.TryGetSharedGroupAssets(sharedGroupPath, out SharedGroupAssetInfo? resolvedSharedGroups))
         {
-            return resolvedSharedGroupAssets;
+            return resolvedSharedGroups;
         }
 
-        return EmptySharedGroupAssets;
+        return EmptySharedGroups;
     }
 
     private static ObjectCatalogFurnitureInfo BuildFurnitureInfo(

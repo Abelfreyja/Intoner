@@ -1,3 +1,4 @@
+using Intoner.Objects.Assets;
 using Intoner.Objects.Utils;
 using Microsoft.Extensions.Logging;
 using System.Buffers.Binary;
@@ -21,7 +22,7 @@ internal sealed record ObjectCollectionResolveData
 
     public bool TryResolvePath(string requestedPath, out ObjectResolvedPath resolvedPath)
     {
-        if (ObjectResourcePathUtility.TryNormalizeGamePath(requestedPath, out string normalizedRequestedPath)
+        if (GameAssetPathRules.TryNormalizeGamePath(requestedPath, out string normalizedRequestedPath)
          && Redirects.TryGetValue(normalizedRequestedPath, out ObjectResolvedPath resolvedSource))
         {
             resolvedPath = resolvedSource;
@@ -34,7 +35,7 @@ internal sealed record ObjectCollectionResolveData
 
     public bool TryGetResourceRevision(string rootResourcePath, out long revision)
     {
-        if (ObjectResourcePathUtility.TryNormalizeGamePath(rootResourcePath, out string normalizedRootPath)
+        if (GameAssetPathRules.TryNormalizeGamePath(rootResourcePath, out string normalizedRootPath)
          && ResourceRevisions.TryGetValue(normalizedRootPath, out CollectionResourceRevision? resourceRevision)
          && resourceRevision is not null)
         {
@@ -345,7 +346,7 @@ internal sealed class ObjectResolvedCollectionStore : IObjectResolvedCollectionS
             = ImmutableDictionary.CreateBuilder<string, CollectionResourceRevision>(StringComparer.OrdinalIgnoreCase);
         foreach (CollectionResourceView view in resourceViews)
         {
-            if (!ObjectResourcePathUtility.TryNormalizeGamePath(view.RootPath, out string rootPath))
+            if (!GameAssetPathRules.TryNormalizeGamePath(view.RootPath, out string rootPath))
             {
                 continue;
             }

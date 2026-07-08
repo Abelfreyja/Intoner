@@ -12,18 +12,18 @@ internal static class ObjectAssetStateChange
         IEnumerable<string> searchTerms,
         KnownVfxFamily vfxFamily = KnownVfxFamily.None)
     {
-        string normalizedPath = ObjectPathRules.NormalizeGamePath(path);
+        string normalizedPath = GameAssetPathRules.NormalizeGamePath(path);
         if (!state.KnowledgeBase.AddPath(normalizedPath, source, contract, searchTerms, vfxFamily))
         {
             return false;
         }
 
-        if (ObjectPathRules.IsCatalogModelPath(normalizedPath))
+        if (ObjectAssetPathRules.IsCatalogModelPath(normalizedPath))
         {
             state.ObservedBgSnapshotDirty = true;
         }
 
-        if (ObjectPathRules.IsVfxPath(normalizedPath))
+        if (GameAssetPathRules.IsFileKind(normalizedPath, GameAssetFileKind.Avfx))
         {
             state.StandaloneVfxSnapshotDirty = true;
         }

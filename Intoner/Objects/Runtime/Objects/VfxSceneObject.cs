@@ -79,7 +79,7 @@ internal sealed unsafe class VfxSceneObject : DrawSceneObject
             return SceneObjectUpdateResult.RequiresRecreate;
         }
 
-        if (string.IsNullOrWhiteSpace(vfxModel.VfxPath) || !ObjectPathRules.IsVfxPath(vfxModel.VfxPath))
+        if (string.IsNullOrWhiteSpace(vfxModel.VfxPath) || !GameAssetPathRules.IsFileKind(vfxModel.VfxPath, GameAssetFileKind.Avfx))
         {
             Logger.LogDebug("skipping vfx update because path is empty or invalid");
             return SceneObjectUpdateResult.Rejected;

@@ -451,7 +451,7 @@ internal sealed unsafe class ObjectMemoryResourceService : IObjectMemoryResource
     }
 
     private static MemoryResourceReadKind ClassifyReadKind(string gamePath)
-        => ObjectPathRules.ClassifyObjectResourcePath(gamePath) switch
+        => ObjectAssetPathRules.ClassifyResourcePath(gamePath) switch
         {
             ObjectResourcePathKind.Model => MemoryResourceReadKind.Model,
             ObjectResourcePathKind.Texture or ObjectResourcePathKind.Atex => MemoryResourceReadKind.Texture,
@@ -464,7 +464,7 @@ internal sealed unsafe class ObjectMemoryResourceService : IObjectMemoryResource
         if (string.IsNullOrEmpty(resource.GamePath)
          || string.IsNullOrEmpty(resource.MemoryPath)
          || resource.Data is not { Length: > 0 }
-         || !ObjectPathRules.TryNormalizeSupportedObjectResourcePath(resource.GamePath, out string normalizedGamePath)
+         || !ObjectAssetPathRules.TryNormalizeSupportedResourcePath(resource.GamePath, out string normalizedGamePath)
          || !ObjectMemoryResourcePathUtility.TryParse(resource.MemoryPath, out ObjectMemoryResourcePath memoryPath))
         {
             return false;

@@ -10,7 +10,7 @@ internal static class ObjectResourceCategoryUtility
 
     public static bool TryResolveBgModelResourceCategory(string modelPath, out uint resourceCategory)
     {
-        string normalizedPath = ObjectPathRules.NormalizeGamePath(modelPath).ToLowerInvariant();
+        string normalizedPath = GameAssetPathRules.NormalizeGamePath(modelPath).ToLowerInvariant();
         if (normalizedPath.StartsWith("bgcommon/", StringComparison.Ordinal))
         {
             resourceCategory = BgCommonResourceCategory;

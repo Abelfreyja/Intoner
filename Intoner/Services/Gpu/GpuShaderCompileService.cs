@@ -6,21 +6,45 @@ namespace Intoner.Services.Gpu;
 
 internal static class GpuShaderCompileService
 {
-    public static byte[] CreateComputeShaderBytecode(
+    public static GpuShaderBytecode CreateComputeShader(
+        Type resourceAnchorType,
+        string resourceName,
+        string shaderName,
+        string entryPoint = "CSMain")
+        => new(
+            new Lazy<byte[]>(() => CreateComputeShaderBytecode(resourceAnchorType, resourceName, shaderName, entryPoint)));
+
+    public static GpuShaderBytecode CreateVertexShader(
+        Type resourceAnchorType,
+        string resourceName,
+        string shaderName,
+        string entryPoint = "VSMain")
+        => new(
+            new Lazy<byte[]>(() => CreateVertexShaderBytecode(resourceAnchorType, resourceName, shaderName, entryPoint)));
+
+    public static GpuShaderBytecode CreatePixelShader(
+        Type resourceAnchorType,
+        string resourceName,
+        string shaderName,
+        string entryPoint = "PSMain")
+        => new(
+            new Lazy<byte[]>(() => CreatePixelShaderBytecode(resourceAnchorType, resourceName, shaderName, entryPoint)));
+
+    private static byte[] CreateComputeShaderBytecode(
         Type resourceAnchorType,
         string resourceName,
         string shaderName,
         string entryPoint = "CSMain")
         => CreateShaderBytecode(resourceAnchorType, resourceName, shaderName, entryPoint, "cs_5_0");
 
-    public static byte[] CreateVertexShaderBytecode(
+    private static byte[] CreateVertexShaderBytecode(
         Type resourceAnchorType,
         string resourceName,
         string shaderName,
         string entryPoint = "VSMain")
         => CreateShaderBytecode(resourceAnchorType, resourceName, shaderName, entryPoint, "vs_5_0");
 
-    public static byte[] CreatePixelShaderBytecode(
+    private static byte[] CreatePixelShaderBytecode(
         Type resourceAnchorType,
         string resourceName,
         string shaderName,
@@ -55,7 +79,7 @@ internal static class GpuShaderCompileService
         return compilation.Bytecode.Data;
     }
 
-    public static string LoadShaderSource(Type resourceAnchorType, string resourceName)
+    private static string LoadShaderSource(Type resourceAnchorType, string resourceName)
         => LoadShaderSource(resourceAnchorType.Assembly, resourceName, []);
 
     private static string LoadShaderSource(Assembly assembly, string resourceName, HashSet<string> loadStack)

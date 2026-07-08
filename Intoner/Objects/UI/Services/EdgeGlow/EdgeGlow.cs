@@ -1,12 +1,10 @@
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Utility;
+using Intoner.Objects.Rendering.Drawing;
 using Intoner.Services.Gpu;
 using Microsoft.Extensions.Logging;
-using SharpDX.D3DCompiler;
-using SharpDX.Direct3D;
 using SharpDX.Direct3D11;
-using SharpDX.DXGI;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Buffer = SharpDX.Direct3D11.Buffer;
@@ -64,7 +62,7 @@ internal readonly record struct EdgeGlowStyle
     public float ClipPadding { get; init; }
 }
 
-internal sealed unsafe partial class EdgeGlowRenderer : IDisposable
+internal sealed unsafe partial class EdgeGlowRenderer : GpuUiDeviceResourceHost
 {
     private const string ShaderResourceName = "Objects.UI.Shaders.EdgeGlow.EdgeGlow.hlsl";
     private const int SpotCount = 9;
@@ -80,16 +78,13 @@ internal sealed unsafe partial class EdgeGlowRenderer : IDisposable
     private const float VisibilityEpsilon = 0.001f;
     private const float FullBorderInnerSpotOpacity = 0.45f;
 
-    private static readonly Lazy<byte[]> VertexShaderBytecode = CreateVertexShaderBytecodeLazy("edge glow vertex shader");
-    private static readonly Lazy<byte[]> LinePixelShaderBytecode = CreatePixelShaderBytecodeLazy("edge glow line pixel shader", "PSLineMain");
-    private static readonly Lazy<byte[]> LineBloomPixelShaderBytecode = CreatePixelShaderBytecodeLazy("edge glow line bloom pixel shader", "PSLineBloomOnly");
-    private static readonly Lazy<byte[]> FullBorderPixelShaderBytecode = CreatePixelShaderBytecodeLazy("edge glow full border pixel shader", "PSFullMain");
-    private static readonly Lazy<byte[]> FullBorderBloomPixelShaderBytecode = CreatePixelShaderBytecodeLazy("edge glow full border bloom pixel shader", "PSFullBloomOnly");
-    private static readonly Lazy<byte[]> DownsampleShaderBytecode = CreatePixelShaderBytecodeLazy("edge glow downsample shader", "PSDownsample");
-    private static readonly Lazy<byte[]> UpsampleShaderBytecode = CreatePixelShaderBytecodeLazy("edge glow upsample shader", "PSUpsample");
-
-    private static readonly ImDrawCallback RenderCallback = ProcessRenderCallback;
-    private static readonly ImDrawCallback ReleaseCallback = ProcessReleaseCallback;
+    private static readonly GpuShaderBytecode VertexShader = CreateVertexShader("edge glow vertex shader");
+    private static readonly GpuShaderBytecode LinePixelShader = CreatePixelShader("edge glow line pixel shader", "PSLineMain");
+    private static readonly GpuShaderBytecode LineBloomPixelShader = CreatePixelShader("edge glow line bloom pixel shader", "PSLineBloomOnly");
+    private static readonly GpuShaderBytecode FullBorderPixelShader = CreatePixelShader("edge glow full border pixel shader", "PSFullMain");
+    private static readonly GpuShaderBytecode FullBorderBloomPixelShader = CreatePixelShader("edge glow full border bloom pixel shader", "PSFullBloomOnly");
+    private static readonly GpuShaderBytecode DownsampleShader = CreatePixelShader("edge glow downsample shader", "PSDownsample");
+    private static readonly GpuShaderBytecode UpsampleShader = CreatePixelShader("edge glow upsample shader", "PSUpsample");
 
     private static readonly AnimationKeyframe[] BeamTravelXFrames =
     [
@@ -159,32 +154,26 @@ internal sealed unsafe partial class EdgeGlowRenderer : IDisposable
     ];
 
     private readonly ILogger<EdgeGlowRenderer> _logger;
-    private readonly IUiBuilder _uiBuilder;
+    private readonly ImGuiDrawCallbackQueue<EdgeGlowRenderJob> _renderJobs = new(ProcessRenderJob, static job => job.Dispose());
 
-    private Device? _device;
-    private DeviceContext? _context;
-    private VertexShader? _vertexShader;
     private PixelShader? _linePixelShader;
     private PixelShader? _lineBloomPixelShader;
     private PixelShader? _fullBorderPixelShader;
     private PixelShader? _fullBorderBloomPixelShader;
     private PixelShader? _downsampleShader;
     private PixelShader? _upsampleShader;
-    private InputLayout? _inputLayout;
-    private Buffer? _vertexBuffer;
+    private GpuFullscreenQuad? _fullscreenQuad;
     private Buffer? _constantBuffer;
     private Buffer? _blurConstantBuffer;
     private SamplerState? _samplerState;
     private RasterizerState? _rasterizerState;
     private DepthStencilState? _depthStencilState;
     private BlendState? _blendState;
-    private bool _disposed;
-    private bool _loggedInitializationFailure;
 
     public EdgeGlowRenderer(ILogger<EdgeGlowRenderer> logger, IUiBuilder uiBuilder)
+        : base(logger, uiBuilder, "edge glow renderer initialization failed")
     {
         _logger = logger;
-        _uiBuilder = uiBuilder;
     }
 
     /// <summary> draws the edge glow around the last submitted item </summary>
@@ -200,7 +189,7 @@ internal sealed unsafe partial class EdgeGlowRenderer : IDisposable
     /// <summary> draws the edge glow around an rounded rect </summary>
     public void DrawRect(Vector2 min, Vector2 max, float defaultRounding, in EdgeGlowStyle style)
     {
-        if (_disposed)
+        if (IsDisposed)
         {
             return;
         }
@@ -265,44 +254,11 @@ internal sealed unsafe partial class EdgeGlowRenderer : IDisposable
             Request = request,
             FramebufferSet = framebufferSet,
         };
-        var handle = GCHandle.Alloc(renderJob);
-        var handlePtr = (void*)GCHandle.ToIntPtr(handle);
-
-        drawList.AddCallback(RenderCallback, handlePtr);
-        if (style.ClipToRect)
-        {
-            drawList.PushClipRect(drawMin - new Vector2(clipPadding), drawMax + new Vector2(clipPadding), false);
-        }
-
-        if (request.RenderBloom)
-        {
-            drawList.AddImageRounded(
-                new ImTextureID(framebufferSet.BlurOutputFramebuffer.ShaderResourceView.NativePointer),
-                drawMin,
-                drawMax,
-                Vector2.Zero,
-                Vector2.One,
-                0xFFFFFFFF,
-                rounding,
-                style.CornerFlags);
-        }
-
-        drawList.AddImageRounded(
-            new ImTextureID(framebufferSet.SharpFramebuffer.ShaderResourceView.NativePointer),
-            drawMin,
-            drawMax,
-            Vector2.Zero,
-            Vector2.One,
-            0xFFFFFFFF,
-            rounding,
-            style.CornerFlags);
-
-        if (style.ClipToRect)
-        {
-            drawList.PopClipRect();
-        }
-
-        drawList.AddCallback(ReleaseCallback, handlePtr);
+        EdgeGlowStyle drawStyle = style;
+        _renderJobs.QueueDraw(
+            drawList,
+            renderJob,
+            () => DrawFramebufferSet(drawList, renderJob, drawMin, drawMax, rounding, drawStyle, clipPadding));
     }
 
     /// <summary> draws the edge glow around the current window border </summary>
@@ -315,43 +271,58 @@ internal sealed unsafe partial class EdgeGlowRenderer : IDisposable
             style);
     }
 
-    public void Dispose()
+    protected override void DisposeManagedResources()
+        => _renderJobs.Dispose();
+
+    private static void DrawFramebufferSet(
+        ImDrawListPtr drawList,
+        EdgeGlowRenderJob renderJob,
+        Vector2 drawMin,
+        Vector2 drawMax,
+        float rounding,
+        in EdgeGlowStyle style,
+        float clipPadding)
     {
-        if (_disposed)
+        if (style.ClipToRect)
         {
-            return;
+            drawList.PushClipRect(drawMin - new Vector2(clipPadding), drawMax + new Vector2(clipPadding), false);
         }
 
-        _disposed = true;
-        DisposeRuntimeResources();
-    }
-
-    private static unsafe void ProcessRenderCallback(ImDrawList* _, ImDrawCmd* cmd)
-    {
-        var handle = GCHandle.FromIntPtr((nint)cmd->UserCallbackData);
-        if (handle.Target is EdgeGlowRenderJob renderJob)
-        {
-            renderJob.Renderer.ProcessRender(renderJob);
-        }
-    }
-
-    private static unsafe void ProcessReleaseCallback(ImDrawList* _, ImDrawCmd* cmd)
-    {
-        var handle = GCHandle.FromIntPtr((nint)cmd->UserCallbackData);
         try
         {
-            if (handle.Target is EdgeGlowRenderJob renderJob)
+            if (renderJob.Request.RenderBloom)
             {
-                renderJob.Renderer.ReleaseFramebufferSet(renderJob.FramebufferSet);
+                drawList.AddImageRounded(
+                    new ImTextureID(renderJob.FramebufferSet.BlurOutputFramebuffer.ShaderResourceView.NativePointer),
+                    drawMin,
+                    drawMax,
+                    Vector2.Zero,
+                    Vector2.One,
+                    0xFFFFFFFF,
+                    rounding,
+                    style.CornerFlags);
             }
+
+            drawList.AddImageRounded(
+                new ImTextureID(renderJob.FramebufferSet.SharpFramebuffer.ShaderResourceView.NativePointer),
+                drawMin,
+                drawMax,
+                Vector2.Zero,
+                Vector2.One,
+                0xFFFFFFFF,
+                rounding,
+                style.CornerFlags);
         }
         finally
         {
-            handle.Free();
+            if (style.ClipToRect)
+            {
+                drawList.PopClipRect();
+            }
         }
     }
 
-    private EdgeGlowRenderRequest CreateRenderRequest(
+    private static EdgeGlowRenderRequest CreateRenderRequest(
         int width,
         int height,
         in CornerRadii outerRadii,
@@ -366,7 +337,7 @@ internal sealed unsafe partial class EdgeGlowRenderer : IDisposable
             : CreateFullBorderRenderRequest(width, height, outerRadii, innerRadii, time, strength, style, scale);
     }
 
-    private EdgeGlowRenderRequest CreateLineRenderRequest(
+    private static EdgeGlowRenderRequest CreateLineRenderRequest(
         int width,
         int height,
         in CornerRadii outerRadii,
@@ -420,7 +391,7 @@ internal sealed unsafe partial class EdgeGlowRenderer : IDisposable
         return new EdgeGlowRenderRequest(EdgeGlowMode.Line, constants, width, height, ShouldRenderBloom(style));
     }
 
-    private EdgeGlowRenderRequest CreateFullBorderRenderRequest(
+    private static EdgeGlowRenderRequest CreateFullBorderRenderRequest(
         int width,
         int height,
         in CornerRadii outerRadii,
@@ -469,19 +440,19 @@ internal sealed unsafe partial class EdgeGlowRenderer : IDisposable
         return new EdgeGlowRenderRequest(EdgeGlowMode.FullBorder, constants, width, height, ShouldRenderBloom(style));
     }
 
-    private static Lazy<byte[]> CreateVertexShaderBytecodeLazy(string shaderName, string entryPoint = "VSMain")
-        => new(() => GpuShaderCompileService.CreateVertexShaderBytecode(
+    private static GpuShaderBytecode CreateVertexShader(string shaderName, string entryPoint = "VSMain")
+        => GpuShaderCompileService.CreateVertexShader(
             typeof(EdgeGlowRenderer),
             ShaderResourceName,
             shaderName,
-            entryPoint));
+            entryPoint);
 
-    private static Lazy<byte[]> CreatePixelShaderBytecodeLazy(string shaderName, string entryPoint)
-        => new(() => GpuShaderCompileService.CreatePixelShaderBytecode(
+    private static GpuShaderBytecode CreatePixelShader(string shaderName, string entryPoint)
+        => GpuShaderCompileService.CreatePixelShader(
             typeof(EdgeGlowRenderer),
             ShaderResourceName,
             shaderName,
-            entryPoint));
+            entryPoint);
 
     private static EdgeGlowConstants CreateCommonConstants(
         int width,
@@ -545,14 +516,15 @@ internal sealed unsafe partial class EdgeGlowRenderer : IDisposable
     private static bool ShouldRenderBloom(in EdgeGlowStyle style)
         => style.BloomOpacity > VisibilityEpsilon;
 
+    private static void ProcessRenderJob(EdgeGlowRenderJob renderJob)
+        => renderJob.Renderer.ProcessRender(renderJob);
+
     private void ProcessRender(EdgeGlowRenderJob renderJob)
     {
         var request = renderJob.Request;
         var framebufferSet = renderJob.FramebufferSet;
-        if (_context is null
-            || _vertexShader is null
-            || _inputLayout is null
-            || _vertexBuffer is null
+        if (ActiveContext is null
+            || _fullscreenQuad is null
             || _constantBuffer is null
             || _blurConstantBuffer is null
             || _samplerState is null
@@ -568,8 +540,8 @@ internal sealed unsafe partial class EdgeGlowRenderer : IDisposable
 
         try
         {
-            using var state = D3D11RenderStateSnapshot.Capture(
-                _context,
+            using var state = D3D11DrawStateScope.Capture(
+                ActiveContext,
                 pixelConstantBufferCount: 2,
                 pixelShaderResourceViewCount: 1);
             ConfigureFullscreenPipeline();
@@ -585,7 +557,7 @@ internal sealed unsafe partial class EdgeGlowRenderer : IDisposable
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "edge glow render pass failed");
-            DisposeRuntimeResources();
+            RequestDeviceReset();
         }
     }
 
@@ -603,38 +575,36 @@ internal sealed unsafe partial class EdgeGlowRenderer : IDisposable
 
     private void RenderEffectPass(in EdgeGlowRenderRequest request, PixelShader shader, EdgeGlowFramebuffer framebuffer)
     {
-        if (_context is null || _constantBuffer is null)
+        if (ActiveContext is null || _constantBuffer is null)
         {
             return;
         }
 
-        var dataBox = _context.MapSubresource(_constantBuffer, 0, MapMode.WriteDiscard, D3D11MapFlags.None);
+        var dataBox = ActiveContext.MapSubresource(_constantBuffer, 0, MapMode.WriteDiscard, D3D11MapFlags.None);
         try
         {
             *(EdgeGlowConstants*)dataBox.DataPointer = request.Constants;
         }
         finally
         {
-            _context.UnmapSubresource(_constantBuffer, 0);
+            ActiveContext.UnmapSubresource(_constantBuffer, 0);
         }
 
-        _context.OutputMerger.SetTargets(framebuffer.RenderTargetView);
-        _context.Rasterizer.SetViewport(0f, 0f, request.Width, request.Height);
-        _context.ClearRenderTargetView(framebuffer.RenderTargetView, new SharpDX.Color4(0f, 0f, 0f, 0f));
-        _context.PixelShader.Set(shader);
-        _context.PixelShader.SetConstantBuffer(0, _constantBuffer);
-        _context.PixelShader.SetConstantBuffer(1, null);
-        _context.PixelShader.SetShaderResource(0, null);
-        _context.PixelShader.SetSampler(0, null);
-        _context.Draw(4, 0);
+        ActiveContext.OutputMerger.SetTargets(framebuffer.RenderTargetView);
+        ActiveContext.Rasterizer.SetViewport(0f, 0f, request.Width, request.Height);
+        ActiveContext.ClearRenderTargetView(framebuffer.RenderTargetView, new SharpDX.Color4(0f, 0f, 0f, 0f));
+        ActiveContext.PixelShader.Set(shader);
+        ActiveContext.PixelShader.SetConstantBuffer(0, _constantBuffer);
+        ActiveContext.PixelShader.SetConstantBuffer(1, null);
+        ActiveContext.PixelShader.SetShaderResource(0, null);
+        ActiveContext.PixelShader.SetSampler(0, null);
+        ActiveContext.Draw(4, 0);
     }
 
     private void ConfigureFullscreenPipeline()
     {
-        if (_context is null
-            || _inputLayout is null
-            || _vertexBuffer is null
-            || _vertexShader is null
+        if (ActiveContext is null
+            || _fullscreenQuad is null
             || _blendState is null
             || _depthStencilState is null
             || _rasterizerState is null)
@@ -642,25 +612,22 @@ internal sealed unsafe partial class EdgeGlowRenderer : IDisposable
             return;
         }
 
-        _context.InputAssembler.InputLayout = _inputLayout;
-        _context.InputAssembler.PrimitiveTopology = PrimitiveTopology.TriangleStrip;
-        _context.InputAssembler.SetVertexBuffers(0, new VertexBufferBinding(_vertexBuffer, Marshal.SizeOf<FullscreenVertex>(), 0));
-        _context.VertexShader.Set(_vertexShader);
-        _context.OutputMerger.BlendState = _blendState;
-        _context.OutputMerger.SetDepthStencilState(_depthStencilState, 0);
-        _context.Rasterizer.State = _rasterizerState;
+        _fullscreenQuad.Apply(ActiveContext);
+        ActiveContext.OutputMerger.BlendState = _blendState;
+        ActiveContext.OutputMerger.SetDepthStencilState(_depthStencilState, 0);
+        ActiveContext.Rasterizer.State = _rasterizerState;
     }
 
     private void RenderBlurPass(EdgeGlowFramebuffer framebuffer, ShaderResourceView inputView, PixelShader shader, float blurOffset)
     {
-        if (_context is null
+        if (ActiveContext is null
             || _blurConstantBuffer is null
             || _samplerState is null)
         {
             return;
         }
 
-        var dataBox = _context.MapSubresource(_blurConstantBuffer, 0, MapMode.WriteDiscard, D3D11MapFlags.None);
+        var dataBox = ActiveContext.MapSubresource(_blurConstantBuffer, 0, MapMode.WriteDiscard, D3D11MapFlags.None);
         try
         {
             var blurConstants = new EdgeGlowBlurConstants
@@ -672,144 +639,86 @@ internal sealed unsafe partial class EdgeGlowRenderer : IDisposable
         }
         finally
         {
-            _context.UnmapSubresource(_blurConstantBuffer, 0);
+            ActiveContext.UnmapSubresource(_blurConstantBuffer, 0);
         }
 
-        _context.OutputMerger.SetTargets(framebuffer.RenderTargetView);
-        _context.Rasterizer.SetViewport(0f, 0f, framebuffer.Width, framebuffer.Height);
-        _context.ClearRenderTargetView(framebuffer.RenderTargetView, new SharpDX.Color4(0f, 0f, 0f, 0f));
-        _context.PixelShader.Set(shader);
-        _context.PixelShader.SetConstantBuffer(0, null);
-        _context.PixelShader.SetConstantBuffer(1, _blurConstantBuffer);
-        _context.PixelShader.SetShaderResource(0, inputView);
-        _context.PixelShader.SetSampler(0, _samplerState);
-        _context.Draw(4, 0);
-        _context.PixelShader.SetShaderResource(0, null);
+        ActiveContext.OutputMerger.SetTargets(framebuffer.RenderTargetView);
+        ActiveContext.Rasterizer.SetViewport(0f, 0f, framebuffer.Width, framebuffer.Height);
+        ActiveContext.ClearRenderTargetView(framebuffer.RenderTargetView, new SharpDX.Color4(0f, 0f, 0f, 0f));
+        ActiveContext.PixelShader.Set(shader);
+        ActiveContext.PixelShader.SetConstantBuffer(0, null);
+        ActiveContext.PixelShader.SetConstantBuffer(1, _blurConstantBuffer);
+        ActiveContext.PixelShader.SetShaderResource(0, inputView);
+        ActiveContext.PixelShader.SetSampler(0, _samplerState);
+        ActiveContext.Draw(4, 0);
+        ActiveContext.PixelShader.SetShaderResource(0, null);
     }
 
     private bool TryEnsureDeviceResources()
+        => TryEnsureDevice(out _);
+
+    protected override void CreateDeviceResources(Device device, DeviceContext context)
     {
-        if (_device is not null && _context is not null)
+        _fullscreenQuad = new GpuFullscreenQuad(device, VertexShader);
+        _linePixelShader = LinePixelShader.CreatePixelShader(device);
+        _lineBloomPixelShader = LineBloomPixelShader.CreatePixelShader(device);
+        _fullBorderPixelShader = FullBorderPixelShader.CreatePixelShader(device);
+        _fullBorderBloomPixelShader = FullBorderBloomPixelShader.CreatePixelShader(device);
+        _downsampleShader = DownsampleShader.CreatePixelShader(device);
+        _upsampleShader = UpsampleShader.CreatePixelShader(device);
+        _constantBuffer = new Buffer(
+            device,
+            Marshal.SizeOf<EdgeGlowConstants>(),
+            ResourceUsage.Dynamic,
+            BindFlags.ConstantBuffer,
+            CpuAccessFlags.Write,
+            ResourceOptionFlags.None,
+            0);
+
+        _blurConstantBuffer = new Buffer(
+            device,
+            Marshal.SizeOf<EdgeGlowBlurConstants>(),
+            ResourceUsage.Dynamic,
+            BindFlags.ConstantBuffer,
+            CpuAccessFlags.Write,
+            ResourceOptionFlags.None,
+            0);
+
+        var samplerDescription = new SamplerStateDescription
         {
-            return true;
-        }
+            Filter = Filter.MinMagMipLinear,
+            AddressU = TextureAddressMode.Clamp,
+            AddressV = TextureAddressMode.Clamp,
+            AddressW = TextureAddressMode.Clamp,
+            ComparisonFunction = Comparison.Never,
+            MaximumLod = float.MaxValue,
+        };
+        _samplerState = new SamplerState(device, samplerDescription);
 
-        if (!OperatingSystem.IsWindows())
+        _rasterizerState = new RasterizerState(device, new RasterizerStateDescription
         {
-            return false;
-        }
+            CullMode = CullMode.None,
+            FillMode = FillMode.Solid,
+            IsDepthClipEnabled = false,
+            IsScissorEnabled = false,
+            IsFrontCounterClockwise = false,
+            IsMultisampleEnabled = false,
+        });
 
-        var deviceHandle = _uiBuilder.DeviceHandle;
-        if (deviceHandle == nint.Zero)
+        _depthStencilState = new DepthStencilState(device, new DepthStencilStateDescription
         {
-            return false;
-        }
+            IsDepthEnabled = false,
+            DepthWriteMask = DepthWriteMask.Zero,
+            DepthComparison = Comparison.Always,
+            IsStencilEnabled = false,
+        });
 
-        Device? device = null;
-        DeviceContext? context = null;
-        try
-        {
-            Marshal.AddRef(deviceHandle);
-            device = new Device(deviceHandle);
-            context = device.ImmediateContext;
-
-            _vertexShader = new VertexShader(device, VertexShaderBytecode.Value);
-            _linePixelShader = new PixelShader(device, LinePixelShaderBytecode.Value);
-            _lineBloomPixelShader = new PixelShader(device, LineBloomPixelShaderBytecode.Value);
-            _fullBorderPixelShader = new PixelShader(device, FullBorderPixelShaderBytecode.Value);
-            _fullBorderBloomPixelShader = new PixelShader(device, FullBorderBloomPixelShaderBytecode.Value);
-            _downsampleShader = new PixelShader(device, DownsampleShaderBytecode.Value);
-            _upsampleShader = new PixelShader(device, UpsampleShaderBytecode.Value);
-            _inputLayout = new InputLayout(
-                device,
-                ShaderSignature.GetInputSignature(VertexShaderBytecode.Value),
-                [
-                    new InputElement("POSITION", 0, Format.R32G32_Float, 0, 0),
-                    new InputElement("TEXCOORD", 0, Format.R32G32_Float, 8, 0),
-                ]);
-
-            FullscreenVertex[] vertices =
-            [
-                new(new Vector2(-1f, 1f), new Vector2(0f, 0f)),
-                new(new Vector2(1f, 1f), new Vector2(1f, 0f)),
-                new(new Vector2(-1f, -1f), new Vector2(0f, 1f)),
-                new(new Vector2(1f, -1f), new Vector2(1f, 1f)),
-            ];
-
-            _vertexBuffer = Buffer.Create(device, BindFlags.VertexBuffer, vertices);
-            _constantBuffer = new Buffer(
-                device,
-                Marshal.SizeOf<EdgeGlowConstants>(),
-                ResourceUsage.Dynamic,
-                BindFlags.ConstantBuffer,
-                CpuAccessFlags.Write,
-                ResourceOptionFlags.None,
-                0);
-
-            _blurConstantBuffer = new Buffer(
-                device,
-                Marshal.SizeOf<EdgeGlowBlurConstants>(),
-                ResourceUsage.Dynamic,
-                BindFlags.ConstantBuffer,
-                CpuAccessFlags.Write,
-                ResourceOptionFlags.None,
-                0);
-
-            var samplerDescription = new SamplerStateDescription
-            {
-                Filter = Filter.MinMagMipLinear,
-                AddressU = TextureAddressMode.Clamp,
-                AddressV = TextureAddressMode.Clamp,
-                AddressW = TextureAddressMode.Clamp,
-                ComparisonFunction = Comparison.Never,
-                MaximumLod = float.MaxValue,
-            };
-            _samplerState = new SamplerState(device, samplerDescription);
-
-            _rasterizerState = new RasterizerState(device, new RasterizerStateDescription
-            {
-                CullMode = CullMode.None,
-                FillMode = FillMode.Solid,
-                IsDepthClipEnabled = false,
-                IsScissorEnabled = false,
-                IsFrontCounterClockwise = false,
-                IsMultisampleEnabled = false,
-            });
-
-            _depthStencilState = new DepthStencilState(device, new DepthStencilStateDescription
-            {
-                IsDepthEnabled = false,
-                DepthWriteMask = DepthWriteMask.Zero,
-                DepthComparison = Comparison.Always,
-                IsStencilEnabled = false,
-            });
-
-            var blendStateDescription = BlendStateDescription.Default();
-            blendStateDescription.RenderTarget[0].IsBlendEnabled = false;
-            _blendState = new BlendState(device, blendStateDescription);
-
-            _device = device;
-            _context = context;
-            _loggedInitializationFailure = false;
-            return true;
-        }
-        catch (Exception ex)
-        {
-            context?.Dispose();
-            device?.Dispose();
-            DisposeRuntimeResources();
-
-            if (!_loggedInitializationFailure)
-            {
-                _loggedInitializationFailure = true;
-                _logger.LogWarning(ex, "edge glow renderer initialization failed");
-            }
-
-            return false;
-        }
+        var blendStateDescription = BlendStateDescription.Default();
+        blendStateDescription.RenderTarget[0].IsBlendEnabled = false;
+        _blendState = new BlendState(device, blendStateDescription);
     }
 
-    private void DisposeRuntimeResources()
+    protected override void DisposeDeviceResources()
     {
         DisposeFramebufferPool();
         _samplerState?.Dispose();
@@ -824,10 +733,8 @@ internal sealed unsafe partial class EdgeGlowRenderer : IDisposable
         _blurConstantBuffer = null;
         _constantBuffer?.Dispose();
         _constantBuffer = null;
-        _vertexBuffer?.Dispose();
-        _vertexBuffer = null;
-        _inputLayout?.Dispose();
-        _inputLayout = null;
+        _fullscreenQuad?.Dispose();
+        _fullscreenQuad = null;
         _upsampleShader?.Dispose();
         _upsampleShader = null;
         _downsampleShader?.Dispose();
@@ -840,12 +747,6 @@ internal sealed unsafe partial class EdgeGlowRenderer : IDisposable
         _lineBloomPixelShader = null;
         _linePixelShader?.Dispose();
         _linePixelShader = null;
-        _vertexShader?.Dispose();
-        _vertexShader = null;
-        _context?.Dispose();
-        _context = null;
-        _device?.Dispose();
-        _device = null;
     }
 
     private static unsafe void WriteLineSpot(
@@ -1033,7 +934,7 @@ internal sealed unsafe partial class EdgeGlowRenderer : IDisposable
     }
 
     private static bool HasCorner(ImDrawFlags flags, ImDrawFlags corner)
-        => (flags & corner) != 0;
+        => (flags & corner) != ImDrawFlags.None;
 
     private static float Wrap01(float value)
     {
@@ -1061,11 +962,24 @@ internal sealed unsafe partial class EdgeGlowRenderer : IDisposable
 
     private readonly record struct EdgeGlowRenderRequest(EdgeGlowMode Mode, EdgeGlowConstants Constants, int Width, int Height, bool RenderBloom);
 
-    private sealed class EdgeGlowRenderJob
+    private sealed class EdgeGlowRenderJob : IDisposable
     {
+        private bool _disposed;
+
         public required EdgeGlowRenderer Renderer { get; init; }
         public required EdgeGlowRenderRequest Request { get; init; }
         public required EdgeGlowFramebufferSet FramebufferSet { get; init; }
+
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            Renderer.ReleaseFramebufferSet(FramebufferSet);
+        }
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -1098,18 +1012,4 @@ internal sealed unsafe partial class EdgeGlowRenderer : IDisposable
         private float _padding0;
     }
 
-    [StructLayout(LayoutKind.Sequential)]
-    private struct FullscreenVertex
-    {
-        public Vector2 Position;
-        public Vector2 Uv;
-
-        public FullscreenVertex(Vector2 position, Vector2 uv)
-        {
-            Position = position;
-            Uv = uv;
-        }
-    }
-
 }
-

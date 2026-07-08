@@ -41,6 +41,9 @@ internal static unsafe class ObjectSignatures
     public const string ApricotResourceLoad =
         "48 89 74 24 ?? 57 48 83 EC ?? 41 0F B6 F0 48 8B F9 40 80 FE";
 
+    public const string SharedGroupLayoutResourceLoad =
+        "40 53 48 83 EC 20 8B 81 F0 00 00 00 48 8B D9 24 0F 3C 01 0F 85 ?? ?? ?? ?? 48 39 51 08 0F 85";
+
     public const string StaticVfxRemove =
         "40 53 48 83 EC 20 48 8B D9 48 8B 89 ?? ?? ?? ?? 48 85 C9 74 28 33 D2 E8 ?? ?? ?? ?? 48 8B 8B ?? ?? ?? ?? 48 85 C9";
 
@@ -93,9 +96,6 @@ internal static unsafe class ObjectSignatures
     public const string ContextPushBackCommand =
         "E8 ?? ?? ?? ?? 8B 6E 6C";
 
-    public const int SharedGroupResourceEventListenerVtableRva = 0x21761B0;
-    public const int ResourceEventListenerLoadVfuncIndex = 3;
-
     private static readonly SignatureScanTarget[] SignatureScanTargets =
     [
         new(LodConfig, "object lod config"),
@@ -104,6 +104,8 @@ internal static unsafe class ObjectSignatures
     // resource targets
     public static readonly SignatureHookTarget ModelLoad = new(ModelResourceLoad, "object model resource load");
     public static readonly SignatureHookTarget ApricotLoad = new(ApricotResourceLoad, "object apricot resource load");
+    public static readonly SignatureHookTarget SharedGroupLayoutResourceLoadHook =
+        new(SharedGroupLayoutResourceLoad, "object shared group resource load");
     public static readonly SignatureHookTarget CachedScheduleResource =
         new(GetCachedScheduleResource, "object scheduler cached resource");
     public static readonly SignatureHookTarget ResourceTextureOnLoad = new(TexHandleOnLoad, "object resource texture on load");
@@ -146,9 +148,6 @@ internal static unsafe class ObjectSignatures
         new((nint)SceneBgObject.MemberFunctionPointers.LoadAnimationData, "object bg object load animation data");
     public static readonly AddressHookTarget LayoutSharedGroupInsertObject =
         new((nint)LayoutSharedGroupObject.MemberFunctionPointers.InsertObject, "object layout shared group insert object");
-    public static readonly VtableHookTarget SharedGroupLayoutResourceLoad =
-        new(SharedGroupResourceEventListenerVtableRva, ResourceEventListenerLoadVfuncIndex, "object shared group resource load");
-
     // asset discovery targets
     public static readonly SignatureHookTarget AssetStaticVfxRemove = new(StaticVfxRemove, "object asset static vfx remove");
     public static readonly SignatureHookTarget AssetActorVfxCreate = new(ActorVfxCreate, "object asset actor vfx create");
@@ -289,11 +288,6 @@ internal static unsafe class ObjectSignatures
         FurnitureExecuteEmote,
     ];
 
-    private static readonly VtableHookTarget[] VtableHookTargets =
-    [
-        SharedGroupLayoutResourceLoad,
-    ];
-
     private static readonly StaticAddressTarget[] StaticAddressTargets =
     [
         ResourceRsfService,
@@ -361,14 +355,6 @@ internal static unsafe class ObjectSignatures
             }
         }
 
-        foreach (var target in VtableHookTargets)
-        {
-            if (ObjectNativeAddressResolver.TryResolveVtableFunction(logger, target) == nint.Zero)
-            {
-                failed = true;
-            }
-        }
-
         foreach (var target in StaticAddressTargets)
         {
             if (ObjectNativeAddressResolver.TryResolveStaticAddress(logger, sigScanner, target) == nint.Zero)
@@ -395,7 +381,6 @@ internal static unsafe class ObjectSignatures
     public readonly record struct JmpCallHookTarget(string Signature, string Label);
     public readonly record struct JmpCallAddressTarget(string Signature, string Label);
     public readonly record struct AddressHookTarget(nint Address, string Label);
-    public readonly record struct VtableHookTarget(int VtableRva, int VfunctionIndex, string Label);
     public readonly record struct StaticAddressTarget(string Signature, int Offset, string Label);
     private readonly record struct SignatureScanTarget(string Signature, string Label);
 }

@@ -39,9 +39,9 @@ internal sealed class ObjectAssetStandaloneVfxCatalog(IObjectAssetGameData gameD
         bool runtimeObserved,
         [NotNullWhen(true)] out VfxStandaloneReport? report)
     {
-        string normalizedPath = ObjectPathRules.NormalizeGamePath(path);
+        string normalizedPath = GameAssetPathRules.NormalizeGamePath(path);
         report = null;
-        if (!ObjectPathRules.IsVfxPath(normalizedPath) || !_gameData.FileExists(normalizedPath))
+        if (!GameAssetPathRules.IsFileKind(normalizedPath, GameAssetFileKind.Avfx) || !_gameData.FileExists(normalizedPath))
         {
             return false;
         }
@@ -150,7 +150,7 @@ internal sealed class ObjectAssetStandaloneVfxCatalog(IObjectAssetGameData gameD
         IReadOnlyList<string> searchTerms,
         bool runtimeObserved)
     {
-        string normalizedPath = ObjectPathRules.NormalizeGamePath(path);
+        string normalizedPath = GameAssetPathRules.NormalizeGamePath(path);
         IReadOnlyList<string> referenceSearchTerms = ObjectSearchTermUtility.MergeTerms(searchTerms, referenceInfo.BuildSearchTerms());
         _ = AddKnowledgePath(state, normalizedPath, source, contract, referenceSearchTerms);
 
@@ -191,7 +191,7 @@ internal sealed class ObjectAssetStandaloneVfxCatalog(IObjectAssetGameData gameD
 
         if (!report.IsSupportedStandalone)
         {
-            string normalizedPath = ObjectPathRules.NormalizeGamePath(path);
+            string normalizedPath = GameAssetPathRules.NormalizeGamePath(path);
             return RemoveStandaloneVfx(state, normalizedPath)
                 ? ObservationApplyResult.ProjectionChanged
                 : ObservationApplyResult.None;
@@ -262,7 +262,7 @@ internal sealed class ObjectAssetStandaloneVfxCatalog(IObjectAssetGameData gameD
         RuntimeVfxEvidence evidence,
         bool runtimeObserved = false)
     {
-        string normalizedPath = ObjectPathRules.NormalizeGamePath(path);
+        string normalizedPath = GameAssetPathRules.NormalizeGamePath(path);
         if (!state.VfxAssets.TryGetValue(normalizedPath, out RuntimeVfxAssetState? asset))
         {
             return ObservationApplyResult.None;

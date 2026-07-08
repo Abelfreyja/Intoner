@@ -10,7 +10,7 @@ namespace Intoner.Objects.UI;
 
 internal sealed partial class EditorWindow
 {
-    private const string ObjectPreviewControlsText = "drag to rotate | scroll to zoom | double click to reset";
+    private const string PreviewControlsText = "drag to rotate | scroll to zoom | double click to reset";
 
     private void DrawCreatePanel(IReadOnlyList<ObjectKindInfo> kindInfos)
     {
@@ -80,9 +80,9 @@ internal sealed partial class EditorWindow
 
         DrawScrollableCreateSectionCard("bgobject-settings", FontAwesomeIcon.Cube, "BgObject Settings", "Set object state and configuration before creation.", MathF.Max(1f, settingsHostHeight), () =>
         {
-            DrawObjectPreviewSection(
+            DrawPreviewSection(
                 "bgobject-preview",
-                ObjectPreviewControlsText,
+                PreviewControlsText,
                 ObjectCatalogKind.BgObject,
                 _bgObjectCreate.ModelPath,
                 _bgObjectCreate.Preview);
@@ -156,9 +156,9 @@ internal sealed partial class EditorWindow
 
         DrawScrollableCreateSectionCard("furniture-settings", FontAwesomeIcon.Home, "Furniture Settings", "Set furniture state and configuration before creation.", MathF.Max(1f, settingsHostHeight), () =>
         {
-            DrawObjectPreviewSection(
+            DrawPreviewSection(
                 "furniture-preview",
-                ObjectPreviewControlsText,
+                PreviewControlsText,
                 ObjectCatalogKind.Furniture,
                 _furnitureCreate.SharedGroupPath,
                 _furnitureCreate.Preview);

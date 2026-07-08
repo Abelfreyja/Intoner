@@ -63,6 +63,37 @@ internal static class ModelPreviewGeometryReader
         public PreviewBounds Bounds { get; } = BuildPreviewBounds(positions);
         public int TriangleCount { get; } = Math.Min(indices.Length / 3, triangleMaterialIndices.Length);
         public long EstimatedByteCount { get; } = EstimatePreviewGeometryByteCount(positions, texCoords, indices, triangleMaterialIndices);
+
+        private static PreviewBounds BuildPreviewBounds(IReadOnlyList<Vector3> positions)
+        {
+            var min = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
+            var max = new Vector3(float.MinValue, float.MinValue, float.MinValue);
+
+            for (var i = 0; i < positions.Count; i++)
+            {
+                min = Vector3.Min(min, positions[i]);
+                max = Vector3.Max(max, positions[i]);
+            }
+
+            var center = (min + max) * 0.5f;
+            var radiusSquared = 0f;
+            for (var i = 0; i < positions.Count; i++)
+            {
+                radiusSquared = MathF.Max(radiusSquared, Vector3.DistanceSquared(positions[i], center));
+            }
+
+            return new PreviewBounds(center, MathF.Max(0.001f, MathF.Sqrt(radiusSquared)));
+        }
+
+        private static long EstimatePreviewGeometryByteCount(
+            IReadOnlyCollection<Vector3> positions,
+            IReadOnlyCollection<Vector2> texCoords,
+            IReadOnlyCollection<int> indices,
+            IReadOnlyCollection<int> triangleMaterialIndices)
+            => (positions.Count * 3L * sizeof(float))
+             + (texCoords.Count * 2L * sizeof(float))
+             + (indices.Count * sizeof(int))
+             + (triangleMaterialIndices.Count * sizeof(int));
     }
 
     public static bool TryLoad(
@@ -191,37 +222,6 @@ internal static class ModelPreviewGeometryReader
         out PreviewGeometry geometry,
         out string? reason)
         => TryLoad(data, out geometry, out reason);
-
-    private static PreviewBounds BuildPreviewBounds(IReadOnlyList<Vector3> positions)
-    {
-        var min = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
-        var max = new Vector3(float.MinValue, float.MinValue, float.MinValue);
-
-        for (var i = 0; i < positions.Count; i++)
-        {
-            min = Vector3.Min(min, positions[i]);
-            max = Vector3.Max(max, positions[i]);
-        }
-
-        var center = (min + max) * 0.5f;
-        var radiusSquared = 0f;
-        for (var i = 0; i < positions.Count; i++)
-        {
-            radiusSquared = MathF.Max(radiusSquared, Vector3.DistanceSquared(positions[i], center));
-        }
-
-        return new PreviewBounds(center, MathF.Max(0.001f, MathF.Sqrt(radiusSquared)));
-    }
-
-    private static long EstimatePreviewGeometryByteCount(
-        IReadOnlyCollection<Vector3> positions,
-        IReadOnlyCollection<Vector2> texCoords,
-        IReadOnlyCollection<int> indices,
-        IReadOnlyCollection<int> triangleMaterialIndices)
-        => (positions.Count * 3L * sizeof(float))
-         + (texCoords.Count * 2L * sizeof(float))
-         + (indices.Count * sizeof(int))
-         + (triangleMaterialIndices.Count * sizeof(int));
 
     private static bool TryBuildPreviewVertexFormat(
         MdlStructs.VertexDeclarationStruct declaration,

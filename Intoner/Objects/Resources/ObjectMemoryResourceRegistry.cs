@@ -23,7 +23,7 @@ internal sealed class ObjectMemoryResourceRegistry
             throw new ArgumentException("memory resource owner id must not be empty", nameof(ownerId));
         }
 
-        if (!ObjectPathRules.TryNormalizeSupportedObjectResourcePath(gamePath, out string normalizedGamePath))
+        if (!ObjectAssetPathRules.TryNormalizeSupportedResourcePath(gamePath, out string normalizedGamePath))
         {
             throw new ArgumentException("memory resource game path must be a supported object resource path", nameof(gamePath));
         }

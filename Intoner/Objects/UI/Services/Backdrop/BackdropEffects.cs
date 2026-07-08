@@ -203,7 +203,7 @@ internal readonly struct BlurRequest
 }
 
 /// <summary> shared contract for shader backed object window backdrop effects </summary>
-internal abstract unsafe class ShaderBackdropEffectBase<TStyle, TRequest, TEffectConstants> : BackdropEffectBase
+internal abstract class ShaderBackdropEffectBase<TStyle, TRequest, TEffectConstants> : BackdropEffectBase
     where TRequest : struct
     where TEffectConstants : unmanaged
 {
@@ -217,7 +217,7 @@ internal abstract unsafe class ShaderBackdropEffectBase<TStyle, TRequest, TEffec
     { }
 
     /// <summary> embedded shader resource used for this effect </summary>
-    protected abstract Lazy<byte[]> ShaderBytecode { get; }
+    protected abstract GpuShaderBytecode ShaderBytecode { get; }
 
     /// <summary> log message used when effect processing fails </summary>
     protected abstract string FailureLogMessage { get; }
@@ -249,16 +249,21 @@ internal abstract unsafe class ShaderBackdropEffectBase<TStyle, TRequest, TEffec
         }
 
         var request = CreateRequest(region, style);
-        Renderer.QueueEffectCallback(drawList, ProcessEffectCallback, new ShaderCallbackData(this, request));
-        drawList.AddImageRounded(
-            new ImTextureID(draw.TextureHandle),
-            min,
-            max,
-            draw.UvMin,
-            draw.UvMax,
-            DrawTintColor,
-            rounding,
-            roundingFlags);
+        Renderer.QueueEffectDraw(
+            drawList,
+            new ShaderEffectDrawJob(this, request),
+            () =>
+            {
+                drawList.AddImageRounded(
+                    new ImTextureID(draw.TextureHandle),
+                    min,
+                    max,
+                    draw.UvMin,
+                    draw.UvMax,
+                    DrawTintColor,
+                    rounding,
+                    roundingFlags);
+            });
     }
 
     protected bool TryRenderShader(in BackdropRenderer.BackdropRegion region, in BackdropRenderer.BackdropSurfaceConstants constants)
@@ -320,25 +325,9 @@ internal abstract unsafe class ShaderBackdropEffectBase<TStyle, TRequest, TEffec
         return true;
     }
 
-    private static unsafe void ProcessEffectCallback(ImDrawList* _, ImDrawCmd* cmd)
+    private sealed class ShaderEffectDrawJob : BackdropRenderer.IDrawJob
     {
-        var handle = GCHandle.FromIntPtr((nint)cmd->UserCallbackData);
-        try
-        {
-            if (handle.Target is ShaderCallbackData callbackData)
-            {
-                callbackData.Effect.ProcessRequest(callbackData.Request);
-            }
-        }
-        finally
-        {
-            handle.Free();
-        }
-    }
-
-    private sealed class ShaderCallbackData
-    {
-        public ShaderCallbackData(ShaderBackdropEffectBase<TStyle, TRequest, TEffectConstants> effect, TRequest request)
+        public ShaderEffectDrawJob(ShaderBackdropEffectBase<TStyle, TRequest, TEffectConstants> effect, TRequest request)
         {
             Effect = effect;
             Request = request;
@@ -346,6 +335,9 @@ internal abstract unsafe class ShaderBackdropEffectBase<TStyle, TRequest, TEffec
 
         public ShaderBackdropEffectBase<TStyle, TRequest, TEffectConstants> Effect { get; }
         public TRequest Request { get; }
+
+        public void Process()
+            => Effect.ProcessRequest(Request);
     }
 
     private void ProcessRequest(in TRequest request)
@@ -440,12 +432,11 @@ internal sealed class GlassEffect
 {
     private const string GlassShaderResourceName = "Objects.UI.Shaders.Window.ObjectWindowGlass.hlsl";
 
-    private static readonly Lazy<byte[]> GlassShaderBytecode = new(
-        () => GpuShaderCompileService.CreatePixelShaderBytecode(
+    private static readonly GpuShaderBytecode GlassShader = GpuShaderCompileService.CreatePixelShader(
             typeof(BackdropRenderer),
             GlassShaderResourceName,
             "object window glass shader",
-            "PSGlass"));
+            "PSGlass");
 
     internal readonly struct Style
     {
@@ -485,7 +476,7 @@ internal sealed class GlassEffect
         : base(renderer)
     { }
 
-    protected override Lazy<byte[]> ShaderBytecode => GlassShaderBytecode;
+    protected override GpuShaderBytecode ShaderBytecode => GlassShader;
     protected override string FailureLogMessage => "object window glass processing failed";
 
     protected override GlassRequest CreateRequest(in BackdropRenderer.BackdropRegion region, Style style)

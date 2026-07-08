@@ -166,7 +166,7 @@ internal sealed unsafe class SceneObjectFactory : ISceneObjectFactory
             return SceneObjectCreateResult.Failed(ObjectRuntimeFailureCodes.InvalidAssetPath);
         }
 
-        if (!ObjectPathRules.IsCatalogSharedGroupPath(furnitureModel.SharedGroupPath))
+        if (!ObjectAssetPathRules.IsCatalogSharedGroupPath(furnitureModel.SharedGroupPath))
         {
             _furnitureLogger.LogWarning("furniture create rejected invalid shared group path {SharedGroupPath}", furnitureModel.SharedGroupPath);
             return SceneObjectCreateResult.Failed(ObjectRuntimeFailureCodes.InvalidAssetPath);
@@ -304,7 +304,7 @@ internal sealed unsafe class SceneObjectFactory : ISceneObjectFactory
             return SceneObjectCreateResult.Failed(ObjectRuntimeFailureCodes.InvalidAssetPath);
         }
 
-        if (!ObjectPathRules.IsVfxPath(vfxModel.VfxPath))
+        if (!GameAssetPathRules.IsFileKind(vfxModel.VfxPath, GameAssetFileKind.Avfx))
         {
             _vfxLogger.LogWarning("vfx create rejected invalid path {VfxPath}", vfxModel.VfxPath);
             return SceneObjectCreateResult.Failed(ObjectRuntimeFailureCodes.InvalidAssetPath);

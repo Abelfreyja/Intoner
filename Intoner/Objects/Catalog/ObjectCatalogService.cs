@@ -197,7 +197,7 @@ internal sealed class ObjectCatalogService : IObjectCatalogService, IDisposable
     }
 
     private static bool TryNormalizeCatalogPath(string path, out string normalizedPath)
-        => ObjectPathRules.TryNormalizeGamePath(path, out normalizedPath);
+        => GameAssetPathRules.TryNormalizeGamePath(path, out normalizedPath);
 
     public void Dispose()
     {

@@ -189,7 +189,7 @@ internal sealed unsafe class PrimitiveCallbackRenderer : IDisposable
 
         try
         {
-            using var renderState = D3D11RenderStateSnapshot.Capture(
+            using var renderState = D3D11DrawStateScope.Capture(
                 context,
                 pixelConstantBufferCount: 1,
                 pixelShaderResourceViewCount: 1,

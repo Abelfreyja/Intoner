@@ -7,7 +7,7 @@ internal sealed class VfxTimelineReferenceCache(IObjectAssetGameData gameData)
 
     public IReadOnlyList<TmbVfxReference> Get(string timelinePath)
     {
-        string normalizedTimelinePath = ObjectPathRules.NormalizeGamePath(timelinePath);
+        string normalizedTimelinePath = GameAssetPathRules.NormalizeGamePath(timelinePath);
         if (_references.TryGetValue(normalizedTimelinePath, out IReadOnlyList<TmbVfxReference>? references))
         {
             return references;

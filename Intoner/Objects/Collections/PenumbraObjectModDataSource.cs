@@ -135,7 +135,7 @@ internal sealed class PenumbraObjectModDataSource : IObjectModDataSource
             Dictionary<string, string> normalizedData = new(StringComparer.OrdinalIgnoreCase);
             foreach ((string requestedPath, string? mappedPath) in data)
             {
-                if (!ObjectPathRules.TryNormalizeGamePath(requestedPath, out string normalizedRequestedPath))
+                if (!GameAssetPathRules.TryNormalizeGamePath(requestedPath, out string normalizedRequestedPath))
                 {
                     continue;
                 }
@@ -384,7 +384,7 @@ internal sealed class PenumbraObjectModDataSource : IObjectModDataSource
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        HashSet<string> normalizedRequestedPaths = ObjectPathCollectionUtility.CreateSupportedObjectResourceSet(requestedPaths);
+        HashSet<string> normalizedRequestedPaths = CreateSupportedResourceSet(requestedPaths);
         if (normalizedRequestedPaths.Count == 0)
         {
             return CompleteResolve(
@@ -1316,6 +1316,20 @@ internal sealed class PenumbraObjectModDataSource : IObjectModDataSource
         => groupType is PenumbraModGroupType.Multi
             or PenumbraModGroupType.Combining
             or PenumbraModGroupType.Imc;
+
+    private static HashSet<string> CreateSupportedResourceSet(IEnumerable<string> paths)
+    {
+        HashSet<string> normalizedPaths = new(StringComparer.OrdinalIgnoreCase);
+        foreach (string path in paths)
+        {
+            if (ObjectAssetPathRules.TryNormalizeSupportedResourcePath(path, out string normalizedPath))
+            {
+                normalizedPaths.Add(normalizedPath);
+            }
+        }
+
+        return normalizedPaths;
+    }
 
     private static bool AllowsEmptyExplicitSelection(PenumbraModGroupType groupType)
         => groupType is PenumbraModGroupType.Multi

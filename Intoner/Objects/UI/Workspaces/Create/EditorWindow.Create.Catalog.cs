@@ -5,6 +5,7 @@ using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using Intoner.Objects.Catalog;
 using Intoner.Objects.Models;
+using Intoner.Objects.Preview;
 using Intoner.Objects.Runtime;
 using Intoner.Objects.UI.Components;
 using Intoner.Objects.Utils;
@@ -318,7 +319,7 @@ internal sealed partial class EditorWindow
             out variant);
     }
 
-    private void DrawCatalogLayoutToggleButtons(string id, ref CatalogLayoutMode layoutMode)
+    private static void DrawCatalogLayoutToggleButtons(string id, ref CatalogLayoutMode layoutMode)
     {
         var buttonEdge = ResolveCatalogLayoutToggleButtonEdge();
         var buttonSize = new Vector2(buttonEdge, buttonEdge);
@@ -762,10 +763,9 @@ internal sealed partial class EditorWindow
         float scale = ImGuiHelpers.GlobalScale;
         float innerPadding = 8f * scale;
         var preview = string.IsNullOrWhiteSpace(entry.PlacementPath)
-            ? new ObjectCatalogPreviewResult(null, false, "Preview unavailable")
+            ? new PreviewRender.Result(null, false, "Preview unavailable")
             : _previewService.GetPreview(
-                entry.Kind,
-                entry.PlacementPath,
+                CatalogPreviewAssetFactory.Create(entry),
                 CreateCatalogThumbnailRequest(size, innerPadding));
 
         ImGui.InvisibleButton($"##bgobjectCatalogGrid:{entry.Source}:{entry.RowId}:{entry.PlacementPath}", size);
@@ -788,11 +788,19 @@ internal sealed partial class EditorWindow
         var fill = selected
             ? accent with { W = 0.16f }
             : EditorColors.ButtonDefault with { W = 0.24f };
-        var border = selected
-            ? accent with { W = 0.88f }
-            : hovered
-                ? accent with { W = 0.54f }
-                : EditorColors.Border with { W = 0.34f };
+        Vector4 border;
+        if (selected)
+        {
+            border = accent with { W = 0.88f };
+        }
+        else if (hovered)
+        {
+            border = accent with { W = 0.54f };
+        }
+        else
+        {
+            border = EditorColors.Border with { W = 0.34f };
+        }
         float rounding = 10f * scale;
         var previewMin = min + new Vector2(innerPadding);
         var previewMax = max - new Vector2(innerPadding);
@@ -810,7 +818,7 @@ internal sealed partial class EditorWindow
             drawList.AddRectFilled(
                 previewMin,
                 previewMax,
-                ImGui.GetColorU32(ObjectPreviewBackgroundPalette.GetPlaceholderFill(ObjectPreviewBackgroundStyle.White)),
+                ImGui.GetColorU32(PreviewRender.BackgroundPalette.GetPlaceholderFill(PreviewRender.BackgroundStyle.White)),
                 imageRounding);
             if (preview.IsLoading)
             {
@@ -833,7 +841,7 @@ internal sealed partial class EditorWindow
         }
     }
 
-    private static ObjectCatalogPreviewRequest CreateCatalogThumbnailRequest(Vector2 tileSize, float innerPadding)
+    private static PreviewRender.Request CreateCatalogThumbnailRequest(Vector2 tileSize, float innerPadding)
     {
         float previewWidth = MathF.Max(1f, tileSize.X - (innerPadding * 2f));
         float previewHeight = MathF.Max(1f, tileSize.Y - (innerPadding * 2f));
@@ -844,17 +852,22 @@ internal sealed partial class EditorWindow
             -85,
             34,
             100,
-            ObjectPreviewBackgroundStyle.White,
-            ObjectCatalogPreviewMode.Thumbnail);
+            PreviewRender.BackgroundStyle.White,
+            PreviewRender.Mode.Thumbnail);
     }
 
-    private static string BuildCatalogEntryTooltip(ObjectCatalogEntry entry, ObjectCatalogPreviewResult preview)
+    private static string BuildCatalogEntryTooltip(ObjectCatalogEntry entry, PreviewRender.Result preview)
     {
-        string status = preview.IsLoading
-            ? "\nPreview: loading"
-            : !string.IsNullOrWhiteSpace(preview.Error)
-                ? $"\nPreview: {preview.Error}"
-                : string.Empty;
+        string status = string.Empty;
+        if (preview.IsLoading)
+        {
+            status = "\nPreview: loading";
+        }
+        else if (!string.IsNullOrWhiteSpace(preview.Error))
+        {
+            status = $"\nPreview: {preview.Error}";
+        }
+
         return $"{entry.Name}\n#{entry.RowId} | {entry.Source}\n{entry.DisplayPath}{status}";
     }
 

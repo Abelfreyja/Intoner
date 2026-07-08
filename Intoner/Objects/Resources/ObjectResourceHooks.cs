@@ -105,7 +105,7 @@ internal sealed unsafe class ObjectResourceHooks : IDisposable
         MaterialResourceLoadShpkFilesHook = ObjectInteropHookUtility.CreateHookFromAddress(logger, gameInteropProvider, ObjectSignatures.MaterialShaderLoad, materialResourceLoadShpkFilesDetour);
         ApricotResourceLoadHook = ObjectInteropHookUtility.CreateHook(logger, gameInteropProvider, sigScanner, ObjectSignatures.ApricotLoad, apricotResourceLoadDetour);
         BgObjectLoadAnimationDataHook = ObjectInteropHookUtility.CreateHookFromAddress(logger, gameInteropProvider, ObjectSignatures.BgObjectAnimationLoad, bgObjectLoadAnimationDataDetour);
-        SharedGroupLayoutResourceLoadHook = ObjectInteropHookUtility.CreateHookFromVtable(logger, gameInteropProvider, ObjectSignatures.SharedGroupLayoutResourceLoad, sharedGroupLayoutResourceLoadDetour);
+        SharedGroupLayoutResourceLoadHook = ObjectInteropHookUtility.CreateHook(logger, gameInteropProvider, sigScanner, ObjectSignatures.SharedGroupLayoutResourceLoadHook, sharedGroupLayoutResourceLoadDetour);
         LayoutSharedGroupInsertObjectHook = ObjectInteropHookUtility.CreateHookFromAddress(logger, gameInteropProvider, ObjectSignatures.LayoutSharedGroupInsertObject, layoutSharedGroupInsertObjectDetour);
         ResourceHandleIncRefHook = ObjectInteropHookUtility.CreateHookFromAddress(logger, gameInteropProvider, ObjectSignatures.ResourceHandleIncRef, resourceHandleIncRefDetour);
         SchedulerTimelineLoadResourcesHook = ObjectInteropHookUtility.CreateHookFromAddress(logger, gameInteropProvider, ObjectSignatures.SchedulerTimelineLoadResources, schedulerTimelineLoadResourcesDetour);

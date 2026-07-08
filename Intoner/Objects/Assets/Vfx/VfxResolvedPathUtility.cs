@@ -16,7 +16,7 @@ internal static class VfxResolvedPathUtility
         IEnumerable<string> searchTerms,
         VfxAnalysis? analysis = null)
     {
-        string normalizedPath = ObjectPathRules.NormalizeGamePath(path);
+        string normalizedPath = GameAssetPathRules.NormalizeGamePath(path);
         return TryMergeResolvedPathCore(
             resolvedPaths,
             gameData,
@@ -37,7 +37,7 @@ internal static class VfxResolvedPathUtility
         SqpackIndexSnapshot? sqpackIndexSnapshot = null,
         IReadOnlyList<string>? extraSearchTerms = null)
     {
-        string normalizedPath = ObjectPathRules.NormalizeGamePath(resolvedPath.Path);
+        string normalizedPath = GameAssetPathRules.NormalizeGamePath(resolvedPath.Path);
         IReadOnlyList<string> searchTerms = extraSearchTerms is null
             ? resolvedPath.SearchTerms
             : ObjectSearchTermUtility.MergeTerms(resolvedPath.SearchTerms, extraSearchTerms);
@@ -92,7 +92,7 @@ internal static class VfxResolvedPathUtility
         IObjectAssetGameData gameData,
         string normalizedPath,
         SqpackIndexSnapshot? sqpackIndexSnapshot)
-        => ObjectPathRules.IsVfxPath(normalizedPath)
+        => GameAssetPathRules.IsFileKind(normalizedPath, GameAssetFileKind.Avfx)
          && ((sqpackIndexSnapshot?.ContainsPath(normalizedPath) ?? false)
           || gameData.FileExists(normalizedPath));
 }

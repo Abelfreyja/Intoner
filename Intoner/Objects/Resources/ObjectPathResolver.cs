@@ -96,7 +96,7 @@ internal sealed class ObjectPathResolver : IObjectPathResolver
 
     public ObjectResolvedRootPath ResolveRootPath(ObjectSnapshot snapshot, ObjectRootPathKind kind, string requestedPath)
     {
-        string normalizedRequestedPath = ObjectPathRules.NormalizeGamePath(requestedPath);
+        string normalizedRequestedPath = GameAssetPathRules.NormalizeGamePath(requestedPath);
         string requestedCollectionId = ObjectCollectionKeyUtility.NormalizeCollectionId(snapshot.CollectionId);
         string resourceCollectionId = string.Empty;
         ObjectResolvedPath resolvedPath = ObjectResolvedPath.FromGamePath(normalizedRequestedPath);
@@ -114,7 +114,7 @@ internal sealed class ObjectPathResolver : IObjectPathResolver
             else if (collection.TryResolvePath(normalizedRequestedPath, out ObjectResolvedPath redirectedPath))
             {
                 resolvedPath = redirectedPath;
-                if (!CanUseRootPath(kind, redirectedPath))
+                if (!CanUseRootPath(kind, normalizedRequestedPath, redirectedPath))
                 {
                     status = ObjectResolvedRootPathStatus.InvalidRedirectKind;
                 }
@@ -147,18 +147,16 @@ internal sealed class ObjectPathResolver : IObjectPathResolver
             status);
     }
 
-    private static bool CanUseRootPath(ObjectRootPathKind kind, ObjectResolvedPath resolvedPath)
+    private static bool CanUseRootPath(ObjectRootPathKind kind, string requestedPath, ObjectResolvedPath resolvedPath)
     {
-        string resourcePath = resolvedPath.ResourceGamePath;
+        string resourcePath = resolvedPath.Kind == ObjectResolvedPathKind.GamePath
+            ? resolvedPath.ResourceGamePath
+            : requestedPath;
         return kind switch
         {
-            ObjectRootPathKind.BgModel => resolvedPath.Kind == ObjectResolvedPathKind.GamePath
-                ? ObjectPathRules.IsCatalogModelPath(resourcePath)
-                : ObjectPathRules.IsModelPath(resourcePath),
-            ObjectRootPathKind.FurnitureSharedGroup => resolvedPath.Kind == ObjectResolvedPathKind.GamePath
-                ? ObjectPathRules.IsCatalogSharedGroupPath(resourcePath)
-                : ObjectPathRules.IsSharedGroupPath(resourcePath),
-            ObjectRootPathKind.Vfx => ObjectPathRules.IsVfxPath(resourcePath),
+            ObjectRootPathKind.BgModel => ObjectAssetPathRules.IsCatalogModelPath(resourcePath),
+            ObjectRootPathKind.FurnitureSharedGroup => ObjectAssetPathRules.IsCatalogSharedGroupPath(resourcePath),
+            ObjectRootPathKind.Vfx => GameAssetPathRules.IsFileKind(resourcePath, GameAssetFileKind.Avfx),
             _ => false,
         };
     }

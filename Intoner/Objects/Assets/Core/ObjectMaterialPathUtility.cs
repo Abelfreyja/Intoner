@@ -1,4 +1,3 @@
-using Dalamud.Plugin.Services;
 using PenumbraMdlFile = Penumbra.GameData.Files.MdlFile;
 using PenumbraMtrlFile = Penumbra.GameData.Files.MtrlFile;
 
@@ -6,123 +5,57 @@ namespace Intoner.Objects.Assets;
 
 internal static class ObjectMaterialPathUtility
 {
-    public static bool TryResolveMaterialPath(IDataManager gameData, string modelPath, string materialName, out string materialPath)
-        => TryResolveMaterialPath(gameData.FileExists, modelPath, materialName, allowMissingCandidate: false, out materialPath);
-
-    public static bool TryResolveMaterialPath(IObjectAssetGameData gameData, string modelPath, string materialName, out string materialPath)
-        => TryResolveMaterialPath(gameData.FileExists, modelPath, materialName, allowMissingCandidate: false, out materialPath);
-
     public static IReadOnlyList<string> CollectGameModelMaterialPaths(IObjectAssetGameData gameData, string modelPath)
     {
-        List<string> materialPaths = [];
-        HashSet<string> seenPaths = new(StringComparer.OrdinalIgnoreCase);
-        string normalizedModelPath = ObjectPathRules.NormalizeGamePath(modelPath);
-        if (!ObjectPathRules.IsModelPath(normalizedModelPath))
+        string normalizedModelPath = GameAssetPathRules.NormalizeGamePath(modelPath);
+        if (!GameAssetPathRules.IsFileKind(normalizedModelPath, GameAssetFileKind.Mdl))
         {
-            return materialPaths;
+            return [];
         }
 
         PenumbraMdlFile? model = TryLoadModel(gameData.GetFile(normalizedModelPath)?.Data);
-        if (model is null)
-        {
-            return materialPaths;
-        }
-
-        foreach (string materialName in model.Materials)
-        {
-            if (!TryResolveMaterialPath(gameData, normalizedModelPath, materialName, out string materialPath))
-            {
-                continue;
-            }
-
-            AddCandidatePath(materialPaths, seenPaths, materialPath);
-        }
-
-        return materialPaths;
+        return CollectModelMaterialPaths(
+            normalizedModelPath,
+            model,
+            gameData.FileExists,
+            includeUnresolvedCandidate: false);
     }
 
-    public static IReadOnlyList<string> CollectLocalModelMaterialPaths(string requestedModelPath, string localModelPath)
+    public static IReadOnlyList<string> CollectLocalModelMaterialPaths(
+        IObjectAssetGameData gameData,
+        string requestedModelPath,
+        string localModelPath)
     {
-        List<string> materialPaths = [];
-        HashSet<string> seenPaths = new(StringComparer.OrdinalIgnoreCase);
-        string normalizedRequestedModelPath = ObjectPathRules.NormalizeGamePath(requestedModelPath);
-        if (!ObjectPathRules.IsModelPath(normalizedRequestedModelPath))
+        string normalizedRequestedModelPath = GameAssetPathRules.NormalizeGamePath(requestedModelPath);
+        if (!GameAssetPathRules.IsFileKind(normalizedRequestedModelPath, GameAssetFileKind.Mdl))
         {
-            return materialPaths;
+            return [];
         }
 
         PenumbraMdlFile? model = TryLoadModel(ObjectAssetFileUtility.TryReadLocalFileBytes(localModelPath));
-        if (model is null)
-        {
-            return materialPaths;
-        }
-
-        foreach (string materialName in model.Materials)
-        {
-            if (!TryResolveMaterialPath(
-                    fileExists: null,
-                    normalizedRequestedModelPath,
-                    materialName,
-                    allowMissingCandidate: true,
-                    out string materialPath))
-            {
-                continue;
-            }
-
-            AddCandidatePath(materialPaths, seenPaths, materialPath);
-        }
-
-        return materialPaths;
-    }
-
-    public static IReadOnlyList<string> CollectModelDependencyPaths(IObjectAssetGameData gameData, string modelPath)
-    {
-        List<string> dependencyPaths = [];
-        HashSet<string> seenPaths = new(StringComparer.OrdinalIgnoreCase);
-        foreach (string materialPath in CollectGameModelMaterialPaths(gameData, modelPath))
-        {
-            AddCandidatePath(dependencyPaths, seenPaths, materialPath);
-            CollectMaterialDependencyPaths(gameData, materialPath, dependencyPaths, seenPaths);
-        }
-
-        return dependencyPaths;
+        return CollectModelMaterialPaths(
+            normalizedRequestedModelPath,
+            model,
+            gameData.FileExists,
+            includeUnresolvedCandidate: true);
     }
 
     public static IReadOnlyList<string> CollectMaterialDependencyPaths(IObjectAssetGameData gameData, string materialPath)
     {
         List<string> dependencyPaths = [];
         HashSet<string> seenPaths = new(StringComparer.OrdinalIgnoreCase);
-        CollectMaterialDependencyPaths(gameData, materialPath, dependencyPaths, seenPaths);
+        CollectGameMaterialDependencyPaths(gameData, materialPath, dependencyPaths, seenPaths);
         return dependencyPaths;
     }
 
-    public static IReadOnlyList<string> CollectLocalMaterialDependencyPaths(string localMaterialPath)
-    {
-        List<string> dependencyPaths = [];
-        HashSet<string> seenPaths = new(StringComparer.OrdinalIgnoreCase);
-        PenumbraMtrlFile? material = TryLoadMaterial(ObjectAssetFileUtility.TryReadLocalFileBytes(localMaterialPath));
-        if (material is null)
-        {
-            return dependencyPaths;
-        }
-
-        foreach (PenumbraMtrlFile.Texture texture in material.Textures)
-        {
-            AddCandidatePath(dependencyPaths, seenPaths, texture.Path);
-        }
-
-        AddCandidatePath(dependencyPaths, seenPaths, material.ShaderPackage.Name);
-        return dependencyPaths;
-    }
-
-    public static void CollectMaterialDependencyPaths(
+    private static void CollectGameMaterialDependencyPaths(
         IObjectAssetGameData gameData,
         string materialPath,
         ICollection<string> dependencyPaths,
         ISet<string> seenPaths)
     {
-        string normalizedMaterialPath = ObjectPathRules.NormalizeGamePath(materialPath);
-        if (!ObjectPathRules.IsMaterialPath(normalizedMaterialPath))
+        string normalizedMaterialPath = GameAssetPathRules.NormalizeGamePath(materialPath);
+        if (!GameAssetPathRules.IsFileKind(normalizedMaterialPath, GameAssetFileKind.Mtrl))
         {
             return;
         }
@@ -141,12 +74,7 @@ internal static class ObjectMaterialPathUtility
                 return;
             }
 
-            foreach (PenumbraMtrlFile.Texture texture in material.Textures)
-            {
-                AddCandidatePath(dependencyPaths, seenPaths, texture.Path);
-            }
-
-            AddCandidatePath(dependencyPaths, seenPaths, material.ShaderPackage.Name);
+            CollectMaterialDependencyPaths(material, dependencyPaths, seenPaths);
         }
         catch
         {
@@ -154,56 +82,71 @@ internal static class ObjectMaterialPathUtility
         }
     }
 
+    public static IReadOnlyList<string> CollectLocalMaterialDependencyPaths(string localMaterialPath)
+    {
+        List<string> dependencyPaths = [];
+        HashSet<string> seenPaths = new(StringComparer.OrdinalIgnoreCase);
+        PenumbraMtrlFile? material = TryLoadMaterial(ObjectAssetFileUtility.TryReadLocalFileBytes(localMaterialPath));
+        CollectMaterialDependencyPaths(material, dependencyPaths, seenPaths);
+        return dependencyPaths;
+    }
+
+    private static IReadOnlyList<string> CollectModelMaterialPaths(
+        string normalizedModelPath,
+        PenumbraMdlFile? model,
+        Func<string, bool> fileExists,
+        bool includeUnresolvedCandidate)
+    {
+        if (model is null)
+        {
+            return [];
+        }
+
+        List<string> materialPaths = [];
+        HashSet<string> seenPaths = new(StringComparer.OrdinalIgnoreCase);
+        foreach (string materialName in model.Materials)
+        {
+            if (TryResolveMaterialPath(normalizedModelPath, materialName, fileExists, includeUnresolvedCandidate, out string materialPath))
+            {
+                AddCandidatePath(materialPaths, seenPaths, materialPath);
+            }
+        }
+
+        return materialPaths;
+    }
+
     private static bool TryResolveMaterialPath(
-        Func<string, bool>? fileExists,
-        string modelPath,
+        string normalizedModelPath,
         string materialName,
-        bool allowMissingCandidate,
+        Func<string, bool> fileExists,
+        bool includeUnresolvedCandidate,
         out string materialPath)
     {
-        materialPath = string.Empty;
-
-        string normalizedMaterialName = ObjectPathRules.NormalizeGamePath(materialName);
-        if (string.IsNullOrWhiteSpace(normalizedMaterialName))
+        if (GameMaterialPathUtility.TryResolveExistingMaterialPath(fileExists, normalizedModelPath, materialName, out materialPath))
         {
-            return false;
-        }
-
-        if (!ObjectPathRules.IsMaterialPath(normalizedMaterialName))
-        {
-            normalizedMaterialName += ".mtrl";
-        }
-
-        List<string> candidates = [];
-        HashSet<string> seenCandidates = new(StringComparer.OrdinalIgnoreCase);
-        AddMaterialPathCandidate(candidates, seenCandidates, normalizedMaterialName);
-
-        string fileName = Path.GetFileName(normalizedMaterialName);
-        string modelDirectory = GetGameDirectory(modelPath);
-        string modelParentDirectory = GetGameDirectory(modelDirectory);
-        string materialDirectory = CombineGamePath(modelParentDirectory, "material");
-        AddMaterialPathCandidatesForDirectory(candidates, seenCandidates, modelDirectory, normalizedMaterialName, fileName);
-        AddMaterialPathCandidatesForDirectory(candidates, seenCandidates, modelParentDirectory, normalizedMaterialName, fileName);
-        AddMaterialPathCandidatesForDirectory(candidates, seenCandidates, materialDirectory, normalizedMaterialName, fileName);
-
-        foreach (string candidate in candidates)
-        {
-            if (fileExists is not null && !fileExists(candidate))
-            {
-                continue;
-            }
-
-            materialPath = candidate;
             return true;
         }
 
-        if (allowMissingCandidate && candidates.Count > 0)
+        return includeUnresolvedCandidate
+            && GameMaterialPathUtility.TryGetPrimaryMaterialPathCandidate(normalizedModelPath, materialName, out materialPath);
+    }
+
+    private static void CollectMaterialDependencyPaths(
+        PenumbraMtrlFile? material,
+        ICollection<string> dependencyPaths,
+        ISet<string> seenPaths)
+    {
+        if (material is null)
         {
-            materialPath = candidates[0];
-            return true;
+            return;
         }
 
-        return false;
+        foreach (PenumbraMtrlFile.Texture texture in material.Textures)
+        {
+            AddCandidatePath(dependencyPaths, seenPaths, texture.Path);
+        }
+
+        AddCandidatePath(dependencyPaths, seenPaths, material.ShaderPackage.Name);
     }
 
     private static PenumbraMdlFile? TryLoadModel(byte[]? data)
@@ -242,31 +185,7 @@ internal static class ObjectMaterialPathUtility
         }
     }
 
-    private static void AddMaterialPathCandidate(ICollection<string> candidates, ISet<string> seenCandidates, string path)
-        => _ = ObjectPathCollectionUtility.AddGamePath(candidates, seenCandidates, path);
-
-    private static void AddMaterialPathCandidatesForDirectory(
-        ICollection<string> candidates,
-        ISet<string> seenCandidates,
-        string directory,
-        string normalizedMaterialName,
-        string fileName)
-    {
-        AddMaterialPathCandidate(candidates, seenCandidates, CombineGamePath(directory, normalizedMaterialName));
-        AddMaterialPathCandidate(candidates, seenCandidates, CombineGamePath(directory, fileName));
-    }
-
-    private static string GetGameDirectory(string gamePath)
-    {
-        string normalizedPath = ObjectPathRules.NormalizeGamePath(gamePath);
-        int lastSlashIndex = normalizedPath.LastIndexOf('/');
-        return lastSlashIndex < 0 ? string.Empty : normalizedPath[..lastSlashIndex];
-    }
-
-    private static string CombineGamePath(params string[] segments)
-        => ObjectPathRules.NormalizeGamePath(string.Join("/", segments.Where(static segment => !string.IsNullOrWhiteSpace(segment))));
-
     private static void AddCandidatePath(ICollection<string> candidates, ISet<string> seenPaths, string path)
-        => _ = ObjectPathCollectionUtility.AddGamePath(candidates, seenPaths, path);
+        => _ = GameAssetPathCollectionUtility.AddGamePath(candidates, seenPaths, path);
 }
 

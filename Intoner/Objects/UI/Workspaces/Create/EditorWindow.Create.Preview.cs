@@ -2,7 +2,7 @@ using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using Intoner.Objects.Catalog;
-using Intoner.Objects.Models;
+using Intoner.Objects.Preview;
 using Intoner.UI;
 using System.Numerics;
 
@@ -10,7 +10,7 @@ namespace Intoner.Objects.UI;
 
 internal sealed partial class EditorWindow
 {
-    private void DrawObjectPreviewSection(
+    private void DrawPreviewSection(
         string id,
         string controlsText,
         ObjectCatalogKind kind,
@@ -24,20 +24,19 @@ internal sealed partial class EditorWindow
         var previewHeight = MathF.Max(
             180f * ImGuiHelpers.GlobalScale,
             MathF.Min(260f * ImGuiHelpers.GlobalScale, previewWidth * 0.66f));
-        var request = state.AssetPath.Length > 0
-            ? _previewService.GetPreview(
-                kind,
-                state.AssetPath,
-                state.CreateRequest(
-                    (int)MathF.Round(MathF.Max(96f, previewWidth - (24f * ImGuiHelpers.GlobalScale))),
-                    (int)MathF.Round(MathF.Max(96f, previewHeight - (24f * ImGuiHelpers.GlobalScale)))))
-            : new ObjectCatalogPreviewResult(null, false, null);
+        var request = state.CreateRequest(
+            (int)MathF.Round(MathF.Max(96f, previewWidth - (24f * ImGuiHelpers.GlobalScale))),
+            (int)MathF.Round(MathF.Max(96f, previewHeight - (24f * ImGuiHelpers.GlobalScale))));
+        PreviewAsset? previewAsset = CatalogPreviewAssetFactory.TryCreate(_objectCatalog, kind, state.AssetPath, out PreviewAsset? resolvedAsset)
+            ? resolvedAsset
+            : null;
 
-        DrawObjectPreviewViewport(
+        DrawViewport(
             $"{id}-viewport",
             new Vector2(previewWidth, previewHeight),
             accent,
             controlsText,
+            previewAsset,
             request,
             state);
     }
@@ -49,12 +48,13 @@ internal sealed partial class EditorWindow
         return MathF.Max(140f * ImGuiHelpers.GlobalScale, stableWidth);
     }
 
-    private void DrawObjectPreviewViewport(
+    private void DrawViewport(
         string id,
         Vector2 viewportSize,
         Vector4 accent,
         string controlsText,
-        ObjectCatalogPreviewResult preview,
+        PreviewAsset? previewAsset,
+        PreviewRender.Request request,
         PreviewState state)
     {
         var availableWidth = ImGui.GetContentRegionAvail().X;
@@ -92,23 +92,38 @@ internal sealed partial class EditorWindow
         var active = ImGui.IsItemActive();
         var cursorAfterViewport = cursorBeforeViewport + viewportRectSize;
 
-        if (preview.Texture is not null)
+        PreviewRender.Result preview = new(null, false, null);
+        bool drewGpuPreview = false;
+        if (previewAsset is not null)
         {
-            drawList.AddImageRounded(preview.Texture.Handle, imageMin, imageMax, Vector2.Zero, Vector2.One, 0xFFFFFFFF, imageRounding);
+            drewGpuPreview = _viewportService.TryDrawPreview(
+                drawList,
+                previewAsset,
+                request,
+                imageMin,
+                imageMax,
+                imageRounding,
+                out preview);
         }
-        else
+
+        if (!drewGpuPreview)
         {
-            var placeholderBackground = ObjectPreviewBackgroundPalette.GetPlaceholderFill(state.BackgroundStyle);
+            var placeholderBackground = PreviewRender.BackgroundPalette.GetPlaceholderFill(state.BackgroundStyle);
             drawList.AddRectFilled(
                 imageMin,
                 imageMax,
                 ImGui.GetColorU32(placeholderBackground),
                 imageRounding);
-            var placeholder = preview.IsLoading
-                ? "Loading preview..."
-                : !string.IsNullOrWhiteSpace(preview.Error)
-                    ? preview.Error
-                    : "select to preview";
+            var placeholder = "select to preview";
+            if (preview.IsLoading)
+            {
+                placeholder = "Loading preview...";
+            }
+            else if (!string.IsNullOrWhiteSpace(preview.Error))
+            {
+                placeholder = preview.Error;
+            }
+
             DrawCenteredPreviewMessage(imageMin, imageMax, placeholder, accent);
         }
 
@@ -180,22 +195,22 @@ internal sealed partial class EditorWindow
             new Vector2(firstButtonX, buttonY),
             swatchSize,
             imageRounding,
-            ObjectPreviewBackgroundPalette.GetSwatchFill(ObjectPreviewBackgroundStyle.White),
-            state.BackgroundStyle == ObjectPreviewBackgroundStyle.White,
+            PreviewRender.BackgroundPalette.GetSwatchFill(PreviewRender.BackgroundStyle.White),
+            state.BackgroundStyle == PreviewRender.BackgroundStyle.White,
             accent,
             "light",
-            () => state.BackgroundStyle = ObjectPreviewBackgroundStyle.White);
+            () => state.BackgroundStyle = PreviewRender.BackgroundStyle.White);
 
         hoveredAny |= DrawPreviewBackgroundButton(
             $"{id}-dark",
             new Vector2(firstButtonX + swatchSize.X + spacing, buttonY),
             swatchSize,
             imageRounding,
-            ObjectPreviewBackgroundPalette.GetSwatchFill(ObjectPreviewBackgroundStyle.DarkBlue),
-            state.BackgroundStyle == ObjectPreviewBackgroundStyle.DarkBlue,
+            PreviewRender.BackgroundPalette.GetSwatchFill(PreviewRender.BackgroundStyle.DarkBlue),
+            state.BackgroundStyle == PreviewRender.BackgroundStyle.DarkBlue,
             accent,
             "dark",
-            () => state.BackgroundStyle = ObjectPreviewBackgroundStyle.DarkBlue);
+            () => state.BackgroundStyle = PreviewRender.BackgroundStyle.DarkBlue);
 
         return hoveredAny;
     }
@@ -233,11 +248,20 @@ internal sealed partial class EditorWindow
             onClick();
         }
 
-        var outlineColor = selected
-            ? accent with { W = 0.90f }
-            : hovered
-                ? EditorColors.Color(1f, 1f, 1f, 0.70f)
-                : EditorColors.Color(1f, 1f, 1f, 0.38f);
+        Vector4 outlineColor;
+        if (selected)
+        {
+            outlineColor = accent with { W = 0.90f };
+        }
+        else if (hovered)
+        {
+            outlineColor = EditorColors.Color(1f, 1f, 1f, 0.70f);
+        }
+        else
+        {
+            outlineColor = EditorColors.Color(1f, 1f, 1f, 0.38f);
+        }
+
         drawList.AddRectFilled(outerMin, outerMax, ImGui.GetColorU32(EditorColors.Color(0f, 0f, 0f, 0.28f)), buttonRounding);
         drawList.AddRectFilled(innerMin, innerMax, ImGui.GetColorU32(fillColor), MathF.Max(2f * ImGuiHelpers.GlobalScale, buttonRounding - framePadding));
         drawList.AddRect(outerMin, outerMax, ImGui.GetColorU32(outlineColor), buttonRounding, ImDrawFlags.None, selected ? 1.8f * ImGuiHelpers.GlobalScale : 1.1f * ImGuiHelpers.GlobalScale);

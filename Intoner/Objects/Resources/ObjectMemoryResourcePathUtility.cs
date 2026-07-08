@@ -25,7 +25,7 @@ internal static class ObjectMemoryResourcePathUtility
     public static string Create(string resourceId, string gamePath)
     {
         string normalizedResourceId = ObjectStringUtility.TrimOrEmpty(resourceId);
-        string normalizedGamePath = ObjectPathRules.NormalizeGamePath(gamePath);
+        string normalizedGamePath = GameAssetPathRules.NormalizeGamePath(gamePath);
         return normalizedResourceId.Length > 0 && normalizedGamePath.Length > 0
             ? $"{Prefix}{normalizedResourceId}{Separator}{normalizedGamePath}"
             : string.Empty;
@@ -53,7 +53,7 @@ internal static class ObjectMemoryResourcePathUtility
         }
 
         string resourceId = normalizedPath[Prefix.Length..separatorIndex];
-        string gamePath = ObjectPathRules.NormalizeGamePath(normalizedPath[(separatorIndex + 1)..]);
+        string gamePath = GameAssetPathRules.NormalizeGamePath(normalizedPath[(separatorIndex + 1)..]);
         if (resourceId.Length == 0 || gamePath.Length == 0)
         {
             return false;

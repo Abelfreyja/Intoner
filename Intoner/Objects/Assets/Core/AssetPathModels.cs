@@ -53,6 +53,23 @@ internal enum ObjectResourcePathKind
     Eid,
 }
 
+internal enum GameAssetFileKind
+{
+    Unknown,
+    Mdl,
+    Sgb,
+    Tmb,
+    Sklb,
+    Pap,
+    Mtrl,
+    Tex,
+    Shpk,
+    Avfx,
+    Atex,
+    Scd,
+    Eid,
+}
+
 [Flags]
 internal enum KnownVfxFamily
 {
@@ -140,7 +157,7 @@ internal static class KnownVfxFamilyExtensions
 
     public static KnownVfxFamily InferFamilyHintFromPath(string path)
     {
-        string normalizedPath = ObjectPathRules.NormalizeGamePath(path);
+        string normalizedPath = GameAssetPathRules.NormalizeGamePath(path);
         if (string.IsNullOrWhiteSpace(normalizedPath))
         {
             return KnownVfxFamily.None;

@@ -85,13 +85,13 @@ internal sealed class GameDataLayoutAssetResolver
                 exportedSharedGroups,
                 ExportedSharedGroupSource,
                 static row => row.RowId,
-                static row => ObjectPathRules.NormalizeGamePath(row.SgbPath.ToString()),
+                static row => GameAssetPathRules.NormalizeGamePath(row.SgbPath.ToString()),
                 cancellationToken);
             CollectAssetPathRows(
                 housingExteriors,
                 HousingExteriorSource,
                 static row => row.RowId,
-                static row => ObjectPathRules.NormalizeGamePath(row.Model.ExtractText()),
+                static row => GameAssetPathRules.NormalizeGamePath(row.Model.ExtractText()),
                 cancellationToken);
             CollectHousingInteriorAssets(housingInteriors, cancellationToken);
             CollectHousingFurnitureAssets(housingFurniture, cancellationToken);
@@ -258,7 +258,7 @@ internal sealed class GameDataLayoutAssetResolver
                     TryCollectSharedGroupAssets(
                         territory.RowId,
                         TerritoryZoneSharedGroupSource,
-                        ObjectPathRules.NormalizeGamePath(zoneSharedGroup.LGBSharedGroup.ToString()),
+                        GameAssetPathRules.NormalizeGamePath(zoneSharedGroup.LGBSharedGroup.ToString()),
                         territoryMetadata);
                 }
             }
@@ -295,13 +295,13 @@ internal sealed class GameDataLayoutAssetResolver
             string sourcePath,
             in ObjectTerritoryMetadata territoryMetadata)
         {
-            if (ObjectPathRules.IsCatalogSharedGroupPath(sourcePath))
+            if (ObjectAssetPathRules.IsCatalogSharedGroupPath(sourcePath))
             {
                 TryCollectSharedGroupAssets(rowId, source, sourcePath, territoryMetadata);
                 return;
             }
 
-            if (!ObjectPathRules.IsCatalogModelPath(sourcePath)
+            if (!ObjectAssetPathRules.IsCatalogModelPath(sourcePath)
              || !_gameData.FileExists(sourcePath))
             {
                 return;
@@ -322,7 +322,7 @@ internal sealed class GameDataLayoutAssetResolver
             string sharedGroupPath,
             in ObjectTerritoryMetadata territoryMetadata)
         {
-            if (!ObjectPathRules.IsCatalogSharedGroupPath(sharedGroupPath)
+            if (!ObjectAssetPathRules.IsCatalogSharedGroupPath(sharedGroupPath)
              || !_gameData.FileExists(sharedGroupPath))
             {
                 return;

@@ -73,9 +73,9 @@ internal static class ObjectSnapshotUtility
     public static string GetRootResourcePath(ObjectSnapshot snapshot)
         => snapshot.Model switch
         {
-            BgObjectModel bgObjectModel   => ObjectPathRules.NormalizeGamePath(bgObjectModel.ModelPath),
-            FurnitureModel furnitureModel => ObjectPathRules.NormalizeGamePath(furnitureModel.SharedGroupPath),
-            VfxModel vfxModel             => ObjectPathRules.NormalizeGamePath(vfxModel.VfxPath),
+            BgObjectModel bgObjectModel   => GameAssetPathRules.NormalizeGamePath(bgObjectModel.ModelPath),
+            FurnitureModel furnitureModel => GameAssetPathRules.NormalizeGamePath(furnitureModel.SharedGroupPath),
+            VfxModel vfxModel             => GameAssetPathRules.NormalizeGamePath(vfxModel.VfxPath),
             _                             => string.Empty,
         };
 

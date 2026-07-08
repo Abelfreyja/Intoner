@@ -176,7 +176,7 @@ internal sealed class ObjectKindService : IObjectKindService
             },
             Model = bgObjectModel with
             {
-                ModelPath = ObjectPathRules.NormalizeGamePath(bgObjectModel.ModelPath),
+                ModelPath = GameAssetPathRules.NormalizeGamePath(bgObjectModel.ModelPath),
                 Transparency = Math.Clamp(bgObjectModel.Transparency, 0f, 1f),
                 DyeColor = ObjectColorUtility.ClampNormalizedColor(bgObjectModel.DyeColor),
             },
@@ -196,7 +196,7 @@ internal sealed class ObjectKindService : IObjectKindService
             },
             Model = furnitureModel with
             {
-                SharedGroupPath = ObjectPathRules.NormalizeGamePath(furnitureModel.SharedGroupPath),
+                SharedGroupPath = GameAssetPathRules.NormalizeGamePath(furnitureModel.SharedGroupPath),
                 Color = furnitureModel.Color with
                 {
                     StainId = Math.Min(furnitureModel.Color.StainId, (byte)(SharedGroupLayoutInstance.ObjectStainCount - 1)),
@@ -223,7 +223,7 @@ internal sealed class ObjectKindService : IObjectKindService
             },
             Model = vfxModel with
             {
-                VfxPath = ObjectPathRules.NormalizeGamePath(vfxModel.VfxPath),
+                VfxPath = GameAssetPathRules.NormalizeGamePath(vfxModel.VfxPath),
                 Color = ObjectColorUtility.ClampNormalizedColor(vfxModel.Color),
             },
         };

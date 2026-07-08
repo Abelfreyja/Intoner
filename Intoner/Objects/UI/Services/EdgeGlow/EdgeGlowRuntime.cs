@@ -14,7 +14,8 @@ internal sealed unsafe partial class EdgeGlowRenderer
     private bool TryAcquireFramebufferSet(int width, int height, [NotNullWhen(true)] out EdgeGlowFramebufferSet? framebufferSet)
     {
         framebufferSet = null;
-        if (_device is null)
+        Device? device = ActiveDevice;
+        if (device is null)
         {
             return false;
         }
@@ -41,10 +42,10 @@ internal sealed unsafe partial class EdgeGlowRenderer
         try
         {
             framebufferSet = new EdgeGlowFramebufferSet(
-                CreateFramebuffer(_device, width, height),
-                CreateFramebuffer(_device, width, height),
-                CreateFramebuffer(_device, blurWidth, blurHeight),
-                CreateFramebuffer(_device, width, height),
+                CreateFramebuffer(device, width, height),
+                CreateFramebuffer(device, width, height),
+                CreateFramebuffer(device, blurWidth, blurHeight),
+                CreateFramebuffer(device, width, height),
                 width,
                 height,
                 blurWidth,
@@ -55,14 +56,14 @@ internal sealed unsafe partial class EdgeGlowRenderer
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "edge glow framebuffer allocation failed");
-            DisposeRuntimeResources();
+            ClearDeviceResources();
             return false;
         }
     }
 
     private void ReleaseFramebufferSet(EdgeGlowFramebufferSet framebufferSet)
     {
-        if (_disposed || framebufferSet.Generation != _framebufferGeneration || _device is null || _context is null)
+        if (IsDisposed || framebufferSet.Generation != _framebufferGeneration || ActiveDevice is null || ActiveContext is null)
         {
             framebufferSet.Dispose();
             return;

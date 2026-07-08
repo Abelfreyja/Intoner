@@ -17,8 +17,8 @@ internal sealed class PathKnowledgeBase
         IEnumerable<string>? searchTerms = null,
         KnownVfxFamily vfxFamily = KnownVfxFamily.None)
     {
-        string normalizedPath = ObjectPathRules.NormalizeGamePath(path);
-        AssetPathKind kind = ObjectPathRules.ClassifyPath(normalizedPath);
+        string normalizedPath = GameAssetPathRules.NormalizeGamePath(path);
+        AssetPathKind kind = ObjectAssetPathRules.ClassifyKnownAssetPath(normalizedPath);
         if (kind == AssetPathKind.Unknown)
         {
             return false;
@@ -54,7 +54,7 @@ internal sealed class PathKnowledgeBase
 
     public bool TryGetPath(string path, [NotNullWhen(true)] out KnownAssetPath? knownAssetPath)
     {
-        string normalizedPath = ObjectPathRules.NormalizeGamePath(path);
+        string normalizedPath = GameAssetPathRules.NormalizeGamePath(path);
         if (_paths.TryGetValue(normalizedPath, out KnownAssetPathState? assetPathState))
         {
             knownAssetPath = assetPathState.ToKnownAssetPath();

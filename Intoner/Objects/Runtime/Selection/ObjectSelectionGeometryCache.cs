@@ -142,7 +142,7 @@ internal sealed class ObjectSelectionGeometryCache
     {
         try
         {
-            if (ObjectResourcePathUtility.IsLocalFilePath(normalizedPath))
+            if (ObjectLocalFilePathUtility.IsLocalFilePath(normalizedPath))
             {
                 return LoadLocalGeometryEntry(normalizedPath, touchedUtc);
             }

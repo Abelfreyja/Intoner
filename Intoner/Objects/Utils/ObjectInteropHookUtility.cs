@@ -55,19 +55,6 @@ internal static class ObjectInteropHookUtility
         where TDelegate : Delegate
         => CreateHookFromAddress(logger, gameInteropProvider, target.Address, detour, target.Label);
 
-    public static Hook<TDelegate>? CreateHookFromVtable<TDelegate>(
-        ILogger logger,
-        IGameInteropProvider gameInteropProvider,
-        ObjectSignatures.VtableHookTarget target,
-        TDelegate detour)
-        where TDelegate : Delegate
-    {
-        nint functionAddress = ObjectNativeAddressResolver.TryResolveVtableFunction(logger, target);
-        return functionAddress == nint.Zero
-            ? null
-            : CreateHookFromAddress(logger, gameInteropProvider, functionAddress, detour, target.Label);
-    }
-
     public static Hook<TDelegate>? CreateHookFromAddress<TDelegate>(
         ILogger logger,
         IGameInteropProvider gameInteropProvider,

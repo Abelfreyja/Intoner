@@ -26,8 +26,8 @@ internal static class ObjectAssetBgModelCatalog
         string source,
         in ObjectTerritoryMetadata territoryMetadata)
     {
-        string normalizedPath = ObjectPathRules.NormalizeGamePath(path);
-        if (!ObjectPathRules.IsCatalogModelPath(normalizedPath))
+        string normalizedPath = GameAssetPathRules.NormalizeGamePath(path);
+        if (!ObjectAssetPathRules.IsCatalogModelPath(normalizedPath))
         {
             return false;
         }

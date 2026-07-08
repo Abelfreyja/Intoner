@@ -41,12 +41,11 @@ internal sealed class SplashScreenBannerEffect
 {
     private const string ShaderResourceName = "Objects.UI.Shaders.Window.ObjectSplashScreenBanner.hlsl";
 
-    private static readonly Lazy<byte[]> SplashScreenBannerShaderBytecode = new(
-        () => GpuShaderCompileService.CreatePixelShaderBytecode(
+    private static readonly GpuShaderBytecode SplashScreenBannerShader = GpuShaderCompileService.CreatePixelShader(
             typeof(BackdropRenderer),
             ShaderResourceName,
             "object splash screen banner shader",
-            "PSSplashScreenBanner"));
+            "PSSplashScreenBanner");
 
     internal readonly struct Style
     {
@@ -93,7 +92,7 @@ internal sealed class SplashScreenBannerEffect
         : base(renderer)
     { }
 
-    protected override Lazy<byte[]> ShaderBytecode => SplashScreenBannerShaderBytecode;
+    protected override GpuShaderBytecode ShaderBytecode => SplashScreenBannerShader;
     protected override string FailureLogMessage => "splash screen banner shader processing failed";
 
     protected override SplashScreenBannerRequest CreateRequest(in BackdropRenderer.BackdropRegion region, Style style)

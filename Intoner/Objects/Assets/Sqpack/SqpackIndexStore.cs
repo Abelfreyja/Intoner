@@ -13,7 +13,7 @@ internal readonly record struct SqpackPathHash(int IndexId, uint FolderHash, uin
 {
     public static bool TryCompute(string path, out SqpackPathHash sqpackPathHash)
     {
-        string normalizedPath = ObjectPathRules.NormalizeGamePath(path).ToLowerInvariant();
+        string normalizedPath = GameAssetPathRules.NormalizeGamePath(path).ToLowerInvariant();
         ParsedFilePath? parsedPath;
         try
         {
@@ -182,7 +182,7 @@ internal sealed record SqpackIndexSnapshot(
     IReadOnlyList<SqpackNamedPath> NamedPaths)
 {
     private readonly HashSet<string> _normalizedNamedPathSet = NamedPaths
-        .Select(static path => ObjectPathRules.NormalizeGamePath(path.Path))
+        .Select(static path => GameAssetPathRules.NormalizeGamePath(path.Path))
         .Where(static path => !string.IsNullOrWhiteSpace(path))
         .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
@@ -191,7 +191,7 @@ internal sealed record SqpackIndexSnapshot(
 
     public bool ContainsPath(string path)
     {
-        string normalizedPath = ObjectPathRules.NormalizeGamePath(path);
+        string normalizedPath = GameAssetPathRules.NormalizeGamePath(path);
         if (_normalizedNamedPathSet.Contains(normalizedPath))
         {
             return true;
@@ -305,7 +305,7 @@ internal sealed class SqpackIndexStore
             foreach (SqpackNamedPath namedPath in sqpackIndexFile.NamedPaths)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                string normalizedPath = ObjectPathRules.NormalizeGamePath(namedPath.Path);
+                string normalizedPath = GameAssetPathRules.NormalizeGamePath(namedPath.Path);
                 if (!string.IsNullOrWhiteSpace(normalizedPath))
                 {
                     _ = namedPaths.Add(normalizedPath);

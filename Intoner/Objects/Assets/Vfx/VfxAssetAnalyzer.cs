@@ -130,8 +130,8 @@ internal static class VfxAssetAnalyzer
             VfxParticleTypes.None,
             VfxAnalysisFeatures.None);
 
-        var normalizedPath = ObjectPathRules.NormalizeGamePath(vfxPath);
-        if (!ObjectPathRules.IsVfxPath(normalizedPath))
+        var normalizedPath = GameAssetPathRules.NormalizeGamePath(vfxPath);
+        if (!GameAssetPathRules.IsFileKind(normalizedPath, GameAssetFileKind.Avfx))
         {
             return false;
         }
@@ -193,8 +193,8 @@ internal static class VfxAssetAnalyzer
 
     public static IReadOnlyList<TmbVfxReference> CollectTmbVfxReferences(IObjectAssetGameData gameData, string tmbPath)
     {
-        var normalizedPath = ObjectPathRules.NormalizeGamePath(tmbPath);
-        if (!ObjectPathRules.IsTimelinePath(normalizedPath))
+        var normalizedPath = GameAssetPathRules.NormalizeGamePath(tmbPath);
+        if (!GameAssetPathRules.IsFileKind(normalizedPath, GameAssetFileKind.Tmb))
         {
             return [];
         }
@@ -316,8 +316,8 @@ internal static class VfxAssetAnalyzer
         {
             foreach (string nestedTimelinePath in nestedTimelinePaths)
             {
-                string normalizedTimelinePath = ObjectPathRules.NormalizeGamePath(nestedTimelinePath);
-                if (!ObjectPathRules.IsTimelinePath(normalizedTimelinePath)
+                string normalizedTimelinePath = GameAssetPathRules.NormalizeGamePath(nestedTimelinePath);
+                if (!GameAssetPathRules.IsFileKind(normalizedTimelinePath, GameAssetFileKind.Tmb)
                  || !gameData.FileExists(normalizedTimelinePath))
                 {
                     continue;
@@ -356,8 +356,8 @@ internal static class VfxAssetAnalyzer
 
     public static IReadOnlyList<string> CollectAvfxDependencyPaths(IObjectAssetGameData gameData, string vfxPath)
     {
-        var normalizedPath = ObjectPathRules.NormalizeGamePath(vfxPath);
-        if (!ObjectPathRules.IsVfxPath(normalizedPath))
+        var normalizedPath = GameAssetPathRules.NormalizeGamePath(vfxPath);
+        if (!GameAssetPathRules.IsFileKind(normalizedPath, GameAssetFileKind.Avfx))
         {
             return [];
         }
@@ -499,7 +499,7 @@ internal static class VfxAssetAnalyzer
         RuntimeVfxEvidence evidence,
         VfxTimelineContext contextFlags)
     {
-        string normalizedPath = ObjectPathRules.NormalizeGamePath(path);
+        string normalizedPath = GameAssetPathRules.NormalizeGamePath(path);
         if (string.IsNullOrWhiteSpace(normalizedPath))
         {
             return;
@@ -711,14 +711,14 @@ internal static class VfxAssetAnalyzer
         string path,
         bool requireExistingModelPath)
     {
-        string normalizedPath = ObjectPathRules.NormalizeGamePath(path);
-        if (normalizedPath.EndsWith(".atex", StringComparison.OrdinalIgnoreCase))
+        string normalizedPath = GameAssetPathRules.NormalizeGamePath(path);
+        if (GameAssetPathRules.IsFileKind(normalizedPath, GameAssetFileKind.Atex))
         {
             dependencyPaths.Add(normalizedPath);
             return;
         }
 
-        if (ObjectPathRules.IsModelPath(normalizedPath)
+        if (GameAssetPathRules.IsFileKind(normalizedPath, GameAssetFileKind.Mdl)
          && (!requireExistingModelPath
           || (gameData is not null && gameData.FileExists(normalizedPath))))
         {
@@ -964,7 +964,7 @@ internal static class VfxAssetAnalyzer
         }
 
         reader.BaseStream.Position = savePosition;
-        return ObjectPathRules.NormalizeGamePath(Encoding.ASCII.GetString([.. bytes]));
+        return GameAssetPathRules.NormalizeGamePath(Encoding.ASCII.GetString([.. bytes]));
     }
 
     private static string ReadAscii(BinaryReader reader, int size)

@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project Sdk="Dalamud.NET.Sdk/15.0.0">
   <PropertyGroup>
     <Version>0.1.5.0</Version>
@@ -66,6 +66,9 @@
     </EmbeddedResource>
     <EmbeddedResource Include="Objects\UI\Shaders\EdgeGlow\*.hlsli">
       <LogicalName>Objects.UI.Shaders.EdgeGlow.%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Objects\Preview\Rendering\Shaders\Viewport.hlsl">
+      <LogicalName>Objects.Preview.Rendering.Shaders.Viewport.hlsl</LogicalName>
     </EmbeddedResource>
     <EmbeddedResource Include="Objects\UI\Shaders\Window\ObjectSplashScreenBanner.hlsl">
       <LogicalName>Objects.UI.Shaders.Window.ObjectSplashScreenBanner.hlsl</LogicalName>

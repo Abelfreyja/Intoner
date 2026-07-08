@@ -16,7 +16,7 @@ internal sealed class SharedGroupAssetInfo(
     public IReadOnlyList<string> NestedSharedGroupPaths { get; } = nestedSharedGroupPaths;
     public IReadOnlyList<string> StandaloneVfxPaths { get; } = standaloneVfxPaths;
     public IReadOnlyList<string> ReferencedVfxPaths { get; } = referencedVfxPaths;
-    public IReadOnlyList<string> CollectionDependencyPaths { get; } = ObjectPathCollectionUtility.MergeGamePaths(
+    public IReadOnlyList<string> CollectionDependencyPaths { get; } = GameAssetPathCollectionUtility.MergeGamePaths(
         bgObjectModelPaths,
         nestedSharedGroupPaths,
         referencedVfxPaths);

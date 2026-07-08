@@ -486,7 +486,7 @@ internal sealed class ObjectTemporaryCollectionService : IObjectTemporaryCollect
     {
         normalizedRedirect = default!;
         redirectRule = default;
-        if (!ObjectResourcePathUtility.TryNormalizeGamePath(redirect?.RequestedPath ?? string.Empty, out string normalizedRequestedPath)
+        if (!GameAssetPathRules.TryNormalizeGamePath(redirect?.RequestedPath ?? string.Empty, out string normalizedRequestedPath)
          || !seenRequestedPaths.Add(normalizedRequestedPath))
         {
             return false;
@@ -534,7 +534,7 @@ internal sealed class ObjectTemporaryCollectionService : IObjectTemporaryCollect
         switch (replacement.Kind)
         {
             case ObjectTemporaryCollectionReplacementKind.GamePath:
-                if (!ObjectResourcePathUtility.TryNormalizeGamePath(replacement.Path, out string normalizedGamePath))
+                if (!GameAssetPathRules.TryNormalizeGamePath(replacement.Path, out string normalizedGamePath))
                 {
                     resolvedPath = default;
                     return false;
@@ -548,7 +548,7 @@ internal sealed class ObjectTemporaryCollectionService : IObjectTemporaryCollect
                 resolvedPath = ObjectResolvedPath.FromGamePath(normalizedGamePath);
                 return true;
             case ObjectTemporaryCollectionReplacementKind.LocalFile:
-                if (!ObjectResourcePathUtility.TryNormalizeLocalFilePath(replacement.Path, out string normalizedLocalFilePath))
+                if (!ObjectLocalFilePathUtility.TryNormalizeLocalFilePath(replacement.Path, out string normalizedLocalFilePath))
                 {
                     resolvedPath = default;
                     return false;
@@ -591,7 +591,7 @@ internal sealed class ObjectTemporaryCollectionService : IObjectTemporaryCollect
         resolvedPath = default;
         if (replacement.Data.Length > 0)
         {
-            if (!ObjectPathRules.TryNormalizeSupportedObjectResourcePath(replacement.Path, out string normalizedGamePath))
+            if (!ObjectAssetPathRules.TryNormalizeSupportedResourcePath(replacement.Path, out string normalizedGamePath))
             {
                 return false;
             }

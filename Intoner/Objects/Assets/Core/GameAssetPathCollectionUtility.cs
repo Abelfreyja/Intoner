@@ -1,10 +1,10 @@
 namespace Intoner.Objects.Assets;
 
-internal static class ObjectPathCollectionUtility
+internal static class GameAssetPathCollectionUtility
 {
     public static bool AddGamePath(ICollection<string> paths, ISet<string> seenPaths, string path)
     {
-        if (!ObjectPathRules.TryNormalizeGamePath(path, out string normalizedPath)
+        if (!GameAssetPathRules.TryNormalizeGamePath(path, out string normalizedPath)
          || !seenPaths.Add(normalizedPath))
         {
             return false;
@@ -28,19 +28,4 @@ internal static class ObjectPathCollectionUtility
 
         return paths;
     }
-
-    public static HashSet<string> CreateSupportedObjectResourceSet(IEnumerable<string> paths)
-    {
-        HashSet<string> normalizedPaths = new(StringComparer.OrdinalIgnoreCase);
-        foreach (string path in paths)
-        {
-            if (ObjectPathRules.TryNormalizeSupportedObjectResourcePath(path, out string normalizedPath))
-            {
-                normalizedPaths.Add(normalizedPath);
-            }
-        }
-
-        return normalizedPaths;
-    }
 }
-

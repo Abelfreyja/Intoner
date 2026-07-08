@@ -110,8 +110,8 @@ internal sealed class ObjectAssetStaticDiscovery
         foreach (string path in paths)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            string normalizedPath = ObjectPathRules.NormalizeGamePath(path);
-            if (ObjectPathRules.IsRelevantSqpackCatalogSeedPath(normalizedPath))
+            string normalizedPath = GameAssetPathRules.NormalizeGamePath(path);
+            if (ObjectAssetPathRules.IsRelevantSqpackCatalogSeedPath(normalizedPath))
             {
                 _ = collisionPaths.Add(normalizedPath);
             }
@@ -130,7 +130,7 @@ internal sealed class ObjectAssetStaticDiscovery
         foreach (GameDataBgObjectAsset asset in assets)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            string normalizedPath = ObjectPathRules.NormalizeGamePath(asset.ModelPath);
+            string normalizedPath = GameAssetPathRules.NormalizeGamePath(asset.ModelPath);
             if (string.IsNullOrWhiteSpace(normalizedPath))
             {
                 continue;
@@ -162,7 +162,7 @@ internal sealed class ObjectAssetStaticDiscovery
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (resolvedVfxPath.Analysis is not null
-             || !ObjectPathRules.IsVfxPath(resolvedVfxPath.Path)
+             || !GameAssetPathRules.IsFileKind(resolvedVfxPath.Path, GameAssetFileKind.Avfx)
              || !_gameData.FileExists(resolvedVfxPath.Path))
             {
                 continue;

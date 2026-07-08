@@ -17,14 +17,14 @@ internal sealed class ObjectAssetDependencyResolver(
         Lock stateLock)
     {
         HashSet<string> dependencyPaths = new(StringComparer.OrdinalIgnoreCase);
-        string normalizedRequestedPath = ObjectPathRules.NormalizeGamePath(requestedPath);
+        string normalizedRequestedPath = GameAssetPathRules.NormalizeGamePath(requestedPath);
         foreach (string dependencyPath in CollectRequestedPathDependencies(
             normalizedRequestedPath,
             effectivePath,
             state,
             stateLock))
         {
-            string normalizedDependencyPath = ObjectPathRules.NormalizeGamePath(dependencyPath);
+            string normalizedDependencyPath = GameAssetPathRules.NormalizeGamePath(dependencyPath);
             if (normalizedDependencyPath.Length > 0)
             {
                 dependencyPaths.Add(normalizedDependencyPath);
@@ -57,7 +57,7 @@ internal sealed class ObjectAssetDependencyResolver(
         foreach (string materialPath in effectivePath.Kind switch
         {
             ObjectResolvedPathKind.GamePath => ObjectMaterialPathUtility.CollectGameModelMaterialPaths(_gameData, effectivePath.Path),
-            ObjectResolvedPathKind.LocalFile => ObjectMaterialPathUtility.CollectLocalModelMaterialPaths(requestedModelPath, effectivePath.Path),
+            ObjectResolvedPathKind.LocalFile => ObjectMaterialPathUtility.CollectLocalModelMaterialPaths(_gameData, requestedModelPath, effectivePath.Path),
             _ => [],
         })
         {
@@ -67,7 +67,7 @@ internal sealed class ObjectAssetDependencyResolver(
         string animationModelPath = effectivePath.Kind == ObjectResolvedPathKind.GamePath
             ? effectivePath.Path
             : requestedModelPath;
-        foreach (string animationResourcePath in ObjectPathRules.CollectBgModelAnimationResourcePaths(animationModelPath))
+        foreach (string animationResourcePath in ObjectAssetPathRules.CollectBgModelAnimationResourcePaths(animationModelPath))
         {
             yield return animationResourcePath;
         }
@@ -117,22 +117,22 @@ internal sealed class ObjectAssetDependencyResolver(
 
     private static RedirectScopePathKind ClassifyScopePath(string path)
     {
-        if (ObjectPathRules.IsModelPath(path))
+        if (GameAssetPathRules.IsFileKind(path, GameAssetFileKind.Mdl))
         {
             return RedirectScopePathKind.Model;
         }
 
-        if (ObjectPathRules.IsSharedGroupPath(path))
+        if (GameAssetPathRules.IsFileKind(path, GameAssetFileKind.Sgb))
         {
             return RedirectScopePathKind.SharedGroup;
         }
 
-        if (ObjectPathRules.IsVfxPath(path))
+        if (GameAssetPathRules.IsFileKind(path, GameAssetFileKind.Avfx))
         {
             return RedirectScopePathKind.Vfx;
         }
 
-        if (ObjectPathRules.IsMaterialPath(path))
+        if (GameAssetPathRules.IsFileKind(path, GameAssetFileKind.Mtrl))
         {
             return RedirectScopePathKind.Material;
         }

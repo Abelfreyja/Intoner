@@ -65,8 +65,8 @@ internal sealed class ObjectAssetSharedGroupCache(IObjectAssetGameData gameData)
 
     private bool TryNormalizeExistingPath(string sharedGroupPath, [NotNullWhen(true)] out string? normalizedPath)
     {
-        normalizedPath = ObjectPathRules.NormalizeGamePath(sharedGroupPath);
-        return ObjectPathRules.IsCatalogSharedGroupPath(normalizedPath)
+        normalizedPath = GameAssetPathRules.NormalizeGamePath(sharedGroupPath);
+        return ObjectAssetPathRules.IsCatalogSharedGroupPath(normalizedPath)
             && _gameData.FileExists(normalizedPath);
     }
 

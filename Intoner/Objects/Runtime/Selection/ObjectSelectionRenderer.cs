@@ -1,5 +1,4 @@
 using Intoner.Services.Gpu;
-using SharpDX.D3DCompiler;
 using SharpDX.Direct3D;
 using SharpDX.Direct3D11;
 using SharpDX.DXGI;
@@ -14,17 +13,15 @@ internal sealed class ObjectSelectionRenderer : IDisposable
 {
     private const string ShaderResourceName = "Objects.Runtime.Selection.Shaders.ObjectSelection.hlsl";
 
-    private static readonly Lazy<byte[]> VertexShaderBytecode = new(
-        () => GpuShaderCompileService.CreateVertexShaderBytecode(
+    private static readonly GpuShaderBytecode VertexShader = GpuShaderCompileService.CreateVertexShader(
             typeof(ObjectSelectionRenderer),
             ShaderResourceName,
-            "object selection vertex shader"));
+            "object selection vertex shader");
 
-    private static readonly Lazy<byte[]> PixelShaderBytecode = new(
-        () => GpuShaderCompileService.CreatePixelShaderBytecode(
+    private static readonly GpuShaderBytecode PixelShader = GpuShaderCompileService.CreatePixelShader(
             typeof(ObjectSelectionRenderer),
             ShaderResourceName,
-            "object selection pixel shader"));
+            "object selection pixel shader");
 
     private readonly Device _device;
     private readonly VertexShader _vertexShader;
@@ -42,11 +39,10 @@ internal sealed class ObjectSelectionRenderer : IDisposable
         _device = device;
         _geometryCache = geometryCache;
         Context = device.ImmediateContext;
-        _vertexShader = new VertexShader(device, VertexShaderBytecode.Value);
-        _pixelShader = new PixelShader(device, PixelShaderBytecode.Value);
-        _inputLayout = new InputLayout(
+        _vertexShader = VertexShader.CreateVertexShader(device);
+        _pixelShader = PixelShader.CreatePixelShader(device);
+        _inputLayout = VertexShader.CreateInputLayout(
             device,
-            ShaderSignature.GetInputSignature(VertexShaderBytecode.Value),
             [new InputElement("POSITION", 0, Format.R32G32B32_Float, 0, 0)]);
         ConstantBuffer = new Buffer(
             device,

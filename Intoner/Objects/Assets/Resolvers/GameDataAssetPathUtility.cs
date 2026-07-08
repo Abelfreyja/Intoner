@@ -6,9 +6,9 @@ internal static class GameDataAssetPathUtility
 {
     public static bool TryBuildHousingInteriorSourcePath(HousingInterior row, out string path)
     {
-        string directPath = ObjectPathRules.NormalizeGamePath(row.Unknown0.ExtractText());
-        if (ObjectPathRules.IsCatalogSharedGroupPath(directPath)
-         || ObjectPathRules.IsCatalogModelPath(directPath))
+        string directPath = GameAssetPathRules.NormalizeGamePath(row.Unknown0.ExtractText());
+        if (ObjectAssetPathRules.IsCatalogSharedGroupPath(directPath)
+         || ObjectAssetPathRules.IsCatalogModelPath(directPath))
         {
             path = directPath;
             return true;
@@ -32,7 +32,7 @@ internal static class GameDataAssetPathUtility
 
     public static string BuildTerritoryLayoutPath(string bgToken)
     {
-        string normalizedToken = ObjectPathRules.NormalizeGamePath(bgToken);
+        string normalizedToken = GameAssetPathRules.NormalizeGamePath(bgToken);
         if (string.IsNullOrWhiteSpace(normalizedToken))
         {
             return string.Empty;
@@ -50,14 +50,14 @@ internal static class GameDataAssetPathUtility
 
     public static bool TryBuildCommonEffectVfxPath(string token, out string path)
     {
-        string normalizedToken = ObjectPathRules.NormalizeGamePath(token);
+        string normalizedToken = GameAssetPathRules.NormalizeGamePath(token);
         if (string.IsNullOrWhiteSpace(normalizedToken))
         {
             path = string.Empty;
             return false;
         }
 
-        if (ObjectPathRules.IsVfxPath(normalizedToken))
+        if (GameAssetPathRules.IsFileKind(normalizedToken, GameAssetFileKind.Avfx))
         {
             path = normalizedToken;
             return true;
@@ -75,7 +75,7 @@ internal static class GameDataAssetPathUtility
 
     public static bool TryBuildActionTimelinePath(string key, out string path)
     {
-        string normalizedKey = ObjectPathRules.NormalizeGamePath(key);
+        string normalizedKey = GameAssetPathRules.NormalizeGamePath(key);
         if (string.IsNullOrWhiteSpace(normalizedKey)
          || normalizedKey.Contains("[SKL_ID]", StringComparison.OrdinalIgnoreCase))
         {
@@ -83,7 +83,7 @@ internal static class GameDataAssetPathUtility
             return false;
         }
 
-        if (ObjectPathRules.IsTimelinePath(normalizedKey))
+        if (GameAssetPathRules.IsFileKind(normalizedKey, GameAssetFileKind.Tmb))
         {
             path = normalizedKey;
             return true;

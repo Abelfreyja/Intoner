@@ -34,7 +34,7 @@ internal static class TerritoryLayoutAssetResolver
 
     public static AssetInfo AnalyzeTerritoryLayout(IObjectAssetGameData gameData, string territoryLayoutPath)
     {
-        string normalizedPath = ObjectPathRules.NormalizeGamePath(territoryLayoutPath);
+        string normalizedPath = GameAssetPathRules.NormalizeGamePath(territoryLayoutPath);
         if (string.IsNullOrWhiteSpace(normalizedPath)
          || !normalizedPath.EndsWith(".lvb", StringComparison.OrdinalIgnoreCase)
          || !gameData.FileExists(normalizedPath))
@@ -127,7 +127,7 @@ internal static class TerritoryLayoutAssetResolver
             Span<int> layerGroupResourceOffsets = sceneHeader->LayerGroupResourceOffsets;
             for (int i = 0; i < layerGroupResourceOffsets.Length; i++)
             {
-                string referencedLayoutPath = ObjectPathRules.NormalizeGamePath(
+                string referencedLayoutPath = GameAssetPathRules.NormalizeGamePath(
                     ReadCString(sceneHeader->LayerGroupResource(layerGroupResourceOffsets[i])));
                 if (string.IsNullOrWhiteSpace(referencedLayoutPath)
                  || !referencedLayoutPath.EndsWith(".lgb", StringComparison.OrdinalIgnoreCase)
@@ -205,8 +205,8 @@ internal static class TerritoryLayoutAssetResolver
 
         private void CollectBgPart(FileLayerGroupInstanceBgPart* bgPart)
         {
-            string modelPath = ObjectPathRules.NormalizeGamePath(ReadCString(bgPart->PathMdl));
-            if (!ObjectPathRules.IsCatalogModelPath(modelPath)
+            string modelPath = GameAssetPathRules.NormalizeGamePath(ReadCString(bgPart->PathMdl));
+            if (!ObjectAssetPathRules.IsCatalogModelPath(modelPath)
              || !_gameData.FileExists(modelPath)
              || !_seenBgObjectModels.Add(modelPath))
             {
@@ -226,10 +226,10 @@ internal static class TerritoryLayoutAssetResolver
                 ObjectSearchTermUtility.BuildStableTerms("layout vfx", ReadCString(vfx->Base.Name)));
         }
 
-        private void CollectSharedGroup(FileLayerGroupInstanceSharedGroup* sharedGroup)
+        private void CollectSharedGroup(FileLayerGroupInstanceSharedGroup* sharedGroupInstance)
         {
-            string sharedGroupPath = ObjectPathRules.NormalizeGamePath(ReadCString(sharedGroup->Path));
-            if (!ObjectPathRules.IsCatalogSharedGroupPath(sharedGroupPath)
+            string sharedGroupPath = GameAssetPathRules.NormalizeGamePath(ReadCString(sharedGroupInstance->Path));
+            if (!ObjectAssetPathRules.IsCatalogSharedGroupPath(sharedGroupPath)
              || !_gameData.FileExists(sharedGroupPath)
              || !_seenSharedGroupPaths.Add(sharedGroupPath))
             {
@@ -328,8 +328,8 @@ internal static class TerritoryLayoutAssetResolver
             RuntimeVfxEvidence sourceEvidence,
             IReadOnlyList<string> searchTerms)
         {
-            string normalizedTimelinePath = ObjectPathRules.NormalizeGamePath(timelinePath);
-            if (!ObjectPathRules.IsCatalogTimelinePath(normalizedTimelinePath)
+            string normalizedTimelinePath = GameAssetPathRules.NormalizeGamePath(timelinePath);
+            if (!GameAssetPathRules.IsFileKind(normalizedTimelinePath, GameAssetFileKind.Tmb)
              || !_gameData.FileExists(normalizedTimelinePath)
              || !_seenTimelinePaths.Add(normalizedTimelinePath))
             {

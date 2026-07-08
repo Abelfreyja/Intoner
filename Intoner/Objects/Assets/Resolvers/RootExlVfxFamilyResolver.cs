@@ -297,15 +297,15 @@ internal sealed class RootExlVfxFamilyResolver
 
     private static bool TryBuildVfxPath(string prefix, string token, out string path)
     {
-        string normalizedPrefix = ObjectPathRules.NormalizeGamePath(prefix);
-        string normalizedToken = ObjectPathRules.NormalizeGamePath(token);
+        string normalizedPrefix = GameAssetPathRules.NormalizeGamePath(prefix);
+        string normalizedToken = GameAssetPathRules.NormalizeGamePath(token);
         if (string.IsNullOrWhiteSpace(normalizedPrefix) || string.IsNullOrWhiteSpace(normalizedToken))
         {
             path = string.Empty;
             return false;
         }
 
-        bool hasExtension = ObjectPathRules.IsVfxPath(normalizedToken);
+        bool hasExtension = GameAssetPathRules.IsFileKind(normalizedToken, GameAssetFileKind.Avfx);
         if (normalizedToken.StartsWith("vfx/", StringComparison.OrdinalIgnoreCase))
         {
             path = hasExtension ? normalizedToken : $"{normalizedToken}.avfx";

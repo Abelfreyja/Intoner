@@ -11,8 +11,8 @@ internal static class SharedGroupAssetResolver
 {
     public static SharedGroupAssetInfo AnalyzeSharedGroup(IObjectAssetGameData gameData, string sharedGroupPath)
     {
-        var normalizedPath = ObjectPathRules.NormalizeGamePath(sharedGroupPath);
-        if (!ObjectPathRules.IsCatalogSharedGroupPath(normalizedPath) || !gameData.FileExists(normalizedPath))
+        var normalizedPath = GameAssetPathRules.NormalizeGamePath(sharedGroupPath);
+        if (!ObjectAssetPathRules.IsCatalogSharedGroupPath(normalizedPath) || !gameData.FileExists(normalizedPath))
         {
             return new SharedGroupAssetInfo([], [], [], [], []);
         }
@@ -25,9 +25,9 @@ internal static class SharedGroupAssetResolver
         string requestedSharedGroupPath,
         string localSharedGroupPath)
     {
-        string normalizedRequestedPath = ObjectPathRules.NormalizeGamePath(requestedSharedGroupPath);
-        string normalizedLocalPath = ObjectResourcePathUtility.NormalizeLocalFilePath(localSharedGroupPath);
-        if (!ObjectPathRules.IsSharedGroupPath(normalizedRequestedPath)
+        string normalizedRequestedPath = GameAssetPathRules.NormalizeGamePath(requestedSharedGroupPath);
+        string normalizedLocalPath = ObjectLocalFilePathUtility.NormalizeLocalFilePath(localSharedGroupPath);
+        if (!GameAssetPathRules.IsFileKind(normalizedRequestedPath, GameAssetFileKind.Sgb)
          || normalizedLocalPath.Length == 0)
         {
             return new SharedGroupDependencyInfo([], [], []);
@@ -47,7 +47,7 @@ internal static class SharedGroupAssetResolver
         private readonly List<string> _standaloneVfxPaths = [];
         private readonly List<string> _referencedVfxPaths = [];
         private readonly HashSet<string> _seenBgObjectModels = new(StringComparer.OrdinalIgnoreCase);
-        private readonly HashSet<string> _seenNestedSharedGroups = new(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> _seenNestedSharedGroupPaths = new(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> _seenStandaloneVfxPaths = new(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> _seenReferencedVfxPaths = new(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> _recursionStack = new(StringComparer.OrdinalIgnoreCase);
@@ -133,7 +133,7 @@ internal static class SharedGroupAssetResolver
 
         private void CollectBgObject(LayerCommon.BGInstanceObject bgInstance, Matrix4x4 worldTransform)
         {
-            var modelPath = ObjectPathRules.NormalizeGamePath(bgInstance.AssetPath);
+            var modelPath = GameAssetPathRules.NormalizeGamePath(bgInstance.AssetPath);
             if (_policy.CollectPreviewModels && CanUsePreviewModelPath(modelPath))
             {
                 _previewModels.Add(new PreviewModelInfo(modelPath, worldTransform));
@@ -150,9 +150,9 @@ internal static class SharedGroupAssetResolver
 
         private void CollectNestedSharedGroup(LayerCommon.SharedGroupInstanceObject sharedGroupInstance, Matrix4x4 worldTransform)
         {
-            var sharedGroupPath = ObjectPathRules.NormalizeGamePath(sharedGroupInstance.AssetPath);
+            var sharedGroupPath = GameAssetPathRules.NormalizeGamePath(sharedGroupInstance.AssetPath);
             if (!CanUseSharedGroupPath(sharedGroupPath)
-             || !_seenNestedSharedGroups.Add(sharedGroupPath))
+             || !_seenNestedSharedGroupPaths.Add(sharedGroupPath))
             {
                 return;
             }
@@ -166,7 +166,7 @@ internal static class SharedGroupAssetResolver
 
         private void CollectVfx(LayerCommon.VFXInstanceObject vfxInstance)
         {
-            var vfxPath = ObjectPathRules.NormalizeGamePath(vfxInstance.AssetPath);
+            var vfxPath = GameAssetPathRules.NormalizeGamePath(vfxInstance.AssetPath);
             if (!CanUseVfxPath(vfxPath))
             {
                 return;
@@ -187,40 +187,40 @@ internal static class SharedGroupAssetResolver
         {
             if (!_policy.RequireExistingGamePaths)
             {
-                return ObjectPathRules.IsModelPath(modelPath);
+                return GameAssetPathRules.IsFileKind(modelPath, GameAssetFileKind.Mdl);
             }
 
-            return ObjectPathRules.IsCatalogModelPath(modelPath) && _gameData.FileExists(modelPath);
+            return ObjectAssetPathRules.IsCatalogModelPath(modelPath) && _gameData.FileExists(modelPath);
         }
 
         private bool CanUseModelDependencyPath(string modelPath)
         {
             if (!_policy.RequireExistingGamePaths)
             {
-                return ObjectPathRules.IsModelPath(modelPath);
+                return GameAssetPathRules.IsFileKind(modelPath, GameAssetFileKind.Mdl);
             }
 
-            return ObjectPathRules.IsBgObjectModelPath(modelPath) && _gameData.FileExists(modelPath);
+            return ObjectAssetPathRules.IsBgObjectModelPath(modelPath) && _gameData.FileExists(modelPath);
         }
 
         private bool CanUseSharedGroupPath(string sharedGroupPath)
         {
             if (!_policy.RequireExistingGamePaths)
             {
-                return ObjectPathRules.IsSharedGroupPath(sharedGroupPath);
+                return GameAssetPathRules.IsFileKind(sharedGroupPath, GameAssetFileKind.Sgb);
             }
 
-            return ObjectPathRules.IsCatalogSharedGroupPath(sharedGroupPath) && _gameData.FileExists(sharedGroupPath);
+            return ObjectAssetPathRules.IsCatalogSharedGroupPath(sharedGroupPath) && _gameData.FileExists(sharedGroupPath);
         }
 
         private bool CanUseVfxPath(string vfxPath)
         {
             if (!_policy.RequireExistingGamePaths)
             {
-                return ObjectPathRules.IsVfxPath(vfxPath);
+                return GameAssetPathRules.IsFileKind(vfxPath, GameAssetFileKind.Avfx);
             }
 
-            return ObjectPathRules.IsVfxPath(vfxPath) && _gameData.FileExists(vfxPath);
+            return GameAssetPathRules.IsFileKind(vfxPath, GameAssetFileKind.Avfx) && _gameData.FileExists(vfxPath);
         }
 
         private SgbFile? TryLoadGameSharedGroup(string sharedGroupPath)

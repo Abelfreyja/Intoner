@@ -51,6 +51,7 @@ internal static class ObjectScopedResourcePathUtility
         string normalizedPath = ObjectStringUtility.TrimOrEmpty(path);
         return normalizedPath.Length > 0
             && !normalizedPath.StartsWith(Prefix, StringComparison.Ordinal)
+            && !ObjectMemoryResourcePathUtility.IsMemoryResourcePath(normalizedPath)
             && (normalizedPath[0] == '|'
                 || normalizedPath.Contains(UriMarker, StringComparison.Ordinal));
     }
@@ -80,7 +81,7 @@ internal static class ObjectScopedResourcePathUtility
 
         return ObjectLocalFilePathUtility.IsLocalFilePath(path)
             ? ObjectLocalFilePathUtility.NormalizeLocalFilePath(path)
-            : ObjectPathRules.NormalizeGamePath(path);
+            : GameAssetPathRules.NormalizeGamePath(path);
     }
 }
 

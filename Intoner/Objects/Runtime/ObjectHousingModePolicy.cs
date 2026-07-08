@@ -158,7 +158,7 @@ internal sealed class ObjectHousingModePolicy(IObjectConfigurationService config
 
     private static bool AllowsFurniturePath(ObjectHousingModeState state, string sharedGroupPath)
     {
-        string normalizedPath = ObjectPathRules.NormalizeGamePath(sharedGroupPath);
+        string normalizedPath = GameAssetPathRules.NormalizeGamePath(sharedGroupPath);
         return state.Area switch
         {
             ObjectHousingArea.Indoor  => normalizedPath.StartsWith(IndoorFurniturePrefix, StringComparison.OrdinalIgnoreCase),

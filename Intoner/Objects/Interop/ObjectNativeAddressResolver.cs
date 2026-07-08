@@ -1,6 +1,5 @@
 using Dalamud.Plugin.Services;
 using Microsoft.Extensions.Logging;
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 
 namespace Intoner.Objects.Interop;
@@ -87,35 +86,6 @@ internal static class ObjectNativeAddressResolver
         {
             logger.LogWarning(ex, "failed to verify JMP/CALL opcode for {Label}", label);
             return false;
-        }
-    }
-
-    public static nint TryResolveVtableFunction(
-        ILogger logger,
-        ObjectSignatures.VtableHookTarget target)
-    {
-        try
-        {
-            var moduleBaseAddress = Process.GetCurrentProcess().MainModule?.BaseAddress ?? nint.Zero;
-            if (moduleBaseAddress == nint.Zero)
-            {
-                logger.LogWarning("failed to resolve module base for {Label}", target.Label);
-                return nint.Zero;
-            }
-
-            var vtableAddress = moduleBaseAddress + target.VtableRva;
-            var functionAddress = Marshal.ReadIntPtr(vtableAddress + target.VfunctionIndex * nint.Size);
-            if (functionAddress == nint.Zero)
-            {
-                logger.LogWarning("resolved zero vtable function for {Label}", target.Label);
-            }
-
-            return functionAddress;
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "failed to resolve vtable function for {Label}", target.Label);
-            return nint.Zero;
         }
     }
 

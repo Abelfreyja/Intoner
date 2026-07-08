@@ -4,7 +4,7 @@ using Buffer = SharpDX.Direct3D11.Buffer;
 
 namespace Intoner.Services.Gpu;
 
-internal sealed class D3D11RenderStateSnapshot : IDisposable
+internal sealed class D3D11DrawStateScope : IDisposable
 {
     private readonly DeviceContext _context;
     private readonly InputLayout? _inputLayout;
@@ -20,7 +20,7 @@ internal sealed class D3D11RenderStateSnapshot : IDisposable
     private readonly PixelShader? _pixelShader;
     private readonly Buffer[] _pixelConstantBuffers;
     private readonly ShaderResourceView[] _pixelShaderResourceViews;
-    private readonly SamplerState? _pixelSampler;
+    private readonly SamplerState[] _pixelSamplers;
     private readonly RenderTargetView[] _renderTargetViews;
     private readonly DepthStencilView? _depthStencilView;
     private readonly RasterizerState? _rasterizerState;
@@ -32,7 +32,7 @@ internal sealed class D3D11RenderStateSnapshot : IDisposable
     private readonly DepthStencilState? _depthStencilState;
     private readonly int _stencilRef;
 
-    private D3D11RenderStateSnapshot(
+    private D3D11DrawStateScope(
         DeviceContext context,
         InputLayout? inputLayout,
         PrimitiveTopology primitiveTopology,
@@ -47,7 +47,7 @@ internal sealed class D3D11RenderStateSnapshot : IDisposable
         PixelShader? pixelShader,
         Buffer[] pixelConstantBuffers,
         ShaderResourceView[] pixelShaderResourceViews,
-        SamplerState? pixelSampler,
+        SamplerState[] pixelSamplers,
         RenderTargetView[] renderTargetViews,
         DepthStencilView? depthStencilView,
         RasterizerState? rasterizerState,
@@ -73,7 +73,7 @@ internal sealed class D3D11RenderStateSnapshot : IDisposable
         _pixelShader = pixelShader;
         _pixelConstantBuffers = pixelConstantBuffers;
         _pixelShaderResourceViews = pixelShaderResourceViews;
-        _pixelSampler = pixelSampler;
+        _pixelSamplers = pixelSamplers;
         _renderTargetViews = renderTargetViews;
         _depthStencilView = depthStencilView;
         _rasterizerState = rasterizerState;
@@ -89,15 +89,19 @@ internal sealed class D3D11RenderStateSnapshot : IDisposable
     public RenderTargetView? PrimaryRenderTargetView
         => _renderTargetViews.Length > 0 ? _renderTargetViews[0] : null;
 
-    public static D3D11RenderStateSnapshot Capture(
+    public static D3D11DrawStateScope Capture(
         DeviceContext context,
         int pixelConstantBufferCount,
         int pixelShaderResourceViewCount,
+        int pixelSamplerCount = 1,
         int vertexConstantBufferCount = 1,
         int vertexBufferCount = 1,
+        int renderTargetCount = 1,
         bool captureScissorRectangles = false)
     {
         vertexBufferCount = Math.Max(vertexBufferCount, 1);
+        pixelSamplerCount = Math.Max(pixelSamplerCount, 0);
+        renderTargetCount = Math.Max(renderTargetCount, 1);
         var inputLayout = context.InputAssembler.InputLayout;
         var primitiveTopology = context.InputAssembler.PrimitiveTopology;
         var vertexBuffers = new Buffer[vertexBufferCount];
@@ -113,8 +117,8 @@ internal sealed class D3D11RenderStateSnapshot : IDisposable
         var pixelShader = context.PixelShader.Get();
         var pixelConstantBuffers = context.PixelShader.GetConstantBuffers(0, pixelConstantBufferCount);
         var pixelShaderResourceViews = context.PixelShader.GetShaderResources(0, pixelShaderResourceViewCount);
-        var pixelSampler = context.PixelShader.GetSamplers(0, 1)[0];
-        var renderTargetViews = context.OutputMerger.GetRenderTargets(1, out var depthStencilView);
+        var pixelSamplers = context.PixelShader.GetSamplers(0, pixelSamplerCount);
+        var renderTargetViews = context.OutputMerger.GetRenderTargets(renderTargetCount, out var depthStencilView);
         var rasterizerState = context.Rasterizer.State;
         var viewports = context.Rasterizer.GetViewports<SharpDX.Mathematics.Interop.RawViewportF>();
         var scissorRectangles = captureScissorRectangles
@@ -123,7 +127,7 @@ internal sealed class D3D11RenderStateSnapshot : IDisposable
         var blendState = context.OutputMerger.GetBlendState(out var blendFactor, out var sampleMask);
         var depthStencilState = context.OutputMerger.GetDepthStencilState(out var stencilRef);
 
-        return new D3D11RenderStateSnapshot(
+        return new D3D11DrawStateScope(
             context,
             inputLayout,
             primitiveTopology,
@@ -138,7 +142,7 @@ internal sealed class D3D11RenderStateSnapshot : IDisposable
             pixelShader,
             pixelConstantBuffers,
             pixelShaderResourceViews,
-            pixelSampler,
+            pixelSamplers,
             renderTargetViews,
             depthStencilView,
             rasterizerState,
@@ -164,7 +168,7 @@ internal sealed class D3D11RenderStateSnapshot : IDisposable
         _context.PixelShader.Set(_pixelShader);
         _context.PixelShader.SetConstantBuffers(0, _pixelConstantBuffers);
         _context.PixelShader.SetShaderResources(0, _pixelShaderResourceViews);
-        _context.PixelShader.SetSampler(0, _pixelSampler);
+        _context.PixelShader.SetSamplers(0, _pixelSamplers);
         _context.OutputMerger.SetTargets(_depthStencilView, _renderTargetViews);
         _context.OutputMerger.SetBlendState(_blendState, _blendFactor, _sampleMask);
         _context.OutputMerger.SetDepthStencilState(_depthStencilState, _stencilRef);
@@ -188,7 +192,7 @@ internal sealed class D3D11RenderStateSnapshot : IDisposable
         _pixelShader?.Dispose();
         DisposeArray(_pixelConstantBuffers);
         DisposeArray(_pixelShaderResourceViews);
-        _pixelSampler?.Dispose();
+        DisposeArray(_pixelSamplers);
         DisposeArray(_renderTargetViews);
         _depthStencilView?.Dispose();
         _rasterizerState?.Dispose();
