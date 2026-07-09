@@ -103,6 +103,7 @@ internal static class ObjectServiceCollectionExtensions
         services.AddSingleton<ObjectResourceLoadScope>();
         services.AddSingleton<IObjectMemoryResourceService, ObjectMemoryResourceService>();
         services.AddSingleton<Func<IObjectMemoryResourceService>>(provider => () => provider.GetRequiredService<IObjectMemoryResourceService>());
+        services.AddSingleton<IVfxResourceRewriteService, VfxResourceRewriteService>();
         services.AddSingleton<IObjectFileReadService, ObjectFileReadService>();
         services.AddSingleton<IObjectResourceTracker, ObjectResourceTracker>();
         services.AddSingleton<IObjectResourceLoader, ObjectResourceLoader>();

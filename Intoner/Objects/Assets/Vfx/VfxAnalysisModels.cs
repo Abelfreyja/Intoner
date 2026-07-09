@@ -1,3 +1,5 @@
+using System.Runtime.InteropServices;
+
 namespace Intoner.Objects.Assets;
 
 internal enum VfxDrawLayer
@@ -74,6 +76,34 @@ internal enum VfxAnalysisFeatures : ushort
     UsesWaterLayer    = 1 << 3,
     UsesScreenLayer   = 1 << 4,
     StrongContextPath = 1 << 5,
+    BoundTimelineItem = 1 << 6,
+}
+
+internal enum VfxLoopBehavior : byte
+{
+    Unknown   = 0,
+    Permanent = 1,
+}
+
+[Flags]
+internal enum VfxLoopSource : byte
+{
+    None     = 0,
+    Timeline = 1 << 0,
+    Emitter  = 1 << 1,
+    Effector = 1 << 2,
+}
+
+[StructLayout(LayoutKind.Auto)]
+internal readonly record struct VfxLoopFacts(
+    VfxLoopBehavior Behavior,
+    VfxLoopSource Sources)
+{
+    public static VfxLoopFacts Unknown
+        => new(VfxLoopBehavior.Unknown, VfxLoopSource.None);
+
+    public bool IsPermanent
+        => Behavior == VfxLoopBehavior.Permanent;
 }
 
 internal sealed record VfxBinderFacts(
@@ -82,15 +112,16 @@ internal sealed record VfxBinderFacts(
     VfxBinderTypes Types,
     VfxBinderProperties PropertyFlags)
 {
+    private const VfxBinderTypes EndpointBinderTypes =
+        VfxBinderTypes.Linear
+      | VfxBinderTypes.Spline
+      | VfxBinderTypes.LinearAdjust;
+
     private const VfxBinderProperties TargetPropertyFlags =
         VfxBinderProperties.TargetOrigin
       | VfxBinderProperties.TargetFitGround
       | VfxBinderProperties.TargetDamageCircle
       | VfxBinderProperties.TargetByName;
-
-    private const VfxBinderProperties OriginPropertyFlags =
-        VfxBinderProperties.CasterOrigin
-      | VfxBinderProperties.TargetOrigin;
 
     private const VfxBinderProperties FitGroundPropertyFlags =
         VfxBinderProperties.CasterFitGround
@@ -110,11 +141,11 @@ internal sealed record VfxBinderFacts(
     public bool HasCameraBinder
         => Types.HasAny(VfxBinderTypes.Camera);
 
+    public bool HasEndpointBinder
+        => Types.HasAny(EndpointBinderTypes);
+
     public bool HasTargetBindPoint
         => PropertyFlags.HasAny(TargetPropertyFlags);
-
-    public bool HasOriginBinder
-        => PropertyFlags.HasAny(OriginPropertyFlags);
 
     public bool HasCasterOriginBinder
         => PropertyFlags.HasAny(VfxBinderProperties.CasterOrigin);
@@ -124,12 +155,6 @@ internal sealed record VfxBinderFacts(
 
     public bool HasFitGroundBinder
         => PropertyFlags.HasAny(FitGroundPropertyFlags);
-
-    public bool HasCasterFitGroundBinder
-        => PropertyFlags.HasAny(VfxBinderProperties.CasterFitGround);
-
-    public bool HasTargetFitGroundBinder
-        => PropertyFlags.HasAny(VfxBinderProperties.TargetFitGround);
 
     public bool HasDamageCircleBinder
         => PropertyFlags.HasAny(DamageCirclePropertyFlags);
@@ -152,7 +177,8 @@ internal sealed record VfxAnalysis(
     VfxDrawLayer DrawLayer,
     VfxBinderFacts BinderFacts,
     VfxParticleTypes ParticleTypes,
-    VfxAnalysisFeatures FeatureFlags)
+    VfxAnalysisFeatures FeatureFlags,
+    VfxLoopFacts LoopFacts)
 {
     public int BinderCount
         => BinderFacts.Count;
@@ -163,11 +189,11 @@ internal sealed record VfxAnalysis(
     public bool HasCameraBinder
         => BinderFacts.HasCameraBinder;
 
+    public bool HasEndpointBinder
+        => BinderFacts.HasEndpointBinder;
+
     public bool HasTargetBindPoint
         => BinderFacts.HasTargetBindPoint;
-
-    public bool HasOriginBinder
-        => BinderFacts.HasOriginBinder;
 
     public bool HasCasterOriginBinder
         => BinderFacts.HasCasterOriginBinder;
@@ -177,12 +203,6 @@ internal sealed record VfxAnalysis(
 
     public bool HasFitGroundBinder
         => BinderFacts.HasFitGroundBinder;
-
-    public bool HasCasterFitGroundBinder
-        => BinderFacts.HasCasterFitGroundBinder;
-
-    public bool HasTargetFitGroundBinder
-        => BinderFacts.HasTargetFitGroundBinder;
 
     public bool HasDamageCircleBinder
         => BinderFacts.HasDamageCircleBinder;
@@ -211,14 +231,11 @@ internal sealed record VfxAnalysis(
     public bool HasStrongContextPath
         => FeatureFlags.HasAny(VfxAnalysisFeatures.StrongContextPath);
 
+    public bool HasBoundTimelineItems
+        => FeatureFlags.HasAny(VfxAnalysisFeatures.BoundTimelineItem);
+
     public bool HasModelSkinParticle
         => ParticleTypes.HasAny(VfxParticleTypes.ModelSkin);
-
-    public bool HasGroundProjectedParticle
-        => ParticleTypes.HasAny(
-            VfxParticleTypes.Decal
-          | VfxParticleTypes.DecalRing
-          | VfxParticleTypes.Disc);
 
     public bool HasBinder
         => BinderCount > 0;
@@ -226,10 +243,6 @@ internal sealed record VfxAnalysis(
     public bool HasTriggerWithoutScheduledItems
         => SchedulerTriggerCount > 0
          && SchedulerItemCount == 0;
-
-    public bool HasCameraSpaceTriggerOnly
-        => IsCameraSpace
-         && HasTriggerWithoutScheduledItems;
 
     public bool HasRenderableContent
         => EmitterCount > 0
@@ -242,25 +255,19 @@ internal static class VfxAnalysisFlagExtensions
     public static bool HasAny(this VfxBinderTypes value, VfxBinderTypes flags)
         => (value & flags) != VfxBinderTypes.None;
 
-    public static bool HasAll(this VfxBinderTypes value, VfxBinderTypes flags)
-        => (value & flags) == flags;
-
     public static bool HasAny(this VfxBinderProperties value, VfxBinderProperties flags)
         => (value & flags) != VfxBinderProperties.None;
-
-    public static bool HasAll(this VfxBinderProperties value, VfxBinderProperties flags)
-        => (value & flags) == flags;
 
     public static bool HasAny(this VfxParticleTypes value, VfxParticleTypes flags)
         => (value & flags) != VfxParticleTypes.None;
 
-    public static bool HasAll(this VfxParticleTypes value, VfxParticleTypes flags)
-        => (value & flags) == flags;
+    public static bool HasAny(this VfxLoopSource value, VfxLoopSource flags)
+        => (value & flags) != VfxLoopSource.None;
 
     public static bool HasAny(this VfxAnalysisFeatures value, VfxAnalysisFeatures flags)
         => (value & flags) != VfxAnalysisFeatures.None;
 
-    public static bool HasAll(this VfxAnalysisFeatures value, VfxAnalysisFeatures flags)
+    public static bool HasAll(this VfxBinderProperties value, VfxBinderProperties flags)
         => (value & flags) == flags;
 }
 

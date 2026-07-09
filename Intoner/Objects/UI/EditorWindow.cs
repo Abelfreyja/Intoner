@@ -88,6 +88,8 @@ internal sealed partial class EditorWindow : IntonerWindow, IGizmoHost, IDisposa
         public Vector3 Scale = Vector3.One;
         public bool Visible = true;
         public Vector4 Color = Vector4.One;
+        public bool Loop;
+        public int LoopIntervalSeconds = VfxModel.DefaultLoopIntervalSeconds;
     }
 
     private sealed class PreviewState

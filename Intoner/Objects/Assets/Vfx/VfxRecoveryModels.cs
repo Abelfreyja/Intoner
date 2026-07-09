@@ -3,40 +3,41 @@ using Intoner.Objects.Utils;
 namespace Intoner.Objects.Assets;
 
 [Flags]
-internal enum RuntimeVfxEvidence
+internal enum RuntimeVfxEvidence : uint
 {
-    None                    = 0,
-    Omen                    = 1 << 0,
-    LayoutAutoplay          = 1 << 1,
-    ResourceLoad            = 1 << 2,
-    StaticCreate            = 1 << 3,
-    ActorCreate             = 1 << 4,
-    TriggerReferenced       = 1 << 5,
-    TriggerUsed             = 1 << 6,
-    Binder                  = 1 << 7,
-    TimelineBinder          = 1 << 8,
-    SchedulerTrigger        = 1 << 9,
-    Renderable              = 1 << 10,
-    Common                  = 1 << 11,
-    Channeling              = 1 << 12,
-    Lockon                  = 1 << 13,
-    Event                   = 1 << 14,
-    Equipment               = 1 << 15,
-    Weapon                  = 1 << 16,
-    Monster                 = 1 << 17,
-    DemiHuman               = 1 << 18,
-    Accessory               = 1 << 19,
-    AsyncTimelineReferenced = 1 << 20,
-    LoVM                    = 1 << 21,
-    Status                  = 1 << 22,
-    Action                  = 1 << 23,
-    ActionTimeline          = 1 << 24,
-    EmoteTimeline           = 1 << 25,
-    GimmickTimeline         = 1 << 26,
-    LayoutTimeline          = 1 << 27,
-    Glasses                 = 1 << 28,
-    LayoutInstance          = 1 << 29,
-    TimelineReferenced      = 1 << 30,
+    None                       = 0,
+    Omen                       = 1u << 0,
+    LayoutAutoplay             = 1u << 1,
+    ResourceLoad               = 1u << 2,
+    StaticCreate               = 1u << 3,
+    ActorCreate                = 1u << 4,
+    TriggerReferenced          = 1u << 5,
+    TriggerUsed                = 1u << 6,
+    Binder                     = 1u << 7,
+    TimelineBinder             = 1u << 8,
+    SchedulerTrigger           = 1u << 9,
+    Renderable                 = 1u << 10,
+    Common                     = 1u << 11,
+    Channeling                 = 1u << 12,
+    Lockon                     = 1u << 13,
+    Event                      = 1u << 14,
+    Equipment                  = 1u << 15,
+    Weapon                     = 1u << 16,
+    Monster                    = 1u << 17,
+    DemiHuman                  = 1u << 18,
+    Accessory                  = 1u << 19,
+    AsyncTimelineReferenced    = 1u << 20,
+    LoVM                       = 1u << 21,
+    Status                     = 1u << 22,
+    Action                     = 1u << 23,
+    ActionTimeline             = 1u << 24,
+    EmoteTimeline              = 1u << 25,
+    GimmickTimeline            = 1u << 26,
+    LayoutTimeline             = 1u << 27,
+    Glasses                    = 1u << 28,
+    LayoutInstance             = 1u << 29,
+    TimelineReferenced         = 1u << 30,
+    StandaloneRewriteCandidate = 1u << 31,
 }
 
 internal sealed record ResolvedVfxPath(
@@ -158,7 +159,8 @@ internal static class RuntimeVfxEvidenceExtensions
             RuntimeVfxEvidence.Binder
           | RuntimeVfxEvidence.TimelineBinder
           | RuntimeVfxEvidence.SchedulerTrigger
-          | RuntimeVfxEvidence.Renderable);
+          | RuntimeVfxEvidence.Renderable
+          | RuntimeVfxEvidence.StandaloneRewriteCandidate);
 
     public static bool HasAny(this RuntimeVfxEvidence value, RuntimeVfxEvidence flags)
         => (value & flags) != RuntimeVfxEvidence.None;

@@ -168,6 +168,10 @@ internal sealed unsafe class ObjectResourceHooks : IDisposable
         };
     }
 
+    public bool CanResolveResourceRequests()
+        => GetResourceSyncHook != null
+        && GetResourceAsyncHook != null;
+
     public void Enable()
         => _enableOnce.Execute(
             () =>

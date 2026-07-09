@@ -56,6 +56,7 @@ internal sealed unsafe class SceneObjectFactory : ISceneObjectFactory
     private readonly IObjectKindService _objectKindService;
     private readonly IObjectResourceTracker _resourceTracker;
     private readonly Func<IObjectResourceLoader> _resourceLoaderFactory;
+    private readonly IVfxResourceRewriteService _vfxResourceRewriteService;
     private readonly IObjectPathResolver _pathResolver;
 
     public SceneObjectFactory(
@@ -67,6 +68,7 @@ internal sealed unsafe class SceneObjectFactory : ISceneObjectFactory
         IObjectKindService objectKindService,
         IObjectResourceTracker resourceTracker,
         Func<IObjectResourceLoader> resourceLoaderFactory,
+        IVfxResourceRewriteService vfxResourceRewriteService,
         IObjectPathResolver pathResolver)
     {
         _framework = framework;
@@ -76,6 +78,7 @@ internal sealed unsafe class SceneObjectFactory : ISceneObjectFactory
         _objectKindService = objectKindService;
         _resourceTracker = resourceTracker;
         _resourceLoaderFactory = resourceLoaderFactory;
+        _vfxResourceRewriteService = vfxResourceRewriteService;
         _pathResolver = pathResolver;
         _bgObjectLogger = loggerFactory.CreateLogger<BgSceneObject>();
         _furnitureLogger = loggerFactory.CreateLogger<FurnitureSceneObject>();
@@ -330,6 +333,8 @@ internal sealed unsafe class SceneObjectFactory : ISceneObjectFactory
 
         VfxObject* vfxObject;
         using var resourceLoadScope = EnterRootLoadScope(resolvedResource);
+        using var cacheIsolationScope = EnterVfxCacheIsolationScope(resolvedResource);
+        using var vfxRewriteScope = _vfxResourceRewriteService.EnterRewriteScope(resolvedResource);
         fixed (byte* pathPtr = pathBytes)
         fixed (byte* poolPtr = VfxPoolName)
         {
@@ -348,6 +353,7 @@ internal sealed unsafe class SceneObjectFactory : ISceneObjectFactory
             CreateBootstrapSnapshot(snapshot),
             vfxObject,
             resolvedResource.ResolvedPath,
+            _nativeBindings.StaticVfx,
             _resourceTracker);
         return FinalizeSceneObjectCreate(
             sceneObject,
@@ -468,6 +474,13 @@ internal sealed unsafe class SceneObjectFactory : ISceneObjectFactory
         => resolvedResource.ResourceCollectionId.Length == 0
             ? default(ObjectResourceLoadScopeToken)
             : _resourceLoaderFactory().EnterRootLoadScope(resolvedResource.ResourceCollectionId);
+
+    private IDisposable EnterVfxCacheIsolationScope(ObjectResolvedRootPath resolvedResource)
+        => resolvedResource.ResourceCollectionId.Length == 0
+            && resolvedResource.ResolvedPathKind == ObjectResolvedPathKind.GamePath
+            && GameAssetPathRules.IsFileKind(resolvedResource.CreatePath, GameAssetFileKind.Avfx)
+            ? _resourceLoaderFactory().EnterRootCacheIsolation(resolvedResource.CreatePath)
+            : default(ObjectResourceLoadScopeToken);
 
     private bool TryResolveRootResource(
         ILogger logger,

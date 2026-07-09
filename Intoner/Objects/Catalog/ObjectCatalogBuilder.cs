@@ -153,6 +153,7 @@ internal sealed class ObjectCatalogBuilder
                 ObjectCatalogLabelUtility.BuildPathLabel(vfxAsset.Source, vfxAsset.Path),
                 vfxAsset.Path,
                 vfxAsset.Path,
+                vfxInfo: new ObjectCatalogVfxInfo(vfxAsset.LoopFacts),
                 additionalSearchTerms: vfxAsset.SearchTerms,
                 searchProfile: ObjectCatalogSearchProfile.Vfx);
         }

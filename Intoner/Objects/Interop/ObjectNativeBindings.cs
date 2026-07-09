@@ -1,10 +1,16 @@
 using Dalamud.Plugin.Services;
+using Intoner.Objects.Utils;
 using Microsoft.Extensions.Logging;
+using System.Runtime.InteropServices;
+using SceneVfxObject = FFXIVClientStructs.FFXIV.Client.Graphics.Scene.VfxObject;
 
 namespace Intoner.Objects.Interop;
 
-internal sealed class ObjectNativeBindings
+internal sealed unsafe class ObjectNativeBindings
 {
+    internal delegate nint StaticVfxPlayDelegate(SceneVfxObject* vfxObject, float startTime, int bindPoint);
+
+    [StructLayout(LayoutKind.Auto)]
     public readonly struct FurnitureBinding
     {
         public FurnitureBinding(nint createAddress, nint destroyAddress, nint applyStateAddress)
@@ -22,6 +28,21 @@ internal sealed class ObjectNativeBindings
             => CreateAddress != nint.Zero && DestroyAddress != nint.Zero && ApplyStateAddress != nint.Zero;
     }
 
+    [StructLayout(LayoutKind.Auto)]
+    public readonly struct StaticVfxBinding(StaticVfxPlayDelegate? play)
+    {
+        public bool TryPlay(SceneVfxObject* vfxObject)
+        {
+            if (vfxObject == null || play is null)
+            {
+                return false;
+            }
+
+            _ = play(vfxObject, 0f, -1);
+            return true;
+        }
+    }
+
     private readonly ILogger<ObjectNativeBindings> _logger;
 
     public ObjectNativeBindings(ILogger<ObjectNativeBindings> logger, ISigScanner sigScanner)
@@ -31,9 +52,18 @@ internal sealed class ObjectNativeBindings
         ObjectSignatures.TestSignatures(sigScanner, _logger);
 #endif
         Furniture = CreateFurnitureBinding(sigScanner);
+        StaticVfx = CreateStaticVfxBinding(sigScanner);
     }
 
     public FurnitureBinding Furniture { get; }
+    public StaticVfxBinding StaticVfx { get; }
+
+    private StaticVfxBinding CreateStaticVfxBinding(ISigScanner sigScanner)
+        => new(
+            ObjectInteropHookUtility.CreateDelegate<StaticVfxPlayDelegate>(
+                _logger,
+                sigScanner,
+                ObjectSignatures.NativeStaticVfxPlay));
 
     private FurnitureBinding CreateFurnitureBinding(ISigScanner sigScanner)
     {

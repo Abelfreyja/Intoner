@@ -17,17 +17,23 @@ internal sealed unsafe class VfxSceneObject : DrawSceneObject
     private const int VfxResourceUnkApricotHandleOffset = 0x18;
 
     private SceneVfxObject* _vfxObject;
-    private string _vfxPath = string.Empty;
+    private string _vfxPath;
+    private readonly ObjectNativeBindings.StaticVfxBinding _staticVfxBinding;
     private readonly IObjectResourceTracker _resourceTracker;
     private bool _needsVisualReplay;
     private bool _needsInitialVisualReplay = true;
+    private bool _needsInitialPlay = true;
+    private bool _loggedMissingStaticPlay;
+    private long _nextLoopReplayMilliseconds;
     private ObjectResourceRegistration _rootHandleRegistration;
 
     public override ObjectKind Kind
         => ObjectKind.Vfx;
 
     public override bool NeedsFrameworkUpdates
-        => _needsVisualReplay || (Snapshot.CollectionId.Length > 0 && !_rootHandleRegistration.IsRegistered);
+        => _needsVisualReplay
+        || IsLoopEnabled
+        || (Snapshot.CollectionId.Length > 0 && !_rootHandleRegistration.IsRegistered);
 
     public override nint Address
         => (nint)_vfxObject;
@@ -41,14 +47,20 @@ internal sealed unsafe class VfxSceneObject : DrawSceneObject
         ObjectSnapshot snapshot,
         SceneVfxObject* vfxObject,
         string vfxPath,
+        ObjectNativeBindings.StaticVfxBinding staticVfxBinding,
         IObjectResourceTracker resourceTracker)
         : base(framework, logger, snapshot)
     {
         _vfxObject = vfxObject;
         _vfxPath = vfxPath;
+        _staticVfxBinding = staticVfxBinding;
         _resourceTracker = resourceTracker;
+        _rootHandleRegistration = new ObjectResourceRegistration(snapshot.Id);
         UpdateRegisteredRootHandle(snapshot);
     }
+
+    private bool IsLoopEnabled
+        => Snapshot.Model is VfxModel { Loop: true };
 
     protected override void FrameworkUpdateUnsafe()
     {
@@ -66,6 +78,7 @@ internal sealed unsafe class VfxSceneObject : DrawSceneObject
             }
         }
 
+        ReplayLoopIfNeededUnsafe((VfxModel)Snapshot.Model);
         UpdateRegisteredRootHandle(Snapshot);
     }
 
@@ -112,6 +125,13 @@ internal sealed unsafe class VfxSceneObject : DrawSceneObject
             || vfxModel.NeedsVisualState(previousModel);
 
         ApplyRuntimeStateUnsafe(snapshot);
+        if (!vfxModel.Loop
+         || !previousModel.Loop
+         || vfxModel.LoopIntervalSeconds != previousModel.LoopIntervalSeconds)
+        {
+            _nextLoopReplayMilliseconds = 0;
+        }
+
         if (!needsVisualReplay)
         {
             _needsVisualReplay = false;
@@ -174,6 +194,8 @@ internal sealed unsafe class VfxSceneObject : DrawSceneObject
         _vfxPath = string.Empty;
         _needsVisualReplay = false;
         _needsInitialVisualReplay = false;
+        _needsInitialPlay = false;
+        _nextLoopReplayMilliseconds = 0;
     }
 
     private void ApplyRuntimeStateUnsafe(ObjectSnapshot snapshot)
@@ -204,7 +226,70 @@ internal sealed unsafe class VfxSceneObject : DrawSceneObject
         _vfxObject->SomeFlags &= SomeFlagsClearBit3Mask;
         _vfxObject->Color = model.Color;
         _vfxObject->Update(0.0f);
-        return _vfxObject->VfxResourceInstance != null && ObjectSceneInterop.IsDrawObjectLoaded(drawObject);
+        if (_vfxObject->VfxResourceInstance == null || !ObjectSceneInterop.IsDrawObjectLoaded(drawObject))
+        {
+            return false;
+        }
+
+        if (PlayInitialIfNeededUnsafe() && model.Loop)
+        {
+            ScheduleNextLoopReplay(Environment.TickCount64, model);
+        }
+
+        return true;
+    }
+
+    private void ReplayLoopIfNeededUnsafe(VfxModel model)
+    {
+        if (!model.Loop)
+        {
+            _nextLoopReplayMilliseconds = 0;
+            return;
+        }
+
+        long nowMilliseconds = Environment.TickCount64;
+        if (_nextLoopReplayMilliseconds != 0 && nowMilliseconds < _nextLoopReplayMilliseconds)
+        {
+            return;
+        }
+
+        _ = TryPlayStaticVfxUnsafe();
+        ScheduleNextLoopReplay(nowMilliseconds, model);
+    }
+
+    private bool PlayInitialIfNeededUnsafe()
+    {
+        if (!_needsInitialPlay)
+        {
+            return false;
+        }
+
+        _needsInitialPlay = false;
+        return TryPlayStaticVfxUnsafe();
+    }
+
+    private void ScheduleNextLoopReplay(long nowMilliseconds, VfxModel model)
+        => _nextLoopReplayMilliseconds = nowMilliseconds + (VfxModel.ClampLoopIntervalSeconds(model.LoopIntervalSeconds) * 1000L);
+
+    private bool TryPlayStaticVfxUnsafe()
+    {
+        if (_vfxObject == null || _vfxObject->VfxResourceInstance == null)
+        {
+            return false;
+        }
+
+        if (_staticVfxBinding.TryPlay(_vfxObject))
+        {
+            return true;
+        }
+
+        if (!_loggedMissingStaticPlay)
+        {
+            _loggedMissingStaticPlay = true;
+            Logger.LogWarning("static vfx play binding is unavailable; vfx loop replay is disabled for path {VfxPath}", _vfxPath);
+        }
+
+        return false;
     }
 
     private void UpdateRegisteredRootHandle(ObjectSnapshot snapshot)

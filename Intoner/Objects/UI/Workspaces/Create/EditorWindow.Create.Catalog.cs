@@ -3,6 +3,7 @@ using Dalamud.Interface;
 using Dalamud.Interface.Textures.TextureWraps;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
+using Intoner.Objects.Assets;
 using Intoner.Objects.Catalog;
 using Intoner.Objects.Models;
 using Intoner.Objects.Preview;
@@ -910,6 +911,12 @@ internal sealed partial class EditorWindow
             return;
         }
 
+        if (entry.Kind == ObjectCatalogKind.Vfx && entry.VfxInfo is not null)
+        {
+            DrawVfxCatalogEntryCard(entry, entry.VfxInfo, selected, onSelect, height);
+            return;
+        }
+
         DrawCatalogSelectionCardCore(
             $"{entry.Source}:{entry.RowId}:{entry.PlacementPath}",
             entry.Name,
@@ -958,11 +965,38 @@ internal sealed partial class EditorWindow
             titleIconColor);
     }
 
+    private void DrawVfxCatalogEntryCard(ObjectCatalogEntry entry, ObjectCatalogVfxInfo vfxInfo, bool selected, Action onSelect, float height)
+    {
+        FontAwesomeIcon? titleIcon = null;
+        string? titleIconTooltip = null;
+        Vector4? titleIconColor = null;
+        if (vfxInfo.IsPermanentLoop)
+        {
+            titleIcon = FontAwesomeIcon.Repeat;
+            titleIconTooltip = "permanent loop";
+            titleIconColor = EditorColors.AccentGreen with { W = selected ? 0.95f : 0.82f };
+        }
+
+        DrawCatalogSelectionCardCore(
+            $"{entry.Source}:{entry.RowId}:{entry.PlacementPath}",
+            entry.Name,
+            entry.DisplayPath,
+            null,
+            selected,
+            onSelect,
+            height,
+            null,
+            badgeUsesIconFont: false,
+            titleIcon: titleIcon,
+            titleIconTooltip: titleIconTooltip,
+            titleIconColor: titleIconColor);
+    }
+
     private void DrawCatalogSelectionCardCore(
         string id,
         string title,
         string detail,
-        string badgeText,
+        string? badgeText,
         bool selected,
         Action onSelect,
         float height,
@@ -996,29 +1030,35 @@ internal sealed partial class EditorWindow
 
         var badgePaddingX = Scaled(7f);
         var badgePaddingY = Scaled(3f);
-        var badgeTextSize = badgeUsesIconFont
-            ? MeasureCatalogBadgeText(badgeText)
-            : ImGui.CalcTextSize(badgeText);
-        var badgeMin = new Vector2(max.X - badgeTextSize.X - (badgePaddingX * 2f) - padX, min.Y + padY);
-        var badgeMax = new Vector2(max.X - padX, badgeMin.Y + badgeTextSize.Y + (badgePaddingY * 2f));
-        drawList.AddRectFilled(badgeMin, badgeMax, ImGui.GetColorU32(accent with { W = selected ? 0.36f : 0.22f }), 999f);
-        if (badgeUsesIconFont)
+        var contentRight = max.X - padX;
+        if (!string.IsNullOrWhiteSpace(badgeText))
         {
-            drawList.AddText(
-                UiBuilder.IconFont,
-                UiBuilder.IconFont.FontSize,
-                new Vector2(badgeMin.X + badgePaddingX, badgeMin.Y + badgePaddingY),
-                ImGui.GetColorU32(text),
-                badgeText);
-        }
-        else
-        {
-            drawList.AddText(new Vector2(badgeMin.X + badgePaddingX, badgeMin.Y + badgePaddingY), ImGui.GetColorU32(text), badgeText);
-        }
+            var badgeTextSize = badgeUsesIconFont
+                ? MeasureCatalogBadgeText(badgeText)
+                : ImGui.CalcTextSize(badgeText);
+            var badgeMin = new Vector2(max.X - badgeTextSize.X - (badgePaddingX * 2f) - padX, min.Y + padY);
+            var badgeMax = new Vector2(max.X - padX, badgeMin.Y + badgeTextSize.Y + (badgePaddingY * 2f));
+            drawList.AddRectFilled(badgeMin, badgeMax, ImGui.GetColorU32(accent with { W = selected ? 0.36f : 0.22f }), 999f);
+            if (badgeUsesIconFont)
+            {
+                drawList.AddText(
+                    UiBuilder.IconFont,
+                    UiBuilder.IconFont.FontSize,
+                    new Vector2(badgeMin.X + badgePaddingX, badgeMin.Y + badgePaddingY),
+                    ImGui.GetColorU32(text),
+                    badgeText);
+            }
+            else
+            {
+                drawList.AddText(new Vector2(badgeMin.X + badgePaddingX, badgeMin.Y + badgePaddingY), ImGui.GetColorU32(text), badgeText);
+            }
 
-        if (!string.IsNullOrWhiteSpace(badgeTooltip) && EditorInputUtility.IsMouseInside(badgeMin, badgeMax))
-        {
-            UiSharedService.DrawAccentTooltipText(badgeTooltip, accent, wrapEms: 35f);
+            if (!string.IsNullOrWhiteSpace(badgeTooltip) && EditorInputUtility.IsMouseInside(badgeMin, badgeMax))
+            {
+                UiSharedService.DrawAccentTooltipText(badgeTooltip, accent, wrapEms: 35f);
+            }
+
+            contentRight = badgeMin.X - padX;
         }
 
         var contentMinX = min.X + padX;
@@ -1061,7 +1101,7 @@ internal sealed partial class EditorWindow
             }
         }
 
-        var nameWidth = MathF.Max(ResolveMinimumCardTextWidth(), badgeMin.X - contentMinX - padX - titleIconSize.X - titleIconSpacing);
+        var nameWidth = MathF.Max(ResolveMinimumCardTextWidth(), contentRight - contentMinX - titleIconSize.X - titleIconSpacing);
         var nameText = ClipTextToWidth(title, nameWidth);
         var titlePosition = new Vector2(contentMinX, min.Y + padY);
         drawList.AddText(titlePosition, ImGui.GetColorU32(text), nameText);

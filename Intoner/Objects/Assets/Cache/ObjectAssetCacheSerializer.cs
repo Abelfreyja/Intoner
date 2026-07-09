@@ -229,6 +229,7 @@ internal sealed class ObjectAssetCacheSerializer
         {
             writer.Write7BitEncodedInt(stringTable.GetId(vfxAsset.Path));
             writer.Write((uint)vfxAsset.Evidence);
+            WriteVfxAnalysis(writer, vfxAsset.Analysis);
         }
 
         writer.Flush();
@@ -333,7 +334,8 @@ internal sealed class ObjectAssetCacheSerializer
             {
                 string path = stringTable[reader.Read7BitEncodedInt()];
                 RuntimeVfxEvidence evidence = (RuntimeVfxEvidence)reader.ReadUInt32();
-                return new ObjectAssetCacheStandaloneVfx(path, evidence);
+                VfxAnalysis? analysis = ReadVfxAnalysis(reader);
+                return new ObjectAssetCacheStandaloneVfx(path, evidence, analysis);
             });
 
     private static IReadOnlyList<ObjectAssetCacheTimelineReferencedVfxEntry> ReadTimelineReferencedVfxSection(
@@ -427,6 +429,8 @@ internal sealed class ObjectAssetCacheSerializer
         writer.Write((ushort)analysis.BinderFacts.PropertyFlags);
         writer.Write((ushort)analysis.ParticleTypes);
         writer.Write((ushort)analysis.FeatureFlags);
+        writer.Write((byte)analysis.LoopFacts.Behavior);
+        writer.Write((byte)analysis.LoopFacts.Sources);
     }
 
     private static VfxAnalysis? ReadVfxAnalysis(BinaryReader reader)
@@ -450,6 +454,8 @@ internal sealed class ObjectAssetCacheSerializer
         VfxBinderProperties binderPropertyFlags = (VfxBinderProperties)reader.ReadUInt16();
         VfxParticleTypes particleTypes = (VfxParticleTypes)reader.ReadUInt16();
         VfxAnalysisFeatures featureFlags = (VfxAnalysisFeatures)reader.ReadUInt16();
+        VfxLoopBehavior loopBehavior = (VfxLoopBehavior)reader.ReadByte();
+        VfxLoopSource loopSources = (VfxLoopSource)reader.ReadByte();
 
         return new VfxAnalysis(
             schedulerCount,
@@ -466,7 +472,8 @@ internal sealed class ObjectAssetCacheSerializer
                 binderTypes,
                 binderPropertyFlags),
             particleTypes,
-            featureFlags);
+            featureFlags,
+            new VfxLoopFacts(loopBehavior, loopSources));
     }
 
     private static uint[] ReadUInt32List(BinaryReader reader)

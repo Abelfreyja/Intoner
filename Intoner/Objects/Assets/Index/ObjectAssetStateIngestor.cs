@@ -68,7 +68,8 @@ internal sealed class ObjectAssetStateIngestor(
                 AssetPathContract.PersistedCache,
                 ["persisted"],
                 vfxAsset.Evidence,
-                runtimeObserved: true);
+                runtimeObserved: true,
+                analysis: vfxAsset.Analysis);
         }
     }
 

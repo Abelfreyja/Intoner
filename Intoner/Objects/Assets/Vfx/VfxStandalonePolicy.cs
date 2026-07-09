@@ -2,54 +2,6 @@ using System.Runtime.InteropServices;
 
 namespace Intoner.Objects.Assets;
 
-[Flags]
-internal enum VfxStandaloneUnsupportedReason
-{
-    None                     = 0,
-    MissingRenderableContent = 1 << 0,
-    ModelSkinParticle        = 1 << 1,
-    ByNameBinder             = 1 << 2,
-    ExplicitBindPointId      = 1 << 3,
-    TargetOriginBinder       = 1 << 4,
-}
-
-[Flags]
-internal enum VfxStandaloneContextClue
-{
-    None                         = 0,
-    Binder                       = 1 << 0,
-    TimelineBinder               = 1 << 1,
-    CameraBinder                 = 1 << 2,
-    TargetBindPoint              = 1 << 3,
-    OriginBinder                 = 1 << 4,
-    FitGroundBinder              = 1 << 5,
-    DamageCircleBinder           = 1 << 6,
-    FitGround                    = 1 << 7,
-    CameraSpace                  = 1 << 8,
-    AllStopOnHide                = 1 << 9,
-    GroundProjectedParticle      = 1 << 10,
-    SchedulerTrigger             = 1 << 11,
-    AsyncTimelineReference       = 1 << 12,
-    ScreenLayer                  = 1 << 13,
-    WaterLayer                   = 1 << 14,
-    TriggerWithoutScheduledItems = 1 << 15,
-    StrongContextPath            = 1 << 16,
-    CameraSpaceTriggerOnly       = 1 << 17,
-    TimelineReference            = 1 << 18,
-    TriggeredTimelineReference   = 1 << 19,
-    NestedTimelineReference      = 1 << 20,
-    AnimationTimelineReference   = 1 << 21,
-    SoundTimelineReference       = 1 << 22,
-    TimelineBindPointOverride    = 1 << 23,
-}
-
-[Flags]
-internal enum VfxStandaloneUnknownReason
-{
-    None                = 0,
-    SheetConventionOnly = 1 << 0,
-}
-
 internal enum VfxStandaloneSupportClass
 {
     Unknown,
@@ -58,39 +10,39 @@ internal enum VfxStandaloneSupportClass
     Unsupported,
 }
 
-internal enum VfxStandaloneValidatedSupportShape
-{
-    None,
-    DeterministicOmenFitGround,
-    GroupPoseCameraOrigin,
-}
-
 [StructLayout(LayoutKind.Auto)]
 internal readonly record struct VfxStandalonePolicyResult(
     VfxStandaloneSupportClass SupportClass,
-    RuntimeVfxEvidence AnalysisEvidence,
-    VfxStandaloneUnsupportedReason UnsupportedReasons,
-    VfxStandaloneContextClue ContextClues,
-    VfxStandaloneUnknownReason UnknownReasons)
-{
-    public bool IsSupportedStandalone
-        => SupportClass == VfxStandaloneSupportClass.SupportedStandalone;
-}
+    RuntimeVfxEvidence AnalysisEvidence);
 
 internal static class VfxStandalonePolicy
 {
-    private readonly record struct ValidatedSupportRule
+    [Flags]
+    private enum ContextClue
     {
-        public required VfxStandaloneValidatedSupportShape Shape { get; init; }
-        public required RuntimeVfxEvidence RequiredEvidence { get; init; }
-        public required AssetPathContract RequiredPathContracts { get; init; }
-        public required int RequiredBinderCount { get; init; }
-        public required int RequiredTimelineBinderCount { get; init; }
-        public required VfxBinderTypes RequiredBinderTypes { get; init; }
-        public required VfxBinderTypes ForbiddenBinderTypes { get; init; }
-        public required VfxBinderProperties RequiredBinderProperties { get; init; }
-        public required VfxBinderProperties ForbiddenBinderProperties { get; init; }
-        public string? RequiredPathPrefix { get; init; }
+        None                         = 0,
+        Binder                       = 1 << 0,
+        TimelineBinder               = 1 << 1,
+        CameraBinder                 = 1 << 2,
+        EndpointBinder               = 1 << 3,
+        TargetBindPoint              = 1 << 4,
+        OriginBinder                 = 1 << 5,
+        FitGroundBinder              = 1 << 6,
+        DamageCircleBinder           = 1 << 7,
+        FitGround                    = 1 << 8,
+        CameraSpace                  = 1 << 9,
+        AllStopOnHide                = 1 << 10,
+        AsyncTimelineReference       = 1 << 11,
+        ScreenLayer                  = 1 << 12,
+        WaterLayer                   = 1 << 13,
+        TriggerWithoutScheduledItems = 1 << 14,
+        StrongContextPath            = 1 << 15,
+        TimelineReference            = 1 << 16,
+        TriggeredTimelineReference   = 1 << 17,
+        NestedTimelineReference      = 1 << 18,
+        AnimationTimelineReference   = 1 << 19,
+        SoundTimelineReference       = 1 << 20,
+        TimelineBindPointOverride    = 1 << 21,
     }
 
     private const VfxBinderProperties TargetBinderProperties =
@@ -98,10 +50,6 @@ internal static class VfxStandalonePolicy
       | VfxBinderProperties.TargetFitGround
       | VfxBinderProperties.TargetDamageCircle
       | VfxBinderProperties.TargetByName;
-
-    private const VfxBinderProperties FitGroundBinderProperties =
-        VfxBinderProperties.CasterFitGround
-      | VfxBinderProperties.TargetFitGround;
 
     private const VfxBinderProperties DamageCircleBinderProperties =
         VfxBinderProperties.CasterDamageCircle
@@ -117,13 +65,6 @@ internal static class VfxStandalonePolicy
       | ByNameBinderProperties
       | VfxBinderProperties.ExplicitBindPointId;
 
-    private const VfxBinderProperties GroupPoseForbiddenBinderProperties =
-        TargetBinderProperties
-      | FitGroundBinderProperties
-      | DamageCircleBinderProperties
-      | ByNameBinderProperties
-      | VfxBinderProperties.ExplicitBindPointId;
-
     private const RuntimeVfxEvidence StrongContextEvidence =
         RuntimeVfxEvidence.ActorCreate
       | RuntimeVfxEvidence.TriggerUsed
@@ -133,91 +74,62 @@ internal static class VfxStandalonePolicy
       | RuntimeVfxEvidence.EmoteTimeline
       | RuntimeVfxEvidence.GimmickTimeline;
 
-    private const VfxStandaloneContextClue ContextRequiredClues =
-        VfxStandaloneContextClue.TargetBindPoint
-      | VfxStandaloneContextClue.DamageCircleBinder
-      | VfxStandaloneContextClue.AsyncTimelineReference
-      | VfxStandaloneContextClue.TriggeredTimelineReference
-      | VfxStandaloneContextClue.TriggerWithoutScheduledItems
-      | VfxStandaloneContextClue.StrongContextPath
-      | VfxStandaloneContextClue.CameraSpaceTriggerOnly
-      | VfxStandaloneContextClue.TimelineBindPointOverride;
+    private const ContextClue ContextRequiredClues =
+        ContextClue.TargetBindPoint
+      | ContextClue.EndpointBinder
+      | ContextClue.DamageCircleBinder
+      | ContextClue.AsyncTimelineReference
+      | ContextClue.TriggeredTimelineReference
+      | ContextClue.TriggerWithoutScheduledItems
+      | ContextClue.StrongContextPath
+      | ContextClue.TimelineBindPointOverride;
 
-    private const VfxStandaloneContextClue BlockingUnknownClues =
-        VfxStandaloneContextClue.Binder
-      | VfxStandaloneContextClue.TimelineBinder
-      | VfxStandaloneContextClue.CameraBinder
-      | VfxStandaloneContextClue.OriginBinder
-      | VfxStandaloneContextClue.FitGroundBinder
-      | VfxStandaloneContextClue.FitGround
-      | VfxStandaloneContextClue.CameraSpace
-      | VfxStandaloneContextClue.AllStopOnHide
-      | VfxStandaloneContextClue.ScreenLayer
-      | VfxStandaloneContextClue.WaterLayer
-      | VfxStandaloneContextClue.TimelineReference
-      | VfxStandaloneContextClue.NestedTimelineReference
-      | VfxStandaloneContextClue.AnimationTimelineReference
-      | VfxStandaloneContextClue.SoundTimelineReference;
-
-    private static readonly ValidatedSupportRule[] ValidatedSupportRules =
-    [
-        new()
-        {
-            Shape                       = VfxStandaloneValidatedSupportShape.DeterministicOmenFitGround,
-            RequiredEvidence            = RuntimeVfxEvidence.Omen,
-            RequiredPathContracts       = AssetPathContract.DeterministicBuilder,
-            RequiredBinderCount         = 1,
-            RequiredTimelineBinderCount = 0,
-            RequiredBinderTypes         = VfxBinderTypes.None,
-            ForbiddenBinderTypes        = VfxBinderTypes.Camera,
-            RequiredBinderProperties    = VfxBinderProperties.CasterFitGround,
-            ForbiddenBinderProperties   = DeterministicOmenForbiddenBinderProperties,
-        },
-        new()
-        {
-            Shape                       = VfxStandaloneValidatedSupportShape.GroupPoseCameraOrigin,
-            RequiredEvidence            = RuntimeVfxEvidence.Event,
-            RequiredPathContracts       = AssetPathContract.DeterministicBuilder,
-            RequiredBinderCount         = 1,
-            RequiredTimelineBinderCount = 0,
-            RequiredBinderTypes         = VfxBinderTypes.Camera,
-            ForbiddenBinderTypes        = VfxBinderTypes.None,
-            RequiredBinderProperties    = VfxBinderProperties.CasterOrigin,
-            ForbiddenBinderProperties   = GroupPoseForbiddenBinderProperties,
-            RequiredPathPrefix          = "vfx/grouppose/eff/",
-        },
-    ];
+    private const ContextClue BlockingUnknownClues =
+        ContextClue.Binder
+      | ContextClue.TimelineBinder
+      | ContextClue.CameraBinder
+      | ContextClue.OriginBinder
+      | ContextClue.FitGroundBinder
+      | ContextClue.FitGround
+      | ContextClue.CameraSpace
+      | ContextClue.AllStopOnHide
+      | ContextClue.ScreenLayer
+      | ContextClue.WaterLayer
+      | ContextClue.TimelineReference
+      | ContextClue.NestedTimelineReference
+      | ContextClue.AnimationTimelineReference
+      | ContextClue.SoundTimelineReference;
 
     public static VfxStandalonePolicyResult Evaluate(
-        string path,
         VfxAnalysis analysis,
+        KnownVfxFamily familyHint,
         RuntimeVfxEvidence sourceEvidence,
         VfxTimelineContext timelineContext,
         AssetPathContract pathContracts)
     {
-        VfxStandaloneUnsupportedReason unsupportedReasons = GetUnsupportedReasons(analysis);
-        VfxStandaloneContextClue contextClues = GetContextClues(analysis, sourceEvidence, timelineContext);
-        VfxStandaloneUnknownReason unknownReasons = GetUnknownReasons(pathContracts, sourceEvidence);
+        bool canRewriteForStandaloneSpawn = AvfxRewritePolicy.CanRewriteForStandaloneSpawn(analysis);
+        bool isUnsupported = IsUnsupported(analysis, canRewriteForStandaloneSpawn);
+        ContextClue contextClues = GetContextClues(analysis, sourceEvidence, timelineContext);
+        bool hasUnknownSource = !sourceEvidence.HasAny(RuntimeVfxEvidence.StaticCreate)
+                             && IsSheetConventionOnly(pathContracts);
 
-        RuntimeVfxEvidence analysisEvidence = GetAnalysisEvidence(analysis);
+        RuntimeVfxEvidence analysisEvidence = GetAnalysisEvidence(analysis, canRewriteForStandaloneSpawn);
         VfxStandaloneSupportClass supportClass = DetermineSupportClass(
-            path,
             analysis,
+            familyHint,
             sourceEvidence,
             pathContracts,
-            unsupportedReasons,
+            isUnsupported,
             contextClues,
-            unknownReasons);
+            hasUnknownSource,
+            canRewriteForStandaloneSpawn);
 
         return new VfxStandalonePolicyResult(
             supportClass,
-            analysisEvidence,
-            unsupportedReasons,
-            contextClues,
-            unknownReasons);
+            analysisEvidence);
     }
 
-    private static RuntimeVfxEvidence GetAnalysisEvidence(VfxAnalysis analysis)
+    private static RuntimeVfxEvidence GetAnalysisEvidence(VfxAnalysis analysis, bool canRewriteForStandaloneSpawn)
     {
         RuntimeVfxEvidence analysisEvidence = RuntimeVfxEvidence.None;
         if (analysis.HasRenderableContent)
@@ -240,30 +152,49 @@ internal static class VfxStandalonePolicy
             analysisEvidence |= RuntimeVfxEvidence.SchedulerTrigger;
         }
 
+        if (canRewriteForStandaloneSpawn)
+        {
+            analysisEvidence |= RuntimeVfxEvidence.StandaloneRewriteCandidate;
+        }
+
         return analysisEvidence;
     }
 
     private static VfxStandaloneSupportClass DetermineSupportClass(
-        string path,
         VfxAnalysis analysis,
+        KnownVfxFamily familyHint,
         RuntimeVfxEvidence sourceEvidence,
         AssetPathContract pathContracts,
-        VfxStandaloneUnsupportedReason unsupportedReasons,
-        VfxStandaloneContextClue contextClues,
-        VfxStandaloneUnknownReason unknownReasons)
+        bool isUnsupported,
+        ContextClue contextClues,
+        bool hasUnknownSource,
+        bool canRewriteForStandaloneSpawn)
     {
         bool hasDetachedRuntimeSignal = sourceEvidence.HasAny(RuntimeVfxEvidence.StaticCreate);
-        bool hasUnsupportedReasons = unsupportedReasons != VfxStandaloneUnsupportedReason.None;
-        bool hasContextRequiredClues = contextClues.HasAny(ContextRequiredClues);
-        bool hasStrongContextEvidence = !hasDetachedRuntimeSignal && sourceEvidence.HasAny(StrongContextEvidence);
-        bool hasUnknownReasons = unknownReasons != VfxStandaloneUnknownReason.None;
-        bool hasBlockingUnknownClues = contextClues.HasAny(BlockingUnknownClues);
-        bool hasValidatedSupportedShape =
+        bool hasContextRequiredClues = HasAny(contextClues, GetContextRequiredClues(analysis, canRewriteForStandaloneSpawn));
+        bool hasStrongContextEvidence = !hasDetachedRuntimeSignal
+                                     && !canRewriteForStandaloneSpawn
+                                     && sourceEvidence.HasAny(StrongContextEvidence);
+        bool hasBlockingUnknownClues = HasAny(contextClues, GetBlockingUnknownClues(analysis, canRewriteForStandaloneSpawn));
+        bool isKnownGroupPoseScreenEffect = IsKnownGroupPoseScreenEffect(
+            analysis,
+            familyHint,
+            sourceEvidence,
+            pathContracts);
+        bool isValidatedOmenFitGround =
             !hasDetachedRuntimeSignal
-         && !hasUnknownReasons
-         && ResolveValidatedSupportShape(path, analysis, sourceEvidence, pathContracts) != VfxStandaloneValidatedSupportShape.None;
+         && !hasUnknownSource
+         && IsValidatedOmenFitGround(
+                analysis,
+                sourceEvidence,
+                pathContracts);
 
-        if (hasUnsupportedReasons)
+        if (isKnownGroupPoseScreenEffect)
+        {
+            return VfxStandaloneSupportClass.SupportedStandalone;
+        }
+
+        if (isUnsupported)
         {
             return VfxStandaloneSupportClass.Unsupported;
         }
@@ -274,12 +205,12 @@ internal static class VfxStandalonePolicy
             return VfxStandaloneSupportClass.ContextRequired;
         }
 
-        if (hasValidatedSupportedShape)
+        if (isValidatedOmenFitGround)
         {
             return VfxStandaloneSupportClass.SupportedStandalone;
         }
 
-        if (!hasDetachedRuntimeSignal && (hasUnknownReasons || hasBlockingUnknownClues))
+        if (!hasDetachedRuntimeSignal && (hasUnknownSource || hasBlockingUnknownClues))
         {
             return VfxStandaloneSupportClass.Unknown;
         }
@@ -287,210 +218,110 @@ internal static class VfxStandalonePolicy
         return VfxStandaloneSupportClass.SupportedStandalone;
     }
 
-    private static VfxStandaloneUnsupportedReason GetUnsupportedReasons(VfxAnalysis analysis)
-        => FlagIf(
-                !analysis.HasRenderableContent,
-                VfxStandaloneUnsupportedReason.MissingRenderableContent)
-         | FlagIf(
-                analysis.HasModelSkinParticle,
-                VfxStandaloneUnsupportedReason.ModelSkinParticle)
-         | FlagIf(
-                analysis.HasByNameBinder,
-                VfxStandaloneUnsupportedReason.ByNameBinder)
-         | FlagIf(
-                analysis.HasExplicitBindPointId,
-                VfxStandaloneUnsupportedReason.ExplicitBindPointId)
-         | FlagIf(
-                analysis.HasTargetOriginBinder,
-                VfxStandaloneUnsupportedReason.TargetOriginBinder);
+    private static ContextClue GetContextRequiredClues(VfxAnalysis analysis, bool canRewriteForStandaloneSpawn)
+    {
+        ContextClue clues = ContextRequiredClues;
+        if (analysis.HasBoundTimelineItems || canRewriteForStandaloneSpawn)
+        {
+            clues &= ~ContextClue.TimelineBindPointOverride;
+        }
 
-    private static VfxStandaloneContextClue GetContextClues(
+        if (canRewriteForStandaloneSpawn)
+        {
+            clues &= ~ContextClue.TargetBindPoint;
+        }
+
+        return clues;
+    }
+
+    private static ContextClue GetBlockingUnknownClues(VfxAnalysis analysis, bool canRewriteForStandaloneSpawn)
+    {
+        ContextClue clues = BlockingUnknownClues;
+        if (analysis.HasBoundTimelineItems || canRewriteForStandaloneSpawn)
+        {
+            clues &= ~ContextClue.TimelineReference;
+        }
+
+        if (canRewriteForStandaloneSpawn)
+        {
+            clues &= ~(ContextClue.Binder
+                     | ContextClue.TimelineBinder
+                     | ContextClue.OriginBinder);
+        }
+
+        return clues;
+    }
+
+    private static bool IsUnsupported(VfxAnalysis analysis, bool canRewriteForStandaloneSpawn)
+    {
+        bool endpointContextRequired = analysis.HasEndpointBinder;
+        return !analysis.HasRenderableContent
+            || analysis.HasModelSkinParticle
+            || (!canRewriteForStandaloneSpawn
+             && !endpointContextRequired
+             && (analysis.HasByNameBinder
+              || analysis.HasExplicitBindPointId
+              || analysis.HasTargetOriginBinder));
+    }
+
+    private static ContextClue GetContextClues(
         VfxAnalysis analysis,
         RuntimeVfxEvidence sourceEvidence,
         VfxTimelineContext timelineContext)
-        => FlagIf(analysis.HasBinder, VfxStandaloneContextClue.Binder)
-         | FlagIf(analysis.HasTimelineBinder, VfxStandaloneContextClue.TimelineBinder)
-         | FlagIf(analysis.HasCameraBinder, VfxStandaloneContextClue.CameraBinder)
-         | FlagIf(analysis.HasTargetBindPoint, VfxStandaloneContextClue.TargetBindPoint)
-         | FlagIf(analysis.HasCasterOriginBinder, VfxStandaloneContextClue.OriginBinder)
-         | FlagIf(analysis.HasFitGroundBinder, VfxStandaloneContextClue.FitGroundBinder)
-         | FlagIf(analysis.HasDamageCircleBinder, VfxStandaloneContextClue.DamageCircleBinder)
-         | FlagIf(analysis.IsFitGround, VfxStandaloneContextClue.FitGround)
-         | FlagIf(analysis.IsCameraSpace, VfxStandaloneContextClue.CameraSpace)
-         | FlagIf(analysis.IsAllStopOnHide, VfxStandaloneContextClue.AllStopOnHide)
-         | FlagIf(analysis.HasGroundProjectedParticle, VfxStandaloneContextClue.GroundProjectedParticle)
-         | FlagIf(analysis.UsesScreenLayer, VfxStandaloneContextClue.ScreenLayer)
-         | FlagIf(analysis.UsesWaterLayer, VfxStandaloneContextClue.WaterLayer)
-         | FlagIf(analysis.SchedulerTriggerCount > 0, VfxStandaloneContextClue.SchedulerTrigger)
-         | FlagIf(analysis.HasTriggerWithoutScheduledItems, VfxStandaloneContextClue.TriggerWithoutScheduledItems)
-         | FlagIf(analysis.HasStrongContextPath, VfxStandaloneContextClue.StrongContextPath)
-         | FlagIf(analysis.HasCameraSpaceTriggerOnly, VfxStandaloneContextClue.CameraSpaceTriggerOnly)
-         | FlagIf(sourceEvidence.HasAny(RuntimeVfxEvidence.TimelineReferenced), VfxStandaloneContextClue.TimelineReference)
-         | FlagIf(sourceEvidence.HasAny(RuntimeVfxEvidence.TriggerReferenced), VfxStandaloneContextClue.TriggeredTimelineReference)
-         | FlagIf(sourceEvidence.HasAny(RuntimeVfxEvidence.AsyncTimelineReferenced), VfxStandaloneContextClue.AsyncTimelineReference)
-         | FlagIf(timelineContext.HasAny(VfxTimelineContext.NestedTimeline), VfxStandaloneContextClue.NestedTimelineReference)
-         | FlagIf(timelineContext.HasAny(VfxTimelineContext.AnimationReferenced), VfxStandaloneContextClue.AnimationTimelineReference)
-         | FlagIf(timelineContext.HasAny(VfxTimelineContext.SoundReferenced), VfxStandaloneContextClue.SoundTimelineReference)
-         | FlagIf(timelineContext.HasAny(VfxTimelineContext.NonDefaultBindPoints), VfxStandaloneContextClue.TimelineBindPointOverride);
-
-    private static VfxStandaloneUnknownReason GetUnknownReasons(
-        AssetPathContract pathContracts,
-        RuntimeVfxEvidence sourceEvidence)
-    {
-        if (sourceEvidence.HasAny(RuntimeVfxEvidence.StaticCreate))
-        {
-            return VfxStandaloneUnknownReason.None;
-        }
-
-        return IsSheetConventionOnly(pathContracts)
-            ? VfxStandaloneUnknownReason.SheetConventionOnly
-            : VfxStandaloneUnknownReason.None;
-    }
+        => FlagIf(analysis.HasBinder, ContextClue.Binder)
+         | FlagIf(analysis.HasTimelineBinder, ContextClue.TimelineBinder)
+         | FlagIf(analysis.HasCameraBinder, ContextClue.CameraBinder)
+         | FlagIf(analysis.HasEndpointBinder, ContextClue.EndpointBinder)
+         | FlagIf(analysis.HasTargetBindPoint, ContextClue.TargetBindPoint)
+         | FlagIf(analysis.HasCasterOriginBinder, ContextClue.OriginBinder)
+         | FlagIf(analysis.HasFitGroundBinder, ContextClue.FitGroundBinder)
+         | FlagIf(analysis.HasDamageCircleBinder, ContextClue.DamageCircleBinder)
+         | FlagIf(analysis.IsFitGround, ContextClue.FitGround)
+         | FlagIf(analysis.IsCameraSpace, ContextClue.CameraSpace)
+         | FlagIf(analysis.IsAllStopOnHide, ContextClue.AllStopOnHide)
+         | FlagIf(analysis.UsesScreenLayer, ContextClue.ScreenLayer)
+         | FlagIf(analysis.UsesWaterLayer, ContextClue.WaterLayer)
+         | FlagIf(analysis.HasTriggerWithoutScheduledItems, ContextClue.TriggerWithoutScheduledItems)
+         | FlagIf(analysis.HasStrongContextPath, ContextClue.StrongContextPath)
+         | FlagIf(sourceEvidence.HasAny(RuntimeVfxEvidence.TimelineReferenced), ContextClue.TimelineReference)
+         | FlagIf(sourceEvidence.HasAny(RuntimeVfxEvidence.TriggerReferenced), ContextClue.TriggeredTimelineReference)
+         | FlagIf(sourceEvidence.HasAny(RuntimeVfxEvidence.AsyncTimelineReferenced), ContextClue.AsyncTimelineReference)
+         | FlagIf(timelineContext.HasAny(VfxTimelineContext.NestedTimeline), ContextClue.NestedTimelineReference)
+         | FlagIf(timelineContext.HasAny(VfxTimelineContext.AnimationReferenced), ContextClue.AnimationTimelineReference)
+         | FlagIf(timelineContext.HasAny(VfxTimelineContext.SoundReferenced), ContextClue.SoundTimelineReference)
+         | FlagIf(timelineContext.HasAny(VfxTimelineContext.NonDefaultBindPoints), ContextClue.TimelineBindPointOverride);
 
     private static bool IsSheetConventionOnly(AssetPathContract pathContracts)
         => pathContracts.HasAny(AssetPathContract.SheetConvention)
          && (pathContracts & ~AssetPathContract.SheetConvention) == AssetPathContract.None;
 
-    private static VfxStandaloneValidatedSupportShape ResolveValidatedSupportShape(
-        string path,
+    private static bool IsKnownGroupPoseScreenEffect(
+        VfxAnalysis analysis,
+        KnownVfxFamily familyHint,
+        RuntimeVfxEvidence sourceEvidence,
+        AssetPathContract pathContracts)
+        => familyHint.HasAll(KnownVfxFamily.GroupPose)
+        && sourceEvidence.HasAll(RuntimeVfxEvidence.Event)
+        && pathContracts.HasAll(AssetPathContract.DeterministicBuilder)
+        && analysis.HasRenderableContent
+        && analysis.UsesScreenLayer
+        && !analysis.HasModelSkinParticle;
+
+    private static bool IsValidatedOmenFitGround(
         VfxAnalysis analysis,
         RuntimeVfxEvidence sourceEvidence,
         AssetPathContract pathContracts)
-        => ValidatedSupportRules
-            .Where(rule => MatchesValidatedSupportRule(path, analysis, sourceEvidence, pathContracts, rule))
-            .Select(static rule => rule.Shape)
-            .FirstOrDefault();
+        => sourceEvidence.HasAll(RuntimeVfxEvidence.Omen)
+        && pathContracts.HasAll(AssetPathContract.DeterministicBuilder)
+        && analysis.BinderCount == 1
+        && analysis.BinderFacts.TimelineCount == 0
+        && !analysis.BinderFacts.Types.HasAny(VfxBinderTypes.Camera)
+        && analysis.BinderFacts.PropertyFlags.HasAll(VfxBinderProperties.CasterFitGround)
+        && !analysis.BinderFacts.PropertyFlags.HasAny(DeterministicOmenForbiddenBinderProperties);
 
-    private static bool MatchesValidatedSupportRule(
-        string path,
-        VfxAnalysis analysis,
-        RuntimeVfxEvidence sourceEvidence,
-        AssetPathContract pathContracts,
-        in ValidatedSupportRule rule)
-    {
-        if (!sourceEvidence.HasAll(rule.RequiredEvidence)
-         || !pathContracts.HasAll(rule.RequiredPathContracts)
-         || analysis.BinderCount != rule.RequiredBinderCount
-         || analysis.BinderFacts.TimelineCount != rule.RequiredTimelineBinderCount)
-        {
-            return false;
-        }
+    private static ContextClue FlagIf(bool condition, ContextClue flag)
+        => condition ? flag : ContextClue.None;
 
-        if (!string.IsNullOrEmpty(rule.RequiredPathPrefix)
-         && !path.StartsWith(rule.RequiredPathPrefix, StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        if (!analysis.BinderFacts.Types.HasAll(rule.RequiredBinderTypes)
-         || analysis.BinderFacts.Types.HasAny(rule.ForbiddenBinderTypes)
-         || !analysis.BinderFacts.PropertyFlags.HasAll(rule.RequiredBinderProperties)
-         || analysis.BinderFacts.PropertyFlags.HasAny(rule.ForbiddenBinderProperties))
-        {
-            return false;
-        }
-
-        return true;
-    }
-
-    private static VfxStandaloneUnsupportedReason FlagIf(bool condition, VfxStandaloneUnsupportedReason flag)
-        => condition ? flag : VfxStandaloneUnsupportedReason.None;
-
-    private static VfxStandaloneContextClue FlagIf(bool condition, VfxStandaloneContextClue flag)
-        => condition ? flag : VfxStandaloneContextClue.None;
+    private static bool HasAny(ContextClue value, ContextClue flags)
+        => (value & flags) != ContextClue.None;
 }
-
-internal static class VfxStandaloneFlagExtensions
-{
-    public static bool HasAny(this VfxStandaloneUnsupportedReason value, VfxStandaloneUnsupportedReason flags)
-        => (value & flags) != VfxStandaloneUnsupportedReason.None;
-
-    public static bool HasAny(this VfxStandaloneContextClue value, VfxStandaloneContextClue flags)
-        => (value & flags) != VfxStandaloneContextClue.None;
-
-    public static bool HasAny(this VfxStandaloneUnknownReason value, VfxStandaloneUnknownReason flags)
-        => (value & flags) != VfxStandaloneUnknownReason.None;
-}
-
-internal static class VfxStandaloneClassificationLabelExtensions
-{
-    private readonly record struct UnsupportedReasonLabelRule(VfxStandaloneUnsupportedReason Reason, string Label);
-    private readonly record struct ContextClueLabelRule(VfxStandaloneContextClue Clue, string Label);
-    private readonly record struct UnknownReasonLabelRule(VfxStandaloneUnknownReason Reason, string Label);
-
-    private static readonly UnsupportedReasonLabelRule[] UnsupportedReasonRules =
-    [
-        new(VfxStandaloneUnsupportedReason.MissingRenderableContent, "missing renderable content"),
-        new(VfxStandaloneUnsupportedReason.ModelSkinParticle, "model skin particle"),
-        new(VfxStandaloneUnsupportedReason.ByNameBinder, "by name binder"),
-        new(VfxStandaloneUnsupportedReason.ExplicitBindPointId, "explicit bind point id"),
-        new(VfxStandaloneUnsupportedReason.TargetOriginBinder, "target origin binder"),
-    ];
-
-    private static readonly ContextClueLabelRule[] ContextClueRules =
-    [
-        new(VfxStandaloneContextClue.Binder, "binder"),
-        new(VfxStandaloneContextClue.TimelineBinder, "timeline binder"),
-        new(VfxStandaloneContextClue.CameraBinder, "camera binder"),
-        new(VfxStandaloneContextClue.TargetBindPoint, "target bind point"),
-        new(VfxStandaloneContextClue.OriginBinder, "origin binder"),
-        new(VfxStandaloneContextClue.FitGroundBinder, "fit ground binder"),
-        new(VfxStandaloneContextClue.DamageCircleBinder, "damage circle binder"),
-        new(VfxStandaloneContextClue.FitGround, "fit ground"),
-        new(VfxStandaloneContextClue.CameraSpace, "camera space"),
-        new(VfxStandaloneContextClue.AllStopOnHide, "all stop on hide"),
-        new(VfxStandaloneContextClue.GroundProjectedParticle, "ground projected particle"),
-        new(VfxStandaloneContextClue.SchedulerTrigger, "scheduler trigger"),
-        new(VfxStandaloneContextClue.AsyncTimelineReference, "async timeline reference"),
-        new(VfxStandaloneContextClue.ScreenLayer, "screen layer"),
-        new(VfxStandaloneContextClue.WaterLayer, "water layer"),
-        new(VfxStandaloneContextClue.TriggerWithoutScheduledItems, "trigger without scheduled items"),
-        new(VfxStandaloneContextClue.StrongContextPath, "strong context path"),
-        new(VfxStandaloneContextClue.CameraSpaceTriggerOnly, "camera space trigger only"),
-        new(VfxStandaloneContextClue.TimelineReference, "timeline reference"),
-        new(VfxStandaloneContextClue.TriggeredTimelineReference, "triggered timeline reference"),
-        new(VfxStandaloneContextClue.NestedTimelineReference, "nested timeline reference"),
-        new(VfxStandaloneContextClue.AnimationTimelineReference, "animation timeline reference"),
-        new(VfxStandaloneContextClue.SoundTimelineReference, "sound timeline reference"),
-        new(VfxStandaloneContextClue.TimelineBindPointOverride, "timeline bind point override"),
-    ];
-
-    private static readonly UnknownReasonLabelRule[] UnknownReasonRules =
-    [
-        new(VfxStandaloneUnknownReason.SheetConventionOnly, "sheet convention only"),
-    ];
-
-    public static IReadOnlyList<string> ToLabels(this VfxStandaloneUnsupportedReason reasons)
-        => BuildLabels(reasons, UnsupportedReasonRules);
-
-    public static IReadOnlyList<string> ToLabels(this VfxStandaloneContextClue clues)
-        => BuildLabels(clues, ContextClueRules);
-
-    public static IReadOnlyList<string> ToLabels(this VfxStandaloneUnknownReason reasons)
-        => BuildLabels(reasons, UnknownReasonRules);
-
-    private static IReadOnlyList<string> BuildLabels(
-        VfxStandaloneUnsupportedReason reasons,
-        IReadOnlyList<UnsupportedReasonLabelRule> rules)
-        => rules
-            .Where(rule => reasons.HasAny(rule.Reason))
-            .Select(static rule => rule.Label)
-            .ToArray();
-
-    private static IReadOnlyList<string> BuildLabels(
-        VfxStandaloneContextClue clues,
-        IReadOnlyList<ContextClueLabelRule> rules)
-        => rules
-            .Where(rule => clues.HasAny(rule.Clue))
-            .Select(static rule => rule.Label)
-            .ToArray();
-
-    private static IReadOnlyList<string> BuildLabels(
-        VfxStandaloneUnknownReason reasons,
-        IReadOnlyList<UnknownReasonLabelRule> rules)
-        => rules
-            .Where(rule => reasons.HasAny(rule.Reason))
-            .Select(static rule => rule.Label)
-            .ToArray();
-}
-

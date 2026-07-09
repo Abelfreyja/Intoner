@@ -85,6 +85,7 @@ internal enum KnownVfxFamily
     DemiHuman  = 1 << 8,
     Accessory  = 1 << 9,
     LoVM       = 1 << 10,
+    GroupPose  = 1 << 11,
 }
 
 internal sealed record KnownAssetPath(
@@ -105,6 +106,9 @@ internal static class AssetPathFlagExtensions
 
     public static bool HasAny(this KnownVfxFamily value, KnownVfxFamily flags)
         => (value & flags) != KnownVfxFamily.None;
+
+    public static bool HasAll(this KnownVfxFamily value, KnownVfxFamily flags)
+        => (value & flags) == flags;
 }
 
 internal static class KnownVfxFamilyExtensions
@@ -118,7 +122,8 @@ internal static class KnownVfxFamilyExtensions
         new(KnownVfxFamily.Omen, ["vfx/omen/eff/"]),
         new(KnownVfxFamily.Channeling, ["vfx/channeling/eff/"]),
         new(KnownVfxFamily.Lockon, ["vfx/lockon/eff/"]),
-        new(KnownVfxFamily.Event, ["vfx/cut/general/eff/", "vfx/grouppose/eff/"]),
+        new(KnownVfxFamily.Event, ["vfx/cut/general/eff/"]),
+        new(KnownVfxFamily.Event | KnownVfxFamily.GroupPose, ["vfx/grouppose/eff/"]),
         new(KnownVfxFamily.Equipment, ["chara/equipment/", "vfx/equipment/eff/"]),
         new(KnownVfxFamily.Accessory, ["chara/accessory/", "vfx/accessory/eff/"]),
         new(KnownVfxFamily.Weapon, ["chara/weapon/", "vfx/weapon/eff/"]),
@@ -133,6 +138,7 @@ internal static class KnownVfxFamilyExtensions
         new(KnownVfxFamily.Omen, "omen"),
         new(KnownVfxFamily.Channeling, "channeling"),
         new(KnownVfxFamily.Lockon, "lockon"),
+        new(KnownVfxFamily.GroupPose, "grouppose vfx"),
         new(KnownVfxFamily.Event, "event vfx"),
         new(KnownVfxFamily.Equipment, "equipment effect"),
         new(KnownVfxFamily.Accessory, "accessory effect"),
@@ -142,17 +148,15 @@ internal static class KnownVfxFamilyExtensions
         new(KnownVfxFamily.LoVM, "lovm effect"),
     ];
 
-    public static string? TryGetSearchLabel(this KnownVfxFamily familyHint)
+    public static IEnumerable<string> EnumerateSearchLabels(this KnownVfxFamily familyHint)
     {
         foreach (LabelRule rule in LabelRules)
         {
             if (familyHint.HasAny(rule.Family))
             {
-                return rule.Label;
+                yield return rule.Label;
             }
         }
-
-        return null;
     }
 
     public static KnownVfxFamily InferFamilyHintFromPath(string path)

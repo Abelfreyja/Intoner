@@ -51,10 +51,14 @@ internal sealed record VfxModelPatch : ObjectDataPatch
 {
     public string? VfxPath { get; init; }
     public Vector4? Color { get; init; }
+    public bool? Loop { get; init; }
+    public int? LoopIntervalSeconds { get; init; }
 
     public bool HasChanges
         => VfxPath is not null
-           || Color.HasValue;
+           || Color.HasValue
+           || Loop.HasValue
+           || LoopIntervalSeconds.HasValue;
 }
 
 internal sealed record LightFlagsPatch

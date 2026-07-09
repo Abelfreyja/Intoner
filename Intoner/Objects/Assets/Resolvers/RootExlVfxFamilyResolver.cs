@@ -234,7 +234,8 @@ internal sealed class RootExlVfxFamilyResolver
             cancellationToken.ThrowIfCancellationRequested();
             string token = row.Unknown1.ExtractText();
             string label = row.Unknown0.ExtractText();
-            if (!TryResolveEventPathPrefix((EventVfxPathType)row.Unknown2, out string pathPrefix))
+            EventVfxPathType eventType = (EventVfxPathType)row.Unknown2;
+            if (!TryResolveEventPathPrefix(eventType, out string pathPrefix))
             {
                 continue;
             }
@@ -244,9 +245,9 @@ internal sealed class RootExlVfxFamilyResolver
                 resolvedPaths,
                 pathPrefix,
                 token,
-                KnownVfxFamily.Event,
+                ResolveEventFamily(eventType),
                 RuntimeVfxEvidence.Event,
-                BuildEventSearchTerms(label, token, (EventVfxPathType)row.Unknown2));
+                BuildEventSearchTerms(label, token, eventType));
         }
     }
 
@@ -355,5 +356,10 @@ internal sealed class RootExlVfxFamilyResolver
 
         return !string.IsNullOrWhiteSpace(pathPrefix);
     }
+
+    private static KnownVfxFamily ResolveEventFamily(EventVfxPathType eventType)
+        => eventType == EventVfxPathType.GroupPose
+            ? KnownVfxFamily.Event | KnownVfxFamily.GroupPose
+            : KnownVfxFamily.Event;
 }
 

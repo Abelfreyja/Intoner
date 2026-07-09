@@ -335,9 +335,6 @@ internal sealed partial class EditorWindow
 
         DrawScrollableCreateSectionCard("vfx-settings", FontAwesomeIcon.Magic, "VFX Settings", "Set VFX state and configuration before creation.", MathF.Max(1f, settingsHostHeight), () =>
         {
-            ImGui.TextWrapped("Select a catalog entry or paste a direct .avfx path.");
-            ImGuiHelpers.ScaledDummy(6f);
-
             using var vfxSettingsTable = CompactSettingsTable("vfxCreate");
             if (!vfxSettingsTable)
             {
@@ -345,6 +342,32 @@ internal sealed partial class EditorWindow
             }
 
             DrawCheckboxRow("vfxCreateVisible", "Visible", ref _vfxCreate.Visible);
+
+            ObjectCatalogVfxInfo? vfxInfo = ResolveVfxCatalogInfo(_vfxCreate.VfxPath);
+            if (vfxInfo?.CanUseReplayLoop != false)
+            {
+                DrawCheckboxRow("vfxCreateLoop", "Loop", ref _vfxCreate.Loop);
+
+                using (ImRaii.Disabled(!_vfxCreate.Loop))
+                {
+                    DrawCompactSettingsLabelCell("Loop Interval");
+                    var loopIntervalSeconds = _vfxCreate.LoopIntervalSeconds;
+                    if (ImGui.DragInt(
+                            "##vfxCreateLoopInterval",
+                            ref loopIntervalSeconds,
+                            0.1f,
+                            VfxModel.MinLoopIntervalSeconds,
+                            VfxModel.MaxLoopIntervalSeconds,
+                            "%d seconds"))
+                    {
+                        _vfxCreate.LoopIntervalSeconds = VfxModel.ClampLoopIntervalSeconds(loopIntervalSeconds);
+                    }
+                }
+            }
+            else
+            {
+                _vfxCreate.Loop = false;
+            }
 
             DrawCompactSettingsLabelCell("VFX Path");
             var vfxPath = _vfxCreate.VfxPath;
@@ -368,7 +391,10 @@ internal sealed partial class EditorWindow
         DrawBottomAlignedCreateActionHost("vfx-action-host", actionHostHeight, () =>
         {
             ObjectPlacementOverrides BuildPlacementOverrides()
-                => new()
+            {
+                ObjectCatalogVfxInfo? vfxInfo = ResolveVfxCatalogInfo(_vfxCreate.VfxPath);
+                bool loop = vfxInfo?.CanUseReplayLoop != false && _vfxCreate.Loop;
+                return new()
                 {
                     Visible = _vfxCreate.Visible,
                     FolderPath = selectedPlacementFolderPath,
@@ -377,8 +403,11 @@ internal sealed partial class EditorWindow
                     {
                         VfxPath = _vfxCreate.VfxPath,
                         Color = _vfxCreate.Color,
+                        Loop = loop,
+                        LoopIntervalSeconds = _vfxCreate.LoopIntervalSeconds,
                     },
                 };
+            }
 
             using var disabled = ImRaii.Disabled(!kindInfo.CanCreate || string.IsNullOrWhiteSpace(_vfxCreate.VfxPath));
             DrawCreateActionCard(
@@ -396,5 +425,11 @@ internal sealed partial class EditorWindow
     {
         return kindInfos.FirstOrDefault(info => info.Kind == kind);
     }
+
+    private ObjectCatalogVfxInfo? ResolveVfxCatalogInfo(string vfxPath)
+        => _objectCatalog.TryResolveEntry(ObjectCatalogKind.Vfx, vfxPath, out ObjectCatalogEntry? entry)
+        && entry.VfxInfo is { } vfxInfo
+            ? vfxInfo
+            : null;
 }
 

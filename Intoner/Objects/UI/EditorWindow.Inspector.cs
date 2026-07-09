@@ -1747,6 +1747,52 @@ internal sealed partial class EditorWindow
                     Model = vfxModel with { Color = color },
                 });
         }
+
+        ObjectCatalogVfxInfo? vfxInfo = ResolveVfxCatalogInfo(vfxModel.VfxPath);
+        if (vfxInfo?.CanUseReplayLoop != false)
+        {
+            var loop = vfxModel.Loop;
+            if (DrawCheckboxRow("vfxLoop", "Loop", ref loop))
+            {
+                ApplyInspectorSnapshotEdit(
+                    "VfxLoop",
+                    ObjectHistoryKind.Appearance,
+                    loop ? "Enable VFX Loop" : "Disable VFX Loop",
+                    snapshot,
+                    snapshot with
+                    {
+                        Model = vfxModel with { Loop = loop },
+                    },
+                    recordImmediately: true);
+            }
+
+            using (ImRaii.Disabled(!loop))
+            {
+                DrawCompactSettingsLabelCell("Loop Interval");
+                var loopIntervalSeconds = vfxModel.LoopIntervalSeconds;
+                if (ImGui.DragInt(
+                        "##vfxLoopInterval",
+                        ref loopIntervalSeconds,
+                        0.1f,
+                        VfxModel.MinLoopIntervalSeconds,
+                        VfxModel.MaxLoopIntervalSeconds,
+                        "%d seconds"))
+                {
+                    ApplyInspectorSnapshotEdit(
+                        "VfxLoopInterval",
+                        ObjectHistoryKind.Appearance,
+                        "Change VFX Loop Interval",
+                        snapshot,
+                        snapshot with
+                        {
+                            Model = vfxModel with
+                            {
+                                LoopIntervalSeconds = VfxModel.ClampLoopIntervalSeconds(loopIntervalSeconds),
+                            },
+                        });
+                }
+            }
+        }
     }
 
     private bool DrawLightModelEditor(

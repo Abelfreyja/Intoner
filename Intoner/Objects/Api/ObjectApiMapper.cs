@@ -477,6 +477,8 @@ internal static class ObjectApiMapper
         {
             VfxPath = model.VfxPath,
             Color = ToVector4(model.Color),
+            Loop = model.Loop,
+            LoopIntervalSeconds = model.LoopIntervalSeconds,
         };
 
     private static LightModelPatch ToPatch(LightModelPatchData model)
@@ -549,7 +551,9 @@ internal static class ObjectApiMapper
     private static WorldObjectModelData ToDto(VfxModel model)
         => new(Vfx: new VfxModelData(
             model.VfxPath,
-            ToDto(model.Color)));
+            ToDto(model.Color),
+            model.Loop,
+            model.LoopIntervalSeconds));
 
     private static WorldObjectModelData ToDto(LightModel model)
         => new(Light: new LightModelData(
@@ -637,6 +641,8 @@ internal static class ObjectApiMapper
         {
             VfxPath = model.VfxPath,
             Color = ToVector4(model.Color),
+            Loop = model.Loop,
+            LoopIntervalSeconds = model.LoopIntervalSeconds,
         };
 
     private static LightModel ToModel(LightModelData model)

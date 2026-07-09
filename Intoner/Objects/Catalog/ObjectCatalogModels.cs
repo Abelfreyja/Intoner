@@ -320,6 +320,15 @@ internal sealed record ObjectCatalogBgObjectInfo(
     }
 }
 
+internal sealed record ObjectCatalogVfxInfo(VfxLoopFacts LoopFacts)
+{
+    public bool CanUseReplayLoop
+        => !LoopFacts.IsPermanent;
+
+    public bool IsPermanentLoop
+        => LoopFacts.IsPermanent;
+}
+
 internal enum ObjectCatalogSearchProfile
 {
     Default,
@@ -340,6 +349,7 @@ internal sealed record ObjectCatalogEntry
         string assetPath,
         ObjectCatalogFurnitureInfo? furnitureInfo = null,
         ObjectCatalogBgObjectInfo? bgObjectInfo = null,
+        ObjectCatalogVfxInfo? vfxInfo = null,
         IReadOnlyList<PreviewModelInfo>? previewModels = null,
         IReadOnlyList<string>? previewModelPaths = null,
         IReadOnlyList<string>? additionalSearchTerms = null,
@@ -353,6 +363,7 @@ internal sealed record ObjectCatalogEntry
         AssetPath         = assetPath;
         FurnitureInfo     = furnitureInfo;
         BgObjectInfo      = bgObjectInfo;
+        VfxInfo           = vfxInfo;
         PreviewModels     = ResolvePreviewModels(kind, placementPath, previewModels, previewModelPaths);
         PreviewModelPaths = ResolvePreviewModelPaths(PreviewModels, previewModelPaths);
         string baseSearchText = BuildSearchText(
@@ -388,6 +399,7 @@ internal sealed record ObjectCatalogEntry
     public string AssetPath { get; }
     public ObjectCatalogFurnitureInfo? FurnitureInfo { get; }
     public ObjectCatalogBgObjectInfo? BgObjectInfo { get; }
+    public ObjectCatalogVfxInfo? VfxInfo { get; }
     public IReadOnlyList<PreviewModelInfo> PreviewModels { get; }
     public IReadOnlyList<string> PreviewModelPaths { get; }
 
@@ -465,39 +477,21 @@ internal sealed record ObjectCatalogEntry
         IReadOnlyList<string>? additionalSearchTerms,
         ObjectCatalogSearchProfile searchProfile)
     {
-        return ObjectSearchTermUtility.BuildSearchText(EnumerateSearchTerms());
-
-        IEnumerable<string?> EnumerateSearchTerms()
+        HashSet<string> searchTerms = ObjectSearchTermUtility.CreateSet(name, placementPath, assetPath);
+        if (searchProfile != ObjectCatalogSearchProfile.Vfx)
         {
-            yield return name;
-
-            if (searchProfile != ObjectCatalogSearchProfile.Vfx)
-            {
-                yield return source;
-                yield return rowId.ToString(CultureInfo.InvariantCulture);
-            }
-
-            yield return placementPath;
-            yield return assetPath;
-
-            foreach (string previewModelPath in previewModelPaths)
-            {
-                yield return previewModelPath;
-            }
-
-            if (additionalSearchTerms is not null)
-            {
-                foreach (string additionalTerm in additionalSearchTerms)
-                {
-                    yield return additionalTerm;
-                }
-            }
-
-            if (bgObjectInfo is not null)
-            {
-                yield return bgObjectInfo.SearchText;
-            }
+            _ = ObjectSearchTermUtility.AddTerm(searchTerms, source);
+            _ = ObjectSearchTermUtility.AddTerm(searchTerms, rowId.ToString(CultureInfo.InvariantCulture));
         }
+
+        _ = ObjectSearchTermUtility.AddTerms(searchTerms, previewModelPaths);
+        AddOptionalSearchTerms(searchTerms, additionalSearchTerms);
+        if (bgObjectInfo is not null)
+        {
+            _ = ObjectSearchTermUtility.AddTerm(searchTerms, bgObjectInfo.SearchText);
+        }
+
+        return ObjectSearchTermUtility.BuildSearchText(ObjectSearchTermUtility.BuildStableTerms(searchTerms));
     }
 
     private static string BuildFurnitureSharedSearchText(
@@ -507,26 +501,17 @@ internal sealed record ObjectCatalogEntry
         IReadOnlyList<string> previewModelPaths,
         IReadOnlyList<string>? additionalSearchTerms)
     {
-        return ObjectSearchTermUtility.BuildSearchText(EnumerateSearchTerms());
+        HashSet<string> searchTerms = ObjectSearchTermUtility.CreateSet(source, placementPath, assetPath);
+        _ = ObjectSearchTermUtility.AddTerms(searchTerms, previewModelPaths);
+        AddOptionalSearchTerms(searchTerms, additionalSearchTerms);
+        return ObjectSearchTermUtility.BuildSearchText(ObjectSearchTermUtility.BuildStableTerms(searchTerms));
+    }
 
-        IEnumerable<string?> EnumerateSearchTerms()
+    private static void AddOptionalSearchTerms(HashSet<string> searchTerms, IReadOnlyList<string>? additionalSearchTerms)
+    {
+        if (additionalSearchTerms is not null)
         {
-            yield return source;
-            yield return placementPath;
-            yield return assetPath;
-
-            foreach (string previewModelPath in previewModelPaths)
-            {
-                yield return previewModelPath;
-            }
-
-            if (additionalSearchTerms is not null)
-            {
-                foreach (string additionalTerm in additionalSearchTerms)
-                {
-                    yield return additionalTerm;
-                }
-            }
+            _ = ObjectSearchTermUtility.AddTerms(searchTerms, additionalSearchTerms);
         }
     }
 

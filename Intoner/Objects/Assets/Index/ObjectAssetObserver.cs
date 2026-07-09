@@ -185,7 +185,7 @@ internal sealed unsafe class ObjectAssetObserver : IDisposable
 
     private void TrackActiveVfx(nint vfx, string path)
     {
-        var normalizedPath = GameAssetPathRules.NormalizeGamePath(path);
+        string normalizedPath = NormalizeObservedPath(path);
         if (vfx == nint.Zero || string.IsNullOrWhiteSpace(normalizedPath))
         {
             return;
@@ -225,7 +225,7 @@ internal sealed unsafe class ObjectAssetObserver : IDisposable
             return;
         }
 
-        var path = GameAssetPathRules.NormalizeGamePath(rawPath);
+        string path = NormalizeObservedPath(rawPath);
         if (string.IsNullOrWhiteSpace(path))
         {
             return;
@@ -285,6 +285,12 @@ internal sealed unsafe class ObjectAssetObserver : IDisposable
 
     private bool IsDisposing
         => _disposeState.IsDisposing;
+
+    private static string NormalizeObservedPath(string path)
+    {
+        string normalizedPath = ObjectResourcePathUtility.NormalizeTrackedPath(path);
+        return ObjectMemoryResourcePathUtility.GetGamePathOrSelf(normalizedPath);
+    }
 
     private static string ReadAnsiPath(byte* pathPointer)
     {

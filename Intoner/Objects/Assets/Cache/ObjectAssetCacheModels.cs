@@ -224,7 +224,8 @@ internal sealed record ObjectAssetCacheBgModel(
 
 internal sealed record ObjectAssetCacheStandaloneVfx(
     string Path,
-    RuntimeVfxEvidence Evidence);
+    RuntimeVfxEvidence Evidence,
+    VfxAnalysis? Analysis);
 
 internal sealed record ObjectAssetCacheTimelineReferencedVfxEntry(
     string Path,

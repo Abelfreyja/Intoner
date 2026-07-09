@@ -23,8 +23,9 @@ internal sealed class ObjectAssetStandaloneVfxCatalog(IObjectAssetGameData gameD
 
             snapshot.Add(new RuntimeVfxAsset(
                 asset.Path,
-                asset.GetPrimarySource(),
-                asset.BuildSearchTerms()));
+                asset.CatalogSource,
+                asset.SearchTerms,
+                asset.Analysis?.LoopFacts ?? VfxLoopFacts.Unknown));
         }
 
         snapshot.Sort(comparer);
@@ -49,11 +50,13 @@ internal sealed class ObjectAssetStandaloneVfxCatalog(IObjectAssetGameData gameD
         RuntimeVfxEvidence resolvedEvidence = RuntimeVfxEvidence.None;
         AssetPathContract pathContracts = GetPathContracts(state, normalizedPath);
         KnownVfxFamily familyHint = GetPathFamilyHint(state, normalizedPath);
+        IReadOnlyList<string> knownSearchTerms = state.KnowledgeBase.GetSearchTerms(normalizedPath);
         if (state.StaticResolvedVfxPaths.TryGetValue(normalizedPath, out ResolvedVfxPath? resolvedPath))
         {
             analysis ??= resolvedPath.Analysis;
             resolvedEvidence |= resolvedPath.Evidence;
             pathContracts |= resolvedPath.Contracts;
+            knownSearchTerms = ObjectSearchTermUtility.MergeTerms(knownSearchTerms, resolvedPath.SearchTerms);
             if (familyHint == KnownVfxFamily.None)
             {
                 familyHint = resolvedPath.Family;
@@ -86,6 +89,7 @@ internal sealed class ObjectAssetStandaloneVfxCatalog(IObjectAssetGameData gameD
             pathContracts,
             sourceEvidence,
             timelineReference,
+            knownSearchTerms,
             analysis,
             runtimeObserved);
         return true;
@@ -204,12 +208,10 @@ internal sealed class ObjectAssetStandaloneVfxCatalog(IObjectAssetGameData gameD
                 CatalogSource       = report.CatalogSource,
                 Evidence            = report.CombinedEvidence,
                 Analysis            = report.Analysis,
+                SearchTerms         = report.SearchTerms,
                 PathContracts       = report.PathContracts,
                 FamilyHint          = report.FamilyHint,
                 SupportClass        = report.SupportClass,
-                UnsupportedReasons  = report.UnsupportedReasons,
-                ContextClues        = report.ContextClues,
-                UnknownReasons      = report.UnknownReasons,
                 SeenFromRuntime     = report.SeenFromRuntime,
             };
             MarkStandaloneVfxChanged(state);
@@ -220,21 +222,21 @@ internal sealed class ObjectAssetStandaloneVfxCatalog(IObjectAssetGameData gameD
         string previousCatalogSource = asset.CatalogSource;
         bool previousSeenFromRuntime = asset.SeenFromRuntime;
         VfxAnalysis? previousAnalysis = asset.Analysis;
+        IReadOnlyList<string> previousSearchTerms = asset.SearchTerms;
         KnownVfxFamily previousFamilyHint = asset.FamilyHint;
         VfxStandaloneSupportClass previousSupportClass = asset.SupportClass;
 
         asset.Evidence = report.CombinedEvidence;
         asset.Analysis = report.Analysis;
+        asset.SearchTerms = report.SearchTerms;
         asset.PathContracts = report.PathContracts;
         asset.FamilyHint = report.FamilyHint;
         asset.CatalogSource = report.CatalogSource;
         asset.SupportClass = report.SupportClass;
-        asset.UnsupportedReasons = report.UnsupportedReasons;
-        asset.ContextClues = report.ContextClues;
-        asset.UnknownReasons = report.UnknownReasons;
         asset.SeenFromRuntime = report.SeenFromRuntime;
         if (asset.Evidence == previousEvidence
          && Equals(asset.Analysis, previousAnalysis)
+         && SearchTermsEqual(asset.SearchTerms, previousSearchTerms)
          && string.Equals(asset.CatalogSource, previousCatalogSource, StringComparison.OrdinalIgnoreCase)
          && asset.FamilyHint == previousFamilyHint
          && asset.SupportClass == previousSupportClass
@@ -243,11 +245,11 @@ internal sealed class ObjectAssetStandaloneVfxCatalog(IObjectAssetGameData gameD
             return ObservationApplyResult.None;
         }
 
-        asset.InvalidateSearchTerms();
         MarkStandaloneVfxChanged(state);
 
         bool projectionChanged = asset.Evidence != previousEvidence
             || !string.Equals(asset.CatalogSource, previousCatalogSource, StringComparison.OrdinalIgnoreCase)
+            || !SearchTermsEqual(asset.SearchTerms, previousSearchTerms)
             || asset.FamilyHint != previousFamilyHint
             || asset.SupportClass != previousSupportClass;
 
@@ -351,30 +353,55 @@ internal sealed class ObjectAssetStandaloneVfxCatalog(IObjectAssetGameData gameD
         AssetPathContract pathContracts,
         RuntimeVfxEvidence sourceEvidence,
         VfxTimelineReferenceInfo timelineReference,
+        IReadOnlyList<string> knownSearchTerms,
         VfxAnalysis analysis,
         bool runtimeObserved)
     {
         VfxStandalonePolicyResult policyResult = VfxStandalonePolicy.Evaluate(
-            path,
             analysis,
+            familyHint,
             sourceEvidence,
             timelineReference.Context,
             pathContracts);
         RuntimeVfxEvidence combinedEvidence = sourceEvidence | policyResult.AnalysisEvidence;
+        string catalogSource = combinedEvidence.ResolveCatalogSourceLabel();
+        IReadOnlyList<string> searchTerms = VfxCatalogSearchTerms.Build(
+            path,
+            catalogSource,
+            familyHint,
+            timelineReference,
+            analysis.LoopFacts,
+            knownSearchTerms);
 
         return new VfxStandaloneReport(
             path,
-            combinedEvidence.ResolveCatalogSourceLabel(),
+            catalogSource,
             familyHint,
             pathContracts,
             sourceEvidence,
             combinedEvidence,
             timelineReference,
             analysis,
+            searchTerms,
             policyResult.SupportClass,
-            policyResult.UnsupportedReasons,
-            policyResult.ContextClues,
-            policyResult.UnknownReasons,
             runtimeObserved);
+    }
+
+    private static bool SearchTermsEqual(IReadOnlyList<string> left, IReadOnlyList<string> right)
+    {
+        if (left.Count != right.Count)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < left.Count; index++)
+        {
+            if (!string.Equals(left[index], right[index], StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 }

@@ -41,11 +41,17 @@ internal static unsafe class ObjectSignatures
     public const string ApricotResourceLoad =
         "48 89 74 24 ?? 57 48 83 EC ?? 41 0F B6 F0 48 8B F9 40 80 FE";
 
+    public const string AvfxResourceBufferLoad =
+        "4C 89 4C 24 ?? 48 89 54 24 ?? 48 89 4C 24 ?? 55 53 56 57";
+
     public const string SharedGroupLayoutResourceLoad =
         "40 53 48 83 EC 20 8B 81 F0 00 00 00 48 8B D9 24 0F 3C 01 0F 85 ?? ?? ?? ?? 48 39 51 08 0F 85";
 
     public const string StaticVfxRemove =
         "40 53 48 83 EC 20 48 8B D9 48 8B 89 ?? ?? ?? ?? 48 85 C9 74 28 33 D2 E8 ?? ?? ?? ?? 48 8B 8B ?? ?? ?? ?? 48 85 C9";
+
+    public const string StaticVfxPlay =
+        "48 89 5C 24 ?? 48 89 74 24 ?? 57 48 81 EC ?? ?? ?? ?? 0F 29 B4 24 ?? ?? ?? ?? 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 ?? 83 89";
 
     public const string ActorVfxCreate =
         "40 53 55 56 57 48 81 EC ?? ?? ?? ?? 0F 29 B4 24 ?? ?? ?? ?? 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 ?? ?? ?? ?? 0F B6 AC 24 ?? ?? ?? ?? 0F 28 F3 49 8B F8";
@@ -104,6 +110,8 @@ internal static unsafe class ObjectSignatures
     // resource targets
     public static readonly SignatureHookTarget ModelLoad = new(ModelResourceLoad, "object model resource load");
     public static readonly SignatureHookTarget ApricotLoad = new(ApricotResourceLoad, "object apricot resource load");
+    public static readonly SignatureHookTarget AvfxResourceBufferLoadHook =
+        new(AvfxResourceBufferLoad, "AVFX resource buffer load");
     public static readonly SignatureHookTarget SharedGroupLayoutResourceLoadHook =
         new(SharedGroupLayoutResourceLoad, "object shared group resource load");
     public static readonly SignatureHookTarget CachedScheduleResource =
@@ -160,6 +168,8 @@ internal static unsafe class ObjectSignatures
         new((nint)ResourceManager.MemberFunctionPointers.GetResourceAsync, "object asset resource async");
     public static readonly AddressHookTarget AssetStaticVfxCreate =
         new((nint)SceneVfxObject.MemberFunctionPointers.Create, "object asset static vfx create");
+    public static readonly SignatureDelegateTarget NativeStaticVfxPlay =
+        new(StaticVfxPlay, "object static vfx play");
 
     // furniture and housing targets
     public static readonly SignatureHookTarget HousingFurnitureCulling =
@@ -199,6 +209,7 @@ internal static unsafe class ObjectSignatures
         ModelLoad,
         ApricotLoad,
         CachedScheduleResource,
+        AvfxResourceBufferLoadHook,
         ResourceTextureOnLoad,
         ResourceSoundOnLoad,
         ResourceMemoryModelRead,
@@ -237,6 +248,9 @@ internal static unsafe class ObjectSignatures
         ResourceLoadScdFileLocal,
         ResourceUpdateTextureCategory,
         ResourceHandleTypeFromPath,
+
+        // vfx
+        NativeStaticVfxPlay,
 
         // furniture and housing
         NativeHousingPlacementRaycast,

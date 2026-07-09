@@ -122,6 +122,10 @@ internal static class ObjectSnapshotUtility
         {
             VfxPath = patch.VfxPath ?? model.VfxPath,
             Color = patch.Color ?? model.Color,
+            Loop = patch.Loop ?? model.Loop,
+            LoopIntervalSeconds = patch.LoopIntervalSeconds.HasValue
+                ? VfxModel.ClampLoopIntervalSeconds(patch.LoopIntervalSeconds.Value)
+                : model.LoopIntervalSeconds,
         };
 
     private static LightModel ApplyLightModelPatch(LightModel model, LightModelPatch patch)

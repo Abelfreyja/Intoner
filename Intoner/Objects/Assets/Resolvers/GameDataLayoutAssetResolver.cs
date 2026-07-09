@@ -241,11 +241,6 @@ internal sealed class GameDataLayoutAssetResolver
             foreach (TerritoryType territory in territories)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                if (!territory.IsInUse)
-                {
-                    continue;
-                }
-
                 var zoneSharedGroups = territory.ZoneSharedGroup.ValueNullable;
                 if (zoneSharedGroups is null)
                 {
@@ -277,11 +272,6 @@ internal sealed class GameDataLayoutAssetResolver
             foreach (TerritoryType territory in territories)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                if (!territory.IsInUse)
-                {
-                    continue;
-                }
-
                 TryCollectTerritoryLayoutAssets(
                     territory.RowId,
                     GameDataAssetPathUtility.BuildTerritoryLayoutPath(territory.Bg.ExtractText()),

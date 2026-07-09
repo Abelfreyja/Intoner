@@ -33,6 +33,13 @@ internal interface IObjectResourceLoader : IDisposable
     /// <param name="resourceCollectionId">the active object collection id</param>
     /// <returns>a disposable scope that restores the previous object collection context</returns>
     IDisposable EnterRootLoadScope(string resourceCollectionId);
+
+    /// <summary>
+    /// Enters one temporary root cache isolation scope that keeps the real game path but prevents the game's native cache reuse.
+    /// </summary>
+    /// <param name="rootPath">the game resource path being passed to native creation</param>
+    /// <returns>a disposable scope that restores the previous root cache isolation context</returns>
+    IDisposable EnterRootCacheIsolation(string rootPath);
 }
 
 internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
@@ -65,6 +72,41 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         string LoadPath,
         string HandlePath,
         string TrackedPath);
+
+    private sealed class RootCacheIsolation(
+        string path,
+        long loadId,
+        RootCacheIsolation? previousScope)
+    {
+        private int _threadScopeActive = 1;
+        private int _disposed;
+
+        public string Path { get; } = path;
+        public long LoadId { get; } = loadId;
+        public RootCacheIsolation? PreviousScope { get; } = previousScope;
+
+        public bool IsActive
+            => Volatile.Read(ref _disposed) == 0
+            && Path.Length > 0
+            && LoadId > 0;
+
+        public void RestoreThreadScope(ObjectResourceLoader owner)
+        {
+            if (Interlocked.Exchange(ref _threadScopeActive, 0) != 0)
+            {
+                owner.TryWriteRootCacheIsolation(PreviousScope);
+            }
+        }
+
+        public void Release(ObjectResourceLoader owner)
+        {
+            RestoreThreadScope(owner);
+            Deactivate();
+        }
+
+        public void Deactivate()
+            => _ = Interlocked.Exchange(ref _disposed, 1);
+    }
 
     private readonly record struct RedirectResolution(
         RedirectResolutionStatus Status,
@@ -136,10 +178,12 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
     private readonly Func<IObjectFileReadService> _fileReadServiceFactory;
     private readonly IObjectResourceTracker _resourceTracker;
     private readonly ObjectResourceLoadScope _loadScope;
+    private readonly ThreadLocal<RootCacheIsolation?> _rootCacheIsolation = new(static () => default);
     private readonly ObjectResourceIncRefGuard _incRefGuard;
     private readonly ResolveResourceHandleTypeDelegate? _resolveResourceHandleType;
     private readonly ObjectResourceHooks _hooks;
     private readonly ObjectDisposalState _disposeState = new();
+    private long _nextRootCacheIsolationId;
 
     public ObjectResourceLoader(
         ILogger<ObjectResourceLoader> logger,
@@ -195,6 +239,40 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
             : EnterCollectionScopeToken(normalizedCollectionId);
     }
 
+    public IDisposable EnterRootCacheIsolation(string rootPath)
+    {
+        if (IsDisposing
+         || !_hooks.CanResolveResourceRequests()
+         || !TryNormalizeRootCacheIsolationPath(rootPath, out string normalizedPath)
+         || !ObjectThreadLocalUtility.TryRead(_rootCacheIsolation, null, out RootCacheIsolation? previousScope))
+        {
+            return default(RootCacheIsolationScopeToken);
+        }
+
+        _hooks.Enable();
+        var isolation = new RootCacheIsolation(
+            normalizedPath,
+            Interlocked.Increment(ref _nextRootCacheIsolationId),
+            previousScope);
+        if (TryWriteRootCacheIsolation(isolation))
+        {
+            return new RootCacheIsolationScopeToken(this, isolation);
+        }
+
+        isolation.Deactivate();
+        return default(RootCacheIsolationScopeToken);
+    }
+
+    private bool TryWriteRootCacheIsolation(RootCacheIsolation? isolation)
+    {
+        if (IsDisposing)
+        {
+            return false;
+        }
+
+        return ObjectThreadLocalUtility.TryWrite(_rootCacheIsolation, isolation);
+    }
+
     public bool CanResolveCollectionResources(ObjectRootPathKind kind)
     {
         if (IsDisposing
@@ -216,6 +294,7 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         }
 
         _hooks.Dispose();
+        _rootCacheIsolation.Dispose();
         _incRefGuard.Dispose();
     }
 
@@ -584,6 +663,12 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
             return CallOriginal(request);
         }
 
+        if (TryResolveRootCacheIsolation(requestedPath, request, out uint cacheIsolationHash))
+        {
+            _logger.LogDebug("using temporary root resource hash for {Path}: 0x{ResourceHash:X8}", requestedPath, cacheIsolationHash);
+            return CallOriginalWithHash(request, cacheIsolationHash);
+        }
+
         if (!TryResolveScopedResourceRequest(requestedPath, out ScopedResourceRequest scopedRequest))
         {
             return ObjectScopedResourcePathUtility.IsObjectScopedPath(requestedPath)
@@ -695,6 +780,30 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         }
 
         request = new ScopedResourceRequest(collection, requestedPath, WasScoped: false);
+        return true;
+    }
+
+    private bool TryResolveRootCacheIsolation(string requestedPath, ResourceRequest request, out uint resourceHash)
+    {
+        resourceHash = 0;
+        if (!ShouldIsolateResourceCache(request.Type)
+         || ObjectScopedResourcePathUtility.IsObjectScopedPath(requestedPath)
+         || !ObjectThreadLocalUtility.TryRead(_rootCacheIsolation, null, out RootCacheIsolation? isolation)
+         || isolation is null
+         || !isolation.IsActive)
+        {
+            return false;
+        }
+
+        string normalizedRequestedPath = ObjectResourcePathUtility.NormalizeTrackedPath(requestedPath);
+        if (normalizedRequestedPath.Length == 0
+         || !string.Equals(normalizedRequestedPath, isolation.Path, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        resourceHash = unchecked((uint)ComputeRootCacheIsolationHash(normalizedRequestedPath, isolation.LoadId, request.Parameters));
+        isolation.RestoreThreadScope(this);
         return true;
     }
 
@@ -873,6 +982,14 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
             or ResourceType.Sgb
             or ResourceType.Tmb;
 
+    private static bool TryNormalizeRootCacheIsolationPath(string rootPath, out string normalizedPath)
+    {
+        normalizedPath = ObjectResourcePathUtility.NormalizeTrackedPath(rootPath);
+        return normalizedPath.Length > 0
+            && !ObjectLocalFilePathUtility.IsLocalFilePath(normalizedPath)
+            && !ObjectMemoryResourcePathUtility.IsMemoryResourcePath(normalizedPath);
+    }
+
     private static string CreateResourceHandlePath(ObjectCollectionResolveData collection, string loadPath, uint resourceType)
     {
         // scoped handle paths let async callbacks recover the collection before tracker registration
@@ -921,6 +1038,12 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         }
     }
 
+    private static int ComputeRootCacheIsolationHash(string path, long loadId, ObjectGetResourceParameters* getResourceParameters)
+    {
+        string isolatedPath = string.Concat(path, ".intoner.", loadId.ToString("x", CultureInfo.InvariantCulture));
+        return ComputeResourceHash(isolatedPath, getResourceParameters);
+    }
+
     private ResourceHandle* CallOriginalWithPath(ResourceRequest request, string resourcePath)
         => (ResourceHandle*)ObjectResourcePathEncoding.WithNullTerminatedUtf8(
             resourcePath,
@@ -947,6 +1070,19 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
                     state.Request.File,
                     state.Request.Line));
             });
+
+    private ResourceHandle* CallOriginalWithHash(ResourceRequest request, uint resourceHash)
+        => CallOriginal(new ResourceRequest(
+            request.IsSync,
+            request.ResourceManager,
+            request.HandleType,
+            request.ResourceType,
+            &resourceHash,
+            request.Path,
+            request.Parameters,
+            request.HasHandleLock,
+            request.File,
+            request.Line));
 
     private bool TryResolveResourceHandleType(
         ResourceHandleType* currentHandleType,
@@ -1083,7 +1219,7 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
             && string.Equals(currentPath, ObjectResourcePathUtility.NormalizeTrackedPath(resolvedPath), StringComparison.OrdinalIgnoreCase);
     }
 
-    private bool IsObjectScopedHandle(ResourceHandle* handle)
+    private static bool IsObjectScopedHandle(ResourceHandle* handle)
         => ObjectResourcePathEncoding.TryReadHandlePath(handle, out string handlePath)
             && ObjectScopedResourcePathUtility.IsObjectScopedPath(handlePath);
 
@@ -1142,5 +1278,15 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
                 request.File,
                 request.Line);
 
+    private readonly struct RootCacheIsolationScopeToken(ObjectResourceLoader? owner, RootCacheIsolation? isolation) : IDisposable
+    {
+        public void Dispose()
+        {
+            if (owner is not null && isolation is not null)
+            {
+                isolation.Release(owner);
+            }
+        }
+    }
 }
 

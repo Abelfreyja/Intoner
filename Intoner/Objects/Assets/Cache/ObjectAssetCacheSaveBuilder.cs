@@ -61,7 +61,7 @@ internal static class ObjectAssetCacheSaveBuilder
                 .Where(static asset => asset.SeenFromRuntime)
                 .Where(asset => !staticResolvedVfxPaths.Contains(asset.Path))
                 .Where(static asset => asset.SupportClass == VfxStandaloneSupportClass.SupportedStandalone)
-                .Select(static asset => new ObjectAssetCacheStandaloneVfx(asset.Path, asset.Evidence))
+                .Select(static asset => new ObjectAssetCacheStandaloneVfx(asset.Path, asset.Evidence, asset.Analysis))
                 .ToArray(),
             capture.RuntimeTimelineReferencedVfx
                 .Where(static pair => pair.Value.HasEvidence)
