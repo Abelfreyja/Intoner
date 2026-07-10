@@ -20,7 +20,7 @@ internal sealed partial class EditorWindow
         state.SyncAsset(assetPath);
 
         var accent = EditorColors.CatalogAccent(kind);
-        var previewWidth  = ResolveStablePreviewHostWidth();
+        var previewWidth  = ResolvePreviewHostWidth();
         var previewHeight = MathF.Max(
             180f * ImGuiHelpers.GlobalScale,
             MathF.Min(260f * ImGuiHelpers.GlobalScale, previewWidth * 0.66f));
@@ -41,12 +41,8 @@ internal sealed partial class EditorWindow
             state);
     }
 
-    private static float ResolveStablePreviewHostWidth()
-    {
-        var style = ImGui.GetStyle();
-        var stableWidth = ImGui.GetWindowSize().X - (style.WindowPadding.X * 2f) - style.ScrollbarSize;
-        return MathF.Max(140f * ImGuiHelpers.GlobalScale, stableWidth);
-    }
+    private static float ResolvePreviewHostWidth()
+        => MathF.Max(140f * ImGuiHelpers.GlobalScale, ImGui.GetContentRegionAvail().X);
 
     private void DrawViewport(
         string id,

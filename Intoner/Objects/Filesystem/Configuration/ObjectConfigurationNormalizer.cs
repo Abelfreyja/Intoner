@@ -22,6 +22,7 @@ internal static class ObjectConfigurationNormalizer
         NormalizeLayoutAutoSave(configuration.LayoutAutoSave);
         NormalizeLogging(configuration.Logging);
         NormalizeRendering(configuration.Rendering);
+        NormalizeUi(configuration.Ui);
     }
 
     private static void ValidateVersion(int version)
@@ -67,6 +68,9 @@ internal static class ObjectConfigurationNormalizer
         ValidateEnum(configuration.DepthMode, nameof(configuration.DepthMode));
         configuration.AntiAliasing = RenderingConfiguration.ClampAntiAliasing(configuration.AntiAliasing);
     }
+
+    private static void NormalizeUi(UiConfiguration configuration)
+        => configuration.WorkspaceSplits = configuration.WorkspaceSplits.Clamp();
 
     private static void ValidateEnum<TEnum>(TEnum value, string propertyName)
         where TEnum : struct, Enum

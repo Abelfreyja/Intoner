@@ -78,7 +78,7 @@ internal sealed partial class EditorWindow
             return;
         }
 
-        DrawScrollableCreateSectionCard("bgobject-settings", FontAwesomeIcon.Cube, "BgObject Settings", "Set object state and configuration before creation.", MathF.Max(1f, settingsHostHeight), () =>
+        DrawScrollableCreateSettingsCard("bgobject-settings", MathF.Max(1f, settingsHostHeight), () =>
         {
             DrawPreviewSection(
                 "bgobject-preview",
@@ -154,7 +154,7 @@ internal sealed partial class EditorWindow
             ClearFurnitureCatalogSelection();
         }
 
-        DrawScrollableCreateSectionCard("furniture-settings", FontAwesomeIcon.Home, "Furniture Settings", "Set furniture state and configuration before creation.", MathF.Max(1f, settingsHostHeight), () =>
+        DrawScrollableCreateSettingsCard("furniture-settings", MathF.Max(1f, settingsHostHeight), () =>
         {
             DrawPreviewSection(
                 "furniture-preview",
@@ -284,7 +284,7 @@ internal sealed partial class EditorWindow
             return;
         }
 
-        DrawScrollableCreateSectionCard("light-settings", FontAwesomeIcon.Sun, "Light Settings", "Set light state and configuration before creation.", MathF.Max(1f, settingsHostHeight), () =>
+        DrawScrollableCreateSettingsCard("light-settings", MathF.Max(1f, settingsHostHeight), () =>
         {
             using (var lightSettingsTable = CompactSettingsTable("lightCreate"))
             {
@@ -333,7 +333,7 @@ internal sealed partial class EditorWindow
             return;
         }
 
-        DrawScrollableCreateSectionCard("vfx-settings", FontAwesomeIcon.Magic, "VFX Settings", "Set VFX state and configuration before creation.", MathF.Max(1f, settingsHostHeight), () =>
+        DrawScrollableCreateSettingsCard("vfx-settings", MathF.Max(1f, settingsHostHeight), () =>
         {
             using var vfxSettingsTable = CompactSettingsTable("vfxCreate");
             if (!vfxSettingsTable)

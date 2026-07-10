@@ -19,6 +19,18 @@ namespace Intoner.Objects.UI;
 
 internal sealed partial class EditorWindow
 {
+    private enum CatalogLayoutMode
+    {
+        List,
+        Grid,
+    }
+
+    private enum CatalogGridTileImageSource
+    {
+        Preview,
+        ItemIcon,
+    }
+
     private void DrawCatalogPanel(ObjectCatalogData catalog)
     {
         switch (_draftKind)
@@ -104,35 +116,16 @@ internal sealed partial class EditorWindow
             ref currentFilter,
             "search light type or description",
             null,
-            0f,
+            Vector2.Zero,
             null);
         _lightCreate.CatalogFilter = currentFilter;
         filteredEntries = FilterLightCatalogEntries(_lightCreate.CatalogFilter);
 
-        var background = EditorColors.ButtonDefault with { W = 0.28f };
-        using var childBg = ImRaii.PushColor(ImGuiCol.ChildBg, background);
-        using var child = ObjectScrollList.Begin(
-            "##lightCatalog_entries",
-            new Vector2(0f, 0f),
-            CreateOverlayScrollPanelOptions(background, Scaled(8f), EditorColors.AccentPurple),
-            true);
-        if (!child)
-        {
-            return;
-        }
-
-        if (filteredEntries.Count == 0)
-        {
-            DrawCatalogEmptyState("No light types match the current filter.");
-            return;
-        }
-
-        var itemHeight   = Scaled(48f);
-        var itemSpacingY = ResolveObjectListItemSpacingY();
-        UiVirtualList.Draw(
+        DrawCatalogEntriesListCore(
+            "##lightCatalog",
             filteredEntries,
-            UiVirtualListOptions.Rows(itemHeight, itemSpacingY),
-            (entry, _) =>
+            "No light types match the current filter.",
+            (entry, itemHeight) =>
             {
                 DrawCatalogSelectionCardCore(
                     $"lightCatalog:{entry.Type}",
@@ -161,34 +154,40 @@ internal sealed partial class EditorWindow
         var currentSourceFilter = sourceFilter;
         var filteredEntries = section.FilterBySource(currentFilter, currentSourceFilter);
 
-        DrawCatalogHeaderCardCore(
+        DrawCatalogHeaderCard(
             id,
             icon,
-            section.DisplayName,
-            section.Count,
-            filteredEntries.Count,
+            section,
             ref currentFilter,
             "search name, row, source, or path",
+            ref currentSourceFilter,
+            section.SourceFilters,
+            filteredEntries.Count,
             () => DrawCatalogLayoutToggleButtons($"{id}_layout", ref _bgObjectCreate.CatalogLayout),
-            MeasureCatalogLayoutToggleButtonsWidth(),
-            () =>
-            {
-                currentSourceFilter = DrawCatalogFilterButtons(id, currentSourceFilter, section.SourceFilters);
-            });
+            MeasureCatalogLayoutToggleButtonsSize());
 
         filter = currentFilter;
         sourceFilter = currentSourceFilter;
         filteredEntries = section.FilterBySource(filter, sourceFilter);
 
-        switch (_bgObjectCreate.CatalogLayout)
-        {
-            case CatalogLayoutMode.Grid:
-                DrawBgObjectCatalogEntriesGrid(id, filteredEntries, selectedPath, onSelect, emptyText);
-                break;
-            default:
-                DrawCatalogEntriesList(id, filteredEntries, selectedPath, onSelect, emptyText);
-                break;
-        }
+        DrawCatalogEntries(
+            id,
+            _bgObjectCreate.CatalogLayout,
+            filteredEntries,
+            emptyText,
+            (entry, itemHeight) => DrawCatalogEntryCard(
+                entry,
+                string.Equals(selectedPath, entry.PlacementPath, StringComparison.OrdinalIgnoreCase),
+                () => onSelect(entry),
+                itemHeight),
+            (entry, tileSize) => DrawCatalogGridTile(
+                $"bgobjectCatalogGrid:{entry.Source}:{entry.RowId}:{entry.PlacementPath}",
+                entry,
+                entry.Name,
+                entry.RowId,
+                string.Equals(selectedPath, entry.PlacementPath, StringComparison.OrdinalIgnoreCase),
+                () => onSelect(entry),
+                tileSize));
     }
 
     private void DrawCatalogBrowser(
@@ -218,7 +217,15 @@ internal sealed partial class EditorWindow
         filter = currentFilter;
         sourceFilter = currentSourceFilter;
         filteredEntries = section.FilterBySource(filter, sourceFilter);
-        DrawCatalogEntriesList(id, filteredEntries, selectedPath, onSelect, emptyText);
+        DrawCatalogEntriesListCore(
+            id,
+            filteredEntries,
+            emptyText,
+            (entry, itemHeight) => DrawCatalogEntryCard(
+                entry,
+                string.Equals(selectedPath, entry.PlacementPath, StringComparison.OrdinalIgnoreCase),
+                () => onSelect(entry),
+                itemHeight));
     }
 
     private void DrawFurnitureCatalogBrowser(
@@ -245,7 +252,9 @@ internal sealed partial class EditorWindow
             "search name, row, category, or path",
             ref currentCategoryFilter,
             section.CategoryFilters,
-            filteredEntries.Count);
+            filteredEntries.Count,
+            () => DrawCatalogLayoutToggleButtons($"{id}_layout", ref _furnitureCreate.CatalogLayout),
+            MeasureCatalogLayoutToggleButtonsSize());
 
         filter = currentFilter;
         categoryFilter = currentCategoryFilter;
@@ -253,7 +262,26 @@ internal sealed partial class EditorWindow
             FilterHousingFurnitureCatalogEntries(section.FilterFurniture(filter, categoryFilter)),
             filter,
             categoryFilter);
-        DrawFurnitureCatalogEntriesList(id, filteredEntries, onSelect, emptyText);
+        DrawCatalogEntries(
+            id,
+            _furnitureCreate.CatalogLayout,
+            filteredEntries,
+            emptyText,
+            (entry, itemHeight) => DrawFurnitureCatalogEntryCard(
+                entry,
+                IsFurnitureCatalogSelection(entry),
+                () => onSelect(entry),
+                itemHeight),
+            (entry, tileSize) => DrawCatalogGridTile(
+                $"furnitureCatalogGrid:{entry.Entry.Source}:{entry.Variant.HousingRowId}:{entry.Variant.ItemRowId}:{entry.Entry.PlacementPath}",
+                entry.Entry,
+                GetFurnitureCatalogDisplayName(entry),
+                GetFurnitureCatalogDisplayRowId(entry),
+                IsFurnitureCatalogSelection(entry),
+                () => onSelect(entry),
+                tileSize,
+                imageSource: CatalogGridTileImageSource.ItemIcon,
+                itemIconId: GetFurnitureCatalogItemIconId(entry)));
     }
 
     private IReadOnlyList<ObjectCatalogFurnitureResult> FilterHousingFurnitureCatalogEntries(IReadOnlyList<ObjectCatalogFurnitureResult> entries)
@@ -320,6 +348,15 @@ internal sealed partial class EditorWindow
             out variant);
     }
 
+    private static string GetFurnitureCatalogDisplayName(ObjectCatalogFurnitureResult result)
+        => string.IsNullOrWhiteSpace(result.Variant.Name) ? result.Entry.Name : result.Variant.Name;
+
+    private static uint GetFurnitureCatalogDisplayRowId(ObjectCatalogFurnitureResult result)
+        => result.Variant.HousingRowId != 0 ? result.Variant.HousingRowId : result.Entry.RowId;
+
+    private static uint? GetFurnitureCatalogItemIconId(ObjectCatalogFurnitureResult result)
+        => result.Variant.IconId > 0 ? result.Variant.IconId : null;
+
     private static void DrawCatalogLayoutToggleButtons(string id, ref CatalogLayoutMode layoutMode)
     {
         var buttonEdge = ResolveCatalogLayoutToggleButtonEdge();
@@ -340,9 +377,10 @@ internal sealed partial class EditorWindow
         }
     }
 
-    private static float MeasureCatalogLayoutToggleButtonsWidth()
+    private static Vector2 MeasureCatalogLayoutToggleButtonsSize()
     {
-        return (ResolveCatalogLayoutToggleButtonEdge() * 2f) + ImGui.GetStyle().ItemSpacing.X;
+        float edge = ResolveCatalogLayoutToggleButtonEdge();
+        return new Vector2((edge * 2f) + ImGui.GetStyle().ItemSpacing.X, edge);
     }
 
     private static float ResolveCatalogLayoutToggleButtonEdge()
@@ -352,42 +390,22 @@ internal sealed partial class EditorWindow
             ResolveSquareIconButtonMetrics(FontAwesomeIcon.Bars.ToIconString()).Edge);
     }
 
-    private void DrawCatalogEntriesList(
+    private void DrawCatalogEntries<TEntry>(
         string id,
-        IReadOnlyList<ObjectCatalogEntry> filteredEntries,
-        string selectedPath,
-        Action<ObjectCatalogEntry> onSelect,
-        string emptyText)
-        => DrawCatalogEntriesListCore(
-            id,
-            filteredEntries,
-            emptyText,
-            (entry, itemHeight) =>
-            {
-                DrawCatalogEntryCard(
-                    entry,
-                    string.Equals(selectedPath, entry.PlacementPath, StringComparison.OrdinalIgnoreCase),
-                    () => onSelect(entry),
-                    itemHeight);
-            });
+        CatalogLayoutMode layout,
+        IReadOnlyList<TEntry> filteredEntries,
+        string emptyText,
+        Action<TEntry, float> drawListEntry,
+        Action<TEntry, Vector2> drawGridEntry)
+    {
+        if (layout == CatalogLayoutMode.Grid)
+        {
+            DrawCatalogEntriesGridCore(id, filteredEntries, emptyText, drawGridEntry);
+            return;
+        }
 
-    private void DrawFurnitureCatalogEntriesList(
-        string id,
-        IReadOnlyList<ObjectCatalogFurnitureResult> filteredEntries,
-        Action<ObjectCatalogFurnitureResult> onSelect,
-        string emptyText)
-        => DrawCatalogEntriesListCore(
-            id,
-            filteredEntries,
-            emptyText,
-            (entry, itemHeight) =>
-            {
-                DrawFurnitureCatalogEntryCard(
-                    entry,
-                    IsFurnitureCatalogSelection(entry),
-                    () => onSelect(entry),
-                    itemHeight);
-            });
+        DrawCatalogEntriesListCore(id, filteredEntries, emptyText, drawListEntry);
+    }
 
     private void DrawCatalogEntriesListCore<TEntry>(
         string id,
@@ -395,38 +413,65 @@ internal sealed partial class EditorWindow
         string emptyText,
         Action<TEntry, float> drawEntry)
     {
-        var background = EditorColors.ButtonDefault with { W = 0.28f };
-        using var childBg = ImRaii.PushColor(ImGuiCol.ChildBg, background);
-        using var entriesChild = ObjectScrollList.Begin(
-            $"{id}_entries",
-            new Vector2(0f, 0f),
-            CreateOverlayScrollPanelOptions(background, Scaled(8f), EditorColors.AccentPurple),
-            true);
-        if (!entriesChild)
-        {
-            return;
-        }
-
-        if (filteredEntries.Count == 0)
-        {
-            DrawCatalogEmptyState(emptyText);
-            return;
-        }
-
-        var itemHeight   = Scaled(48f);
-        var itemSpacingY = ResolveObjectListItemSpacingY();
-        UiVirtualList.Draw(
-            filteredEntries,
-            UiVirtualListOptions.Rows(itemHeight, itemSpacingY) with { DrawTrailingSpacing = true },
-            (entry, _) => drawEntry(entry, itemHeight));
+        DrawCatalogEntriesPanel(
+            id,
+            filteredEntries.Count,
+            emptyText,
+            () =>
+            {
+                var itemHeight = Scaled(48f);
+                var itemSpacingY = ResolveObjectListItemSpacingY();
+                UiVirtualList.Draw(
+                    filteredEntries,
+                    UiVirtualListOptions.Rows(itemHeight, itemSpacingY) with { DrawTrailingSpacing = true },
+                    (entry, _) => drawEntry(entry, itemHeight));
+            });
     }
 
-    private void DrawBgObjectCatalogEntriesGrid(
+    private void DrawCatalogEntriesGridCore<TEntry>(
         string id,
-        IReadOnlyList<ObjectCatalogEntry> filteredEntries,
-        string selectedPath,
-        Action<ObjectCatalogEntry> onSelect,
-        string emptyText)
+        IReadOnlyList<TEntry> filteredEntries,
+        string emptyText,
+        Action<TEntry, Vector2> drawEntry)
+    {
+        DrawCatalogEntriesPanel(
+            id,
+            filteredEntries.Count,
+            emptyText,
+            () =>
+            {
+                float tileSpacing = ImGui.GetStyle().ItemSpacing.X;
+                float availableWidth = Positive(ImGui.GetContentRegionAvail().X);
+                int columns = ResolveCatalogGridColumnCount(availableWidth, tileSpacing);
+                float tileEdge = Positive((availableWidth - ((columns - 1) * tileSpacing)) / columns);
+                int rowCount = (filteredEntries.Count + columns - 1) / columns;
+                Vector2 tileSize = new(tileEdge, tileEdge);
+
+                UiVirtualList.Draw(
+                    rowCount,
+                    UiVirtualListOptions.Rows(tileEdge, tileSpacing) with { DrawTrailingSpacing = true },
+                    row =>
+                    {
+                        for (int column = 0; column < columns; column++)
+                        {
+                            int entryIndex = (row * columns) + column;
+                            if (entryIndex >= filteredEntries.Count)
+                            {
+                                break;
+                            }
+
+                            drawEntry(filteredEntries[entryIndex], tileSize);
+
+                            if (column + 1 < columns && entryIndex + 1 < filteredEntries.Count)
+                            {
+                                ImGui.SameLine(0f, tileSpacing);
+                            }
+                        }
+                    });
+            });
+    }
+
+    private void DrawCatalogEntriesPanel(string id, int entryCount, string emptyText, Action drawEntries)
     {
         var background = EditorColors.ButtonDefault with { W = 0.28f };
         using var childBg = ImRaii.PushColor(ImGuiCol.ChildBg, background);
@@ -440,45 +485,20 @@ internal sealed partial class EditorWindow
             return;
         }
 
-        if (filteredEntries.Count == 0)
+        if (entryCount == 0)
         {
             DrawCatalogEmptyState(emptyText);
             return;
         }
 
-        const int columns = 5;
-        float tileSpacing = ImGui.GetStyle().ItemSpacing.X;
-        float availableWidth = Positive(ImGui.GetContentRegionAvail().X);
-        float tileEdge = Positive((availableWidth - ((columns - 1) * tileSpacing)) / columns);
-        int rowCount = (filteredEntries.Count + columns - 1) / columns;
-        Vector2 tileSize = new(tileEdge, tileEdge);
+        drawEntries();
+    }
 
-        UiVirtualList.Draw(
-            rowCount,
-            UiVirtualListOptions.Rows(tileEdge, tileSpacing) with { DrawTrailingSpacing = true },
-            row =>
-            {
-                for (int column = 0; column < columns; column++)
-                {
-                    int entryIndex = (row * columns) + column;
-                    if (entryIndex >= filteredEntries.Count)
-                    {
-                        break;
-                    }
-
-                    ObjectCatalogEntry entry = filteredEntries[entryIndex];
-                    DrawBgObjectCatalogGridTile(
-                        entry,
-                        string.Equals(selectedPath, entry.PlacementPath, StringComparison.OrdinalIgnoreCase),
-                        () => onSelect(entry),
-                        tileSize);
-
-                    if (column + 1 < columns && entryIndex + 1 < filteredEntries.Count)
-                    {
-                        ImGui.SameLine(0f, tileSpacing);
-                    }
-                }
-            });
+    private static int ResolveCatalogGridColumnCount(float availableWidth, float tileSpacing)
+    {
+        float minimumTileEdge = Scaled(72f);
+        int columns = (int)MathF.Floor((availableWidth + tileSpacing) / (minimumTileEdge + tileSpacing));
+        return Math.Clamp(columns, 1, 5);
     }
 
     private static IReadOnlyList<LightCatalogEntry> FilterLightCatalogEntries(string filter)
@@ -511,7 +531,9 @@ internal sealed partial class EditorWindow
         string searchHint,
         ref string groupFilter,
         IReadOnlyList<ObjectCatalogFilterCount> groupCounts,
-        int filteredCount)
+        int filteredCount,
+        Action? drawHeaderActions = null,
+        Vector2 headerActionsSize = default)
     {
         var currentFilter = filter;
         var currentGroupFilter = groupFilter;
@@ -523,8 +545,8 @@ internal sealed partial class EditorWindow
             filteredCount,
             ref currentFilter,
             searchHint,
-            null,
-            0f,
+            drawHeaderActions,
+            headerActionsSize,
             () =>
             {
                 currentGroupFilter = DrawCatalogFilterButtons(id, currentGroupFilter, groupCounts);
@@ -543,7 +565,7 @@ internal sealed partial class EditorWindow
         ref string filter,
         string searchHint,
         Action? drawHeaderActions,
-        float headerActionsWidth,
+        Vector2 headerActionsSize,
         Action? drawAfterFilter)
     {
         var accent = EditorColors.AccentPurple;
@@ -577,12 +599,11 @@ internal sealed partial class EditorWindow
 
                 float headerRowEndY = ImGui.GetCursorPosY();
 
-                if (drawHeaderActions is not null && headerActionsWidth > 0f)
+                if (drawHeaderActions is not null && headerActionsSize.X > 0f && headerActionsSize.Y > 0f)
                 {
-                    float actionHeight = ResolveCatalogLayoutToggleButtonEdge();
-                    float actionY = headerRowStart.Y + MathF.Max(0f, ((headerRowEndY - headerRowStart.Y) - actionHeight) * 0.5f);
+                    float actionY = headerRowStart.Y + MathF.Max(0f, ((headerRowEndY - headerRowStart.Y) - headerActionsSize.Y) * 0.5f);
                     var previousCursorY = ImGui.GetCursorPosY();
-                    var rightAlignedX = MathF.Max(ImGui.GetCursorPosX(), headerRowMaxX - headerActionsWidth);
+                    var rightAlignedX = MathF.Max(ImGui.GetCursorPosX(), headerRowMaxX - headerActionsSize.X);
                     ImGui.SetCursorPos(new Vector2(rightAlignedX, actionY));
                     drawHeaderActions();
                     ImGui.SetCursorPos(new Vector2(headerRowStart.X, MathF.Max(headerRowEndY, previousCursorY)));
@@ -759,17 +780,30 @@ internal sealed partial class EditorWindow
         ImGui.Dummy(new Vector2(width, height));
     }
 
-    private void DrawBgObjectCatalogGridTile(ObjectCatalogEntry entry, bool selected, Action onSelect, Vector2 size)
+    private void DrawCatalogGridTile(
+        string id,
+        ObjectCatalogEntry entry,
+        string displayName,
+        uint displayRowId,
+        bool selected,
+        Action onSelect,
+        Vector2 size,
+        CatalogGridTileImageSource imageSource = CatalogGridTileImageSource.Preview,
+        uint? itemIconId = null)
     {
         float scale = ImGuiHelpers.GlobalScale;
         float innerPadding = 8f * scale;
-        var preview = string.IsNullOrWhiteSpace(entry.PlacementPath)
-            ? new PreviewRender.Result(null, false, "Preview unavailable")
-            : _previewService.GetPreview(
-                CatalogPreviewAssetFactory.Create(entry),
-                CreateCatalogThumbnailRequest(size, innerPadding));
+        PreviewRender.Result? preview = null;
+        if (imageSource == CatalogGridTileImageSource.Preview)
+        {
+            preview = string.IsNullOrWhiteSpace(entry.PlacementPath)
+                ? new PreviewRender.Result(null, false, "Preview unavailable")
+                : _previewService.GetPreview(
+                    CatalogPreviewAssetFactory.Create(entry),
+                    CreateCatalogThumbnailRequest(size, innerPadding));
+        }
 
-        ImGui.InvisibleButton($"##bgobjectCatalogGrid:{entry.Source}:{entry.RowId}:{entry.PlacementPath}", size);
+        ImGui.InvisibleButton($"##{id}", size);
         if (ImGui.IsItemClicked(ImGuiMouseButton.Left))
         {
             onSelect();
@@ -779,7 +813,7 @@ internal sealed partial class EditorWindow
         if (hovered)
         {
             ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
-            UiSharedService.AttachToolTip(BuildCatalogEntryTooltip(entry, preview));
+            UiSharedService.AttachToolTip(BuildCatalogEntryTooltip(entry, displayName, displayRowId, preview));
         }
 
         var min = ImGui.GetItemRectMin();
@@ -810,9 +844,13 @@ internal sealed partial class EditorWindow
         drawList.AddRectFilled(min, max, ImGui.GetColorU32(fill), rounding);
         drawList.AddRect(min, max, ImGui.GetColorU32(border), rounding, ImDrawFlags.None, hovered || selected ? 1.35f * scale : 1f * scale);
 
-        if (preview.Texture is not null)
+        if (imageSource == CatalogGridTileImageSource.ItemIcon)
         {
-            drawList.AddImageRounded(preview.Texture.Handle, previewMin, previewMax, Vector2.Zero, Vector2.One, 0xFFFFFFFF, imageRounding);
+            DrawCatalogItemIconTileContent(drawList, previewMin, previewMax, imageRounding, itemIconId, accent);
+        }
+        else if (preview is { } resolvedPreview && resolvedPreview.Texture is not null)
+        {
+            drawList.AddImageRounded(resolvedPreview.Texture.Handle, previewMin, previewMax, Vector2.Zero, Vector2.One, 0xFFFFFFFF, imageRounding);
         }
         else
         {
@@ -821,7 +859,7 @@ internal sealed partial class EditorWindow
                 previewMax,
                 ImGui.GetColorU32(PreviewRender.BackgroundPalette.GetPlaceholderFill(PreviewRender.BackgroundStyle.White)),
                 imageRounding);
-            if (preview.IsLoading)
+            if (preview is { IsLoading: true })
             {
                 DrawCenteredCatalogTileMessage(
                     drawList,
@@ -842,6 +880,30 @@ internal sealed partial class EditorWindow
         }
     }
 
+    private void DrawCatalogItemIconTileContent(
+        ImDrawListPtr drawList,
+        Vector2 min,
+        Vector2 max,
+        float rounding,
+        uint? itemIconId,
+        Vector4 accent)
+    {
+        if (itemIconId is > 0
+         && TryGetCatalogItemIcon(itemIconId.Value, out IDalamudTextureWrap? itemIcon)
+         && itemIcon is not null)
+        {
+            drawList.AddImageRounded(itemIcon.Handle, min, max, Vector2.Zero, Vector2.One, 0xFFFFFFFF, rounding);
+            return;
+        }
+
+        drawList.AddRectFilled(
+            min,
+            max,
+            ImGui.GetColorU32(PreviewRender.BackgroundPalette.GetPlaceholderFill(PreviewRender.BackgroundStyle.White)),
+            rounding);
+        DrawCenteredCatalogTileIcon(drawList, min, max, FontAwesomeIcon.Home, accent with { W = 0.88f });
+    }
+
     private static PreviewRender.Request CreateCatalogThumbnailRequest(Vector2 tileSize, float innerPadding)
     {
         float previewWidth = MathF.Max(1f, tileSize.X - (innerPadding * 2f));
@@ -857,19 +919,23 @@ internal sealed partial class EditorWindow
             PreviewRender.Mode.Thumbnail);
     }
 
-    private static string BuildCatalogEntryTooltip(ObjectCatalogEntry entry, PreviewRender.Result preview)
+    private static string BuildCatalogEntryTooltip(
+        ObjectCatalogEntry entry,
+        string displayName,
+        uint displayRowId,
+        PreviewRender.Result? preview)
     {
         string status = string.Empty;
-        if (preview.IsLoading)
+        if (preview is { IsLoading: true })
         {
             status = "\nPreview: loading";
         }
-        else if (!string.IsNullOrWhiteSpace(preview.Error))
+        else if (preview is { Error: { } error })
         {
-            status = $"\nPreview: {preview.Error}";
+            status = $"\nPreview: {error}";
         }
 
-        return $"{entry.Name}\n#{entry.RowId} | {entry.Source}\n{entry.DisplayPath}{status}";
+        return $"{displayName}\n#{displayRowId} | {entry.Source}\n{entry.DisplayPath}{status}";
     }
 
     private static void DrawCenteredCatalogTileMessage(ImDrawListPtr drawList, Vector2 min, Vector2 max, string text, Vector4 color)
@@ -936,7 +1002,7 @@ internal sealed partial class EditorWindow
         FontAwesomeIcon? titleIcon = null;
         string? titleIconTooltip = null;
         Vector4? titleIconColor = null;
-        uint? itemIconId = variant.IconId > 0 ? variant.IconId : null;
+        uint? itemIconId = GetFurnitureCatalogItemIconId(result);
 
         if (variant.DyeCount > 0)
         {
@@ -947,13 +1013,11 @@ internal sealed partial class EditorWindow
             titleIconColor = EditorColors.AccentOrange with { W = selected ? 0.95f : 0.82f };
         }
 
-        uint rowId = variant.HousingRowId != 0 ? variant.HousingRowId : entry.RowId;
-        string name = string.IsNullOrWhiteSpace(variant.Name) ? entry.Name : variant.Name;
         DrawCatalogSelectionCardCore(
             $"{entry.Source}:{variant.HousingRowId}:{variant.ItemRowId}:{entry.PlacementPath}",
-            name,
+            GetFurnitureCatalogDisplayName(result),
             entry.DisplayPath,
-            $"#{rowId}",
+            $"#{GetFurnitureCatalogDisplayRowId(result)}",
             selected,
             onSelect,
             height,

@@ -214,9 +214,26 @@ internal sealed partial class EditorWindow
         MarkCurrentWindowAsEditorOverlayTarget();
     }
 
+    private void DrawScrollableCreateSettingsCard(string id, float height, Action content)
+        => DrawScrollableCreateCard(id, height, null, content, EditorColors.AccentPurple);
+
     private void DrawScrollableCreateSectionCard(string id, FontAwesomeIcon icon, string title, string description, float height, Action content, Vector4? accentOverride = null)
     {
         var accent = accentOverride ?? EditorColors.AccentPurple;
+        DrawScrollableCreateCard(
+            id,
+            height,
+            () =>
+            {
+                DrawIconTitleBlock(icon, title, description, accent, wrapSubtitle: true);
+                ImGuiHelpers.ScaledDummy(4f);
+            },
+            content,
+            accent);
+    }
+
+    private void DrawScrollableCreateCard(string id, float height, Action? drawHeader, Action content, Vector4 accent)
+    {
         var background = EditorColors.ButtonDefault with { W = 0.24f };
         var rounding = Scaled(8f);
         var padding = ResolveObjectListCardPadding();
@@ -231,9 +248,7 @@ internal sealed partial class EditorWindow
             () =>
             {
                 var contentStartY = ImGui.GetCursorPosY();
-                DrawIconTitleBlock(icon, title, description, accent, wrapSubtitle: true);
-
-                ImGuiHelpers.ScaledDummy(4f);
+                drawHeader?.Invoke();
                 var innerHeight = ResolveScrollableCardInnerHeight(height, padding, contentStartY);
 
                 using var childBg = ImRaii.PushColor(ImGuiCol.ChildBg, Vector4.Zero);

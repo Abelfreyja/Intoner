@@ -16,6 +16,7 @@ using Intoner.Objects.Preview.Rendering;
 using Intoner.Objects.Rendering.Drawing;
 using Intoner.Objects.Runtime;
 using Intoner.Objects.UI.Components;
+using Intoner.Objects.UI.Docking;
 using Intoner.Objects.UI.Services;
 using Intoner.Objects.UI.Services.Backdrop;
 using Intoner.Objects.UI.Services.EdgeGlow;
@@ -42,12 +43,6 @@ internal sealed partial class EditorWindow : IntonerWindow, IGizmoHost, IDisposa
         Rename,
     }
 
-    private enum CatalogLayoutMode
-    {
-        List,
-        Grid,
-    }
-
     private sealed class BgObjectCreateState
     {
         public string ModelPath = string.Empty;
@@ -70,6 +65,7 @@ internal sealed partial class EditorWindow : IntonerWindow, IGizmoHost, IDisposa
         public string CatalogFilter = string.Empty;
         public string CategoryFilter = string.Empty;
         public string StainFilter = string.Empty;
+        public CatalogLayoutMode CatalogLayout = CatalogLayoutMode.List;
         public PreviewState Preview = new();
         public Vector3 Scale = Vector3.One;
         public bool Visible = true;
@@ -233,7 +229,9 @@ internal sealed partial class EditorWindow : IntonerWindow, IGizmoHost, IDisposa
     private DraftKind _draftKind = DraftKind.Furniture;
     private WorkspaceMode _workspaceMode = WorkspaceMode.CatalogCreate;
     private ToolbarDockPosition _toolbarDockPosition = ToolbarDockPosition.Top;
+    private UiConfiguration.SplitRatios _workspaceSplits;
     private bool _openToolbarDockPopupNextFrame;
+    private bool _workspaceSplitRatioDirty;
     private bool _openFolderEditorPopupNextFrame;
     private bool _openObjectCollectionCreatePopupNextFrame;
     private bool _openObjectCollectionAddModPopupNextFrame;
@@ -338,6 +336,7 @@ internal sealed partial class EditorWindow : IntonerWindow, IGizmoHost, IDisposa
         _objectModDataSource            = objectModDataSource;
         _clipboardExportService         = clipboardExportService;
         _objectConfigurationService     = objectConfigurationService;
+        _workspaceSplits                = objectConfigurationService.Current.Ui.WorkspaceSplits;
         _settingsPage                   = new SettingsPage(objectConfigurationService, housingCullingService, housingModePolicy, _editorOverlayLayer);
         _previewService                 = previewService;
         _viewportService                = viewportService;
@@ -585,19 +584,28 @@ internal sealed partial class EditorWindow : IntonerWindow, IGizmoHost, IDisposa
             return;
         }
 
-        var bodySize = ImGui.GetContentRegionAvail();
-        using var table = ImRaii.Table("##objectEditorBody", 2, ImGuiTableFlags.SizingStretchSame | ImGuiTableFlags.BordersInnerV | ImGuiTableFlags.NoHostExtendY, bodySize);
-        if (!table)
-        {
-            return;
-        }
+        WorkspaceMode splitWorkspace = _workspaceMode;
+        EditorSplitPane.Update splitUpdate = EditorSplitPane.Draw(
+            "##objectEditorBody",
+            ImGui.GetContentRegionAvail(),
+            new EditorSplitPane.Options(
+                ResolveWorkspaceSplitRatio(splitWorkspace),
+                UiConfiguration.SplitRatios.DefaultRatio,
+                Scaled(320f),
+                Scaled(360f),
+                EditorColors.AccentPurple),
+            () => DrawPrimaryWorkspacePane(objects, activeObjectIds, catalog, layouts, defaultLayoutId),
+            () => DrawSecondaryWorkspacePane(objects, activeObjects, activeObjectIds, kindInfos, layouts, defaultLayoutId));
+        ApplyWorkspaceSplitUpdate(splitWorkspace, splitUpdate);
+    }
 
-        ImGui.TableSetupColumn("Primary", ImGuiTableColumnFlags.WidthStretch, 1f);
-        ImGui.TableSetupColumn("Secondary", ImGuiTableColumnFlags.WidthStretch, 1f);
-
-        ImGui.TableNextRow();
-
-        ImGui.TableNextColumn();
+    private void DrawPrimaryWorkspacePane(
+        IReadOnlyList<ObjectSnapshot> objects,
+        IReadOnlySet<Guid> activeObjectIds,
+        ObjectCatalogData catalog,
+        IReadOnlyList<ObjectLayoutSnapshot> layouts,
+        Guid? defaultLayoutId)
+    {
         switch (_workspaceMode)
         {
             case WorkspaceMode.CatalogCreate:
@@ -610,8 +618,16 @@ internal sealed partial class EditorWindow : IntonerWindow, IGizmoHost, IDisposa
                 DrawChildPanel("##objectLayoutListPanel", Vector2.Zero, false, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse, () => DrawLayoutListPanel(layouts, defaultLayoutId));
                 break;
         }
+    }
 
-        ImGui.TableNextColumn();
+    private void DrawSecondaryWorkspacePane(
+        IReadOnlyList<ObjectSnapshot> objects,
+        IReadOnlyList<ObjectSnapshot> activeObjects,
+        IReadOnlySet<Guid> activeObjectIds,
+        IReadOnlyList<ObjectKindInfo> kindInfos,
+        IReadOnlyList<ObjectLayoutSnapshot> layouts,
+        Guid? defaultLayoutId)
+    {
         switch (_workspaceMode)
         {
             case WorkspaceMode.CatalogCreate:
@@ -624,6 +640,40 @@ internal sealed partial class EditorWindow : IntonerWindow, IGizmoHost, IDisposa
                 DrawLayoutInspectorPanel(objects, activeObjects, layouts, defaultLayoutId);
                 break;
         }
+    }
+
+    private float ResolveWorkspaceSplitRatio(WorkspaceMode workspaceMode)
+        => workspaceMode switch
+        {
+            WorkspaceMode.CatalogCreate    => _workspaceSplits.CatalogCreate,
+            WorkspaceMode.PlacedInspector  => _workspaceSplits.PlacedInspector,
+            WorkspaceMode.LayoutManager    => _workspaceSplits.LayoutManager,
+            _                              => throw new ArgumentOutOfRangeException(nameof(workspaceMode), workspaceMode, null),
+        };
+
+    private void ApplyWorkspaceSplitUpdate(WorkspaceMode workspaceMode, EditorSplitPane.Update update)
+    {
+        if (update.Changed)
+        {
+            float ratio = UiConfiguration.SplitRatios.ClampRatio(update.Ratio);
+            _workspaceSplits = workspaceMode switch
+            {
+                WorkspaceMode.CatalogCreate   => _workspaceSplits with { CatalogCreate = ratio },
+                WorkspaceMode.PlacedInspector => _workspaceSplits with { PlacedInspector = ratio },
+                WorkspaceMode.LayoutManager   => _workspaceSplits with { LayoutManager = ratio },
+                _                             => throw new ArgumentOutOfRangeException(nameof(workspaceMode), workspaceMode, null),
+            };
+            _workspaceSplitRatioDirty = true;
+        }
+
+        if (!update.Commit || !_workspaceSplitRatioDirty)
+        {
+            return;
+        }
+
+        UiConfiguration.SplitRatios ratios = _workspaceSplits;
+        _objectConfigurationService.Update(configuration => configuration.Ui.WorkspaceSplits = ratios);
+        _workspaceSplitRatioDirty = false;
     }
 
     private void DrawChildPanel(string id, Vector2 size, bool border, ImGuiWindowFlags flags, Action draw, bool transparentBackground = true)
