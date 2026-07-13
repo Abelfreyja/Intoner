@@ -22,6 +22,7 @@ internal static class SectionPanel
             new Vector2(0f, height),
             ObjectScrollListOptions.Panel(background, PanelRounding, EditorColors.AccentPurple) with
             {
+                CornerFlags = ImDrawFlags.RoundCornersRight,
                 OverlayTarget = drawContext.OverlayTarget,
             });
         if (!child)

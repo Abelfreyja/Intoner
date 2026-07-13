@@ -16,6 +16,7 @@ internal readonly record struct ObjectScrollListOptions
     public Vector4? Accent { get; init; }
     public Vector4? EdgeColor { get; init; }
     public float Rounding { get; init; }
+    public ImDrawFlags? CornerFlags { get; init; }
     public ObjectScrollListScrollbarLayout ScrollbarLayout { get; init; }
     public bool ShowEdgeCueArrow { get; init; }
     public IEditorOverlayTarget? OverlayTarget { get; init; }
@@ -125,6 +126,7 @@ internal static class ObjectScrollList
         Vector4 Accent,
         Vector4 EdgeColor,
         float Rounding,
+        ImDrawFlags CornerFlags,
         ObjectScrollListScrollbarLayout ScrollbarLayout,
         bool ShowEdgeCueArrow,
         IEditorOverlayTarget? OverlayTarget);
@@ -144,6 +146,7 @@ internal static class ObjectScrollList
             options.Accent ?? EditorColors.AccentPurple,
             options.EdgeColor ?? ResolveDefaultEdgeColor(),
             MathF.Max(0f, options.Rounding),
+            options.CornerFlags ?? ImDrawFlags.RoundCornersAll,
             options.ScrollbarLayout,
             options.ShowEdgeCueArrow,
             options.OverlayTarget);
@@ -262,26 +265,119 @@ internal static class ObjectScrollList
             return;
         }
 
-        Vector2 cueMin = top
-            ? new Vector2(min.X, min.Y)
-            : new Vector2(min.X, max.Y - edgeHeight);
-        Vector2 cueMax = top
-            ? new Vector2(max.X, min.Y + edgeHeight)
-            : new Vector2(max.X, max.Y);
-        uint solid = ImGui.GetColorU32(EditorColors.WithAlpha(options.EdgeColor, alpha));
-        uint clear = ImGui.GetColorU32(EditorColors.WithAlpha(options.EdgeColor, 0f));
-        drawList.AddRectFilledMultiColor(
-            cueMin,
-            cueMax,
-            top ? solid : clear,
-            top ? solid : clear,
-            top ? clear : solid,
-            top ? clear : solid);
+        float maxCornerRadius = MathF.Min(
+            options.Rounding,
+            MathF.Min((max.X - min.X) * 0.5f, (max.Y - min.Y) * 0.5f));
+        ImDrawFlags leftCorner = top ? ImDrawFlags.RoundCornersTopLeft : ImDrawFlags.RoundCornersBottomLeft;
+        ImDrawFlags rightCorner = top ? ImDrawFlags.RoundCornersTopRight : ImDrawFlags.RoundCornersBottomRight;
+        float leftCornerRadius = (options.CornerFlags & leftCorner) != ImDrawFlags.None ? maxCornerRadius : 0f;
+        float rightCornerRadius = (options.CornerFlags & rightCorner) != ImDrawFlags.None ? maxCornerRadius : 0f;
+        DrawRoundedEdgeCueGradient(
+            drawList,
+            min,
+            max,
+            edgeHeight,
+            alpha,
+            top,
+            options.EdgeColor,
+            leftCornerRadius,
+            rightCornerRadius);
 
         if (options.ShowEdgeCueArrow)
         {
             DrawEdgeCueArrow(drawList, min, max, alpha, top);
         }
+    }
+
+    private static void DrawRoundedEdgeCueGradient(
+        ImDrawListPtr drawList,
+        Vector2 min,
+        Vector2 max,
+        float edgeHeight,
+        float alpha,
+        bool top,
+        Vector4 edgeColor,
+        float leftCornerRadius,
+        float rightCornerRadius)
+    {
+        float capHeight = MathF.Min(MathF.Max(leftCornerRadius, rightCornerRadius), edgeHeight);
+        if (capHeight > 0f)
+        {
+            DrawRoundedEdgeCueCap(
+                drawList,
+                min,
+                max,
+                edgeHeight,
+                alpha,
+                top,
+                edgeColor,
+                leftCornerRadius,
+                rightCornerRadius,
+                capHeight);
+        }
+
+        if (capHeight >= edgeHeight)
+        {
+            return;
+        }
+
+        float capAlpha = alpha * (1f - (capHeight / edgeHeight));
+        uint capColor = ImGui.GetColorU32(EditorColors.WithAlpha(edgeColor, capAlpha));
+        uint clear = ImGui.GetColorU32(EditorColors.WithAlpha(edgeColor, 0f));
+        Vector2 gradientMin = top
+            ? new Vector2(min.X, min.Y + capHeight)
+            : new Vector2(min.X, max.Y - edgeHeight);
+        Vector2 gradientMax = top
+            ? new Vector2(max.X, min.Y + edgeHeight)
+            : new Vector2(max.X, max.Y - capHeight);
+        drawList.AddRectFilledMultiColor(
+            gradientMin,
+            gradientMax,
+            top ? capColor : clear,
+            top ? capColor : clear,
+            top ? clear : capColor,
+            top ? clear : capColor);
+    }
+
+    private static void DrawRoundedEdgeCueCap(
+        ImDrawListPtr drawList,
+        Vector2 min,
+        Vector2 max,
+        float edgeHeight,
+        float alpha,
+        bool top,
+        Vector4 edgeColor,
+        float leftCornerRadius,
+        float rightCornerRadius,
+        float capHeight)
+    {
+        float capMinY = top ? min.Y : max.Y - capHeight;
+        int segmentCount = Math.Max(1, (int)MathF.Ceiling(capHeight));
+        for (var segmentIndex = 0; segmentIndex < segmentCount; ++segmentIndex)
+        {
+            float segmentTop = capMinY + ((capHeight * segmentIndex) / segmentCount);
+            float segmentBottom = capMinY + ((capHeight * (segmentIndex + 1)) / segmentCount);
+            float topDistance = top ? segmentTop - min.Y : max.Y - segmentTop;
+            float bottomDistance = top ? segmentBottom - min.Y : max.Y - segmentBottom;
+            float leftTopInset = ResolveRoundedCornerInset(leftCornerRadius, topDistance);
+            float rightTopInset = ResolveRoundedCornerInset(rightCornerRadius, topDistance);
+            float leftBottomInset = ResolveRoundedCornerInset(leftCornerRadius, bottomDistance);
+            float rightBottomInset = ResolveRoundedCornerInset(rightCornerRadius, bottomDistance);
+            float segmentAlpha = alpha * (1f - (((topDistance + bottomDistance) * 0.5f) / edgeHeight));
+            uint color = ImGui.GetColorU32(EditorColors.WithAlpha(edgeColor, segmentAlpha));
+            drawList.AddQuadFilled(
+                new Vector2(min.X + leftTopInset, segmentTop),
+                new Vector2(max.X - rightTopInset, segmentTop),
+                new Vector2(max.X - rightBottomInset, segmentBottom),
+                new Vector2(min.X + leftBottomInset, segmentBottom),
+                color);
+        }
+    }
+
+    private static float ResolveRoundedCornerInset(float radius, float edgeDistance)
+    {
+        float distanceToCenter = radius - Math.Clamp(edgeDistance, 0f, radius);
+        return radius - MathF.Sqrt(MathF.Max(0f, (radius * radius) - (distanceToCenter * distanceToCenter)));
     }
 
     private static void DrawEdgeCueArrow(ImDrawListPtr drawList, Vector2 min, Vector2 max, float alpha, bool top)
