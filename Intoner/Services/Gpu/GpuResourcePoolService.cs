@@ -142,7 +142,7 @@ public sealed class GpuResourcePoolService : IDisposable
 
     public static GpuResourcePoolService Shared { get; } = new();
 
-    private readonly object _sync = new();
+    private readonly Lock _sync = new();
     private readonly Dictionary<StructuredBufferPoolKey, Stack<PooledStructuredBuffer>> _structuredBuffers = new();
     private readonly Dictionary<Texture2DPoolKey, Stack<PooledTexture2D>> _textures = new();
     private readonly Dictionary<ReadbackRingKey, ReadbackBufferRing> _readbackRings = new();

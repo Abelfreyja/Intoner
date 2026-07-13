@@ -46,7 +46,7 @@ namespace Intoner.Utils
 
         public static Dictionary<string, object> GetDiagnosticInfo(bool isWine)
         {
-            return new Dictionary<string, object>
+            return new Dictionary<string, object>(StringComparer.Ordinal)
             {
                 ["effectiveMinAddress"] = $"0x{GetMinAppAddr(isWine):X}",
                 ["effectiveMaxAddress"] = $"0x{GetMaxAppAddr(isWine):X}",

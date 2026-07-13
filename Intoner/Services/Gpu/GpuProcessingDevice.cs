@@ -12,7 +12,7 @@ internal sealed partial class GpuProcessingDevice : IDisposable
 
     private readonly ILogger _logger;
     private readonly IUiBuilder _uiBuilder;
-    private readonly object _sync = new();
+    private readonly Lock _sync = new();
 
     private nint _device;
     private nint _deviceContext;

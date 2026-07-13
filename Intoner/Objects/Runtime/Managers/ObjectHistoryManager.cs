@@ -307,11 +307,13 @@ internal interface IObjectHistoryManager
     /// <param name="action">the completed history action to store</param>
     void RecordCompleted(IObjectHistoryAction action);
 
-    /// <summary> undoes the most recent history action when one exists </summary>
-    void Undo();
+    /// <summary> tries to undo the most recent history action </summary>
+    /// <returns>true when one history action was undone</returns>
+    bool Undo();
 
-    /// <summary> redoes the most recent undone history action when one exists </summary>
-    void Redo();
+    /// <summary> tries to redo the most recent undone history action </summary>
+    /// <returns>true when one history action was redone</returns>
+    bool Redo();
 
     /// <summary> jumps to a specific reachable history state </summary>
     /// <param name="stateIndex">the target state index in the ordered timeline</param>
@@ -402,12 +404,12 @@ internal sealed class ObjectHistoryManager : IObjectHistoryManager, IDisposable
         StoreCompletedAction(action, raiseAppliedEvent: true);
     }
 
-    public void Undo()
+    public bool Undo()
     {
         EnsureHistoryMutationAllowed("cannot undo while object history is changing");
         if (_currentStateIndex == 0)
         {
-            return;
+            return false;
         }
 
         var action = _historySteps[_currentStateIndex].Action!;
@@ -416,11 +418,12 @@ internal sealed class ObjectHistoryManager : IObjectHistoryManager, IDisposable
         {
             if (!TryRunHistoryAction(action, apply: false, "undo"))
             {
-                return;
+                return false;
             }
 
             _currentStateIndex--;
             ActionReverted?.Invoke(action);
+            return true;
         }
         finally
         {
@@ -428,12 +431,12 @@ internal sealed class ObjectHistoryManager : IObjectHistoryManager, IDisposable
         }
     }
 
-    public void Redo()
+    public bool Redo()
     {
         EnsureHistoryMutationAllowed("cannot redo while object history is changing");
         if (_currentStateIndex + 1 >= _historySteps.Count)
         {
-            return;
+            return false;
         }
 
         var action = _historySteps[_currentStateIndex + 1].Action!;
@@ -442,11 +445,12 @@ internal sealed class ObjectHistoryManager : IObjectHistoryManager, IDisposable
         {
             if (!TryRunHistoryAction(action, apply: true, "redo"))
             {
-                return;
+                return false;
             }
 
             _currentStateIndex++;
             ActionApplied?.Invoke(action);
+            return true;
         }
         finally
         {
@@ -464,9 +468,7 @@ internal sealed class ObjectHistoryManager : IObjectHistoryManager, IDisposable
 
         while (_currentStateIndex > stateIndex)
         {
-            var beforeStateIndex = _currentStateIndex;
-            Undo();
-            if (_currentStateIndex >= beforeStateIndex)
+            if (!Undo())
             {
                 return false;
             }
@@ -474,9 +476,7 @@ internal sealed class ObjectHistoryManager : IObjectHistoryManager, IDisposable
 
         while (_currentStateIndex < stateIndex)
         {
-            var beforeStateIndex = _currentStateIndex;
-            Redo();
-            if (_currentStateIndex <= beforeStateIndex)
+            if (!Redo())
             {
                 return false;
             }
@@ -637,4 +637,3 @@ internal sealed class ObjectHistoryManager : IObjectHistoryManager, IDisposable
         }
     }
 }
-

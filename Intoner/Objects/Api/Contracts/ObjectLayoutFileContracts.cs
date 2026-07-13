@@ -51,4 +51,3 @@ internal sealed record ObjectLayoutAutosaveObject
     public required bool Locked { get; init; }
     public required WorldObject Object { get; init; }
 }
-

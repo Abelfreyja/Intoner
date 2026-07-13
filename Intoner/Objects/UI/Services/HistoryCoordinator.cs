@@ -171,6 +171,7 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
     private Func<IReadOnlyList<Guid>>? _captureSelectionIds;
     private Action<IReadOnlyList<Guid>?>? _applySelectionIds;
     private ObjectCreationContext? _currentContext;
+    private long _historyPersistentSceneRevision;
 
     public HistoryCoordinator(
         ILogger<HistoryCoordinator> logger,
@@ -182,6 +183,7 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
         _historyManager = historyManager;
         _mutationService = mutationService;
         _sceneView = sceneView;
+        _historyPersistentSceneRevision = _sceneView.GetPersistentSceneRevision();
 
         _historyManager.ActionApplied += HandleHistoryActionApplied;
         _historyManager.ActionReverted += HandleHistoryActionReverted;
@@ -214,6 +216,7 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
 
         commitPendingChanges();
         _historyManager.ClearHistory();
+        TrackPersistentSceneRevision();
         _currentContext = currentContext;
         return true;
     }
@@ -240,11 +243,13 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
 
         if (nextSnapshot is not null)
         {
+            ResetHistoryForUntrackedPersistentChange();
             if (!_mutationService.TryUpdate(nextSnapshot, out var appliedSnapshot))
             {
                 return;
             }
 
+            TrackPersistentSceneRevision();
             if (!_pendingInspectorEdits.TryGetValue(editId, out var pendingEdit))
             {
                 _pendingInspectorEdits.Add(
@@ -261,32 +266,17 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
     }
 
     public bool TryUndo()
-    {
-        if (_historyManager.UndoActionKind is null)
-        {
-            return false;
-        }
-
-        _historyManager.Undo();
-        return true;
-    }
+        => TryReplayHistory(_historyManager.Undo);
 
     public bool TryRedo()
-    {
-        if (_historyManager.RedoActionKind is null)
-        {
-            return false;
-        }
-
-        _historyManager.Redo();
-        return true;
-    }
+        => TryReplayHistory(_historyManager.Redo);
 
     public bool TryJumpToState(int stateIndex)
-        => _historyManager.TryJumpToState(stateIndex);
+        => TryReplayHistory(() => _historyManager.TryJumpToState(stateIndex));
 
     public bool TryCreateObject(string title, ObjectKind kind, ObjectPlacementOverrides? overrides)
     {
+        ResetHistoryForUntrackedPersistentChange();
         var selectionBefore = CaptureCurrentSelectionIds();
         var createdId = _mutationService.CreateObjectAtPlayer(kind, out var createdSnapshot, overrides);
         if (!createdId.HasValue)
@@ -299,6 +289,7 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
 
     public bool TryImportObjectSnapshot(ObjectSnapshot snapshot)
     {
+        ResetHistoryForUntrackedPersistentChange();
         var selectionBefore = CaptureCurrentSelectionIds();
         var importedId = _mutationService.ImportObjectSnapshot(snapshot, out var importedSnapshot);
         if (!importedId.HasValue)
@@ -311,6 +302,7 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
 
     public bool TryMoveObjectToPlayer(Guid objectId)
     {
+        ResetHistoryForUntrackedPersistentChange();
         if (!_sceneView.TryGetSceneObjectSnapshot(objectId, out var beforeSnapshot)
             && !_sceneView.TryGetPersistedObjectSnapshot(objectId, out beforeSnapshot))
         {
@@ -328,6 +320,7 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
 
     public bool TryApplySelectedSnapshotUpdate(ObjectHistoryKind kind, string title, IReadOnlyList<ObjectSnapshot> selectedSnapshots, Func<ObjectSnapshot, ObjectSnapshot> updateFactory)
     {
+        ResetHistoryForUntrackedPersistentChange();
         if (selectedSnapshots.Count == 0)
         {
             return false;
@@ -359,6 +352,7 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
 
     public bool TryDuplicateObjects(IReadOnlyList<ObjectSnapshot> selectedSnapshots)
     {
+        ResetHistoryForUntrackedPersistentChange();
         if (selectedSnapshots.Count == 0)
         {
             return false;
@@ -388,6 +382,7 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
 
     public bool TryRemoveObjects(IReadOnlyList<ObjectSnapshot> selectedSnapshots)
     {
+        ResetHistoryForUntrackedPersistentChange();
         if (selectedSnapshots.Count == 0)
         {
             return false;
@@ -414,6 +409,7 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
 
     public bool TryClearPlacedObjects()
     {
+        ResetHistoryForUntrackedPersistentChange();
         var persistedSnapshots = _sceneView.GetPlacedObjectSnapshots();
         if (persistedSnapshots.Count == 0)
         {
@@ -465,6 +461,7 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
                 new ObjectSnapshotHistoryAction(_mutationService, kind, title, changes),
                 selectionAfterApply,
                 selectionAfterRevert));
+        TrackPersistentSceneRevision();
         return true;
     }
 
@@ -525,6 +522,11 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
             return;
         }
 
+        if (ResetHistoryForUntrackedPersistentChange())
+        {
+            return;
+        }
+
         _pendingInspectorEdits.Remove(editId);
         _ = TryRecordCompletedAction(
             edit.Kind,
@@ -534,5 +536,41 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
             edit.SelectionIds,
             edit.SelectionIds);
     }
-}
 
+    private bool TryReplayHistory(Func<bool> replay)
+    {
+        if (ResetHistoryForUntrackedPersistentChange())
+        {
+            return false;
+        }
+
+        bool replayed = replay();
+        TrackPersistentSceneRevision();
+        return replayed;
+    }
+
+    private bool ResetHistoryForUntrackedPersistentChange()
+    {
+        long persistentSceneRevision = _sceneView.GetPersistentSceneRevision();
+        if (_historyPersistentSceneRevision == persistentSceneRevision)
+        {
+            return false;
+        }
+
+        bool historyWasActive = _historyManager.UndoActionKind is not null
+            || _historyManager.RedoActionKind is not null
+            || _pendingInspectorEdits.Count > 0;
+        if (historyWasActive)
+        {
+            _pendingInspectorEdits.Clear();
+            _historyManager.ClearHistory();
+            _logger.LogDebug("cleared object history after an untracked persistent scene change");
+        }
+
+        _historyPersistentSceneRevision = persistentSceneRevision;
+        return historyWasActive;
+    }
+
+    private void TrackPersistentSceneRevision()
+        => _historyPersistentSceneRevision = _sceneView.GetPersistentSceneRevision();
+}

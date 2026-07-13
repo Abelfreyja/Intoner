@@ -840,12 +840,11 @@ internal sealed partial class EditorWindow : IntonerWindow, IGizmoHost, IDisposa
 
         using (ImRaii.Disabled(!selectedExists || !selectedActive))
         {
-            if (DrawIconButton("objectMoveToPlayer", FontAwesomeIcon.Running, "Move To Player"))
+            if (DrawIconButton("objectMoveToPlayer", FontAwesomeIcon.Running, "Move To Player")
+                && selectedId is { } selectedObjectId
+                && selectedActive)
             {
-                if (selectedId.HasValue && selectedActive)
-                {
-                    return TryMoveObjectToPlayerWithHistory(selectedId.Value);
-                }
+                return TryMoveObjectToPlayerWithHistory(selectedObjectId);
             }
         }
 

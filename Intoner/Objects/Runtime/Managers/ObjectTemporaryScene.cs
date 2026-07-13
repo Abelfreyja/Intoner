@@ -157,14 +157,12 @@ internal sealed class ObjectTemporaryScene : IObjectTemporaryScene
     public ObjectTemporaryMutationResult TryPatchTemporaryObject(string sourceKey, Guid sessionId, string name, Guid objectId, ObjectSnapshotPatch patch, long revision = 0)
     {
         string sanitizedSourceKey = ObjectTemporarySourceUtility.NormalizeSourceKey(sourceKey);
-        if (_layoutManager.TryGetTemporaryObjectSnapshot(sanitizedSourceKey, objectId, out ObjectSnapshot existingSnapshot))
+        if (_layoutManager.TryGetTemporaryObjectSnapshot(sanitizedSourceKey, objectId, out ObjectSnapshot existingSnapshot)
+            && !TrySanitizeSnapshot(ObjectSnapshotUtility.ApplyPatch(existingSnapshot, patch), out _))
         {
-            if (!TrySanitizeSnapshot(ObjectSnapshotUtility.ApplyPatch(existingSnapshot, patch), out _))
-            {
-                return new ObjectTemporaryMutationResult(
-                    ObjectTemporaryMutationStatus.InvalidObject,
-                    _layoutManager.GetTemporarySourceRevision(sanitizedSourceKey));
-            }
+            return new ObjectTemporaryMutationResult(
+                ObjectTemporaryMutationStatus.InvalidObject,
+                _layoutManager.GetTemporarySourceRevision(sanitizedSourceKey));
         }
 
         ObjectTemporaryMutationResult result = _layoutManager.TryPatchTemporaryObject(

@@ -1661,7 +1661,7 @@ internal sealed partial class EditorWindow
         var stainId = furnitureColor.StainId;
         var useCustomColor = furnitureColor.UseCustomColor;
         var customColor = furnitureColor.CustomColor;
-        if (DrawFurnitureColorEditor(
+        _ = DrawFurnitureColorEditor(
             "Color",
             "inspector",
             ref useCustomColor,
@@ -1686,9 +1686,7 @@ internal sealed partial class EditorWindow
                             },
                         },
                     },
-                    recordImmediately)))
-        {
-        }
+                    recordImmediately));
     }
 
     private void DrawLightInspector(ObjectSnapshot snapshot)

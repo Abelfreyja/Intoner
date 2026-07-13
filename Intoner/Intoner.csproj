@@ -15,6 +15,7 @@
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <CopyLocalLockfileAssemblies>true</CopyLocalLockfileAssemblies>
     <ImplicitUsings>enable</ImplicitUsings>
+    <NoWarn>$(NoWarn);MA0048</NoWarn>
   </PropertyGroup>
   <Target Name="SetIntonerSourceRevisionId" BeforeTargets="InitializeSourceControlInformationFromSourceControlManager;InitializeSourceControlInformation" Condition="'$(SourceRevisionId)' == ''">
     <Exec Condition="'$(Configuration)' == 'Debug' and Exists('$(MSBuildProjectDirectory)/../.git')" Command="git describe --tags --dirty --always --long" WorkingDirectory="$(MSBuildProjectDirectory)/.." ConsoleToMsBuild="true" IgnoreExitCode="true" StandardOutputImportance="Low" StandardErrorImportance="Low">

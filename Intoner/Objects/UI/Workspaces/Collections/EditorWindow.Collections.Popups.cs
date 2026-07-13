@@ -214,12 +214,11 @@ internal sealed partial class EditorWindow
         bool canCreate = !string.IsNullOrWhiteSpace(ObjectStringUtility.TrimOrEmpty(_objectCollectionCreateInput));
         using (ImRaii.Disabled(!canCreate))
         {
-            if ((submitted || ImGui.Button("Create Collection")) && canCreate)
+            if ((submitted || ImGui.Button("Create Collection"))
+                && canCreate
+                && CreateObjectCollection(_objectCollectionCreateInput))
             {
-                if (CreateObjectCollection(_objectCollectionCreateInput))
-                {
-                    ImGui.CloseCurrentPopup();
-                }
+                ImGui.CloseCurrentPopup();
             }
         }
 
