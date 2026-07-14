@@ -209,6 +209,42 @@ internal static class SettingEntries
                 configuration => configuration.Ui.ShowSplashScreenOnStartup = value),
             ResolveSplashScreenStartupStatus);
 
+    public static ISettingEntry CreateHideWithGameUi()
+        => new ToggleSettingEntry(
+            new SettingDefinition(
+                "hideWithGameUi",
+                "Hide Intoner When UI Is Hidden",
+                "Hide the Intoner window when the game UI is hidden.",
+                "ui interface window visibility hide hidden game hud"),
+            static context => context.ConfigurationService.Current.Ui.HideWithGameUi,
+            static (context, value) => context.ConfigurationService.Update(
+                configuration => configuration.Ui.HideWithGameUi = value),
+            static context => ResolveWindowVisibilityStatus(context.ConfigurationService.Current.Ui.HideWithGameUi));
+
+    public static ISettingEntry CreateHideInCutscenes()
+        => new ToggleSettingEntry(
+            new SettingDefinition(
+                "hideInCutscenes",
+                "Hide Intoner in Cutscenes",
+                "Hide the Intoner window while you are watching a cutscene.",
+                "ui interface window visibility hide hidden cutscene"),
+            static context => context.ConfigurationService.Current.Ui.HideInCutscenes,
+            static (context, value) => context.ConfigurationService.Update(
+                configuration => configuration.Ui.HideInCutscenes = value),
+            static context => ResolveWindowVisibilityStatus(context.ConfigurationService.Current.Ui.HideInCutscenes));
+
+    public static ISettingEntry CreateHideInGpose()
+        => new ToggleSettingEntry(
+            new SettingDefinition(
+                "hideInGpose",
+                "Hide Intoner in GPose",
+                "Hide the Intoner window while you are in GPose.",
+                "ui interface window visibility hide hidden gpose group pose"),
+            static context => context.ConfigurationService.Current.Ui.HideInGpose,
+            static (context, value) => context.ConfigurationService.Update(
+                configuration => configuration.Ui.HideInGpose = value),
+            static context => ResolveWindowVisibilityStatus(context.ConfigurationService.Current.Ui.HideInGpose));
+
     public static ISettingEntry CreateDalamudLogLevel()
         => new ChoiceSettingEntry<LogLevel>(
             new SettingDefinition(
@@ -301,6 +337,11 @@ internal static class SettingEntries
         => context.ConfigurationService.Current.Ui.ShowSplashScreenOnStartup
             ? new SettingStatus("Startup", EditorColors.AccentGreen)
             : new SettingStatus("Manual", EditorColors.TextDisabled);
+
+    private static SettingStatus ResolveWindowVisibilityStatus(bool hidesWithCondition)
+        => hidesWithCondition
+            ? new SettingStatus("Hides", EditorColors.AccentGreen)
+            : new SettingStatus("Stays Visible", EditorColors.TextDisabled);
 
     private static SettingStatus ResolveDrawOverGameUiStatus(DrawContext context)
         => context.ConfigurationService.Current.Rendering.DrawOverGameUi

@@ -23,6 +23,7 @@ using Intoner.Objects.UI.Services.EdgeGlow;
 using Intoner.Objects.UI.TitleBar;
 using Intoner.Services;
 using Intoner.UI;
+using Intoner.UI.Windows;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
@@ -215,6 +216,7 @@ internal static class ObjectServiceCollectionExtensions
 
     private static IServiceCollection AddObjectEditorServices(this IServiceCollection services)
     {
+        services.AddScoped<WindowVisibilityService>();
         services.AddScoped<IGameInputSuppressionService, GameInputSuppressionService>();
         services.AddScoped<HousingContextIndicatorProvider>();
         services.AddScoped<HousingFurnitureLimitIndicatorProvider>();

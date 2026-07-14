@@ -12,6 +12,10 @@ internal interface IObjectConfigurationService
     /// <summary> gets the current config </summary>
     ObjectConfiguration Current { get; }
 
+    /// <summary> raised after an update commits the current config </summary>
+    /// <remarks> invoked outside the service lock on the update caller's thread </remarks>
+    event Action? ConfigurationChanged;
+
     /// <summary> saves the current config </summary>
     void Save();
 
@@ -57,6 +61,8 @@ internal sealed class ObjectConfigurationService : IObjectConfigurationService
         }
     }
 
+    public event Action? ConfigurationChanged;
+
     public void Save()
     {
         lock (_lock)
@@ -78,6 +84,8 @@ internal sealed class ObjectConfigurationService : IObjectConfigurationService
             ApplyRuntimeSettings(_current);
             TryWriteConfiguration(_current);
         }
+
+        ConfigurationChanged?.Invoke();
     }
 
     private ObjectConfiguration LoadOrCreate()

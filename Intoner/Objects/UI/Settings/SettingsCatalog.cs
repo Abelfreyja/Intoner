@@ -90,6 +90,18 @@ internal sealed class SettingsCatalog
                         SettingEntries.CreateSplashScreenOnStartup(),
                     ]),
                 new(
+                    SettingsTab.Ui,
+                    "windowVisibility",
+                    FontAwesomeIcon.Eye,
+                    "Window Visibility",
+                    "Choose when Intoner hides its window automatically.",
+                    "ui interface window visibility hide hidden game hud cutscene gpose group pose",
+                    [
+                        SettingEntries.CreateHideWithGameUi(),
+                        SettingEntries.CreateHideInCutscenes(),
+                        SettingEntries.CreateHideInGpose(),
+                    ]),
+                new(
                     SettingsTab.Drawing,
                     "sceneDrawing",
                     FontAwesomeIcon.ProjectDiagram,

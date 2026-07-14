@@ -14,6 +14,7 @@ internal sealed class IntonerWindowService : IDisposable
     private readonly FileDialogManager _fileDialogManager;
     private readonly IntonerThemeStyle _themeStyle;
     private readonly IntonerUiPerformanceService _uiPerformance;
+    private readonly WindowVisibilityService _visibilityService;
     private readonly WindowSystem _windowSystem = new("Intoner");
     private bool _started;
     private bool _disposed;
@@ -23,13 +24,15 @@ internal sealed class IntonerWindowService : IDisposable
         ILogger<IntonerWindowService> logger,
         FileDialogManager fileDialogManager,
         IntonerThemeStyle themeStyle,
-        IntonerUiPerformanceService uiPerformance)
+        IntonerUiPerformanceService uiPerformance,
+        WindowVisibilityService visibilityService)
     {
         _uiBuilder = uiBuilder;
         _logger = logger;
         _fileDialogManager = fileDialogManager;
         _themeStyle = themeStyle;
         _uiPerformance = uiPerformance;
+        _visibilityService = visibilityService;
     }
 
     public void AddWindow(Window window)
@@ -50,8 +53,9 @@ internal sealed class IntonerWindowService : IDisposable
             return;
         }
 
-        _uiBuilder.Draw += Draw;
+        _visibilityService.Start();
         _started = true;
+        _uiBuilder.Draw += Draw;
         _logger.LogTrace("Intoner window service started");
     }
 
@@ -63,6 +67,7 @@ internal sealed class IntonerWindowService : IDisposable
         }
 
         _uiBuilder.Draw -= Draw;
+        _visibilityService.Stop();
         _started = false;
         _logger.LogTrace("Intoner window service stopped");
     }

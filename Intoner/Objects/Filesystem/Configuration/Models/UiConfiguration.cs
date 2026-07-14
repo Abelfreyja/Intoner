@@ -23,12 +23,18 @@ internal sealed class UiConfiguration
     }
 
     public required bool ShowSplashScreenOnStartup { get; set; }
+    public bool HideWithGameUi { get; set; } = true;
+    public bool HideInCutscenes { get; set; } = true;
+    public bool HideInGpose { get; set; } = false;
     public SplitRatios WorkspaceSplits { get; set; } = SplitRatios.Default;
 
     public static UiConfiguration CreateDefault()
         => new()
         {
             ShowSplashScreenOnStartup = true,
+            HideWithGameUi = true,
+            HideInCutscenes = true,
+            HideInGpose = false,
             WorkspaceSplits = SplitRatios.Default,
         };
 
@@ -36,6 +42,9 @@ internal sealed class UiConfiguration
         => new()
         {
             ShowSplashScreenOnStartup = ShowSplashScreenOnStartup,
+            HideWithGameUi = HideWithGameUi,
+            HideInCutscenes = HideInCutscenes,
+            HideInGpose = HideInGpose,
             WorkspaceSplits = WorkspaceSplits,
         };
 }
