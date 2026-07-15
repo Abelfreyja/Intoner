@@ -15,6 +15,7 @@ namespace Intoner.Objects.UI;
 
 internal sealed partial class EditorWindow
 {
+    private const int LayoutNameMaxLength = 128;
     private const string LayoutImportPopupId = "##layoutImportPopup";
     private const string LayoutExportPopupId = "##layoutExportPopup";
 
@@ -130,7 +131,7 @@ internal sealed partial class EditorWindow
             detail += " | default";
         }
 
-        if (DrawObjectListEntryCard(
+        if (_listCard.Draw(
             $"layoutEntry:{layout.Id}",
             layout.Name,
             detail,
@@ -138,9 +139,43 @@ internal sealed partial class EditorWindow
             isDefault ? $"default layout | {objectCountLabel}" : objectCountLabel,
             isSelected,
             EditorColors.AccentPurple,
-            itemHeight))
+            itemHeight,
+            () => DrawLayoutListEntryContextMenu(layout, defaultLayoutId)))
         {
             _selectedLayoutId = isSelected ? null : layout.Id;
+        }
+    }
+
+    private void DrawLayoutListEntryContextMenu(ObjectLayoutSnapshot layout, Guid? defaultLayoutId)
+    {
+        if (EditorContextMenu.DrawItem(FontAwesomeIcon.Edit, "Edit Name"))
+        {
+            OpenRenameLayoutDialog(layout);
+        }
+
+        bool isDefault = defaultLayoutId == layout.Id;
+        if (EditorContextMenu.DrawItem(
+                isDefault ? FontAwesomeIcon.Ban : FontAwesomeIcon.FolderOpen,
+                isDefault ? "Clear Default Layout" : "Set As Default Layout",
+                enabled: isDefault || !defaultLayoutId.HasValue))
+        {
+            SelectLayoutFromEditor(isDefault ? null : layout.Id);
+        }
+
+        using (var exportMenu = EditorContextMenu.BeginSubMenu(
+                   $"layoutExport:{layout.Id}",
+                   FontAwesomeIcon.Save,
+                   "Export Layout"))
+        {
+            if (exportMenu && DrawLayoutFileKindChoices() is { } fileKind)
+            {
+                BeginLayoutExportDialog(layout, fileKind);
+            }
+        }
+
+        if (EditorContextMenu.DrawItem(FontAwesomeIcon.Trash, "Delete Layout"))
+        {
+            OpenDeleteLayoutDialog(layout);
         }
     }
 
@@ -172,7 +207,7 @@ internal sealed partial class EditorWindow
                     {
                         DrawCompactSettingsLabelCell("Layout Name");
                         ImGui.SetNextItemWidth(-1f);
-                        ImGui.InputText("##layoutName", ref _layoutName, 128);
+                        ImGui.InputText("##layoutName", ref _layoutName, LayoutNameMaxLength);
 
                         DrawStateRow("Placed Objects", objectCount.ToString());
                         DrawStateRow("Without Layout", unassignedCount.ToString());
@@ -247,12 +282,13 @@ internal sealed partial class EditorWindow
             FontAwesomeIcon.Ban,
             FontAwesomeIcon.FolderOpen);
 
-        if (DrawAccentIconButton("layoutImportJson", FontAwesomeIcon.FileImport, "Import Layout From Json", EditorColors.AccentBlue, actionButtonEdge))
-        {
-            OpenPopupBelowLastItem(LayoutImportPopupId);
-        }
-
-        if (DrawLayoutFileKindPopup(LayoutImportPopupId) is { } importFileKind)
+        bool importMenuRequested = DrawAccentIconButton(
+            "layoutImportJson",
+            FontAwesomeIcon.FileImport,
+            "Import Layout From Json",
+            EditorColors.AccentBlue,
+            actionButtonEdge);
+        if (DrawLayoutFileKindDropdown(LayoutImportPopupId, importMenuRequested) is { } importFileKind)
         {
             BeginLayoutImportDialog(importFileKind);
         }
@@ -260,14 +296,15 @@ internal sealed partial class EditorWindow
         ImGui.SameLine();
         using (ImRaii.Disabled(!canUseSelected))
         {
-            if (DrawAccentIconButton("layoutExportJson", FontAwesomeIcon.Save, "Export Selected Layout To Json", EditorColors.AccentBlue, actionButtonEdge) && selectedLayout is not null)
-            {
-                OpenPopupBelowLastItem(LayoutExportPopupId);
-            }
-
+            bool exportMenuRequested = DrawAccentIconButton(
+                "layoutExportJson",
+                FontAwesomeIcon.Save,
+                "Export Selected Layout To Json",
+                EditorColors.AccentBlue,
+                actionButtonEdge);
             ObjectLayoutSnapshot? exportLayout = selectedLayout;
             if (exportLayout is not null
-                && DrawLayoutFileKindPopup(LayoutExportPopupId) is { } exportFileKind)
+                && DrawLayoutFileKindDropdown(LayoutExportPopupId, exportMenuRequested) is { } exportFileKind)
             {
                 BeginLayoutExportDialog(exportLayout, exportFileKind);
             }
@@ -277,60 +314,117 @@ internal sealed partial class EditorWindow
         using (ImRaii.Disabled(!canUseSelected))
         {
             if (DrawAccentIconButton("layoutDeleteSelected", FontAwesomeIcon.Trash, "Delete Selected Layout", EditorColors.DimRed, actionButtonEdge)
-                && selectedLayout is not null
-                && _objectManager.TryDeleteLayout(selectedLayout.Id))
+                && selectedLayout is not null)
             {
-                _selectedLayoutId = null;
-                HandleSelectionChanged(_editorSelection.TryClear());
+                OpenDeleteLayoutDialog(selectedLayout);
             }
         }
 
         ImGui.SameLine();
         if (canUnload)
         {
-            if (DrawAccentIconButton("layoutUnload", FontAwesomeIcon.Ban, "Clear Default Layout", EditorColors.AccentYellow, actionButtonEdge)
-                && _objectManager.TrySelectLayout(null))
+            if (DrawAccentIconButton("layoutUnload", FontAwesomeIcon.Ban, "Clear Default Layout", EditorColors.AccentYellow, actionButtonEdge))
             {
-                HandleSelectionChanged(_editorSelection.TryClear());
+                SelectLayoutFromEditor(null);
             }
         }
         else
         {
             using var disabled = ImRaii.Disabled(!canLoadSelected);
             if (DrawAccentIconButton("layoutLoadSelected", FontAwesomeIcon.FolderOpen, "Set Selected As Default Layout", EditorColors.AccentGreen, actionButtonEdge)
-                && selectedLayout is not null
-                && _objectManager.TrySelectLayout(selectedLayout.Id))
+                && selectedLayout is not null)
             {
-                HandleSelectionChanged(_editorSelection.TryClear());
+                SelectLayoutFromEditor(selectedLayout.Id);
             }
         }
     }
 
-    private static ObjectLayoutFileKind? DrawLayoutFileKindPopup(string popupId)
+    private void SelectLayoutFromEditor(Guid? layoutId)
     {
-        using var popup = ImRaii.Popup(popupId, ContextMenuPopupFlags);
+        if (!_objectManager.TrySelectLayout(layoutId))
+        {
+            return;
+        }
+
+        HandleSelectionChanged(_editorSelection.TryClear());
+    }
+
+    private void OpenRenameLayoutDialog(ObjectLayoutSnapshot layout)
+    {
+        OpenDialog(EditorDialog.Request.TextInput(
+            "layout-rename",
+            "Rename Layout",
+            "Rename Layout",
+            name => _layoutManager.TryRenameLayout(layout.Id, name)) with
+        {
+            Icon = FontAwesomeIcon.Edit,
+            InitialValue = layout.Name,
+            Placeholder = "layout name",
+            FailureMessage = "The layout could not be renamed.",
+            MaxLength = LayoutNameMaxLength,
+            Validate = static name => ObjectStringUtility.TrimOrEmpty(name).Length == 0
+                ? "Enter a layout name."
+                : null,
+        });
+    }
+
+    private void OpenDeleteLayoutDialog(ObjectLayoutSnapshot layout)
+    {
+        OpenDialog(EditorDialog.Request.TryConfirmation(
+            "layout-delete",
+            "Delete Layout",
+            "Delete Layout",
+            () => TryDeleteLayoutFromEditor(layout.Id)) with
+        {
+            Icon = FontAwesomeIcon.Trash,
+            ConfirmIcon = FontAwesomeIcon.Trash,
+            Accent = EditorColors.DimRed,
+            Detail = layout.Name,
+            Description = "This permanently deletes the saved layout. If it is active, its layout objects will be removed.",
+            FailureMessage = "The layout could not be deleted.",
+        });
+    }
+
+    private bool TryDeleteLayoutFromEditor(Guid layoutId)
+    {
+        if (!_objectManager.TryDeleteLayout(layoutId))
+        {
+            return false;
+        }
+
+        if (_selectedLayoutId == layoutId)
+        {
+            _selectedLayoutId = null;
+        }
+
+        HandleSelectionChanged(_editorSelection.TryClear());
+        return true;
+    }
+
+    private static ObjectLayoutFileKind? DrawLayoutFileKindDropdown(string popupId, bool open)
+    {
+        using EditorContextMenu.PopupScope popup = EditorContextMenu.BeginDropdownForLastItem(popupId, open);
         if (!popup)
         {
             return null;
         }
 
-        if (DrawContextMenuItem(FontAwesomeIcon.FolderOpen, "Object Layout (.json)"))
+        return DrawLayoutFileKindChoices();
+    }
+
+    private static ObjectLayoutFileKind? DrawLayoutFileKindChoices()
+    {
+        if (EditorContextMenu.DrawItem(FontAwesomeIcon.FolderOpen, "Object Layout (.json)"))
         {
             return ObjectLayoutFileKind.ObjectLayout;
         }
 
-        if (DrawContextMenuItem(FontAwesomeIcon.Home, "MakePlace Layout (.json)"))
+        if (EditorContextMenu.DrawItem(FontAwesomeIcon.Home, "MakePlace Layout (.json)"))
         {
             return ObjectLayoutFileKind.MakePlaceLayout;
         }
 
         return null;
-    }
-
-    private static void OpenPopupBelowLastItem(string popupId)
-    {
-        ImGui.OpenPopup(popupId);
-        ImGui.SetNextWindowPos(new Vector2(ImGui.GetItemRectMin().X, ImGui.GetItemRectMax().Y));
     }
 
     private void DrawLayoutFileStatus()

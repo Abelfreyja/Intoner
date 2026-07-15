@@ -1074,7 +1074,7 @@ internal sealed partial class EditorWindow
         var width = ImGui.GetContentRegionAvail().X;
         var accent = EditorColors.AccentPurple;
 
-        ListEntryCardInteraction interaction = DrawListEntryCardInteraction($"catalogEntry:{id}", selected, new Vector2(width, height));
+        EditorListCard.Interaction interaction = EditorListCard.DrawInteraction($"catalogEntry:{id}", selected, new Vector2(width, height));
         if (interaction.Clicked)
         {
             onSelect();
@@ -1090,7 +1090,7 @@ internal sealed partial class EditorWindow
         var itemIconSize = Scaled(36f);
         var itemIconSpacing = Scaled(9f);
 
-        DrawListEntryCardChrome(drawList, min, max, selected, interaction.Hovered, accent);
+        _listCard.DrawChrome(drawList, min, max, selected, interaction.Hovered, accent);
 
         var badgePaddingX = Scaled(7f);
         var badgePaddingY = Scaled(3f);
@@ -1165,7 +1165,7 @@ internal sealed partial class EditorWindow
             }
         }
 
-        var nameWidth = MathF.Max(ResolveMinimumCardTextWidth(), contentRight - contentMinX - titleIconSize.X - titleIconSpacing);
+        var nameWidth = MathF.Max(EditorListCard.MinimumTextWidth, contentRight - contentMinX - titleIconSize.X - titleIconSpacing);
         var nameText = ClipTextToWidth(title, nameWidth);
         var titlePosition = new Vector2(contentMinX, min.Y + padY);
         drawList.AddText(titlePosition, ImGui.GetColorU32(text), nameText);

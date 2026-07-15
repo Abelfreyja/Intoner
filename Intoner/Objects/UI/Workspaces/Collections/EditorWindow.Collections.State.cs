@@ -1,7 +1,7 @@
 using Dalamud.Interface;
-using Intoner.Objects.Interop.Ipc;
 using Intoner.Objects.Collections;
 using Intoner.Objects.Models;
+using Intoner.Objects.UI.Components;
 using Intoner.Objects.Utils;
 
 namespace Intoner.Objects.UI;
@@ -44,12 +44,29 @@ internal sealed partial class EditorWindow
     private void RecompileObjectCollection(ObjectCollectionSnapshot collection)
         => _objectCollectionManager.EnsureCollectionMaterialized(collection.Record.CollectionId, forceResolve: true);
 
-    private void DeleteSelectedObjectCollection()
+    private void OpenDeleteObjectCollectionDialog(ObjectCollectionSnapshot collection)
     {
-        if (_selectedObjectCollectionId.Length == 0
-         || !_objectCollectionManager.TryGetCollection(_selectedObjectCollectionId, out ObjectCollectionSnapshot collection))
+        string collectionId = collection.Record.CollectionId;
+        OpenDialog(EditorDialog.Request.TryConfirmation(
+            "collection-delete",
+            "Delete Collection",
+            "Delete Collection",
+            () => TryDeleteObjectCollection(collectionId)) with
         {
-            return;
+            Icon = FontAwesomeIcon.Trash,
+            ConfirmIcon = FontAwesomeIcon.Trash,
+            Accent = EditorColors.DimRed,
+            Detail = collection.Record.Name,
+            Description = "This permanently deletes the collection and unassigns it from placed objects. Installed Penumbra mods are NOT deleted.",
+            FailureMessage = "The collection could not be deleted.",
+        });
+    }
+
+    private bool TryDeleteObjectCollection(string collectionId)
+    {
+        if (!_objectCollectionManager.TryGetCollection(collectionId, out ObjectCollectionSnapshot collection))
+        {
+            return false;
         }
 
         IReadOnlyList<ObjectSnapshot> affectedSnapshots = _sceneView.GetPlacedObjectSnapshots()
@@ -58,14 +75,21 @@ internal sealed partial class EditorWindow
             .ToList();
         if (affectedSnapshots.Count > 0 && !_mutationService.TryUpdateMany(affectedSnapshots, out _))
         {
-            return;
+            return false;
         }
 
-        if (_objectCollectionManager.TryDeleteCollection(collection.Record.CollectionId))
+        if (!_objectCollectionManager.TryDeleteCollection(collection.Record.CollectionId))
+        {
+            return false;
+        }
+
+        if (string.Equals(_selectedObjectCollectionId, collection.Record.CollectionId, StringComparison.OrdinalIgnoreCase))
         {
             _selectedObjectCollectionId = string.Empty;
             LoadObjectCollectionNameDraft(null);
         }
+
+        return true;
     }
 
     private bool AddObjectCollectionEntry(ObjectCollectionSnapshot collection, ObjectAvailableMod mod)

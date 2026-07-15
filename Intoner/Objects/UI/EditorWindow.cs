@@ -35,14 +35,6 @@ namespace Intoner.Objects.UI;
 
 internal sealed partial class EditorWindow : IntonerWindow, IGizmoHost, IDisposable
 {
-    private const string FolderEditorPopupId = "##objectFolderEditorPopup";
-    private const string ObjectCollectionCreatePopupId = "##objectCollectionCreatePopup";
-    private enum FolderEditorMode
-    {
-        Create,
-        Rename,
-    }
-
     private sealed class BgObjectCreateState
     {
         public string ModelPath = string.Empty;
@@ -195,6 +187,7 @@ internal sealed partial class EditorWindow : IntonerWindow, IGizmoHost, IDisposa
     private readonly DrawManager                           _drawManager;
     private readonly Gizmo                                 _gizmo;
     private readonly EdgeGlowRenderer                      _edgeGlowRenderer;
+    private readonly EditorListCard                        _listCard;
     private readonly BackdropRenderer                      _windowBackdropRenderer;
     private readonly UiSharedService                       _uiSharedService;
     private readonly EditorTitleBarIndicatorService        _titleBarIndicatorService;
@@ -210,6 +203,7 @@ internal sealed partial class EditorWindow : IntonerWindow, IGizmoHost, IDisposa
     private readonly VfxCreateState               _vfxCreate = new();
     private readonly LightCreateState             _lightCreate = new();
     private readonly SelectionService             _editorSelection = new();
+    private readonly EditorDialog                 _dialog = new();
     private readonly Dictionary<string, float>    _catalogFilterScroll = new(StringComparer.Ordinal);
     private readonly Dictionary<string, float>    _catalogFilterScrollMax = new(StringComparer.Ordinal);
     private readonly Dictionary<string, float>    _pendingCatalogFilterScroll = new(StringComparer.Ordinal);
@@ -232,17 +226,12 @@ internal sealed partial class EditorWindow : IntonerWindow, IGizmoHost, IDisposa
     private UiConfiguration.SplitRatios _workspaceSplits;
     private bool _openToolbarDockPopupNextFrame;
     private bool _workspaceSplitRatioDirty;
-    private bool _openFolderEditorPopupNextFrame;
-    private bool _openObjectCollectionCreatePopupNextFrame;
     private bool _openObjectCollectionAddModPopupNextFrame;
     private bool _objectSelectionLeftMouseWasDown;
     private IDisposable? _windowBackgroundColorScope;
     private string _objectFilter = string.Empty;
     private ObjectKind? _objectKindFilter;
     private string _createPlacementFolderPath = string.Empty;
-    private FolderEditorMode _folderEditorMode;
-    private string _folderEditorSourcePath = string.Empty;
-    private string _folderEditorInput = string.Empty;
     private string _inspectorFurnitureStainFilter = string.Empty;
     private string _layoutFileDialogDirectory = string.Empty;
     private string _layoutFileStatusMessage = string.Empty;
@@ -258,7 +247,6 @@ internal sealed partial class EditorWindow : IntonerWindow, IGizmoHost, IDisposa
     private string _objectCollectionNameCommitted = string.Empty;
     private string _objectCollectionNameDraftCollectionId = string.Empty;
     private string _editingObjectCollectionNameId = string.Empty;
-    private string _objectCollectionCreateInput = string.Empty;
     private string _objectCollectionAddModPopupCollectionId = string.Empty;
     private string _objectCollectionModFilter = string.Empty;
     private bool _focusObjectCollectionNameEdit;
@@ -351,6 +339,7 @@ internal sealed partial class EditorWindow : IntonerWindow, IGizmoHost, IDisposa
             surfacePlacementService,
             surfaceAttachmentService);
         _edgeGlowRenderer               = edgeGlowRenderer;
+        _listCard                       = new EditorListCard(edgeGlowRenderer);
         _windowBackdropRenderer         = windowBackdropRenderer;
         _uiSharedService                = uiSharedService;
         _splashScreenVersionLabel       = buildInfo.SplashScreenVersion;
@@ -364,6 +353,7 @@ internal sealed partial class EditorWindow : IntonerWindow, IGizmoHost, IDisposa
         _historyCoordinator.ConnectSelectionHandlers(CaptureCurrentSelectionIds, ApplyHistorySelection);
         WindowBuilder.For(this)
             .SetSizeConstraints(new Vector2(930f, 695f), new Vector2(1200f, 760f))
+            .AddFlags(ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
             .AddTitleBarButton(FontAwesomeIcon.Book, "Show Splash Screen", ShowSplashScreen)
             .AddTitleBarButton(FontAwesomeIcon.ArrowsAlt, "Toolbar Dock Position", () => _openToolbarDockPopupNextFrame = true)
             .Apply();
@@ -401,6 +391,13 @@ internal sealed partial class EditorWindow : IntonerWindow, IGizmoHost, IDisposa
         DismissSplashScreen();
     }
 
+    private void OpenDialog(EditorDialog.Request request)
+    {
+        DismissSplashScreen();
+        _gizmo.CancelInteractions();
+        _dialog.Open(request);
+    }
+
     public override void PreDraw()
     {
         base.PreDraw();
@@ -420,6 +417,23 @@ internal sealed partial class EditorWindow : IntonerWindow, IGizmoHost, IDisposa
     }
 
     protected override void DrawContent()
+    {
+        bool dialogOpen = _dialog.IsOpen;
+        using (ImRaii.Disabled(dialogOpen))
+        {
+            DrawEditorContent();
+        }
+
+        if (_dialog.IsOpen)
+        {
+            if (TryGetWindowBodyArea(out EditorOverlayArea area))
+            {
+                _dialog.Draw(_editorOverlayLayer, area);
+            }
+        }
+    }
+
+    private void DrawEditorContent()
     {
         _objectCatalog.EnsureWarmup();
         _furnitureStainService.EnsureWarmup();
@@ -459,7 +473,7 @@ internal sealed partial class EditorWindow : IntonerWindow, IGizmoHost, IDisposa
             _selectedLayoutId = null;
         }
 
-        if (!showSplashScreen)
+        if (!showSplashScreen && !_dialog.IsOpen)
         {
             HandleObjectSelectionInput(activeSelectedObjects, boundsSnapshots);
         }
@@ -476,7 +490,6 @@ internal sealed partial class EditorWindow : IntonerWindow, IGizmoHost, IDisposa
         using (ImRaii.PushStyle(ImGuiStyleVar.DisabledAlpha, 1f))
         using (ImRaii.Disabled(showSplashScreen))
         {
-            BeginEditorOverlayFrame();
             DrawToolbarLayout(
                 objects,
                 activeObjects,
@@ -499,7 +512,10 @@ internal sealed partial class EditorWindow : IntonerWindow, IGizmoHost, IDisposa
         SubmitBoundsOverlay(boundsSnapshots);
         SubmitHousingPlacementOverlay(boundsSnapshots, _placementEvaluations);
         DrawCurrentWindowLayer(boundsSnapshots, _placementEvaluations);
-        _gizmo.Draw(activeSelectedObjects, boundsSnapshots);
+        if (!_dialog.IsOpen)
+        {
+            _gizmo.Draw(activeSelectedObjects, boundsSnapshots);
+        }
     }
 
     private void DrawTitleBar()
@@ -692,27 +708,27 @@ internal sealed partial class EditorWindow : IntonerWindow, IGizmoHost, IDisposa
         }
     }
 
-    private bool TryGetWindowBodyRect(out Vector2 backgroundMin, out Vector2 backgroundMax, out float rounding, out ImDrawFlags roundingFlags)
+    private static bool TryGetWindowBodyArea(out EditorOverlayArea area)
     {
         var style = ImGui.GetStyle();
         var windowPos = ImGui.GetWindowPos();
         var windowSize = ImGui.GetWindowSize();
         var contentMin = ImGui.GetWindowContentRegionMin();
         var titleBarHeight = MathF.Max(0f, contentMin.Y - style.WindowPadding.Y);
-        backgroundMin = new Vector2(windowPos.X, windowPos.Y + titleBarHeight);
-        backgroundMax = windowPos + windowSize;
+        Vector2 backgroundMin = new(windowPos.X, windowPos.Y + titleBarHeight);
+        Vector2 backgroundMax = windowPos + windowSize;
         var backgroundSize = backgroundMax - backgroundMin;
         if (backgroundSize.X < 4f || backgroundSize.Y < 4f)
         {
-            rounding = 0f;
-            roundingFlags = ImDrawFlags.RoundCornersNone;
+            area = default;
             return false;
         }
 
-        rounding = MathF.Max(0f, style.WindowRounding);
-        roundingFlags = titleBarHeight > 0f
-            ? ImDrawFlags.RoundCornersBottom
-            : ImDrawFlags.RoundCornersAll;
+        area = new EditorOverlayArea(
+            backgroundMin,
+            backgroundMax,
+            MathF.Max(0f, style.WindowRounding),
+            titleBarHeight > 0f ? ImDrawFlags.RoundCornersBottom : ImDrawFlags.RoundCornersAll);
         return true;
     }
 
@@ -740,34 +756,34 @@ internal sealed partial class EditorWindow : IntonerWindow, IGizmoHost, IDisposa
 
     private void DrawWindowBackgroundGlass()
     {
-        if (!TryGetWindowBodyRect(out var backgroundMin, out var backgroundMax, out var rounding, out var roundingFlags))
+        if (!TryGetWindowBodyArea(out EditorOverlayArea area))
         {
             return;
         }
 
         var drawList = ImGui.GetWindowDrawList();
 
-        drawList.PushClipRect(backgroundMin, backgroundMax, false);
+        drawList.PushClipRect(area.Min, area.Max, false);
         try
         {
             if (IsWindowBackgroundBlurActive())
             {
                 _windowBackdropRenderer.GetEffect<GlassEffect>().DrawRegion(
                     drawList,
-                    backgroundMin,
-                    backgroundMax,
-                    rounding,
+                    area.Min,
+                    area.Max,
+                    area.Rounding,
                     CreateWindowBodyGlassStyle(_windowBodyBackgroundColor),
-                    roundingFlags);
+                    area.RoundingFlags);
             }
             else
             {
                 drawList.AddRectFilled(
-                    backgroundMin,
-                    backgroundMax,
+                    area.Min,
+                    area.Max,
                     ImGui.GetColorU32(_windowBodyBackgroundColor),
-                    rounding,
-                    roundingFlags);
+                    area.Rounding,
+                    area.RoundingFlags);
             }
         }
         finally
@@ -902,17 +918,31 @@ internal sealed partial class EditorWindow : IntonerWindow, IGizmoHost, IDisposa
         return false;
     }
 
-    private bool DrawClearAllButton(bool hasPersistedObjects)
+    private void DrawClearAllButton(bool hasPersistedObjects)
     {
         using (ImRaii.Disabled(!hasPersistedObjects))
         {
             if (DrawAccentIconButton("objectClearAll", FontAwesomeIcon.Ban, "Clear All Placed Objects", EditorColors.DimRed))
             {
-                return TryClearPlacedObjectsWithHistory();
+                OpenClearPlacedObjectsDialog();
             }
         }
+    }
 
-        return false;
+    private void OpenClearPlacedObjectsDialog()
+    {
+        OpenDialog(EditorDialog.Request.TryConfirmation(
+            "placed-objects-clear",
+            "Clear Placed Objects",
+            "Clear Objects",
+            TryClearPlacedObjectsWithHistory) with
+        {
+            Icon = FontAwesomeIcon.Ban,
+            ConfirmIcon = FontAwesomeIcon.Trash,
+            Accent = EditorColors.DimRed,
+            Description = "This removes every placed object from the current workspace. You can undo the clear from History.",
+            FailureMessage = "The placed objects could not be cleared.",
+        });
     }
 
     private void DrawWorkspaceModeActions()
@@ -1135,9 +1165,6 @@ internal sealed partial class EditorWindow : IntonerWindow, IGizmoHost, IDisposa
             MathF.Round(min.Y + ((size.Y - glyphHeight) * 0.5f) - glyph.Y0));
         return true;
     }
-
-    private static float ResolveMinimumCardTextWidth()
-        => Scaled(40f);
 
     private static float Scaled(float value)
         => value * ImGuiHelpers.GlobalScale;

@@ -18,7 +18,6 @@ internal sealed partial class EditorWindow
             .FirstOrDefault(collection => string.Equals(collection.Record.CollectionId, _selectedObjectCollectionId, StringComparison.OrdinalIgnoreCase));
         DrawObjectCollectionListHero(collections, selectedCollection);
         DrawObjectCollectionListCard(collections);
-        DrawObjectCollectionCreatePopup();
     }
 
     private void DrawObjectCollectionListHero(
@@ -47,15 +46,16 @@ internal sealed partial class EditorWindow
                     {
                         if (DrawAccentIconButton("objectCollectionCreate", FontAwesomeIcon.Swatchbook, "Create a new collection", EditorColors.AccentPurple, actionButtonEdge))
                         {
-                            QueueCreateObjectCollectionPopup();
+                            OpenCreateObjectCollectionDialog();
                         }
 
                         ImGui.SameLine();
                         using (ImRaii.Disabled(selectedCollection is null))
                         {
-                            if (DrawAccentIconButton("objectCollectionDelete", FontAwesomeIcon.Trash, "Delete the selected collection", EditorColors.DimRed, actionButtonEdge))
+                            if (DrawAccentIconButton("objectCollectionDelete", FontAwesomeIcon.Trash, "Delete the selected collection", EditorColors.DimRed, actionButtonEdge)
+                                && selectedCollection is not null)
                             {
-                                DeleteSelectedObjectCollection();
+                                OpenDeleteObjectCollectionDialog(selectedCollection);
                             }
                         }
                     },
@@ -110,7 +110,7 @@ internal sealed partial class EditorWindow
     {
         bool selected = string.Equals(_selectedObjectCollectionId, collection.Record.CollectionId, StringComparison.OrdinalIgnoreCase);
         Vector4 accent = ResolveObjectCollectionAccentColor(collection.ResolveState);
-        if (DrawObjectListEntryCard(
+        if (_listCard.Draw(
             $"objectCollectionEntry:{collection.Record.CollectionId}",
             collection.Record.Name,
             BuildObjectCollectionEntryDetail(collection),
@@ -118,10 +118,29 @@ internal sealed partial class EditorWindow
             BuildAssignedModsSubtitle(collection.Record.Entries.Count),
             selected,
             accent,
-            height))
+            height,
+            () => DrawObjectCollectionListEntryContextMenu(collection)))
         {
             _selectedObjectCollectionId = collection.Record.CollectionId;
             LoadObjectCollectionNameDraft(collection);
+        }
+    }
+
+    private void DrawObjectCollectionListEntryContextMenu(ObjectCollectionSnapshot collection)
+    {
+        if (EditorContextMenu.DrawItem(FontAwesomeIcon.Edit, "Edit Name"))
+        {
+            BeginObjectCollectionNameEdit(collection);
+        }
+
+        if (EditorContextMenu.DrawItem(FontAwesomeIcon.Redo, "Reresolve Collection"))
+        {
+            RecompileObjectCollection(collection);
+        }
+
+        if (EditorContextMenu.DrawItem(FontAwesomeIcon.Trash, "Delete Collection"))
+        {
+            OpenDeleteObjectCollectionDialog(collection);
         }
     }
 }

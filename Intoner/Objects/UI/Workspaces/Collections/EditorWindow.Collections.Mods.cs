@@ -122,7 +122,7 @@ internal sealed partial class EditorWindow
         var width = Positive(ImGui.GetContentRegionAvail().X - (insetX * 2f));
 
         ImGui.SetCursorPosX(startPos.X + insetX);
-        ListEntryCardInteraction interaction = DrawListEntryCardInteraction(
+        EditorListCard.Interaction interaction = EditorListCard.DrawInteraction(
             $"objectCollectionModEntry:{collection.Record.CollectionId}:{index}",
             false,
             new Vector2(width, height),
@@ -142,7 +142,7 @@ internal sealed partial class EditorWindow
         var rounding = Scaled(7f);
         var padX = Scaled(8f);
 
-        DrawListEntryCardFrame(
+        _listCard.DrawFrame(
             drawList,
             min,
             max,
@@ -185,7 +185,7 @@ internal sealed partial class EditorWindow
             disclosurePos.X + disclosureSize.X + Scaled(8f),
             min.Y + ((rowHeight - iconSize.Y) * 0.5f));
         var labelX = iconPos.X + iconSize.X + Scaled(10f);
-        var labelWidth = MathF.Max(ResolveMinimumCardTextWidth(), textRight - labelX);
+        var labelWidth = MathF.Max(EditorListCard.MinimumTextWidth, textRight - labelX);
 
         using (ImRaii.PushFont(UiBuilder.IconFont))
         {

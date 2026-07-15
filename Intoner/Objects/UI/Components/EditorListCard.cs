@@ -1,17 +1,19 @@
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
-using Intoner.Objects.UI.Components;
 using Intoner.Objects.UI.Services.EdgeGlow;
 using Intoner.UI;
 using System.Numerics;
 
-namespace Intoner.Objects.UI;
+namespace Intoner.Objects.UI.Components;
 
-internal sealed partial class EditorWindow
+internal sealed class EditorListCard(EdgeGlowRenderer edgeGlowRenderer)
 {
-    private readonly record struct ListEntryCardInteraction(bool Clicked, bool Hovered, Vector2 Min, Vector2 Max);
+    public readonly record struct Interaction(bool Clicked, bool Hovered, Vector2 Min, Vector2 Max);
 
-    private bool DrawObjectListEntryCard(
+    public static float MinimumTextWidth => 40f * ImGuiHelpers.GlobalScale;
+
+    public bool Draw(
         string id,
         string title,
         string detail,
@@ -19,53 +21,64 @@ internal sealed partial class EditorWindow
         string? badgeTooltip,
         bool selected,
         Vector4 accent,
-        float height)
+        float height,
+        Action drawContextMenu)
     {
-        var startPos = ImGui.GetCursorPos();
-        var insetX = Scaled(4f);
-        var width = Positive(ImGui.GetContentRegionAvail().X - (insetX * 2f));
+        Vector2 startPos = ImGui.GetCursorPos();
+        float insetX = 4f * ImGuiHelpers.GlobalScale;
+        float width = MathF.Max(1f, ImGui.GetContentRegionAvail().X - (insetX * 2f));
 
         ImGui.SetCursorPosX(startPos.X + insetX);
-        ListEntryCardInteraction interaction = DrawListEntryCardInteraction(id, selected, new Vector2(width, height));
+        Interaction interaction = DrawInteraction(id, selected, new Vector2(width, height));
+        using (EditorContextMenu.PopupScope contextMenu = EditorContextMenu.BeginForLastItem($"##{id}:context"))
+        {
+            if (contextMenu)
+            {
+                drawContextMenu();
+            }
+        }
 
-        var endPos = ImGui.GetCursorPos();
+        Vector2 endPos = ImGui.GetCursorPos();
         ImGui.SetCursorPos(new Vector2(startPos.X, endPos.Y));
 
-        var drawList = ImGui.GetWindowDrawList();
-        var min = interaction.Min;
-        var max = interaction.Max;
-        var text = EditorColors.Text;
-        var padX = Scaled(10f);
-        var padY = Scaled(8f);
+        ImDrawListPtr drawList = ImGui.GetWindowDrawList();
+        Vector2 min = interaction.Min;
+        Vector2 max = interaction.Max;
+        float scale = ImGuiHelpers.GlobalScale;
+        float padX = 10f * scale;
+        float padY = 8f * scale;
 
-        DrawListEntryCardChrome(drawList, min, max, selected, interaction.Hovered, accent);
+        DrawChrome(drawList, min, max, selected, interaction.Hovered, accent);
 
-        var badgePaddingX = Scaled(7f);
-        var badgePaddingY = Scaled(3f);
-        var badgeTextSize = ImGui.CalcTextSize(badgeText);
-        var badgeMin = new Vector2(max.X - badgeTextSize.X - (badgePaddingX * 2f) - padX, min.Y + padY);
-        var badgeMax = new Vector2(max.X - padX, badgeMin.Y + badgeTextSize.Y + (badgePaddingY * 2f));
+        float badgePaddingX = 7f * scale;
+        float badgePaddingY = 3f * scale;
+        Vector2 badgeTextSize = ImGui.CalcTextSize(badgeText);
+        Vector2 badgeMin = new(max.X - badgeTextSize.X - (badgePaddingX * 2f) - padX, min.Y + padY);
+        Vector2 badgeMax = new(max.X - padX, badgeMin.Y + badgeTextSize.Y + (badgePaddingY * 2f));
         drawList.AddRectFilled(badgeMin, badgeMax, ImGui.GetColorU32(accent with { W = selected ? 0.36f : 0.22f }), 999f);
-        drawList.AddText(new Vector2(badgeMin.X + badgePaddingX, badgeMin.Y + badgePaddingY), ImGui.GetColorU32(text), badgeText);
+        drawList.AddText(new Vector2(badgeMin.X + badgePaddingX, badgeMin.Y + badgePaddingY), ImGui.GetColorU32(EditorColors.Text), badgeText);
 
         if (!string.IsNullOrWhiteSpace(badgeTooltip) && EditorInputUtility.IsMouseInside(badgeMin, badgeMax))
         {
             UiSharedService.DrawAccentTooltipText(badgeTooltip, accent, wrapEms: 35f);
         }
 
-        var textWidth = MathF.Max(ResolveMinimumCardTextWidth(), badgeMin.X - min.X - (padX * 2f));
-        drawList.AddText(new Vector2(min.X + padX, min.Y + padY), ImGui.GetColorU32(text), ClipTextToWidth(title, textWidth));
+        float textWidth = MathF.Max(MinimumTextWidth, badgeMin.X - min.X - (padX * 2f));
+        drawList.AddText(
+            new Vector2(min.X + padX, min.Y + padY),
+            ImGui.GetColorU32(EditorColors.Text),
+            EditorTextUtility.ClipTextToWidth(title, textWidth));
 
-        var metaY = min.Y + padY + ImGui.GetTextLineHeight() + Scaled(4f);
+        float metaY = min.Y + padY + ImGui.GetTextLineHeight() + (4f * scale);
         drawList.AddText(
             new Vector2(min.X + padX, metaY),
             ImGui.GetColorU32(EditorColors.TextDisabled with { W = 0.88f }),
-            ClipTextToWidth(detail, textWidth));
+            EditorTextUtility.ClipTextToWidth(detail, textWidth));
 
         return interaction.Clicked;
     }
 
-    private static ListEntryCardInteraction DrawListEntryCardInteraction(
+    public static Interaction DrawInteraction(
         string id,
         bool selected,
         Vector2 size,
@@ -75,20 +88,15 @@ internal sealed partial class EditorWindow
         using var hovered = ImRaii.PushColor(ImGuiCol.HeaderHovered, Vector4.Zero);
         using var active = ImRaii.PushColor(ImGuiCol.HeaderActive, Vector4.Zero);
 
-        var clicked = ImGui.Selectable(
-            $"##{id}",
-            selected,
-            flags,
-            size);
-
-        return new(
+        bool clicked = ImGui.Selectable($"##{id}", selected, flags, size);
+        return new Interaction(
             clicked,
             ImGui.IsItemHovered(),
             ImGui.GetItemRectMin(),
             ImGui.GetItemRectMax());
     }
 
-    private void DrawListEntryCardChrome(
+    public void DrawChrome(
         ImDrawListPtr drawList,
         Vector2 min,
         Vector2 max,
@@ -96,30 +104,29 @@ internal sealed partial class EditorWindow
         bool hovered,
         Vector4 accent)
     {
-        var fill = selected
+        Vector4 fill = selected
             ? accent with { W = 0.17f }
             : hovered
                 ? accent with { W = 0.08f }
                 : EditorColors.ButtonDefault with { W = 0.22f };
-        var border = selected
+        Vector4 border = selected
             ? accent with { W = 0.85f }
             : hovered
                 ? accent with { W = 0.58f }
                 : EditorColors.Border with { W = 0.38f };
-        var rounding = Scaled(8f);
 
-        DrawListEntryCardFrame(
+        DrawFrame(
             drawList,
             min,
             max,
             fill,
             border,
             accent with { W = selected ? 0.95f : hovered ? 0.72f : 0.55f },
-            rounding,
+            8f * ImGuiHelpers.GlobalScale,
             hovered && !selected);
     }
 
-    private void DrawListEntryCardFrame(
+    public void DrawFrame(
         ImDrawListPtr drawList,
         Vector2 min,
         Vector2 max,
@@ -130,7 +137,7 @@ internal sealed partial class EditorWindow
         bool showEdgeGlow)
     {
         const ImDrawFlags cornerFlags = ImDrawFlags.RoundCornersRight;
-        var railWidth = Scaled(3f);
+        float scale = ImGuiHelpers.GlobalScale;
 
         drawList.AddRectFilled(min, max, ImGui.GetColorU32(fill), rounding, cornerFlags);
         drawList.AddRect(
@@ -139,28 +146,21 @@ internal sealed partial class EditorWindow
             ImGui.GetColorU32(border),
             rounding,
             cornerFlags,
-            Scaled(1f));
+            scale);
         drawList.AddRectFilled(
             min,
-            new Vector2(min.X + railWidth, max.Y),
+            new Vector2(min.X + (3f * scale), max.Y),
             ImGui.GetColorU32(rail),
             0f);
 
         if (showEdgeGlow)
         {
-            DrawListEntryEdgeGlow(min, max, rounding, cornerFlags);
+            edgeGlowRenderer.DrawRect(min, max, rounding, CreateEdgeGlowStyle(cornerFlags));
         }
     }
 
-    private void DrawListEntryEdgeGlow(Vector2 min, Vector2 max, float rounding, ImDrawFlags cornerFlags)
-        => _edgeGlowRenderer.DrawRect(
-            min,
-            max,
-            rounding,
-            CreateListEntryEdgeGlowStyle(cornerFlags));
-
-    private static EdgeGlowStyle CreateListEntryEdgeGlowStyle(ImDrawFlags cornerFlags)
-        => new EdgeGlowStyle
+    private static EdgeGlowStyle CreateEdgeGlowStyle(ImDrawFlags cornerFlags)
+        => new()
         {
             Mode = EdgeGlowMode.FullBorder,
             ColorVariant = EdgeGlowColorVariant.Colorful,

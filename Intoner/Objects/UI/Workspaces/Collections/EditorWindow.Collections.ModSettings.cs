@@ -133,7 +133,7 @@ internal sealed partial class EditorWindow
         var resetPos = new Vector2(max.X - padding.X - resetButtonSize, min.Y + ((rowHeight - resetButtonSize) * 0.5f));
         var labelX = min.X + padding.X;
         var controlRight = resetPos.X - Scaled(7f);
-        var availableBeforeReset = MathF.Max(ResolveMinimumCardTextWidth(), controlRight - labelX);
+        var availableBeforeReset = MathF.Max(EditorListCard.MinimumTextWidth, controlRight - labelX);
         var labelWidth = MathF.Min(Scaled(190f), MathF.Max(Scaled(90f), availableBeforeReset * 0.34f));
         var controlX = labelX + labelWidth + Scaled(10f);
         var controlWidth = MathF.Max(Scaled(120f), controlRight - controlX);

@@ -1,7 +1,9 @@
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using Intoner.Objects.Collections;
+using Intoner.Objects.UI.Components;
 using Intoner.Objects.Utils;
 using Intoner.UI;
 using System.Numerics;
@@ -175,58 +177,18 @@ internal sealed partial class EditorWindow
         _openObjectCollectionAddModPopupNextFrame = true;
     }
 
-    private void QueueCreateObjectCollectionPopup()
+    private void OpenCreateObjectCollectionDialog()
     {
-        _objectCollectionCreateInput = string.Empty;
-        _openObjectCollectionCreatePopupNextFrame = true;
-    }
-
-    private void DrawObjectCollectionCreatePopup()
-    {
-        if (_openObjectCollectionCreatePopupNextFrame)
+        OpenDialog(EditorDialog.Request.TextInput("collection-create", "Create Collection", "Create Collection", CreateObjectCollection) with
         {
-            ImGui.OpenPopup(ObjectCollectionCreatePopupId);
-            _openObjectCollectionCreatePopupNextFrame = false;
-        }
-
-        using var popup = ImRaii.Popup(ObjectCollectionCreatePopupId, ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
-        if (!popup)
-        {
-            return;
-        }
-
-        ImGui.TextUnformatted("Create Collection");
-        ImGui.Separator();
-
-        if (ImGui.IsWindowAppearing())
-        {
-            ImGui.SetKeyboardFocusHere();
-        }
-
-        ImGui.SetNextItemWidth(Positive(Scaled(240f)));
-        bool submitted = ImGui.InputTextWithHint(
-            "##objectCollectionCreateInput",
-            "collection name",
-            ref _objectCollectionCreateInput,
-            ObjectCollectionNameMaxLength,
-            ImGuiInputTextFlags.EnterReturnsTrue);
-
-        bool canCreate = !string.IsNullOrWhiteSpace(ObjectStringUtility.TrimOrEmpty(_objectCollectionCreateInput));
-        using (ImRaii.Disabled(!canCreate))
-        {
-            if ((submitted || ImGui.Button("Create Collection"))
-                && canCreate
-                && CreateObjectCollection(_objectCollectionCreateInput))
-            {
-                ImGui.CloseCurrentPopup();
-            }
-        }
-
-        ImGui.SameLine();
-        if (ImGui.Button("Cancel"))
-        {
-            ImGui.CloseCurrentPopup();
-        }
+            Icon = FontAwesomeIcon.Swatchbook,
+            Accent = EditorColors.AccentPurple,
+            Placeholder = "collection name",
+            MaxLength = ObjectCollectionNameMaxLength,
+            Validate = static input => ObjectStringUtility.TrimOrEmpty(input).Length == 0
+                ? "Enter a collection name."
+                : null,
+        });
     }
 }
 

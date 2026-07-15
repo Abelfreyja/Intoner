@@ -39,16 +39,19 @@ internal sealed partial class EditorWindow
 
     public override void OnClose()
     {
+        _dialog.Dismiss();
         ResetSplashScreen();
         base.OnClose();
     }
 
     private bool ShouldShowSplashScreen()
-        => _splashScreenVisible
+        => !_dialog.IsOpen
+           && _splashScreenVisible
            && (_splashScreenManualOpen || _objectConfigurationService.Current.Ui.ShowSplashScreenOnStartup);
 
     private void ShowSplashScreen()
     {
+        _dialog.Dismiss();
         _splashScreenVisible = true;
         _splashScreenManualOpen = true;
         CloseSplashScreenLayoutPicker();
@@ -65,12 +68,12 @@ internal sealed partial class EditorWindow
 
     private void DrawSplashScreen()
     {
-        if (!TryGetWindowBodyRect(out Vector2 overlayMin, out Vector2 overlayMax, out float rounding, out ImDrawFlags roundingFlags))
+        if (!TryGetWindowBodyArea(out EditorOverlayArea area))
         {
             return;
         }
 
-        Vector2 overlaySize = overlayMax - overlayMin;
+        Vector2 overlaySize = area.Size;
         if (overlaySize.X <= 1f || overlaySize.Y <= 1f)
         {
             return;
@@ -78,33 +81,30 @@ internal sealed partial class EditorWindow
 
         float scale = ImGuiHelpers.GlobalScale;
         Vector2 cardSize = ResolveSplashScreenSize(overlaySize, scale);
-        Vector2 cardMin = overlayMin + ((overlaySize - cardSize) * 0.5f);
+        Vector2 cardMin = area.Min + ((overlaySize - cardSize) * 0.5f);
 
-        SplashScreenActionRequest? request = DrawSplashScreenOverlay(overlayMin, overlayMax, cardMin, cardSize, rounding, roundingFlags, scale, out bool blockDismiss);
+        SplashScreenActionRequest? request = DrawSplashScreenOverlay(area, cardMin, cardSize, scale, out bool blockDismiss);
         if (request is not null)
         {
             blockDismiss = true;
             HandleSplashScreenAction(request.Value);
         }
 
-        HandleSplashScreenDismissClick(overlayMin, overlayMax, blockDismiss);
+        HandleSplashScreenDismissClick(area, blockDismiss);
     }
 
     private SplashScreenActionRequest? DrawSplashScreenOverlay(
-        Vector2 overlayMin,
-        Vector2 overlayMax,
+        EditorOverlayArea area,
         Vector2 cardMin,
         Vector2 cardSize,
-        float rounding,
-        ImDrawFlags roundingFlags,
         float scale,
         out bool blockDismiss)
     {
         SplashScreenActionRequest? request = null;
         bool localBlockDismiss = false;
-        DrawEditorOverlayClipped(overlayMin, overlayMax, drawList =>
+        _editorOverlayLayer.DrawClipped(area, drawList =>
         {
-            DrawSplashScreenBackdrop(drawList, overlayMin, overlayMax, rounding, roundingFlags);
+            DrawSplashScreenBackdrop(drawList, area);
             request = DrawSplashScreenCard(drawList, cardMin, cardSize, scale, out localBlockDismiss);
         });
 
@@ -112,22 +112,17 @@ internal sealed partial class EditorWindow
         return request;
     }
 
-    private void DrawSplashScreenBackdrop(
-        ImDrawListPtr drawList,
-        Vector2 overlayMin,
-        Vector2 overlayMax,
-        float rounding,
-        ImDrawFlags roundingFlags)
+    private static void DrawSplashScreenBackdrop(ImDrawListPtr drawList, EditorOverlayArea area)
     {
         drawList.AddRectFilled(
-            overlayMin,
-            overlayMax,
+            area.Min,
+            area.Max,
             ImGui.GetColorU32(EditorColors.Color(0.015f, 0.016f, 0.020f, 0.54f)),
-            rounding,
-            roundingFlags);
+            area.Rounding,
+            area.RoundingFlags);
     }
 
-    private Vector2 ResolveSplashScreenSize(Vector2 overlaySize, float scale)
+    private static Vector2 ResolveSplashScreenSize(Vector2 overlaySize, float scale)
     {
         float horizontalInset = MathF.Min(48f * scale, overlaySize.X * 0.12f);
         float verticalInset = MathF.Min(46f * scale, overlaySize.Y * 0.12f);
@@ -495,10 +490,10 @@ internal sealed partial class EditorWindow
         drawList.AddText(new Vector2(minX + ((maxX - minX - textSize.X) * 0.5f), y), ImGui.GetColorU32(color), text);
     }
 
-    private void HandleSplashScreenDismissClick(Vector2 overlayMin, Vector2 overlayMax, bool blocked)
+    private void HandleSplashScreenDismissClick(EditorOverlayArea area, bool blocked)
     {
         if (!blocked
-            && EditorInputUtility.IsAnyMouseClickedInside(overlayMin, overlayMax))
+            && EditorInputUtility.IsAnyMouseClickedInside(area.Min, area.Max))
         {
             DismissSplashScreen();
         }

@@ -330,24 +330,24 @@ internal sealed partial class EditorWindow
                 }
 
                 ImGui.SameLine(0f, buttonGap);
-                if (DrawAccentToggleIconButton(
+                bool folderButtonClicked = DrawAccentToggleIconButton(
                         $"createAction:{id}:folder",
                         folderSelected ? FontAwesomeIcon.FolderOpen : FontAwesomeIcon.Folder,
                         new Vector2(folderButtonWidth, buttonHeight),
-                        folderSelected))
+                        folderSelected);
+                bool folderButtonHovered = ImGui.IsItemHovered();
+
+                using (EditorContextMenu.PopupScope popup = EditorContextMenu.BeginDropdownForLastItem(folderPopupId, folderButtonClicked))
                 {
-                    ImGui.OpenPopup(folderPopupId);
+                    if (popup)
+                    {
+                        DrawFolderSelectionMenu(placedFolders, selectedFolderPath, onFolderChanged);
+                    }
                 }
 
-                if (ImGui.IsItemHovered())
+                if (folderButtonHovered)
                 {
                     UiSharedService.AttachToolTip(folderButtonTooltip);
-                }
-
-                using var popup = ImRaii.Popup(folderPopupId);
-                if (popup)
-                {
-                    DrawFolderSelectionContextMenu(placedFolders, selectedFolderPath, onFolderChanged);
                 }
             });
     }

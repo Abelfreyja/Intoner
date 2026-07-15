@@ -184,7 +184,7 @@ internal sealed partial class EditorWindow
 
         var gap = Scaled(6f);
         var availableWidth = Positive(ImGui.GetContentRegionAvail().X);
-        var nameWidth = MathF.Max(ResolveMinimumCardTextWidth(), availableWidth - editIconSize.X - gap);
+        var nameWidth = MathF.Max(EditorListCard.MinimumTextWidth, availableWidth - editIconSize.X - gap);
         string clippedName = ClipTextToWidth(name, nameWidth);
 
         using (ImRaii.Group())
@@ -213,6 +213,7 @@ internal sealed partial class EditorWindow
 
     private void BeginObjectCollectionNameEdit(ObjectCollectionSnapshot collection)
     {
+        _selectedObjectCollectionId = collection.Record.CollectionId;
         _editingObjectCollectionNameId = collection.Record.CollectionId;
         _focusObjectCollectionNameEdit = true;
         LoadObjectCollectionNameDraft(collection);

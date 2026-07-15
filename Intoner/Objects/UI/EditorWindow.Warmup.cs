@@ -1,5 +1,6 @@
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility;
+using Intoner.Objects.UI.Components;
 using Intoner.Objects.UI.Services.EdgeGlow;
 using System.Numerics;
 using System.Diagnostics.CodeAnalysis;
@@ -65,12 +66,12 @@ internal sealed partial class EditorWindow
 
     private void DrawEditorWarmupScreen(string statusText, bool hasFailed)
     {
-        if (TryGetWindowBodyRect(out var backgroundMin, out var backgroundMax, out var backgroundRounding, out var backgroundRoundingFlags))
+        if (TryGetWindowBodyArea(out EditorOverlayArea area))
         {
             _edgeGlowRenderer.DrawRect(
-                backgroundMin,
-                backgroundMax,
-                backgroundRounding,
+                area.Min,
+                area.Max,
+                area.Rounding,
                 new EdgeGlowStyle
                 {
                     Mode = EdgeGlowMode.Line,
@@ -89,7 +90,7 @@ internal sealed partial class EditorWindow
                     InnerShadowAlpha = 0.10f,
                     RenderScale = 0.18f,
                     HorizontalFootprintScale = 2.5f,
-                    CornerFlags = backgroundRoundingFlags,
+                    CornerFlags = area.RoundingFlags,
                     ClipToRect = true,
                     ClipPadding = 1f,
                 });

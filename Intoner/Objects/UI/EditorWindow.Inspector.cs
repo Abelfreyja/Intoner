@@ -34,11 +34,13 @@ internal sealed partial class EditorWindow
         ..EditorColors.FolderSwatches,
     ];
 
+    private const float FolderColorSwatchWidth = 18f;
+    private const float FolderColorSwatchSpacing = 6f;
+
     private void DrawObjectListPanel(IReadOnlyList<ObjectSnapshot> objects, IReadOnlySet<Guid> activeObjectIds)
     {
         DrawPlacedObjectsHero(objects, activeObjectIds);
         DrawPlacedObjectsListCard(objects, activeObjectIds);
-        DrawFolderEditorPopup();
     }
 
     private void DrawInspectorPanel(IReadOnlyList<ObjectSnapshot> objects, IReadOnlySet<Guid> activeObjectIds)
@@ -459,83 +461,53 @@ internal sealed partial class EditorWindow
             return false;
         }
 
-        QueueCreateFolderEditor();
+        OpenCreateFolderDialog();
         return true;
     }
 
-    private void QueueCreateFolderEditor()
+    private void OpenCreateFolderDialog()
     {
-        _folderEditorMode = FolderEditorMode.Create;
-        _folderEditorSourcePath = string.Empty;
-        _folderEditorInput = string.Empty;
-        _openFolderEditorPopupNextFrame = true;
+        OpenDialog(EditorDialog.Request.TextInput("folder-create", "Create Folder", "Create Folder", TryCreateFolderWithHistory) with
+        {
+            Icon = FontAwesomeIcon.FolderPlus,
+            Accent = EditorColors.AccentPurple,
+            Placeholder = "folder name",
+            Validate = static input => ValidateFolderName(input),
+        });
     }
 
-    private void QueueRenameFolderEditor(string folderPath)
+    private void OpenRenameFolderDialog(string folderPath)
     {
-        _folderEditorMode = FolderEditorMode.Rename;
-        _folderEditorSourcePath = folderPath;
-        _folderEditorInput = folderPath;
-        _openFolderEditorPopupNextFrame = true;
+        OpenDialog(EditorDialog.Request.TextInput(
+            "folder-rename",
+            "Rename Folder",
+            "Rename Folder",
+            input => TryRenameFolderWithHistory(folderPath, input)) with
+        {
+            Icon = FontAwesomeIcon.Pen,
+            Accent = EditorColors.AccentPurple,
+            InitialValue = folderPath,
+            Placeholder = "folder name",
+            Detail = $"Current: {ResolveFolderDisplayLabel(folderPath)}",
+            Validate = input => ValidateFolderName(input, folderPath),
+        });
     }
 
-    private void DrawFolderEditorPopup()
+    private static string? ValidateFolderName(string input, string? currentFolderPath = null)
     {
-        if (_openFolderEditorPopupNextFrame)
+        string folderPath = ObjectFolderUtility.SanitizeFolderPath(input);
+        if (string.IsNullOrEmpty(folderPath))
         {
-            ImGui.OpenPopup(FolderEditorPopupId);
-            _openFolderEditorPopupNextFrame = false;
+            return "Enter a folder name.";
         }
 
-        using var popup = ImRaii.Popup(FolderEditorPopupId, ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
-        if (!popup)
+        if (currentFolderPath is not null
+            && string.Equals(folderPath, ObjectFolderUtility.SanitizeFolderPath(currentFolderPath), StringComparison.OrdinalIgnoreCase))
         {
-            return;
+            return "Choose a different folder name.";
         }
 
-        var title = _folderEditorMode == FolderEditorMode.Create
-            ? "Create Folder"
-            : "Rename Folder";
-        var actionLabel = _folderEditorMode == FolderEditorMode.Create
-            ? "Create Folder"
-            : "Rename Folder";
-
-        ImGui.TextUnformatted(title);
-        ImGui.Separator();
-        if (_folderEditorMode == FolderEditorMode.Rename)
-        {
-            ImGui.TextDisabled($"Current: {ResolveFolderDisplayLabel(_folderEditorSourcePath)}");
-            ImGuiHelpers.ScaledDummy(4f);
-        }
-
-        if (ImGui.IsWindowAppearing())
-        {
-            ImGui.SetKeyboardFocusHere();
-        }
-
-        ImGui.SetNextItemWidth(MathF.Max(240f * ImGuiHelpers.GlobalScale, 1f));
-        ImGui.InputTextWithHint("##folderEditorInput", "folder name", ref _folderEditorInput, 256);
-
-        var canApply = !string.IsNullOrWhiteSpace(ObjectFolderUtility.SanitizeFolderPath(_folderEditorInput));
-        using (ImRaii.Disabled(!canApply))
-        {
-            if (ImGui.Button(actionLabel) && canApply)
-            {
-                var applied = _folderEditorMode == FolderEditorMode.Create
-                    ? TryCreateFolderWithHistory(_folderEditorInput)
-                    : TryRenameFolderWithHistory(_folderEditorSourcePath, _folderEditorInput);
-                if (applied)
-                {
-                    ImGui.CloseCurrentPopup();
-                }
-            }
-        }
-
-        ImGui.SameLine();
-        if (ImGui.Button("Cancel"))
-        {
-            ImGui.CloseCurrentPopup();
-        }
+        return null;
     }
 
     private void DrawPlacedObjectFolderRow(PlacedObjectFolderGroup group, IReadOnlySet<Guid> activeObjectIds, float height, bool collapsed)
@@ -549,34 +521,40 @@ internal sealed partial class EditorWindow
         var countLabel = BuildPlacedObjectCountLabel(group.AllObjects.Count, activeCount, group.AllObjects.Count(static snapshot => snapshot.Locked));
 
         ImGui.SetCursorPosX(startPos.X + insetX);
-        ListEntryCardInteraction interaction = DrawListEntryCardInteraction(
+        EditorListCard.Interaction interaction = EditorListCard.DrawInteraction(
             $"placedFolderEntry:{group.FolderKey}",
             false,
             new Vector2(width, height),
             ImGuiSelectableFlags.AllowItemOverlap);
 
-        using (var folderPopup = ImRaii.ContextPopupItem($"##placedFolderContext:{group.FolderKey}"))
+        using (var folderPopup = EditorContextMenu.BeginForLastItem($"##placedFolderContext:{group.FolderKey}"))
         {
             if (folderPopup)
             {
-                if (DrawContextMenuItem(FontAwesomeIcon.Edit, "Rename Folder"))
+                if (EditorContextMenu.DrawItem(FontAwesomeIcon.Edit, "Rename Folder"))
                 {
-                    QueueRenameFolderEditor(group.FolderKey);
+                    OpenRenameFolderDialog(group.FolderKey);
                 }
 
-                if (DrawContextMenuItem(FontAwesomeIcon.Unlink, "Dissolve Folder"))
+                if (EditorContextMenu.DrawItem(FontAwesomeIcon.Unlink, "Dissolve Folder"))
                 {
                     _ = TryDissolveFolderWithHistory(group.FolderKey);
                 }
 
-                ImGui.Separator();
-                ImGui.TextDisabled("Folder Color");
+                EditorContextMenu.DrawSectionLabel("Folder Color");
                 var currentColorValue = ObjectFolderUtility.SanitizeFolderColorValue(group.ColorValue);
+                var swatchWidth = FolderColorSwatchWidth * ImGuiHelpers.GlobalScale;
+                var swatchSpacing = FolderColorSwatchSpacing * ImGuiHelpers.GlobalScale;
+                var swatchRowWidth = (FolderColorSwatches.Count * swatchWidth)
+                    + ((FolderColorSwatches.Count - 1) * swatchSpacing);
+                ImGui.SetCursorPosX(
+                    ImGui.GetCursorPosX()
+                    + MathF.Max(0f, (ImGui.GetContentRegionAvail().X - swatchRowWidth) * 0.5f));
                 for (var i = 0; i < FolderColorSwatches.Count; ++i)
                 {
                     if (i > 0)
                     {
-                        ImGui.SameLine(0f, 6f * ImGuiHelpers.GlobalScale);
+                        ImGui.SameLine(0f, swatchSpacing);
                     }
 
                     var swatchColorValue = FolderColorSwatches[i];
@@ -603,7 +581,7 @@ internal sealed partial class EditorWindow
         var textLineHeight = ImGui.GetTextLineHeight();
         var textGapY = 4f * ImGuiHelpers.GlobalScale;
 
-        DrawListEntryCardFrame(
+        _listCard.DrawFrame(
             drawList,
             min,
             max,
@@ -735,7 +713,7 @@ internal sealed partial class EditorWindow
         var subtitleY = titleY + textLineHeight + textGapY;
         var labelX = folderIconPos.X + folderIconSize.X + (10f * ImGuiHelpers.GlobalScale);
         var contentRight = visibilityButtonPos.X - (10f * ImGuiHelpers.GlobalScale);
-        var labelWidth = MathF.Max(ResolveMinimumCardTextWidth(), contentRight - labelX);
+        var labelWidth = MathF.Max(EditorListCard.MinimumTextWidth, contentRight - labelX);
         var textColor = EditorColors.Text;
         var disabledText = EditorColors.TextDisabled;
         drawList.AddText(
@@ -1009,7 +987,7 @@ internal sealed partial class EditorWindow
             : isActive ? 1f : 0.72f;
 
         ImGui.SetCursorPosX(startPos.X + resolvedLeftInset);
-        ListEntryCardInteraction interaction = DrawListEntryCardInteraction(
+        EditorListCard.Interaction interaction = EditorListCard.DrawInteraction(
             $"placedObjectEntry:{snapshot.Id}",
             selected,
             new Vector2(width, height));
@@ -1018,51 +996,45 @@ internal sealed partial class EditorWindow
             onSelect();
         }
 
-        using (var objectPopup = ImRaii.ContextPopupItem($"##placedObjectContext:{snapshot.Id}"))
+        using (var objectPopup = EditorContextMenu.BeginForLastItem($"##placedObjectContext:{snapshot.Id}"))
         {
             if (objectPopup)
             {
-                using (var assignFolderSubMenu = BeginContextSubMenu($"placedObjectAssignFolder:{snapshot.Id}", FontAwesomeIcon.FolderOpen, "Assign Folder"))
+                using (var assignFolderSubMenu = EditorContextMenu.BeginSubMenu(
+                           $"placedObjectAssignFolder:{snapshot.Id}",
+                           FontAwesomeIcon.FolderOpen,
+                           "Assign Folder"))
                 {
                     if (assignFolderSubMenu)
                     {
-                        if (DrawContextMenuItem(FontAwesomeIcon.TimesCircle, "Ungrouped", string.IsNullOrWhiteSpace(snapshot.FolderPath)))
-                        {
-                            _ = TrySetObjectFolderWithHistory(snapshot, string.Empty);
-                        }
-
-                        foreach (var folderPath in placedFolders)
-                        {
-                            var folderSelected = string.Equals(snapshot.FolderPath, folderPath, StringComparison.OrdinalIgnoreCase);
-                            if (DrawContextMenuItem(FontAwesomeIcon.Folder, folderPath, folderSelected))
-                            {
-                                _ = TrySetObjectFolderWithHistory(snapshot, folderPath);
-                            }
-                        }
+                        DrawFolderSelectionMenu(
+                            placedFolders,
+                            snapshot.FolderPath,
+                            folderPath => _ = TrySetObjectFolderWithHistory(snapshot, folderPath));
                     }
                 }
 
-                if (DrawContextMenuItem(snapshot.Visible ? FontAwesomeIcon.EyeSlash : FontAwesomeIcon.Eye, snapshot.Visible ? "Hide Object" : "Show Object"))
+                if (EditorContextMenu.DrawItem(snapshot.Visible ? FontAwesomeIcon.EyeSlash : FontAwesomeIcon.Eye, snapshot.Visible ? "Hide Object" : "Show Object"))
                 {
                     _ = TrySetObjectVisibleWithHistory(snapshot, !snapshot.Visible);
                 }
 
-                if (DrawContextMenuItem(snapshot.Locked ? FontAwesomeIcon.Unlock : FontAwesomeIcon.Lock, snapshot.Locked ? "Unlock Object" : "Lock Object"))
+                if (EditorContextMenu.DrawItem(snapshot.Locked ? FontAwesomeIcon.Unlock : FontAwesomeIcon.Lock, snapshot.Locked ? "Unlock Object" : "Lock Object"))
                 {
                     _ = TrySetObjectLockedWithHistory(snapshot, !snapshot.Locked);
                 }
 
-                if (DrawContextMenuItem(FontAwesomeIcon.Copy, "Duplicate"))
+                if (EditorContextMenu.DrawItem(FontAwesomeIcon.Copy, "Duplicate"))
                 {
                     _ = TryDuplicateSelectedObjects([snapshot]);
                 }
 
-                if (DrawContextMenuItem(FontAwesomeIcon.Trash, "Delete"))
+                if (EditorContextMenu.DrawItem(FontAwesomeIcon.Trash, "Delete"))
                 {
                     _ = TryRemoveSelectedObjects([snapshot]);
                 }
 
-                if (DrawContextMenuItem(FontAwesomeIcon.Clipboard, "Export To Clipboard"))
+                if (EditorContextMenu.DrawItem(FontAwesomeIcon.Clipboard, "Export To Clipboard"))
                 {
                     ExportObjectToClipboard(snapshot);
                 }
@@ -1091,7 +1063,7 @@ internal sealed partial class EditorWindow
         var padX = 10f * ImGuiHelpers.GlobalScale;
         var padY = 8f * ImGuiHelpers.GlobalScale;
 
-        DrawListEntryCardFrame(
+        _listCard.DrawFrame(
             drawList,
             min,
             max,
@@ -1144,7 +1116,7 @@ internal sealed partial class EditorWindow
 
         var nameStartX = min.X + padX;
         var contentRight = badgeRight;
-        var metaWidth = MathF.Max(ResolveMinimumCardTextWidth(), contentRight - nameStartX);
+        var metaWidth = MathF.Max(EditorListCard.MinimumTextWidth, contentRight - nameStartX);
         var nameWidth = metaWidth;
         if (TryGetPlacedObjectColorBadge(snapshot, out var colorBadge))
         {
@@ -1154,7 +1126,7 @@ internal sealed partial class EditorWindow
             var labelMaxWidth = 120f * ImGuiHelpers.GlobalScale;
             var desiredLabelWidth = MathF.Min(ImGui.CalcTextSize(colorBadge.Label).X, labelMaxWidth);
             var desiredBadgeWidth = swatchSize + swatchGap + desiredLabelWidth;
-            nameWidth = MathF.Max(ResolveMinimumCardTextWidth(), metaWidth - colorBadgeGap - desiredBadgeWidth);
+            nameWidth = MathF.Max(EditorListCard.MinimumTextWidth, metaWidth - colorBadgeGap - desiredBadgeWidth);
 
             var renderedName = ClipTextToWidth(snapshot.Name, nameWidth);
             drawList.AddText(new Vector2(nameStartX, min.Y + padY), ImGui.GetColorU32(text), renderedName);
@@ -2057,7 +2029,7 @@ internal sealed partial class EditorWindow
     private static bool DrawFolderColorSwatch(string id, string colorValue, bool selected)
     {
         var scale = ImGuiHelpers.GlobalScale;
-        var size = new Vector2(18f * scale, 12f * scale);
+        var size = new Vector2(FolderColorSwatchWidth * scale, 12f * scale);
         var clicked = ImGui.InvisibleButton(id, size);
         var min = ImGui.GetItemRectMin();
         var max = ImGui.GetItemRectMax();
@@ -2100,6 +2072,39 @@ internal sealed partial class EditorWindow
         return string.IsNullOrEmpty(sanitizedColorValue)
             ? "Default color"
             : $"Color {sanitizedColorValue}";
+    }
+
+    private static void DrawFolderSelectionMenu(
+        IReadOnlyList<string> placedFolders,
+        string selectedFolderPath,
+        Action<string> onFolderSelected)
+    {
+        if (EditorContextMenu.DrawItem(FontAwesomeIcon.TimesCircle, "Ungrouped", string.IsNullOrWhiteSpace(selectedFolderPath)))
+        {
+            onFolderSelected(string.Empty);
+            return;
+        }
+
+        foreach (var folderPath in placedFolders)
+        {
+            var folderSelected = string.Equals(selectedFolderPath, folderPath, StringComparison.OrdinalIgnoreCase);
+            if (!EditorContextMenu.DrawItem(
+                    FontAwesomeIcon.Folder,
+                    ResolveFolderDisplayLabel(folderPath),
+                    folderSelected,
+                    id: folderPath))
+            {
+                continue;
+            }
+
+            onFolderSelected(folderPath);
+            return;
+        }
+
+        if (placedFolders.Count == 0)
+        {
+            EditorContextMenu.DrawHint("No folders available");
+        }
     }
 
     private static string ResolveFolderDisplayLabel(string folderPath)

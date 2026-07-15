@@ -12,11 +12,9 @@ namespace Intoner.Objects.UI;
 
 internal sealed partial class EditorWindow
 {
-    private const string HistoryCheckpointPopupId = "##objectHistoryCheckpointPopup";
+    private const string HistoryCheckpointDialogKey = "history-checkpoint";
+    private const string HistoryClearDialogKey = "history-clear";
 
-    private int? _historyCheckpointEditStateIndex;
-    private string _historyCheckpointEditLabel = string.Empty;
-    private bool _openHistoryCheckpointPopupNextFrame;
     private bool _focusCurrentHistoryEntry = true;
 
     private void DrawHistoryWorkspace()
@@ -24,14 +22,12 @@ internal sealed partial class EditorWindow
         var entries = _objectHistoryManager.Entries;
         DrawHistoryHero(entries);
         DrawHistoryTimelineCard(entries);
-        DrawHistoryCheckpointPopup(entries);
     }
 
     private void ResetHistoryWorkspaceState()
     {
-        _historyCheckpointEditStateIndex = null;
-        _historyCheckpointEditLabel = string.Empty;
-        _openHistoryCheckpointPopupNextFrame = false;
+        _dialog.DismissIfCurrent(HistoryCheckpointDialogKey);
+        _dialog.DismissIfCurrent(HistoryClearDialogKey);
         _focusCurrentHistoryEntry = true;
     }
 
@@ -111,7 +107,7 @@ internal sealed partial class EditorWindow
         if (DrawAccentIconButton("objectHistoryHeroCheckpoint", FontAwesomeIcon.Flag, checkpointTooltip, EditorColors.AccentYellow))
         {
             CommitPendingHistory();
-            QueueHistoryCheckpointEditor(_objectHistoryManager.CurrentStateIndex);
+            OpenHistoryCheckpointDialog(_objectHistoryManager.CurrentStateIndex);
         }
 
         ImGui.SameLine();
@@ -119,11 +115,31 @@ internal sealed partial class EditorWindow
         {
             if (DrawAccentIconButton("objectHistoryHeroClear", FontAwesomeIcon.Ban, "Clear recorded history", EditorColors.DimRed))
             {
-                CommitPendingHistory();
-                _objectHistoryManager.ClearHistory();
-                ResetHistoryWorkspaceState();
+                OpenClearHistoryDialog();
             }
         }
+    }
+
+    private void OpenClearHistoryDialog()
+    {
+        OpenDialog(EditorDialog.Request.Confirmation(
+            HistoryClearDialogKey,
+            "Clear History",
+            "Clear History",
+            ClearRecordedHistory) with
+        {
+            Icon = FontAwesomeIcon.Ban,
+            ConfirmIcon = FontAwesomeIcon.Trash,
+            Accent = EditorColors.DimRed,
+            Description = "This permanently removes all undo, redo, and checkpoint entries. Placed objects are not changed.",
+        });
+    }
+
+    private void ClearRecordedHistory()
+    {
+        CommitPendingHistory();
+        _objectHistoryManager.ClearHistory();
+        ResetHistoryWorkspaceState();
     }
 
     private void DrawHistoryTimelineCard(IReadOnlyList<ObjectHistoryEntry> entries)
@@ -184,7 +200,7 @@ internal sealed partial class EditorWindow
         var checkpointAccent = EditorColors.AccentYellow;
 
         ImGui.SetCursorPosX(startPos.X + insetX);
-        ListEntryCardInteraction interaction = DrawListEntryCardInteraction(
+        EditorListCard.Interaction interaction = EditorListCard.DrawInteraction(
             $"historyEntry:{entry.StateIndex}",
             false,
             new Vector2(width, height));
@@ -193,22 +209,22 @@ internal sealed partial class EditorWindow
             _ = TryJumpToHistoryState(entry.StateIndex);
         }
 
-        using (var popup = ImRaii.ContextPopupItem($"##historyEntryContext:{entry.StateIndex}"))
+        using (var popup = EditorContextMenu.BeginForLastItem($"##historyEntryContext:{entry.StateIndex}"))
         {
             if (popup)
             {
-                if (!isCurrent && ImGui.MenuItem("Jump Here"))
+                if (!isCurrent && EditorContextMenu.DrawItem(FontAwesomeIcon.History, "Jump Here"))
                 {
                     _ = TryJumpToHistoryState(entry.StateIndex);
                 }
 
-                if (ImGui.MenuItem(entry.HasCheckpoint ? "Edit Checkpoint" : "Set Checkpoint"))
+                if (EditorContextMenu.DrawItem(FontAwesomeIcon.Flag, entry.HasCheckpoint ? "Edit Checkpoint" : "Set Checkpoint"))
                 {
                     CommitPendingHistory();
-                    QueueHistoryCheckpointEditor(entry.StateIndex);
+                    OpenHistoryCheckpointDialog(entry.StateIndex);
                 }
 
-                if (entry.HasCheckpoint && ImGui.MenuItem("Remove Checkpoint"))
+                if (entry.HasCheckpoint && EditorContextMenu.DrawItem(FontAwesomeIcon.TimesCircle, "Remove Checkpoint"))
                 {
                     CommitPendingHistory();
                     if (_objectHistoryManager.TryClearCheckpoint(entry.StateIndex))
@@ -248,7 +264,7 @@ internal sealed partial class EditorWindow
         var badgeAccent = isCurrent ? accent : entry.HasCheckpoint ? checkpointAccent : accent;
 
         var leftBarAccent = entry.HasCheckpoint ? checkpointAccent : accent;
-        DrawListEntryCardFrame(
+        _listCard.DrawFrame(
             drawList,
             min,
             max,
@@ -267,7 +283,7 @@ internal sealed partial class EditorWindow
         drawList.AddRect(badgeMin, badgeMax, ImGui.GetColorU32(EditorColors.WithAlpha(badgeAccent, 0.68f)), 999f, ImDrawFlags.None, MathF.Max(1f * ImGuiHelpers.GlobalScale, 1f));
         drawList.AddText(new Vector2(badgeMin.X + badgePaddingX, badgeMin.Y + badgePaddingY), ImGui.GetColorU32(text), badgeText);
 
-        var textWidth = MathF.Max(ResolveMinimumCardTextWidth(), badgeMin.X - min.X - (padX * 2f));
+        var textWidth = MathF.Max(EditorListCard.MinimumTextWidth, badgeMin.X - min.X - (padX * 2f));
         drawList.AddText(new Vector2(min.X + padX, min.Y + padY), ImGui.GetColorU32(text), ClipTextToWidth(entry.Title, textWidth));
 
         var detail = BuildHistoryEntryDetail(entry, isFuture);
@@ -291,7 +307,7 @@ internal sealed partial class EditorWindow
         return true;
     }
 
-    private void QueueHistoryCheckpointEditor(int stateIndex)
+    private void OpenHistoryCheckpointDialog(int stateIndex)
     {
         var entries = _objectHistoryManager.Entries;
         if (stateIndex < 0 || stateIndex >= entries.Count)
@@ -300,84 +316,56 @@ internal sealed partial class EditorWindow
         }
 
         var entry = entries[stateIndex];
-        _historyCheckpointEditStateIndex = stateIndex;
-        _historyCheckpointEditLabel = entry.HasCheckpoint
+        string initialLabel = entry.HasCheckpoint
             ? entry.CheckpointLabel ?? string.Empty
             : BuildDefaultHistoryCheckpointLabel(entries);
-        _openHistoryCheckpointPopupNextFrame = true;
+        OpenDialog(EditorDialog.Request.TextInput(
+            HistoryCheckpointDialogKey,
+            entry.HasCheckpoint ? "Edit Checkpoint" : "Set Checkpoint",
+            entry.HasCheckpoint ? "Save Checkpoint" : "Create Checkpoint",
+            label => TrySetHistoryCheckpoint(stateIndex, label)) with
+        {
+            Icon = FontAwesomeIcon.Flag,
+            ConfirmIcon = entry.HasCheckpoint ? FontAwesomeIcon.Save : FontAwesomeIcon.Flag,
+            Accent = EditorColors.AccentYellow,
+            InitialValue = initialLabel,
+            Placeholder = "checkpoint name",
+            Detail = entry.IsInitialState ? "Starting point" : $"State {stateIndex}",
+            Description = entry.Title,
+            MaxLength = 128,
+            Validate = static label => string.IsNullOrWhiteSpace(label) ? "Enter a checkpoint name." : null,
+            Secondary = entry.HasCheckpoint
+                ? new EditorDialog.SecondaryAction(
+                    "Remove",
+                    FontAwesomeIcon.Trash,
+                    EditorColors.DimRed,
+                    () => TryRemoveHistoryCheckpoint(stateIndex))
+                : null,
+        });
     }
 
-    private void DrawHistoryCheckpointPopup(IReadOnlyList<ObjectHistoryEntry> entries)
+    private bool TrySetHistoryCheckpoint(int stateIndex, string label)
     {
-        if (_openHistoryCheckpointPopupNextFrame)
+        CommitPendingHistory();
+        if (!_objectHistoryManager.TrySetCheckpoint(stateIndex, label))
         {
-            ImGui.OpenPopup(HistoryCheckpointPopupId);
-            _openHistoryCheckpointPopupNextFrame = false;
+            return false;
         }
 
-        using var popup = ImRaii.Popup(HistoryCheckpointPopupId, ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
-        if (!popup)
+        _focusCurrentHistoryEntry = true;
+        return true;
+    }
+
+    private bool TryRemoveHistoryCheckpoint(int stateIndex)
+    {
+        CommitPendingHistory();
+        if (!_objectHistoryManager.TryClearCheckpoint(stateIndex))
         {
-            return;
+            return false;
         }
 
-        if (!_historyCheckpointEditStateIndex.HasValue
-            || _historyCheckpointEditStateIndex.Value < 0
-            || _historyCheckpointEditStateIndex.Value >= entries.Count)
-        {
-            ImGui.CloseCurrentPopup();
-            return;
-        }
-
-        var stateIndex = _historyCheckpointEditStateIndex.Value;
-        var entry = entries[stateIndex];
-        var title = entry.HasCheckpoint ? "Edit Checkpoint" : "Set Checkpoint";
-
-        ImGui.TextUnformatted(title);
-        ImGui.Separator();
-        ImGui.TextDisabled(entry.IsInitialState ? "Starting point" : $"State {stateIndex}");
-        using (ImRaiiScope.TextWrapPos(26f * ImGui.GetFontSize()))
-        {
-            ImGui.TextUnformatted(entry.Title);
-        }
-        ImGuiHelpers.ScaledDummy(4f);
-
-        ImGui.SetNextItemWidth(MathF.Max(220f * ImGuiHelpers.GlobalScale, 1f));
-        ImGui.InputText("##historyCheckpointLabel", ref _historyCheckpointEditLabel, 128);
-
-        var canSave = !string.IsNullOrWhiteSpace(_historyCheckpointEditLabel);
-        using (ImRaii.Disabled(!canSave))
-        {
-            if (ImGui.Button(entry.HasCheckpoint ? "Save Checkpoint" : "Create Checkpoint") && canSave)
-            {
-                CommitPendingHistory();
-                if (_objectHistoryManager.TrySetCheckpoint(stateIndex, _historyCheckpointEditLabel))
-                {
-                    _focusCurrentHistoryEntry = true;
-                    ImGui.CloseCurrentPopup();
-                }
-            }
-        }
-
-        if (entry.HasCheckpoint)
-        {
-            ImGui.SameLine();
-            if (ImGui.Button("Remove"))
-            {
-                CommitPendingHistory();
-                if (_objectHistoryManager.TryClearCheckpoint(stateIndex))
-                {
-                    _focusCurrentHistoryEntry = true;
-                    ImGui.CloseCurrentPopup();
-                }
-            }
-        }
-
-        ImGui.SameLine();
-        if (ImGui.Button("Cancel"))
-        {
-            ImGui.CloseCurrentPopup();
-        }
+        _focusCurrentHistoryEntry = true;
+        return true;
     }
 
     private static string BuildHistoryStatus(IReadOnlyList<ObjectHistoryEntry> entries, ObjectHistoryEntry currentEntry, int checkpointCount)

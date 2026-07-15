@@ -89,6 +89,14 @@ internal interface IObjectLayoutManager
     ObjectLayoutSnapshot CreateLayout(string name, IReadOnlyList<ObjectSnapshot> objects, IReadOnlyList<string> folders, IReadOnlyDictionary<string, string> folderColors);
 
     /// <summary>
+    /// Renames one saved layout.
+    /// </summary>
+    /// <param name="id">The layout id.</param>
+    /// <param name="name">The requested layout name.</param>
+    /// <returns>true when the layout exists and the name is valid.</returns>
+    bool TryRenameLayout(Guid id, string name);
+
+    /// <summary>
     /// Replaces the persisted objects for one saved layout.
     /// </summary>
     /// <param name="id">The layout id.</param>
@@ -409,6 +417,39 @@ internal sealed class ObjectLayoutManager : IObjectLayoutManager, IDisposable
         ObjectLayoutSnapshot layout = BuildCreatedLayout(name, objects, folders, folderColors);
         AddLayout(layout);
         return layout;
+    }
+
+    public bool TryRenameLayout(Guid id, string name)
+    {
+        string sanitizedName = ObjectStringUtility.TrimOrEmpty(name);
+        if (sanitizedName.Length == 0)
+        {
+            return false;
+        }
+
+        ObjectLayoutSnapshot updatedLayout;
+        lock (_stateLock)
+        {
+            if (!_layouts.TryGetValue(id, out ObjectLayoutSnapshot? layout))
+            {
+                return false;
+            }
+
+            if (string.Equals(layout.Name, sanitizedName, StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            updatedLayout = layout with
+            {
+                Name = sanitizedName,
+                UpdatedAtUtc = DateTime.UtcNow,
+            };
+            _layouts[id] = updatedLayout;
+        }
+
+        _layoutStore.SaveLayout(updatedLayout);
+        return true;
     }
 
     public bool TryReplaceLayoutObjects(Guid id, IReadOnlyList<ObjectSnapshot> objects)

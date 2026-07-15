@@ -3,39 +3,42 @@ using System.Numerics;
 
 namespace Intoner.Objects.UI.Components;
 
+internal readonly record struct EditorOverlayArea(
+    Vector2 Min,
+    Vector2 Max,
+    float Rounding,
+    ImDrawFlags RoundingFlags)
+{
+    public Vector2 Size => Max - Min;
+}
+
 /// <summary> receives editor draw surfaces that late overlays may draw into </summary>
 internal interface IEditorOverlayTarget
 {
-    /// <summary> marks the current ImGui window as the latest valid overlay draw target </summary>
+    /// <summary> marks the current ImGui window as the overlay draw target for this frame </summary>
     void CaptureCurrentWindow();
 }
 
 internal sealed class EditorOverlayLayer : IEditorOverlayTarget
 {
     private ImDrawListPtr _targetDrawList;
-    private bool _hasTarget;
-
-    public void BeginFrame()
-    {
-        _targetDrawList = default;
-        _hasTarget = false;
-    }
+    private int _targetFrame = -1;
 
     public void CaptureCurrentWindow()
     {
         _targetDrawList = ImGui.GetWindowDrawList();
-        _hasTarget = true;
+        _targetFrame = ImGui.GetFrameCount();
     }
 
-    public void DrawClipped(Vector2 min, Vector2 max, Action<ImDrawListPtr> draw)
+    public void DrawClipped(EditorOverlayArea area, Action<ImDrawListPtr> draw)
     {
-        if (!EditorInputUtility.HasArea(min, max))
+        if (!EditorInputUtility.HasArea(area.Min, area.Max))
         {
             return;
         }
 
         ImDrawListPtr drawList = ResolveDrawList();
-        drawList.PushClipRect(min, max, false);
+        drawList.PushClipRect(area.Min, area.Max, false);
         try
         {
             draw(drawList);
@@ -47,7 +50,7 @@ internal sealed class EditorOverlayLayer : IEditorOverlayTarget
     }
 
     private ImDrawListPtr ResolveDrawList()
-        => _hasTarget
+        => _targetFrame == ImGui.GetFrameCount()
             ? _targetDrawList
             : ImGui.GetWindowDrawList();
 }

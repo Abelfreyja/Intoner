@@ -192,7 +192,8 @@ internal sealed class ObjectManager : IObjectManager, IDisposable
 
             IncrementPersistentSceneRevision();
             IncrementSceneRevision();
-            return _scene.ReloadForCurrentLocation().IsApplied;
+            _ = _scene.ReloadForCurrentLocation();
+            return true;
         }
 
         var defaultLayoutId = _layoutManager.GetDefaultLayoutId();
@@ -218,7 +219,8 @@ internal sealed class ObjectManager : IObjectManager, IDisposable
 
         IncrementPersistentSceneRevision();
         IncrementSceneRevision();
-        return _scene.ReloadForCurrentLocation().IsApplied;
+        _ = _scene.ReloadForCurrentLocation();
+        return true;
     }
 
     public bool TryDeleteLayout(Guid layoutId)
@@ -236,9 +238,12 @@ internal sealed class ObjectManager : IObjectManager, IDisposable
         }
 
         IncrementSceneRevision();
-        return defaultLayoutId == layoutId
-            ? _scene.ReloadForCurrentLocation().IsApplied
-            : true;
+        if (defaultLayoutId == layoutId)
+        {
+            _ = _scene.ReloadForCurrentLocation();
+        }
+
+        return true;
     }
 
     public bool TryRecoverWorkspace(ObjectPersistentWorkspaceSnapshot workspace, out string message)
