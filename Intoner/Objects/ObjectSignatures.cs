@@ -50,14 +50,20 @@ internal static unsafe class ObjectSignatures
     public const string StaticVfxRemove =
         "40 53 48 83 EC 20 48 8B D9 48 8B 89 ?? ?? ?? ?? 48 85 C9 74 28 33 D2 E8 ?? ?? ?? ?? 48 8B 8B ?? ?? ?? ?? 48 85 C9";
 
-    public const string StaticVfxPlay =
-        "48 89 5C 24 ?? 48 89 74 24 ?? 57 48 81 EC ?? ?? ?? ?? 0F 29 B4 24 ?? ?? ?? ?? 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 ?? 83 89";
-
     public const string ActorVfxCreate =
         "40 53 55 56 57 48 81 EC ?? ?? ?? ?? 0F 29 B4 24 ?? ?? ?? ?? 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 84 24 ?? ?? ?? ?? 0F B6 AC 24 ?? ?? ?? ?? 0F 28 F3 49 8B F8";
 
     public const string ActorVfxRemove =
         "0F 11 48 10 48 8D 05";
+
+    public const string VfxPauseToggleCall =
+        "E8 ?? ?? ?? ?? 48 8B CB E8 ?? ?? ?? ?? 0F 2E C7";
+
+    public const string VfxIsPausedCall =
+        "E8 ?? ?? ?? ?? 41 3A C5 74 ?? 48 8B CB";
+
+    public const string VfxSetSpeed =
+        "F3 0F 11 89 ?? ?? ?? ?? 48 8B 89";
 
     public const string CallVfxTrigger =
         "E8 ?? ?? ?? ?? 0F B7 43 56";
@@ -168,9 +174,12 @@ internal static unsafe class ObjectSignatures
         new((nint)ResourceManager.MemberFunctionPointers.GetResourceAsync, "object asset resource async");
     public static readonly AddressHookTarget AssetStaticVfxCreate =
         new((nint)SceneVfxObject.MemberFunctionPointers.Create, "object asset static vfx create");
-    public static readonly SignatureDelegateTarget NativeStaticVfxPlay =
-        new(StaticVfxPlay, "object static vfx play");
-
+    public static readonly JmpCallAddressTarget NativeVfxPauseToggle =
+        new(VfxPauseToggleCall, "VFX pause toggle");
+    public static readonly JmpCallAddressTarget NativeVfxIsPaused =
+        new(VfxIsPausedCall, "VFX paused state");
+    public static readonly SignatureDelegateTarget NativeVfxSetSpeed =
+        new(VfxSetSpeed, "VFX playback speed");
     // furniture and housing targets
     public static readonly SignatureHookTarget HousingFurnitureCulling =
         new(HousingFurnitureCullingUpdate, "object housing furniture culling update");
@@ -249,8 +258,8 @@ internal static unsafe class ObjectSignatures
         ResourceUpdateTextureCategory,
         ResourceHandleTypeFromPath,
 
-        // vfx
-        NativeStaticVfxPlay,
+        // vfx playback
+        NativeVfxSetSpeed,
 
         // furniture and housing
         NativeHousingPlacementRaycast,
@@ -269,6 +278,10 @@ internal static unsafe class ObjectSignatures
 
     private static readonly JmpCallAddressTarget[] JmpCallAddressTargets =
     [
+        // vfx playback
+        NativeVfxPauseToggle,
+        NativeVfxIsPaused,
+
         // furniture and housing
         NativeFurnitureCreate,
         NativeFurnitureDestroy,

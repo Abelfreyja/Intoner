@@ -51,12 +51,20 @@ internal sealed record VfxModelPatch : ObjectDataPatch
 {
     public string? VfxPath { get; init; }
     public Vector4? Color { get; init; }
+    public float? Speed { get; init; }
+    public bool? Paused { get; init; }
+    public float? FadeInSeconds { get; init; }
+    public bool? ReplayOnTransform { get; init; }
     public bool? Loop { get; init; }
     public int? LoopIntervalSeconds { get; init; }
 
     public bool HasChanges
         => VfxPath is not null
            || Color.HasValue
+           || Speed.HasValue
+           || Paused.HasValue
+           || FadeInSeconds.HasValue
+           || ReplayOnTransform.HasValue
            || Loop.HasValue
            || LoopIntervalSeconds.HasValue;
 }

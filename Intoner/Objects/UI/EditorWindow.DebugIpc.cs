@@ -740,7 +740,8 @@ internal sealed partial class EditorWindow
     private WorldObject BuildFallbackObjectIpcWorldObjectSample()
     {
         var createdIn = BuildObjectIpcCreationData();
-        if (!string.IsNullOrWhiteSpace(_vfxCreate.VfxPath))
+        var vfxModel = _vfxCreate.Model;
+        if (!string.IsNullOrWhiteSpace(vfxModel.VfxPath))
         {
             return new WorldObject(
                 Guid.Empty,
@@ -756,12 +757,18 @@ internal sealed partial class EditorWindow
                 string.Empty,
                 new WorldObjectModelData(
                     Vfx: new VfxModelData(
-                        _vfxCreate.VfxPath,
+                        vfxModel.VfxPath,
                         new ObjectVector4(
-                            _vfxCreate.Color.X,
-                            _vfxCreate.Color.Y,
-                            _vfxCreate.Color.Z,
-                            _vfxCreate.Color.W))));
+                            vfxModel.Color.X,
+                            vfxModel.Color.Y,
+                            vfxModel.Color.Z,
+                            vfxModel.Color.W),
+                        vfxModel.Speed,
+                        vfxModel.Paused,
+                        vfxModel.FadeInSeconds,
+                        vfxModel.ReplayOnTransform,
+                        vfxModel.Loop,
+                        vfxModel.LoopIntervalSeconds)));
         }
 
         if (!string.IsNullOrWhiteSpace(_furnitureCreate.SharedGroupPath))

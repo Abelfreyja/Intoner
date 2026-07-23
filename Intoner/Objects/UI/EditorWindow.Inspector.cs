@@ -981,7 +981,7 @@ internal sealed partial class EditorWindow
         var accent = EditorColors.AccentPurple;
         var stateBadgeText = isActive ? "Active" : "Inactive";
         var stateBadgeColor = isActive ? EditorColors.AccentGreen : EditorColors.AccentBlue;
-        var kindBadgeText = snapshot.Kind.ToString();
+        var kindBadgeText = _objectKindService.GetDisplayName(snapshot.Kind);
         var contentAlpha = snapshot.Locked
             ? (isActive ? 0.78f : 0.62f)
             : isActive ? 1f : 0.72f;
@@ -1686,81 +1686,110 @@ internal sealed partial class EditorWindow
             return;
         }
 
-        var vfxPath = vfxModel.VfxPath;
+        ObjectCatalogVfxInfo? vfxInfo = ResolveVfxCatalogInfo(vfxModel.VfxPath);
+        DrawVfxModelEditor(
+            "inspector",
+            ref vfxModel,
+            vfxInfo?.CanUseReplayLoop != false,
+            onChanged: (editId, title, updatedModel, recordImmediately) =>
+                ApplyInspectorSnapshotEdit(
+                    editId,
+                    ObjectHistoryKind.Appearance,
+                    title,
+                    snapshot,
+                    snapshot with { Model = updatedModel },
+                    recordImmediately));
+    }
+
+    private static void DrawVfxModelEditor(
+        string id,
+        ref VfxModel model,
+        bool canUseReplayLoop,
+        Action<string, string, VfxModel, bool>? onChanged = null)
+    {
+        var vfxPath = model.VfxPath;
         DrawCompactSettingsLabelCell("VFX Path");
         ImGui.SetNextItemWidth(-1f);
-        if (ImGui.InputText("##vfxPath", ref vfxPath, 512))
+        if (ImGui.InputText($"##VfxPath_{id}", ref vfxPath, 512))
         {
-            ApplyInspectorSnapshotEdit(
-                "VfxPath",
-                ObjectHistoryKind.Appearance,
-                "Change VFX Path",
-                snapshot,
-                snapshot with
-                {
-                    Model = vfxModel with { VfxPath = vfxPath },
-                });
+            model = model with { VfxPath = vfxPath };
+            onChanged?.Invoke("VfxPath", "Change VFX Path", model, false);
         }
 
         DrawCompactSettingsLabelCell("Tint");
-        var color = vfxModel.Color;
+        var color = model.Color;
         ImGui.SetNextItemWidth(-1f);
-        if (ImGui.ColorEdit4("##vfxColor", ref color, ImGuiColorEditFlags.Float))
+        if (ImGui.ColorEdit4($"##VfxColor_{id}", ref color, ImGuiColorEditFlags.Float))
         {
-            ApplyInspectorSnapshotEdit(
-                "VfxColor",
-                ObjectHistoryKind.Appearance,
-                "Change VFX Tint",
-                snapshot,
-                snapshot with
-                {
-                    Model = vfxModel with { Color = color },
-                });
+            model = model with { Color = color };
+            onChanged?.Invoke("VfxColor", "Change VFX Tint", model, false);
         }
 
-        ObjectCatalogVfxInfo? vfxInfo = ResolveVfxCatalogInfo(vfxModel.VfxPath);
-        if (vfxInfo?.CanUseReplayLoop != false)
+        var paused = model.Paused;
+        if (DrawCheckboxRow($"VfxPaused_{id}", "Paused", ref paused))
         {
-            var loop = vfxModel.Loop;
-            if (DrawCheckboxRow("vfxLoop", "Loop", ref loop))
-            {
-                ApplyInspectorSnapshotEdit(
-                    "VfxLoop",
-                    ObjectHistoryKind.Appearance,
-                    loop ? "Enable VFX Loop" : "Disable VFX Loop",
-                    snapshot,
-                    snapshot with
-                    {
-                        Model = vfxModel with { Loop = loop },
-                    },
-                    recordImmediately: true);
-            }
+            model = model with { Paused = paused };
+            onChanged?.Invoke("VfxPaused", paused ? "Pause VFX" : "Resume VFX", model, true);
+        }
 
-            using (ImRaii.Disabled(!loop))
+        var speed = model.Speed;
+        if (DrawDragFloatRow($"VfxSpeed_{id}", "Speed", ref speed, 0.01f, VfxModel.MinSpeed, VfxModel.MaxSpeed, "%.2fx"))
+        {
+            model = model with { Speed = VfxModel.ClampSpeed(speed) };
+            onChanged?.Invoke("VfxSpeed", "Change VFX Speed", model, false);
+        }
+
+        var fadeInSeconds = model.FadeInSeconds;
+        if (DrawDragFloatRow(
+                $"VfxFadeIn_{id}",
+                "Fade In",
+                ref fadeInSeconds,
+                0.05f,
+                VfxModel.MinFadeInSeconds,
+                VfxModel.MaxFadeInSeconds,
+                "%.2f seconds"))
+        {
+            model = model with { FadeInSeconds = VfxModel.ClampFadeInSeconds(fadeInSeconds) };
+            onChanged?.Invoke("VfxFadeIn", "Change VFX Fade In", model, false);
+        }
+
+        var replayOnTransform = model.ReplayOnTransform;
+        if (DrawCheckboxRow($"VfxReplayOnTransform_{id}", "Replay on Transform", ref replayOnTransform))
+        {
+            model = model with { ReplayOnTransform = replayOnTransform };
+            onChanged?.Invoke(
+                "VfxReplayOnTransform",
+                replayOnTransform ? "Enable VFX Transform Replay" : "Disable VFX Transform Replay",
+                model,
+                true);
+        }
+
+        if (!canUseReplayLoop)
+        {
+            return;
+        }
+
+        var loop = model.Loop;
+        if (DrawCheckboxRow($"VfxLoop_{id}", "Loop", ref loop))
+        {
+            model = model with { Loop = loop };
+            onChanged?.Invoke("VfxLoop", loop ? "Enable VFX Loop" : "Disable VFX Loop", model, true);
+        }
+
+        using (ImRaii.Disabled(!loop))
+        {
+            DrawCompactSettingsLabelCell("Loop Interval");
+            var loopIntervalSeconds = model.LoopIntervalSeconds;
+            if (ImGui.DragInt(
+                    $"##VfxLoopInterval_{id}",
+                    ref loopIntervalSeconds,
+                    0.1f,
+                    VfxModel.MinLoopIntervalSeconds,
+                    VfxModel.MaxLoopIntervalSeconds,
+                    "%d seconds"))
             {
-                DrawCompactSettingsLabelCell("Loop Interval");
-                var loopIntervalSeconds = vfxModel.LoopIntervalSeconds;
-                if (ImGui.DragInt(
-                        "##vfxLoopInterval",
-                        ref loopIntervalSeconds,
-                        0.1f,
-                        VfxModel.MinLoopIntervalSeconds,
-                        VfxModel.MaxLoopIntervalSeconds,
-                        "%d seconds"))
-                {
-                    ApplyInspectorSnapshotEdit(
-                        "VfxLoopInterval",
-                        ObjectHistoryKind.Appearance,
-                        "Change VFX Loop Interval",
-                        snapshot,
-                        snapshot with
-                        {
-                            Model = vfxModel with
-                            {
-                                LoopIntervalSeconds = VfxModel.ClampLoopIntervalSeconds(loopIntervalSeconds),
-                            },
-                        });
-                }
+                model = model with { LoopIntervalSeconds = VfxModel.ClampLoopIntervalSeconds(loopIntervalSeconds) };
+                onChanged?.Invoke("VfxLoopInterval", "Change VFX Loop Interval", model, false);
             }
         }
     }

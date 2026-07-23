@@ -225,6 +225,8 @@ internal sealed class ObjectKindService : IObjectKindService
             {
                 VfxPath = GameAssetPathRules.NormalizeGamePath(vfxModel.VfxPath),
                 Color = ObjectColorUtility.ClampNormalizedColor(vfxModel.Color),
+                Speed = VfxModel.ClampSpeed(vfxModel.Speed),
+                FadeInSeconds = VfxModel.ClampFadeInSeconds(vfxModel.FadeInSeconds),
                 LoopIntervalSeconds = VfxModel.ClampLoopIntervalSeconds(vfxModel.LoopIntervalSeconds),
             },
         };

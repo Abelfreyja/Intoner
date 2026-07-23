@@ -10,6 +10,7 @@ internal sealed partial class Gizmo
 {
     private void BeginGizmoSurfaceDrag(in GizmoContext context)
     {
+        _host.PrepareHistoryMutation();
         var objectTargetsEnabled = Settings.SurfaceObjectTargetsEnabled;
         var objectTargetShape = Settings.SurfaceObjectTargetShape;
         var surfaceTargets = CaptureSurfaceTargets(context, objectTargetsEnabled, objectTargetShape);

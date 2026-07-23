@@ -63,8 +63,11 @@ internal sealed partial class EditorWindow
                     catalog.Vfx,
                     ref _vfxCreate.CatalogFilter,
                     ref _vfxCreate.SourceFilter,
-                    _vfxCreate.VfxPath,
-                    entry => _vfxCreate.VfxPath = ToggleCatalogSelectionPath(_vfxCreate.VfxPath, entry.PlacementPath),
+                    _vfxCreate.Model.VfxPath,
+                    entry => _vfxCreate.Model = _vfxCreate.Model with
+                    {
+                        VfxPath = ToggleCatalogSelectionPath(_vfxCreate.Model.VfxPath, entry.PlacementPath),
+                    },
                     "No VFX entries match the current filter.");
                 break;
             case DraftKind.Light:

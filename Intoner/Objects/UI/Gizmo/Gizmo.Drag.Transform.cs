@@ -306,6 +306,7 @@ internal sealed partial class Gizmo
 
     private void BeginLinearGizmoDrag(in GizmoContext context, GizmoAxis axis, GizmoAxisVisualState state, GizmoTransformMode mode)
     {
+        _host.PrepareHistoryMutation();
         var dragScreenLength = GizmoTranslationMath.ResolveDragScreenLength(
             context.ViewProjection,
             context.PivotPosition,
@@ -440,6 +441,7 @@ internal sealed partial class Gizmo
         RotationHoverState hoverState,
         in RotationProjectionContext projection)
     {
+        _host.PrepareHistoryMutation();
         State.ResetTransformDragSessions();
         RotationDragState.Begin(
             context.SelectedSnapshots,

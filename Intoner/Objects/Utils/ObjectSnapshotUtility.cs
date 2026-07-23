@@ -122,6 +122,12 @@ internal static class ObjectSnapshotUtility
         {
             VfxPath = patch.VfxPath ?? model.VfxPath,
             Color = patch.Color ?? model.Color,
+            Speed = patch.Speed.HasValue ? VfxModel.ClampSpeed(patch.Speed.Value) : model.Speed,
+            Paused = patch.Paused ?? model.Paused,
+            FadeInSeconds = patch.FadeInSeconds.HasValue
+                ? VfxModel.ClampFadeInSeconds(patch.FadeInSeconds.Value)
+                : model.FadeInSeconds,
+            ReplayOnTransform = patch.ReplayOnTransform ?? model.ReplayOnTransform,
             Loop = patch.Loop ?? model.Loop,
             LoopIntervalSeconds = patch.LoopIntervalSeconds.HasValue
                 ? VfxModel.ClampLoopIntervalSeconds(patch.LoopIntervalSeconds.Value)

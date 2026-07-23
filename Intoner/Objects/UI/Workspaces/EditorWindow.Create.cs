@@ -342,74 +342,41 @@ internal sealed partial class EditorWindow
             }
 
             DrawCheckboxRow("vfxCreateVisible", "Visible", ref _vfxCreate.Visible);
-
-            ObjectCatalogVfxInfo? vfxInfo = ResolveVfxCatalogInfo(_vfxCreate.VfxPath);
-            if (vfxInfo?.CanUseReplayLoop != false)
+            var vfxModel = _vfxCreate.Model;
+            ObjectCatalogVfxInfo? vfxInfo = ResolveVfxCatalogInfo(vfxModel.VfxPath);
+            bool canUseReplayLoop = vfxInfo?.CanUseReplayLoop != false;
+            if (!canUseReplayLoop && vfxModel.Loop)
             {
-                DrawCheckboxRow("vfxCreateLoop", "Loop", ref _vfxCreate.Loop);
-
-                using (ImRaii.Disabled(!_vfxCreate.Loop))
-                {
-                    DrawCompactSettingsLabelCell("Loop Interval");
-                    var loopIntervalSeconds = _vfxCreate.LoopIntervalSeconds;
-                    if (ImGui.DragInt(
-                            "##vfxCreateLoopInterval",
-                            ref loopIntervalSeconds,
-                            0.1f,
-                            VfxModel.MinLoopIntervalSeconds,
-                            VfxModel.MaxLoopIntervalSeconds,
-                            "%d seconds"))
-                    {
-                        _vfxCreate.LoopIntervalSeconds = VfxModel.ClampLoopIntervalSeconds(loopIntervalSeconds);
-                    }
-                }
-            }
-            else
-            {
-                _vfxCreate.Loop = false;
+                vfxModel = vfxModel with { Loop = false };
             }
 
-            DrawCompactSettingsLabelCell("VFX Path");
-            var vfxPath = _vfxCreate.VfxPath;
-            ImGui.SetNextItemWidth(-1f);
-            if (ImGui.InputText("##vfxCreatePath", ref vfxPath, 512))
-            {
-                _vfxCreate.VfxPath = vfxPath;
-            }
+            DrawVfxModelEditor("create", ref vfxModel, canUseReplayLoop);
+            _vfxCreate.Model = vfxModel;
 
             DrawScaleClipboardRow("vfxCreateScale", ref _vfxCreate.Scale);
-
-            DrawCompactSettingsLabelCell("Tint");
-            var color = _vfxCreate.Color;
-            ImGui.SetNextItemWidth(-1f);
-            if (ImGui.ColorEdit4("##vfxCreateColor", ref color, ImGuiColorEditFlags.Float))
-            {
-                _vfxCreate.Color = color;
-            }
         });
 
         DrawBottomAlignedCreateActionHost("vfx-action-host", actionHostHeight, () =>
         {
             ObjectPlacementOverrides BuildPlacementOverrides()
             {
-                ObjectCatalogVfxInfo? vfxInfo = ResolveVfxCatalogInfo(_vfxCreate.VfxPath);
-                bool loop = vfxInfo?.CanUseReplayLoop != false && _vfxCreate.Loop;
+                var vfxModel = _vfxCreate.Model;
+                ObjectCatalogVfxInfo? vfxInfo = ResolveVfxCatalogInfo(vfxModel.VfxPath);
+                if (vfxInfo?.CanUseReplayLoop == false)
+                {
+                    vfxModel = vfxModel with { Loop = false };
+                }
+
                 return new()
                 {
                     Visible = _vfxCreate.Visible,
                     FolderPath = selectedPlacementFolderPath,
                     Scale = _vfxCreate.Scale,
-                    Model = new VfxModel
-                    {
-                        VfxPath = _vfxCreate.VfxPath,
-                        Color = _vfxCreate.Color,
-                        Loop = loop,
-                        LoopIntervalSeconds = _vfxCreate.LoopIntervalSeconds,
-                    },
+                    Model = vfxModel,
                 };
             }
 
-            using var disabled = ImRaii.Disabled(!kindInfo.CanCreate || string.IsNullOrWhiteSpace(_vfxCreate.VfxPath));
+            using var disabled = ImRaii.Disabled(!kindInfo.CanCreate || string.IsNullOrWhiteSpace(_vfxCreate.Model.VfxPath));
             DrawCreateActionCard(
                 "vfx",
                 actionLabel,

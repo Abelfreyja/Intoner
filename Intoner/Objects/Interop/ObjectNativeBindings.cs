@@ -1,15 +1,13 @@
 using Dalamud.Plugin.Services;
-using Intoner.Objects.Utils;
 using Microsoft.Extensions.Logging;
 using System.Runtime.InteropServices;
 using SceneVfxObject = FFXIVClientStructs.FFXIV.Client.Graphics.Scene.VfxObject;
+using VfxResourceInstance = FFXIVClientStructs.FFXIV.Client.Graphics.Vfx.VfxResourceInstance;
 
 namespace Intoner.Objects.Interop;
 
 internal sealed unsafe class ObjectNativeBindings
 {
-    internal delegate nint StaticVfxPlayDelegate(SceneVfxObject* vfxObject, float startTime, int bindPoint);
-
     [StructLayout(LayoutKind.Auto)]
     public readonly struct FurnitureBinding
     {
@@ -29,16 +27,43 @@ internal sealed unsafe class ObjectNativeBindings
     }
 
     [StructLayout(LayoutKind.Auto)]
-    public readonly struct StaticVfxBinding(StaticVfxPlayDelegate? play)
+    public readonly struct VfxBinding
     {
-        public bool TryPlay(SceneVfxObject* vfxObject)
+        private readonly nint _pauseToggleAddress;
+        private readonly nint _isPausedAddress;
+        private readonly nint _setSpeedAddress;
+
+        public VfxBinding(nint pauseToggleAddress, nint isPausedAddress, nint setSpeedAddress)
         {
-            if (vfxObject == null || play is null)
+            _pauseToggleAddress = pauseToggleAddress;
+            _isPausedAddress = isPausedAddress;
+            _setSpeedAddress = setSpeedAddress;
+        }
+
+        public bool TryApplyPlaybackState(SceneVfxObject* vfxObject, float speed, bool paused)
+        {
+            if (vfxObject == null || vfxObject->VfxResourceInstance == null)
             {
                 return false;
             }
 
-            _ = play(vfxObject, 0f, -1);
+            if (_setSpeedAddress != nint.Zero)
+            {
+                var setSpeed = (delegate* unmanaged<SceneVfxObject*, float, void>)_setSpeedAddress;
+                setSpeed(vfxObject, speed);
+            }
+
+            if (_pauseToggleAddress != nint.Zero && _isPausedAddress != nint.Zero)
+            {
+                var resourceInstance = vfxObject->VfxResourceInstance;
+                var isPaused = (delegate* unmanaged<VfxResourceInstance*, byte>)_isPausedAddress;
+                if ((isPaused(resourceInstance) != 0) != paused)
+                {
+                    var togglePause = (delegate* unmanaged<VfxResourceInstance*, void>)_pauseToggleAddress;
+                    togglePause(resourceInstance);
+                }
+            }
+
             return true;
         }
     }
@@ -52,18 +77,30 @@ internal sealed unsafe class ObjectNativeBindings
         ObjectSignatures.TestSignatures(sigScanner, _logger);
 #endif
         Furniture = CreateFurnitureBinding(sigScanner);
-        StaticVfx = CreateStaticVfxBinding(sigScanner);
+        Vfx = CreateVfxBinding(sigScanner);
     }
 
     public FurnitureBinding Furniture { get; }
-    public StaticVfxBinding StaticVfx { get; }
+    public VfxBinding Vfx { get; }
 
-    private StaticVfxBinding CreateStaticVfxBinding(ISigScanner sigScanner)
-        => new(
-            ObjectInteropHookUtility.CreateDelegate<StaticVfxPlayDelegate>(
-                _logger,
-                sigScanner,
-                ObjectSignatures.NativeStaticVfxPlay));
+    private VfxBinding CreateVfxBinding(ISigScanner sigScanner)
+    {
+        nint pauseToggleAddress = ObjectNativeAddressResolver.TryResolveJmpCallTarget(
+            _logger,
+            sigScanner,
+            ObjectSignatures.NativeVfxPauseToggle);
+        nint isPausedAddress = ObjectNativeAddressResolver.TryResolveJmpCallTarget(
+            _logger,
+            sigScanner,
+            ObjectSignatures.NativeVfxIsPaused);
+        nint setSpeedAddress = ObjectNativeAddressResolver.TryScanSingleTextMatch(
+            _logger,
+            sigScanner,
+            ObjectSignatures.NativeVfxSetSpeed.Signature,
+            ObjectSignatures.NativeVfxSetSpeed.Label);
+
+        return new VfxBinding(pauseToggleAddress, isPausedAddress, setSpeedAddress);
+    }
 
     private FurnitureBinding CreateFurnitureBinding(ISigScanner sigScanner)
     {

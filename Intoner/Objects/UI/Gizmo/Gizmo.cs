@@ -23,6 +23,9 @@ internal interface IGizmoHost
     /// <summary> captures current editor selection ids for history entries </summary>
     Guid[] CaptureCurrentSelectionIds();
 
+    /// <summary> commits pending edits and validates history before a gizmo mutation starts </summary>
+    void PrepareHistoryMutation();
+
     /// <summary> records a completed history action after a gizmo drag finishes </summary>
     bool TryRecordCompletedHistoryAction(
         ObjectHistoryKind kind,

@@ -130,7 +130,11 @@ internal sealed partial class EditorWindow
     {
         _historyCoordinator.CommitPendingInspectorEdits();
         _gizmo.CancelInteractions();
+        _historyCoordinator.PrepareForMutation();
     }
+
+    private void PrepareHistoryMutation()
+        => _historyCoordinator.PrepareForMutation();
 
     private void ApplyInspectorSnapshotEdit(
         string editId,
@@ -229,6 +233,7 @@ internal sealed partial class EditorWindow
             return false;
         }
 
+        PrepareHistoryMutation();
         var beforeFolderState = _objectFolderService.CaptureSceneState();
         var afterFolderState = ObjectFolderSceneStateUtility.RenameFolder(beforeFolderState, sanitizedSourceFolderPath, sanitizedNextFolderPath);
         var beforeSnapshots = _sceneView.GetPlacedObjectSnapshots()
@@ -262,6 +267,7 @@ internal sealed partial class EditorWindow
             return false;
         }
 
+        PrepareHistoryMutation();
         var beforeFolderState = _objectFolderService.CaptureSceneState();
         var afterFolderState = ObjectFolderSceneStateUtility.RemoveFolder(beforeFolderState, sanitizedFolderPath);
         var beforeSnapshots = _sceneView.GetPlacedObjectSnapshots()
@@ -311,6 +317,7 @@ internal sealed partial class EditorWindow
             return false;
         }
 
+        PrepareHistoryMutation();
         if (!_objectFolderService.TryApplySceneState(afterState))
         {
             return false;
@@ -366,7 +373,7 @@ internal sealed partial class EditorWindow
             return false;
         }
 
-        _objectHistoryManager.RecordCompleted(
+        _historyCoordinator.RecordCompletedAction(
             actions.Count == 1
                 ? actions[0]
                 : new CompositeHistoryAction(ObjectHistoryKind.Organization, title, actions));

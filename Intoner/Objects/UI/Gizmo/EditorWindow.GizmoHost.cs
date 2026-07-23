@@ -14,6 +14,9 @@ internal sealed partial class EditorWindow
     Guid[] IGizmoHost.CaptureCurrentSelectionIds()
         => CaptureCurrentSelectionIds();
 
+    void IGizmoHost.PrepareHistoryMutation()
+        => PrepareHistoryMutation();
+
     bool IGizmoHost.TryRecordCompletedHistoryAction(
         ObjectHistoryKind kind,
         string title,

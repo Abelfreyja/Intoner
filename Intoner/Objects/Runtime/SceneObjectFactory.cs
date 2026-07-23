@@ -353,7 +353,7 @@ internal sealed unsafe class SceneObjectFactory : ISceneObjectFactory
             CreateBootstrapSnapshot(snapshot),
             vfxObject,
             resolvedResource.ResolvedPath,
-            _nativeBindings.StaticVfx,
+            _nativeBindings.Vfx,
             _resourceTracker);
         return FinalizeSceneObjectCreate(
             sceneObject,

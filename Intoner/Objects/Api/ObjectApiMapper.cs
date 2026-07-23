@@ -477,6 +477,10 @@ internal static class ObjectApiMapper
         {
             VfxPath = model.VfxPath,
             Color = ToVector4(model.Color),
+            Speed = model.Speed,
+            Paused = model.Paused,
+            FadeInSeconds = model.FadeInSeconds,
+            ReplayOnTransform = model.ReplayOnTransform,
             Loop = model.Loop,
             LoopIntervalSeconds = model.LoopIntervalSeconds,
         };
@@ -552,6 +556,10 @@ internal static class ObjectApiMapper
         => new(Vfx: new VfxModelData(
             model.VfxPath,
             ToDto(model.Color),
+            model.Speed,
+            model.Paused,
+            model.FadeInSeconds,
+            model.ReplayOnTransform,
             model.Loop,
             model.LoopIntervalSeconds));
 
@@ -641,6 +649,10 @@ internal static class ObjectApiMapper
         {
             VfxPath = model.VfxPath,
             Color = ToVector4(model.Color),
+            Speed = model.Speed,
+            Paused = model.Paused,
+            FadeInSeconds = model.FadeInSeconds,
+            ReplayOnTransform = model.ReplayOnTransform,
             Loop = model.Loop,
             LoopIntervalSeconds = model.LoopIntervalSeconds,
         };

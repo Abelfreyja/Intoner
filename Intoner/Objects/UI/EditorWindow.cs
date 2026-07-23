@@ -70,14 +70,11 @@ internal sealed partial class EditorWindow : IntonerWindow, IGizmoHost, IDisposa
 
     private sealed class VfxCreateState
     {
-        public string VfxPath = string.Empty;
         public string CatalogFilter = string.Empty;
         public string SourceFilter = string.Empty;
         public Vector3 Scale = Vector3.One;
         public bool Visible = true;
-        public Vector4 Color = Vector4.One;
-        public bool Loop;
-        public int LoopIntervalSeconds = VfxModel.DefaultLoopIntervalSeconds;
+        public VfxModel Model = new();
     }
 
     private sealed class PreviewState
@@ -387,8 +384,19 @@ internal sealed partial class EditorWindow : IntonerWindow, IGizmoHost, IDisposa
     private void OpenWorkspace(WorkspaceMode workspaceMode)
     {
         IsOpen = true;
-        _workspaceMode = workspaceMode;
+        SetWorkspaceMode(workspaceMode);
         DismissSplashScreen();
+    }
+
+    private void SetWorkspaceMode(WorkspaceMode workspaceMode)
+    {
+        if (_workspaceMode == workspaceMode)
+        {
+            return;
+        }
+
+        CommitPendingHistory();
+        _workspaceMode = workspaceMode;
     }
 
     private void OpenDialog(EditorDialog.Request request)
@@ -418,6 +426,11 @@ internal sealed partial class EditorWindow : IntonerWindow, IGizmoHost, IDisposa
 
     protected override void DrawContent()
     {
+        if (!ImGui.IsAnyItemActive())
+        {
+            _historyCoordinator.CommitPendingInspectorEdits();
+        }
+
         bool dialogOpen = _dialog.IsOpen;
         using (ImRaii.Disabled(dialogOpen))
         {
@@ -963,7 +976,7 @@ internal sealed partial class EditorWindow : IntonerWindow, IGizmoHost, IDisposa
                 continue;
             }
 
-            _workspaceMode = action.Mode;
+            SetWorkspaceMode(action.Mode);
             if (action.FocusCurrentHistoryEntry)
             {
                 _focusCurrentHistoryEntry = true;

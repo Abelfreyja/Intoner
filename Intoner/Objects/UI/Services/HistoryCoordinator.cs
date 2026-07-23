@@ -1,4 +1,3 @@
-using Dalamud.Bindings.ImGui;
 using Intoner.Objects.Models;
 using Intoner.Objects.Runtime;
 using Microsoft.Extensions.Logging;
@@ -24,6 +23,9 @@ internal interface IHistoryCoordinator : IDisposable
 
     /// <summary> forces any pending inspector edits to become one history step </summary>
     void CommitPendingInspectorEdits();
+
+    /// <summary> commits pending edits and validates history before a tracked persistent mutation starts </summary>
+    void PrepareForMutation();
 
     /// <summary> applies one inspector edit and records it when the edit is finished </summary>
     /// <param name="editId">stable editor local id for the edited field</param>
@@ -95,6 +97,10 @@ internal interface IHistoryCoordinator : IDisposable
     /// <param name="selectionAfterRevert">optional selection to restore after revert or undo</param>
     /// <returns>true when a replayable history action was recorded</returns>
     bool TryRecordCompletedAction(ObjectHistoryKind kind, string title, IReadOnlyList<ObjectSnapshot> beforeSnapshots, IReadOnlyList<ObjectSnapshot> afterSnapshots, IReadOnlyList<Guid>? selectionAfterApply, IReadOnlyList<Guid>? selectionAfterRevert);
+
+    /// <summary> records an already applied history action and synchronizes persistent revision tracking </summary>
+    /// <param name="action">the completed action to record</param>
+    void RecordCompletedAction(IObjectHistoryAction action);
 }
 
 internal sealed class HistoryCoordinator : IHistoryCoordinator
@@ -139,6 +145,7 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
     private sealed class PendingInspectorEdit
     {
         public PendingInspectorEdit(
+            string editId,
             string title,
             ObjectHistoryKind kind,
             Guid objectId,
@@ -146,6 +153,7 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
             ObjectSnapshot latestSnapshot,
             IReadOnlyList<Guid> selectionIds)
         {
+            EditId = editId;
             Title = title;
             Kind = kind;
             ObjectId = objectId;
@@ -154,6 +162,7 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
             SelectionIds = [.. selectionIds];
         }
 
+        public string EditId { get; }
         public string Title { get; }
         public ObjectHistoryKind Kind { get; }
         public Guid ObjectId { get; }
@@ -166,7 +175,7 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
     private readonly IObjectHistoryManager _historyManager;
     private readonly IObjectMutationService _mutationService;
     private readonly IObjectSceneView _sceneView;
-    private readonly Dictionary<string, PendingInspectorEdit> _pendingInspectorEdits = new(StringComparer.Ordinal);
+    private PendingInspectorEdit? _pendingInspectorEdit;
 
     private Func<IReadOnlyList<Guid>>? _captureSelectionIds;
     private Action<IReadOnlyList<Guid>?>? _applySelectionIds;
@@ -223,22 +232,27 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
 
     public void CommitPendingInspectorEdits()
     {
-        if (_pendingInspectorEdits.Count == 0)
+        if (_pendingInspectorEdit is null)
         {
             return;
         }
 
-        foreach (var editId in _pendingInspectorEdits.Keys.ToArray())
-        {
-            FinalizeInspectorSnapshotEdit(editId, force: true);
-        }
+        FinalizeInspectorSnapshotEdit();
+    }
+
+    public void PrepareForMutation()
+    {
+        CommitPendingInspectorEdits();
+        ResetHistoryForUntrackedPersistentChange();
     }
 
     public void ApplyInspectorSnapshotEdit(string editId, ObjectHistoryKind kind, string title, ObjectSnapshot startSnapshot, ObjectSnapshot? nextSnapshot, bool recordImmediately = false)
     {
-        if (_pendingInspectorEdits.TryGetValue(editId, out var existingEdit) && existingEdit.ObjectId != startSnapshot.Id)
+        if (_pendingInspectorEdit is not null
+            && (!string.Equals(_pendingInspectorEdit.EditId, editId, StringComparison.Ordinal)
+                || _pendingInspectorEdit.ObjectId != startSnapshot.Id))
         {
-            FinalizeInspectorSnapshotEdit(editId, force: true);
+            FinalizeInspectorSnapshotEdit();
         }
 
         if (nextSnapshot is not null)
@@ -250,19 +264,27 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
             }
 
             TrackPersistentSceneRevision();
-            if (!_pendingInspectorEdits.TryGetValue(editId, out var pendingEdit))
+            if (_pendingInspectorEdit is null)
             {
-                _pendingInspectorEdits.Add(
+                _pendingInspectorEdit = new PendingInspectorEdit(
                     editId,
-                    new PendingInspectorEdit(title, kind, startSnapshot.Id, startSnapshot, appliedSnapshot, CaptureCurrentSelectionIds()));
+                    title,
+                    kind,
+                    startSnapshot.Id,
+                    startSnapshot,
+                    appliedSnapshot,
+                    CaptureCurrentSelectionIds());
             }
             else
             {
-                pendingEdit.LatestSnapshot = appliedSnapshot;
+                _pendingInspectorEdit.LatestSnapshot = appliedSnapshot;
             }
         }
 
-        FinalizeInspectorSnapshotEdit(editId, force: recordImmediately);
+        if (recordImmediately)
+        {
+            FinalizeInspectorSnapshotEdit();
+        }
     }
 
     public bool TryUndo()
@@ -276,7 +298,7 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
 
     public bool TryCreateObject(string title, ObjectKind kind, ObjectPlacementOverrides? overrides)
     {
-        ResetHistoryForUntrackedPersistentChange();
+        PrepareForMutation();
         var selectionBefore = CaptureCurrentSelectionIds();
         var createdId = _mutationService.CreateObjectAtPlayer(kind, out var createdSnapshot, overrides);
         if (!createdId.HasValue)
@@ -289,7 +311,7 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
 
     public bool TryImportObjectSnapshot(ObjectSnapshot snapshot)
     {
-        ResetHistoryForUntrackedPersistentChange();
+        PrepareForMutation();
         var selectionBefore = CaptureCurrentSelectionIds();
         var importedId = _mutationService.ImportObjectSnapshot(snapshot, out var importedSnapshot);
         if (!importedId.HasValue)
@@ -302,7 +324,7 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
 
     public bool TryMoveObjectToPlayer(Guid objectId)
     {
-        ResetHistoryForUntrackedPersistentChange();
+        PrepareForMutation();
         if (!_sceneView.TryGetSceneObjectSnapshot(objectId, out var beforeSnapshot)
             && !_sceneView.TryGetPersistedObjectSnapshot(objectId, out beforeSnapshot))
         {
@@ -320,7 +342,7 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
 
     public bool TryApplySelectedSnapshotUpdate(ObjectHistoryKind kind, string title, IReadOnlyList<ObjectSnapshot> selectedSnapshots, Func<ObjectSnapshot, ObjectSnapshot> updateFactory)
     {
-        ResetHistoryForUntrackedPersistentChange();
+        PrepareForMutation();
         if (selectedSnapshots.Count == 0)
         {
             return false;
@@ -352,7 +374,7 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
 
     public bool TryDuplicateObjects(IReadOnlyList<ObjectSnapshot> selectedSnapshots)
     {
-        ResetHistoryForUntrackedPersistentChange();
+        PrepareForMutation();
         if (selectedSnapshots.Count == 0)
         {
             return false;
@@ -382,7 +404,7 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
 
     public bool TryRemoveObjects(IReadOnlyList<ObjectSnapshot> selectedSnapshots)
     {
-        ResetHistoryForUntrackedPersistentChange();
+        PrepareForMutation();
         if (selectedSnapshots.Count == 0)
         {
             return false;
@@ -409,7 +431,7 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
 
     public bool TryClearPlacedObjects()
     {
-        ResetHistoryForUntrackedPersistentChange();
+        PrepareForMutation();
         var persistedSnapshots = _sceneView.GetPlacedObjectSnapshots();
         if (persistedSnapshots.Count == 0)
         {
@@ -456,20 +478,30 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
             return false;
         }
 
-        _historyManager.RecordCompleted(
+        RecordCompletedAction(
             new SelectionRestoreAction(
                 new ObjectSnapshotHistoryAction(_mutationService, kind, title, changes),
                 selectionAfterApply,
                 selectionAfterRevert));
-        TrackPersistentSceneRevision();
         return true;
+    }
+
+    public void RecordCompletedAction(IObjectHistoryAction action)
+    {
+        ArgumentNullException.ThrowIfNull(action);
+
+        // selection restoration runs synchronously while recording, so track first
+        // to avoid treating the completed mutation as an external scene change
+        TrackPersistentSceneRevision();
+        _historyManager.RecordCompleted(action);
+        TrackPersistentSceneRevision();
     }
 
     public void Dispose()
     {
         _historyManager.ActionApplied -= HandleHistoryActionApplied;
         _historyManager.ActionReverted -= HandleHistoryActionReverted;
-        _pendingInspectorEdits.Clear();
+        _pendingInspectorEdit = null;
         DisconnectSelectionHandlers();
     }
 
@@ -514,10 +546,9 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
     private IReadOnlyList<Guid> CaptureCurrentSelectionIds()
         => _captureSelectionIds?.Invoke() ?? Array.Empty<Guid>();
 
-    private void FinalizeInspectorSnapshotEdit(string editId, bool force)
+    private void FinalizeInspectorSnapshotEdit()
     {
-        if (!_pendingInspectorEdits.TryGetValue(editId, out var edit)
-            || (!force && !ImGui.IsItemDeactivatedAfterEdit()))
+        if (_pendingInspectorEdit is not { } edit)
         {
             return;
         }
@@ -527,7 +558,7 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
             return;
         }
 
-        _pendingInspectorEdits.Remove(editId);
+        _pendingInspectorEdit = null;
         _ = TryRecordCompletedAction(
             edit.Kind,
             edit.Title,
@@ -539,10 +570,7 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
 
     private bool TryReplayHistory(Func<bool> replay)
     {
-        if (ResetHistoryForUntrackedPersistentChange())
-        {
-            return false;
-        }
+        PrepareForMutation();
 
         bool replayed = replay();
         TrackPersistentSceneRevision();
@@ -559,12 +587,15 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
 
         bool historyWasActive = _historyManager.UndoActionKind is not null
             || _historyManager.RedoActionKind is not null
-            || _pendingInspectorEdits.Count > 0;
+            || _pendingInspectorEdit is not null;
         if (historyWasActive)
         {
-            _pendingInspectorEdits.Clear();
+            _pendingInspectorEdit = null;
             _historyManager.ClearHistory();
-            _logger.LogDebug("cleared object history after an untracked persistent scene change");
+            _logger.LogDebug(
+                "cleared object history after persistent scene revision changed outside history from {TrackedRevision} to {CurrentRevision}",
+                _historyPersistentSceneRevision,
+                persistentSceneRevision);
         }
 
         _historyPersistentSceneRevision = persistentSceneRevision;
