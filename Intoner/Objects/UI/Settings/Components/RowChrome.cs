@@ -12,25 +12,31 @@ internal static class RowChrome
     private const float SettingRowMinHeight = 50f;
 
     public static void BeginRow(SettingDefinition definition, float rowHeight)
+        => BeginRow(definition.Label, definition.Description, rowHeight);
+
+    public static void BeginRow(string label, string description, float rowHeight)
     {
         ImGui.TableNextRow(ImGuiTableRowFlags.None, rowHeight);
         ImGui.TableNextColumn();
-        DrawBody(definition, rowHeight);
+        DrawBody(label, description, rowHeight);
         ImGui.TableNextColumn();
     }
 
     public static void DrawBody(SettingDefinition definition, float rowHeight)
+        => DrawBody(definition.Label, definition.Description, rowHeight);
+
+    public static void DrawBody(string label, string description, float rowHeight)
     {
         float bodyHeight = (ImGui.GetTextLineHeight() * 2f) + ImGui.GetStyle().ItemSpacing.Y;
         float cursorY = ImGui.GetCursorPosY();
         ImGui.SetCursorPosY(cursorY + MathF.Max(0f, (rowHeight - bodyHeight) * 0.5f));
 
-        ImGui.TextUnformatted(definition.Label);
-        DrawDescriptionTooltip(definition);
+        ImGui.TextUnformatted(label);
+        DrawTooltip(description);
 
         using var wrap = ImRaiiScope.TextWrapPos();
-        ImGui.TextDisabled(definition.Description);
-        DrawDescriptionTooltip(definition);
+        ImGui.TextDisabled(description);
+        DrawTooltip(description);
     }
 
     public static void DrawDescriptionTooltip(SettingDefinition definition)
@@ -40,20 +46,8 @@ internal static class RowChrome
     {
         if (!string.IsNullOrWhiteSpace(text) && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
         {
-            UiSharedService.AttachToolTip(text);
+            IntonerTooltip.Attach(text);
         }
-    }
-
-    public static void DrawStatusBadge(string text, Vector4 color, Vector2 badgeSize, Vector2 padding, float rounding)
-    {
-        Vector2 badgeMin = ImGui.GetCursorScreenPos();
-        Vector2 badgeMax = badgeMin + badgeSize;
-        ImDrawListPtr drawList = ImGui.GetWindowDrawList();
-
-        drawList.AddRectFilled(badgeMin, badgeMax, ImGui.GetColorU32(color with { W = 0.14f }), rounding);
-        drawList.AddRect(badgeMin, badgeMax, ImGui.GetColorU32(color with { W = 0.32f }), rounding, ImDrawFlags.None, 1f * ImGuiHelpers.GlobalScale);
-        drawList.AddText(badgeMin + padding, ImGui.GetColorU32(color), text);
-        ImGui.Dummy(badgeSize);
     }
 
     public static float ResolveRowHeight(float controlHeight)

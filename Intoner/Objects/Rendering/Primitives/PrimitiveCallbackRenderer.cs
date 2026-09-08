@@ -1,10 +1,10 @@
 using Dalamud.Interface;
-using Intoner.Objects.Filesystem.Configuration;
+using Intoner.Scene.Rendering;
+using Intoner.Services.Configuration;
 using Intoner.Services.Gpu;
 using Microsoft.Extensions.Logging;
 using SharpDX.Direct3D11;
 using System.Diagnostics;
-using System.Runtime.InteropServices;
 using RawViewportF = SharpDX.Mathematics.Interop.RawViewportF;
 using Vector4 = System.Numerics.Vector4;
 
@@ -20,11 +20,16 @@ internal sealed unsafe class PrimitiveCallbackRenderer : IDisposable
     private static readonly TimeSpan DrawDiagnosticInterval = TimeSpan.FromSeconds(30);
 
     private readonly ILogger<PrimitiveCallbackRenderer> _logger;
-    private readonly PrimitiveRenderResources           _resources;
-    private readonly PrimitiveGeometryBuilder           _geometry = new();
+    private readonly PrimitiveRenderResources _resources;
+    private readonly PrimitiveGeometryBuilder _geometry = new();
+    private readonly D3D11DrawStateSnapshot _drawState = new(
+        pixelConstantBufferCount: 1,
+        pixelShaderResourceViewCount: 1,
+        pixelSamplerCount: 0,
+        vertexBufferCount: 2,
+        renderTargetCount: 0);
 
     private bool _loggedDepthFailure;
-    private int _loggedFinalTargetFailure;
     private int _loggedProjectionFailure;
     private int _loggedUploadFailure;
     private long _lastDrawDiagnosticTimestamp;
@@ -33,7 +38,7 @@ internal sealed unsafe class PrimitiveCallbackRenderer : IDisposable
         ILogger<PrimitiveCallbackRenderer> logger,
         IUiBuilder uiBuilder)
     {
-        _logger    = logger;
+        _logger = logger;
         _resources = new PrimitiveRenderResources(logger, uiBuilder);
     }
 
@@ -41,39 +46,24 @@ internal sealed unsafe class PrimitiveCallbackRenderer : IDisposable
         ReadOnlySpan<LineCommand> lines,
         ReadOnlySpan<PointCommand> points,
         ReadOnlySpan<ScreenCommand> screens,
-        PrimitiveDrawState state)
+        PrimitiveDrawState state,
+        in SceneRenderFrame frame)
     {
-        if ((lines.IsEmpty && points.IsEmpty && screens.IsEmpty) || !_resources.TryEnsure())
+        if (lines.IsEmpty && points.IsEmpty && screens.IsEmpty)
         {
-            return false;
-        }
-
-        DeviceContext? context = _resources.Context;
-        if (context == null)
-        {
-            return false;
-        }
-
-        if (!PrimitiveRenderTargetResolver.TryResolveFinalTargetViewport(out var viewport, out var finalTargetSize))
-        {
-            if (Interlocked.Exchange(ref _loggedFinalTargetFailure, 1) == 0)
-            {
-                _logger.LogWarning("object native primitive draw skipped because the final scene target was unavailable");
-            }
-
             return false;
         }
 
         var hasWorldInput = !lines.IsEmpty || !points.IsEmpty;
-        PrimitiveProjectionFrame projectionFrame = default;
-        var hasWorldProjection = hasWorldInput && PrimitiveProjectionFrame.TryCaptureMainView(viewport, out projectionFrame);
+        SceneProjection projectionFrame = frame.Projection;
+        var hasWorldProjection = hasWorldInput && frame.HasProjection;
         var diagnostics = new PrimitiveDrawDiagnostics(lines.Length, points.Length, screens.Length);
         if (hasWorldInput && !hasWorldProjection)
         {
             diagnostics.MarkProjectionUnavailable(lines.Length, points.Length);
             if (Interlocked.Exchange(ref _loggedProjectionFailure, 1) == 0)
             {
-                _logger.LogWarning("object native primitive world draw skipped because the main render view projection was unavailable");
+                _logger.LogWarning("native primitive world draw skipped because the main render view projection was unavailable");
             }
 
             if (screens.IsEmpty)
@@ -82,9 +72,9 @@ internal sealed unsafe class PrimitiveCallbackRenderer : IDisposable
                     "missing-projection",
                     state,
                     diagnostics,
-                    viewport,
-                    finalTargetSize,
-                    PrimitiveTextureSize.Empty,
+                    frame.Viewport,
+                    frame.TargetSize,
+                    SceneTextureSize.Empty,
                     projectionFrame,
                     false,
                     PrimitiveGeometryBuildResult.Empty);
@@ -92,14 +82,51 @@ internal sealed unsafe class PrimitiveCallbackRenderer : IDisposable
             }
         }
 
-        _loggedFinalTargetFailure = 0;
         if (hasWorldProjection)
         {
             _loggedProjectionFailure = 0;
         }
 
+        SceneTextureSize sceneDepthSize = frame.SceneDepthSize;
+        ShaderResourceView? sceneDepthView = frame.SceneDepthView;
+        var canDrawWorld = hasWorldProjection;
+        var needsSceneDepth = canDrawWorld && state.RequiresSceneDepth;
+        if (needsSceneDepth && sceneDepthView == null)
+        {
+            canDrawWorld = false;
+            if (!_loggedDepthFailure)
+            {
+                _loggedDepthFailure = true;
+                _logger.LogWarning("native primitive scene depth draw skipped because scene depth was unavailable");
+            }
+
+            if (screens.IsEmpty)
+            {
+                LogDrawDiagnostics(
+                    "missing-depth",
+                    state,
+                    diagnostics,
+                    frame.Viewport,
+                    frame.TargetSize,
+                    sceneDepthSize,
+                    projectionFrame,
+                    hasWorldProjection,
+                    PrimitiveGeometryBuildResult.Empty);
+                return false;
+            }
+        }
+        else
+        {
+            _loggedDepthFailure = false;
+        }
+
+        if (!_resources.TryEnsure() || _resources.Context is not { } context)
+        {
+            return false;
+        }
+
         PrimitiveAntiAliasParameters antiAlias = PrimitiveAntiAlias.ResolveParameters(state.AntiAliasing);
-        var geometry = hasWorldProjection
+        var geometry = canDrawWorld
             ? _geometry.Build(lines, points, screens, projectionFrame, antiAlias, ref diagnostics)
             : _geometry.BuildScreens(screens, antiAlias);
         if (geometry.IsEmpty)
@@ -108,9 +135,9 @@ internal sealed unsafe class PrimitiveCallbackRenderer : IDisposable
                 "empty",
                 state,
                 diagnostics,
-                viewport,
-                finalTargetSize,
-                PrimitiveTextureSize.Empty,
+                frame.Viewport,
+                frame.TargetSize,
+                SceneTextureSize.Empty,
                 projectionFrame,
                 hasWorldProjection,
                 geometry);
@@ -124,7 +151,7 @@ internal sealed unsafe class PrimitiveCallbackRenderer : IDisposable
             if (Interlocked.Exchange(ref _loggedUploadFailure, 1) == 0)
             {
                 _logger.LogWarning(
-                    "object native primitive draw skipped because upload failed for {LineInstanceCount} line instances, {PointVertexCount} point vertices, and {ScreenVertexCount} screen vertices",
+                    "native primitive draw skipped because upload failed for {LineInstanceCount} line instances, {PointVertexCount} point vertices, and {ScreenVertexCount} screen vertices",
                     geometry.LineInstanceCount,
                     geometry.PointVertexCount,
                     geometry.ScreenVertexCount);
@@ -135,29 +162,9 @@ internal sealed unsafe class PrimitiveCallbackRenderer : IDisposable
 
         _loggedUploadFailure = 0;
 
-        var needsSceneDepth = geometry.HasWorldPrimitives && NeedsSceneDepth(state.DepthMode);
-        var sceneDepthSize = PrimitiveTextureSize.Empty;
-        using ShaderResourceView? sceneDepthView = needsSceneDepth
-            ? TryCreateSceneDepthView(out sceneDepthSize)
-            : null;
-        if (needsSceneDepth && sceneDepthView == null)
-        {
-            LogDrawDiagnostics(
-                "missing-depth",
-                state,
-                diagnostics,
-                viewport,
-                finalTargetSize,
-                sceneDepthSize,
-                projectionFrame,
-                hasWorldProjection,
-                geometry);
-            return false;
-        }
-
         var constants = new PrimitiveConstants
         {
-            Viewport = new Vector4(viewport.X, viewport.Y, viewport.Width, viewport.Height),
+            Viewport = new Vector4(frame.Viewport.X, frame.Viewport.Y, frame.Viewport.Width, frame.Viewport.Height),
             DepthParams = new Vector4(
                 ToShaderDepthMode(state.DepthMode),
                 ViewDepthBias,
@@ -180,8 +187,8 @@ internal sealed unsafe class PrimitiveCallbackRenderer : IDisposable
             "draw",
             state,
             diagnostics,
-            viewport,
-            finalTargetSize,
+            frame.Viewport,
+            frame.TargetSize,
             sceneDepthSize,
             projectionFrame,
             hasWorldProjection,
@@ -189,16 +196,11 @@ internal sealed unsafe class PrimitiveCallbackRenderer : IDisposable
 
         try
         {
-            using var renderState = D3D11DrawStateScope.Capture(
-                context,
-                pixelConstantBufferCount: 1,
-                pixelShaderResourceViewCount: 1,
-                vertexBufferCount: 2,
-                captureScissorRectangles: true);
+            using D3D11DrawStateSnapshot.Scope renderState = _drawState.Capture(context);
 
             if (geometry.HasWorldPrimitives)
             {
-                _resources.ApplySharedPipeline(context, sceneDepthView, viewport, constants);
+                _resources.ApplySharedPipeline(context, sceneDepthView, frame.Viewport, constants);
                 _resources.DrawLines(context, geometry.LineInstanceCount);
                 _resources.DrawPoints(context, geometry.PointVertexCount);
             }
@@ -207,7 +209,7 @@ internal sealed unsafe class PrimitiveCallbackRenderer : IDisposable
             {
                 constants.DepthParams.X = ShaderDepthDisabled;
                 constants.DepthTextureSize = default;
-                _resources.ApplySharedPipeline(context, null, viewport, constants);
+                _resources.ApplySharedPipeline(context, null, frame.Viewport, constants);
                 _resources.DrawScreen(context, geometry.ScreenVertexCount);
             }
 
@@ -215,38 +217,18 @@ internal sealed unsafe class PrimitiveCallbackRenderer : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "object native primitive draw callback failed");
-            _resources.Dispose();
+            _logger.LogWarning(ex, "native primitive draw callback failed");
+            _resources.RequestReset();
             return false;
         }
     }
 
     public void Dispose()
     {
+        _drawState.Dispose();
         _resources.Dispose();
         _geometry.ResetStorage();
     }
-
-    private ShaderResourceView? TryCreateSceneDepthView(out PrimitiveTextureSize sceneDepthSize)
-    {
-        if (!PrimitiveRenderTargetResolver.TryResolveSceneDepthView(out var depthViewPointer, out sceneDepthSize))
-        {
-            if (!_loggedDepthFailure)
-            {
-                _loggedDepthFailure = true;
-                _logger.LogWarning("object native primitive scene-depth draw skipped because scene depth texture was unavailable");
-            }
-
-            return null;
-        }
-
-        _loggedDepthFailure = false;
-        Marshal.AddRef(depthViewPointer);
-        return new ShaderResourceView(depthViewPointer);
-    }
-
-    private static bool NeedsSceneDepth(DrawDepthMode depthMode)
-        => depthMode is DrawDepthMode.Occluded or DrawDepthMode.InvertOccluded;
 
     private static float ToShaderDepthMode(DrawDepthMode depthMode)
         => depthMode switch
@@ -261,9 +243,9 @@ internal sealed unsafe class PrimitiveCallbackRenderer : IDisposable
         PrimitiveDrawState state,
         in PrimitiveDrawDiagnostics diagnostics,
         RawViewportF viewport,
-        PrimitiveTextureSize finalTargetSize,
-        PrimitiveTextureSize sceneDepthSize,
-        in PrimitiveProjectionFrame projectionFrame,
+        SceneTextureSize finalTargetSize,
+        SceneTextureSize sceneDepthSize,
+        in SceneProjection projectionFrame,
         bool hasWorldProjection,
         PrimitiveGeometryBuildResult geometry)
     {
@@ -282,7 +264,7 @@ internal sealed unsafe class PrimitiveCallbackRenderer : IDisposable
             geometry,
             ViewDepthBias);
         _logger.LogDebug(
-            "object native primitive diagnostics ({Reason}){NewLine}  {Summary}",
+            "native primitive diagnostics ({Reason}){NewLine}  {Summary}",
             reason,
             Environment.NewLine,
             summary);
@@ -301,4 +283,3 @@ internal sealed unsafe class PrimitiveCallbackRenderer : IDisposable
         return false;
     }
 }
-

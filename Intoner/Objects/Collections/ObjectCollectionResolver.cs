@@ -8,6 +8,7 @@ namespace Intoner.Objects.Collections;
 
 internal sealed record ObjectCollectionResolveResult
 {
+    public bool IsComplete { get; init; } = true;
     public ObjectCollectionResolveState ResolveState { get; init; } = ObjectCollectionResolveState.Inactive;
     public string StatusText { get; init; } = string.Empty;
     public bool KeepLastGoodSnapshot { get; init; }
@@ -60,6 +61,7 @@ internal sealed class ObjectCollectionResolver : IObjectCollectionResolver
         HashSet<string> probedPaths = new(StringComparer.OrdinalIgnoreCase);
         Queue<string> pendingPaths = new();
         List<string> warnings = [];
+        bool isComplete = true;
 
         AddUsageRootPaths(usageSnapshots, reachablePaths, pendingPaths);
         if (reachablePaths.Count == 0)
@@ -84,10 +86,12 @@ internal sealed class ObjectCollectionResolver : IObjectCollectionResolver
                 requestedPaths,
                 cancellationToken).ConfigureAwait(false);
             warnings.AddRange(resolveResult.Warnings);
+            isComplete &= resolveResult.IsComplete;
             if (resolveResult.ResolveState != ObjectCollectionResolveState.Ready)
             {
                 return new ObjectCollectionResolveResult
                 {
+                    IsComplete = isComplete,
                     ResolveState = resolveResult.ResolveState,
                     StatusText = resolveResult.StatusText,
                     Warnings = ObjectCollectionDiagnosticUtility.NormalizeWarnings(warnings),
@@ -126,6 +130,7 @@ internal sealed class ObjectCollectionResolver : IObjectCollectionResolver
             {
                 ResolveState = ObjectCollectionResolveState.Inactive,
                 StatusText = "assigned Penumbra mods expose no redirects used by the active objects in this collection",
+                IsComplete = isComplete,
                 Warnings = ObjectCollectionDiagnosticUtility.NormalizeWarnings(warnings),
                 ResourceViews = BuildResourceViews(usageSnapshots, resolvedPaths),
             };
@@ -148,6 +153,7 @@ internal sealed class ObjectCollectionResolver : IObjectCollectionResolver
 
         return new ObjectCollectionResolveResult
         {
+            IsComplete = isComplete,
             ResolveState = redirectBuilder.Count == 0
                 ? ObjectCollectionResolveState.Inactive
                 : ObjectCollectionResolveState.Ready,

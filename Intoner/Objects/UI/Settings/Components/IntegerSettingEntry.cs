@@ -5,11 +5,11 @@ namespace Intoner.Objects.UI.Settings.Components;
 internal sealed class IntegerSettingEntry : ISettingEntry
 {
     private readonly IntegerSettingRange _range;
-    private readonly Func<DrawContext, int> _readValue;
-    private readonly Action<DrawContext, int> _writeValue;
-    private readonly Func<DrawContext, int, string> _formatValue;
-    private readonly Func<DrawContext, int, string> _formatRangeValue;
-    private readonly Func<DrawContext, bool> _isEnabled;
+    private readonly Func<int> _readValue;
+    private readonly Action<int> _writeValue;
+    private readonly Func<int, string> _formatValue;
+    private readonly Func<int, string> _formatRangeValue;
+    private readonly Func<bool> _isEnabled;
     private readonly SettingRowLayout _layout;
     private readonly IntegerSettingEditState _editState = new();
 
@@ -19,11 +19,11 @@ internal sealed class IntegerSettingEntry : ISettingEntry
     public IntegerSettingEntry(
         SettingDefinition definition,
         IntegerSettingRange range,
-        Func<DrawContext, int> readValue,
-        Action<DrawContext, int> writeValue,
-        Func<DrawContext, int, string> formatValue,
-        Func<DrawContext, int, string>? formatRangeValue = null,
-        Func<DrawContext, bool>? isEnabled = null,
+        Func<int> readValue,
+        Action<int> writeValue,
+        Func<int, string> formatValue,
+        Func<int, string>? formatRangeValue = null,
+        Func<bool>? isEnabled = null,
         SettingRowLayout layout = default)
     {
         Definition = definition;
@@ -32,7 +32,7 @@ internal sealed class IntegerSettingEntry : ISettingEntry
         _writeValue = writeValue;
         _formatValue = formatValue;
         _formatRangeValue = formatRangeValue ?? formatValue;
-        _isEnabled = isEnabled ?? (static _ => true);
+        _isEnabled = isEnabled ?? (static () => true);
         _layout = layout;
     }
 
@@ -41,10 +41,10 @@ internal sealed class IntegerSettingEntry : ISettingEntry
     public SettingRowLayout Layout
         => _layout;
 
-    public void DrawRow(DrawContext context, Vector4 accent, bool prominentControl)
+    public void DrawRow(Vector4 accent, bool prominentControl)
     {
-        bool enabled = _isEnabled(context);
-        int savedValue = _range.Clamp(_readValue(context));
+        bool enabled = _isEnabled();
+        int savedValue = _range.Clamp(_readValue());
         if (!enabled)
         {
             _hasPendingValue = false;
@@ -56,9 +56,9 @@ internal sealed class IntegerSettingEntry : ISettingEntry
                 Definition,
                 ref value,
                 _range,
-                _formatValue(context, value),
-                _formatRangeValue(context, _range.Minimum),
-                _formatRangeValue(context, _range.Maximum),
+                _formatValue(value),
+                _formatRangeValue(_range.Minimum),
+                _formatRangeValue(_range.Maximum),
                 accent,
                 prominentControl,
                 enabled,
@@ -66,11 +66,11 @@ internal sealed class IntegerSettingEntry : ISettingEntry
                 _layout,
                 out IntegerSettingUpdate update))
         {
-            ApplyUpdate(context, savedValue, update);
+            ApplyUpdate(savedValue, update);
         }
     }
 
-    private void ApplyUpdate(DrawContext context, int savedValue, IntegerSettingUpdate update)
+    private void ApplyUpdate(int savedValue, IntegerSettingUpdate update)
     {
         int nextValue = _range.Clamp(update.Value);
         if (!update.Commit)
@@ -83,7 +83,7 @@ internal sealed class IntegerSettingEntry : ISettingEntry
         _hasPendingValue = false;
         if (nextValue != savedValue)
         {
-            _writeValue(context, nextValue);
+            _writeValue(nextValue);
         }
     }
 }

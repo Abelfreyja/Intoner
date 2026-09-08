@@ -302,7 +302,7 @@ internal sealed class GameDataLayoutAssetResolver
                 source,
                 sourcePath,
                 sourcePath,
-                ObjectSearchTermUtility.BuildStableTerms([source, sourcePath], territoryMetadata.SearchTerms),
+                SearchTermUtility.BuildStableTerms([source, sourcePath], territoryMetadata.SearchTerms),
                 territoryMetadata);
         }
 
@@ -324,7 +324,7 @@ internal sealed class GameDataLayoutAssetResolver
                 _sharedGroupCache.Add(sharedGroupPath, sharedGroupAssets);
             }
 
-            IReadOnlyList<string> bgSearchTerms = ObjectSearchTermUtility.BuildStableTerms(
+            IReadOnlyList<string> bgSearchTerms = SearchTermUtility.BuildStableTerms(
                 [source, sharedGroupPath],
                 territoryMetadata.SearchTerms,
                 sharedGroupAssets.NestedSharedGroupPaths);
@@ -356,7 +356,7 @@ internal sealed class GameDataLayoutAssetResolver
                     RuntimeVfxEvidence.LayoutInstance,
                     AssetPathSource.SharedGroup,
                     AssetPathContract.ParsedFileReference,
-                    ObjectSearchTermUtility.MergeTerms(vfxSearchTerms, ["shared group vfx", "shared group"]));
+                    SearchTermUtility.MergeTerms(vfxSearchTerms, ["shared group vfx", "shared group"]));
             }
 
             foreach (string vfxPath in sharedGroupAssets.StandaloneVfxPaths)
@@ -370,7 +370,7 @@ internal sealed class GameDataLayoutAssetResolver
                     RuntimeVfxEvidence.LayoutAutoplay,
                     AssetPathSource.SharedGroup,
                     AssetPathContract.ParsedFileReference,
-                    ObjectSearchTermUtility.MergeTerms(vfxSearchTerms, ["shared group autoplay", "shared group"]));
+                    SearchTermUtility.MergeTerms(vfxSearchTerms, ["shared group autoplay", "shared group"]));
             }
         }
 
@@ -391,7 +391,7 @@ internal sealed class GameDataLayoutAssetResolver
                 _territoryLayoutCache.Add(territoryLayoutPath, territoryLayoutAssets);
             }
 
-            IReadOnlyList<string> bgSearchTerms = ObjectSearchTermUtility.BuildStableTerms(
+            IReadOnlyList<string> bgSearchTerms = SearchTermUtility.BuildStableTerms(
                 [TerritoryLayoutSource, territoryLayoutPath],
                 territoryMetadata.SearchTerms,
                 territoryLayoutAssets.ReferencedLayoutPaths,
@@ -458,7 +458,7 @@ internal sealed class GameDataLayoutAssetResolver
             string rowId,
             string sourcePath,
             params IReadOnlyList<string>?[] relatedTerms)
-            => ObjectSearchTermUtility.BuildStableTerms([source, rowId, sourcePath], relatedTerms);
+            => SearchTermUtility.BuildStableTerms([source, rowId, sourcePath], relatedTerms);
     }
 
     private sealed class BgObjectDiscoveryState
@@ -472,7 +472,7 @@ internal sealed class GameDataLayoutAssetResolver
             Source = source;
             RowId = rowId;
             SourcePath = sourcePath;
-            _searchTerms = ObjectSearchTermUtility.CreateSet(modelPath);
+            _searchTerms = SearchTermUtility.CreateSet(modelPath);
         }
 
         public string ModelPath { get; }
@@ -481,14 +481,14 @@ internal sealed class GameDataLayoutAssetResolver
         public string SourcePath { get; }
 
         public void AddSearchTerms(IEnumerable<string> searchTerms)
-            => _ = ObjectSearchTermUtility.AddTerms(_searchTerms, searchTerms);
+            => _ = SearchTermUtility.AddTerms(_searchTerms, searchTerms);
 
         public void AddTerritoryMetadata(in ObjectTerritoryMetadata territoryMetadata)
             => _ = _territoryMetadata.Add(territoryMetadata);
 
         public GameDataBgObjectAsset ToAsset()
         {
-            HashSet<string> searchTerms = ObjectSearchTermUtility.CreateSet(_searchTerms);
+            HashSet<string> searchTerms = SearchTermUtility.CreateSet(_searchTerms);
             _territoryMetadata.AddSearchTerms(searchTerms);
 
             return new GameDataBgObjectAsset(
@@ -498,7 +498,7 @@ internal sealed class GameDataLayoutAssetResolver
                 SourcePath,
                 _territoryMetadata.BuildStableIds(),
                 _territoryMetadata.BuildStableNames(),
-                ObjectSearchTermUtility.BuildStableTerms(searchTerms));
+                SearchTermUtility.BuildStableTerms(searchTerms));
         }
     }
 }

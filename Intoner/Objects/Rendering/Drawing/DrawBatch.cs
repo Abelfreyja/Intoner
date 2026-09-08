@@ -49,8 +49,8 @@ internal sealed class DrawBatch
     {
         if (!HasVisibleColor(color)
             || thickness <= 0f
-            || !ObjectMathUtility.IsFinite(start)
-            || !ObjectMathUtility.IsFinite(end))
+            || !NumericsUtility.IsFinite(start)
+            || !NumericsUtility.IsFinite(end))
         {
             return;
         }
@@ -69,10 +69,10 @@ internal sealed class DrawBatch
     {
         if (!HasVisibleColor(color)
             || thickness <= 0f
-            || !ObjectMathUtility.IsFinite(previous)
-            || !ObjectMathUtility.IsFinite(start)
-            || !ObjectMathUtility.IsFinite(end)
-            || !ObjectMathUtility.IsFinite(next))
+            || !NumericsUtility.IsFinite(previous)
+            || !NumericsUtility.IsFinite(start)
+            || !NumericsUtility.IsFinite(end)
+            || !NumericsUtility.IsFinite(next))
         {
             return;
         }
@@ -102,9 +102,9 @@ internal sealed class DrawBatch
     public void AddScreenTriangle(Vector2 first, Vector2 second, Vector2 third, Vector4 color)
     {
         if (!HasVisibleColor(color)
-            || !ObjectMathUtility.IsFinite(first)
-            || !ObjectMathUtility.IsFinite(second)
-            || !ObjectMathUtility.IsFinite(third))
+            || !NumericsUtility.IsFinite(first)
+            || !NumericsUtility.IsFinite(second)
+            || !NumericsUtility.IsFinite(third))
         {
             return;
         }
@@ -130,7 +130,7 @@ internal sealed class DrawBatch
     {
         if (!HasVisibleColor(color)
             || radius <= 0f
-            || !ObjectMathUtility.IsFinite(center))
+            || !NumericsUtility.IsFinite(center))
         {
             return;
         }
@@ -150,7 +150,7 @@ internal sealed class DrawBatch
         if (!HasVisibleColor(color)
             || radius <= 0f
             || thickness <= 0f
-            || !ObjectMathUtility.IsFinite(center))
+            || !NumericsUtility.IsFinite(center))
         {
             return;
         }
@@ -202,7 +202,7 @@ internal sealed class DrawBatch
     }
 
     private static bool HasVisibleColor(Vector4 color)
-        => ObjectMathUtility.IsFinite(color) && color.W > 0f;
+        => NumericsUtility.IsFinite(color) && color.W > 0f;
 
     private static Vector2 ResolveCirclePoint(Vector2 center, float radius, int index, int segmentCount)
     {

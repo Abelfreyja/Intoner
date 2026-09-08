@@ -1,5 +1,6 @@
+using Intoner.Scene;
 using Intoner.Objects.Catalog;
-using Intoner.Objects.Filesystem.Configuration;
+using Intoner.Services.Configuration;
 using Intoner.Objects.Models;
 using Intoner.Objects.Runtime;
 using Intoner.Objects.Utils;
@@ -66,7 +67,7 @@ internal sealed class MakePlaceImportMapper(
         IReadOnlyList<LayoutAttachmentNode<MakePlaceFurnitureDocument>> furnitureEntries,
         LayoutTransferContext areaContext,
         float layoutScale,
-        ObjectCreationContext currentContext,
+        SceneCreationContext currentContext,
         DateTime createdAtUtc,
         out int skippedFurnitureCount)
     {
@@ -98,14 +99,14 @@ internal sealed class MakePlaceImportMapper(
         MakePlaceFurnitureDocument furniture,
         LayoutTransferContext areaContext,
         float layoutScale,
-        ObjectCreationContext currentContext,
+        SceneCreationContext currentContext,
         Guid? attachmentParentId,
         DateTime createdAtUtc,
         out ObjectSnapshot snapshot)
     {
         snapshot = null!;
         if (!furnitureCatalog.TryFind(furniture.ItemId, furniture.Name, areaContext.FurnitureArea, out FurnitureCatalogMatch? match)
-            || !MakePlaceTransformMapper.TryToObjectTransform(furniture.Transform, layoutScale, areaContext.PlotBasis, out ObjectTransform transform))
+            || !MakePlaceTransformMapper.TryToSceneTransform(furniture.Transform, layoutScale, areaContext.PlotBasis, out SceneTransform transform))
         {
             return false;
         }
@@ -117,7 +118,7 @@ internal sealed class MakePlaceImportMapper(
         ObjectSnapshot nextSnapshot = new()
         {
             Id = Guid.NewGuid(),
-            Name = ObjectStringUtility.TrimOrFallback(furniture.Name, match.DisplayName),
+            Name = TextUtility.TrimOrFallback(furniture.Name, match.DisplayName),
             Kind = ObjectKind.Furniture,
             CreatedAtUtc = createdAtUtc,
             CreatedIn = currentContext,

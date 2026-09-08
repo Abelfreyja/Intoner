@@ -7,6 +7,8 @@ using FFXIVClientStructs.FFXIV.Client.System.Scheduler.Base;
 using FFXIVClientStructs.FFXIV.Client.System.Scheduler.Instance;
 using FFXIVClientStructs.FFXIV.Client.System.Scheduler.Resource;
 using Intoner.Objects.Utils;
+using Intoner.Services.Interop;
+using Intoner.Utils;
 using Microsoft.Extensions.Logging;
 using Penumbra.String;
 using System.Globalization;
@@ -182,7 +184,7 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
     private readonly ObjectResourceIncRefGuard _incRefGuard;
     private readonly ResolveResourceHandleTypeDelegate? _resolveResourceHandleType;
     private readonly ObjectResourceHooks _hooks;
-    private readonly ObjectDisposalState _disposeState = new();
+    private readonly DisposalState _disposeState = new();
     private long _nextRootCacheIsolationId;
 
     public ObjectResourceLoader(
@@ -202,10 +204,10 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         _resourceTracker = resourceTracker;
         _loadScope = loadScope;
         _incRefGuard = new ObjectResourceIncRefGuard(_logger);
-        _resolveResourceHandleType = ObjectInteropHookUtility.CreateDelegate<ResolveResourceHandleTypeDelegate>(
+        _resolveResourceHandleType = InteropHookUtility.CreateDelegate<ResolveResourceHandleTypeDelegate>(
             _logger,
             sigScanner,
-            ObjectSignatures.ResourceHandleTypeFromPath);
+            IntonerSignatures.ResourceHandleTypeFromPath);
 
         _hooks = new ObjectResourceHooks(
             _logger,

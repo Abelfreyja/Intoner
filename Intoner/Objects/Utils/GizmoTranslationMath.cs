@@ -1,3 +1,4 @@
+using Intoner.Scene;
 using System.Numerics;
 
 namespace Intoner.Objects.Utils;
@@ -16,7 +17,7 @@ internal static class GizmoTranslationMath
         float fallbackScreenLength)
     {
         var axisWorldEnd = pivotPosition + (axisWorldDirection * axisWorldLength);
-        if (!ObjectViewportProjectionUtility.TryProjectWorldPointToViewport(
+        if (!SceneViewportProjection.TryProjectWorldPointToViewport(
                 viewProjection,
                 axisWorldEnd,
                 viewportPos,
@@ -41,7 +42,7 @@ internal static class GizmoTranslationMath
         out Vector3 planeNormal)
     {
         planeNormal = Vector3.Zero;
-        if (!ObjectMathUtility.TryNormalize(axisWorldDirection, out var axisDirection))
+        if (!NumericsUtility.TryNormalize(axisWorldDirection, out var axisDirection))
         {
             return false;
         }
@@ -70,7 +71,7 @@ internal static class GizmoTranslationMath
             return false;
         }
 
-        return ObjectSelectionTransformMath.TryProjectDirectionOntoPlane(candidateDirection.Value, axisDirection, out planeNormal);
+        return SceneSelectionTransformMath.TryProjectDirectionOntoPlane(candidateDirection.Value, axisDirection, out planeNormal);
     }
 }
 

@@ -1,5 +1,5 @@
 using Dalamud.Interface;
-using Intoner.Objects.Filesystem.Configuration;
+using Intoner.Services.Configuration;
 using Intoner.Objects.Runtime;
 using Intoner.UI;
 using System.Globalization;
@@ -35,21 +35,21 @@ internal sealed class HousingFurnitureLimitIndicatorProvider(IObjectHousingModeP
     {
         if (limit <= 0 || count > limit)
         {
-            return EditorColors.DimRed;
+            return ThemeColors.DimRed;
         }
 
         float ratio = count / (float)limit;
         if (ratio >= 1f)
         {
-            return EditorColors.DimRed;
+            return ThemeColors.DimRed;
         }
 
         if (ratio >= 0.90f)
         {
-            return EditorColors.AccentYellow;
+            return ThemeColors.AccentYellow;
         }
 
-        return EditorColors.AccentBlue;
+        return ThemeColors.AccentBlue;
     }
 }
 

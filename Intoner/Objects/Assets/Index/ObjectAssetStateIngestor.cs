@@ -1,6 +1,8 @@
 using Dalamud.Plugin.Services;
 using Intoner.Objects.Assets.Cache;
 using Intoner.Objects.Utils;
+using Intoner.Scene;
+using Intoner.Services.Loading;
 using Microsoft.Extensions.Logging;
 using static Intoner.Objects.Assets.ObjectAssetStateChange;
 
@@ -10,14 +12,14 @@ internal sealed class ObjectAssetStateIngestor(
     ILogger<ObjectAssetStateIngestor> logger,
     IDataManager dataManager,
     IObjectAssetGameData gameData,
-    IClientState clientState,
+    ISceneLocationService locationService,
     ObjectAssetSharedGroupCache sharedGroupCache,
     ObjectAssetStandaloneVfxCatalog standaloneVfxCatalog)
 {
     private readonly ILogger<ObjectAssetStateIngestor> _logger = logger;
     private readonly IDataManager _dataManager = dataManager;
     private readonly IObjectAssetGameData _gameData = gameData;
-    private readonly IClientState _clientState = clientState;
+    private readonly ISceneLocationService _locationService = locationService;
     private readonly ObjectAssetSharedGroupCache _sharedGroupCache = sharedGroupCache;
     private readonly ObjectAssetStandaloneVfxCatalog _standaloneVfxCatalog = standaloneVfxCatalog;
 
@@ -87,8 +89,9 @@ internal sealed class ObjectAssetStateIngestor(
         CatalogAssetState state,
         StaticAssetDiscoverySnapshot snapshot,
         string fallbackGameVersion,
-        CancellationToken cancellationToken)
+        LoadProgress progress)
     {
+        CancellationToken cancellationToken = progress.CancellationToken;
         state.GameVersion = string.IsNullOrWhiteSpace(snapshot.GameVersion)
             ? fallbackGameVersion
             : snapshot.GameVersion;
@@ -96,11 +99,16 @@ internal sealed class ObjectAssetStateIngestor(
         state.StaticTimelineReferencedVfx.Clear();
         state.GameDataBgObjects.Clear();
         state.StaticResolvedVfxPaths.Clear();
-        state.KnowledgeBase.MergeFrom(snapshot.BuildKnowledgeBase());
         int seededCollisionPathCount = 0;
         int resolvedVfxCount = 0;
         int analyzedVfxCount = 0;
         int promotedStandaloneVfxCount = 0;
+        int completedAssetCount = 0;
+        int totalAssetCount = snapshot.StaticCollisionPaths.Count
+            + snapshot.StaticGameDataBgObjects.Count
+            + snapshot.StaticResolvedVfxPaths.Count;
+
+        progress.ReportItems(completedAssetCount, totalAssetCount);
 
         foreach (string collisionPath in snapshot.StaticCollisionPaths)
         {
@@ -108,12 +116,20 @@ internal sealed class ObjectAssetStateIngestor(
             _ = state.StaticCollisionPaths.Add(collisionPath);
             _ = ApplySqpackSeedPath(state, collisionPath);
             seededCollisionPathCount++;
+            progress.ReportItems(++completedAssetCount, totalAssetCount);
         }
 
         foreach (GameDataBgObjectAsset gameDataBgObjectAsset in snapshot.StaticGameDataBgObjects.Values)
         {
             cancellationToken.ThrowIfCancellationRequested();
             state.GameDataBgObjects[gameDataBgObjectAsset.ModelPath] = gameDataBgObjectAsset;
+            _ = AddKnowledgePath(
+                state,
+                gameDataBgObjectAsset.ModelPath,
+                AssetPathSource.GameData,
+                AssetPathContract.None,
+                gameDataBgObjectAsset.SearchTerms);
+            progress.ReportItems(++completedAssetCount, totalAssetCount);
         }
         if (snapshot.StaticGameDataBgObjects.Count > 0)
         {
@@ -127,6 +143,13 @@ internal sealed class ObjectAssetStateIngestor(
         foreach (ResolvedVfxPath resolvedVfxPath in snapshot.StaticResolvedVfxPaths.Values)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            _ = AddKnowledgePath(
+                state,
+                resolvedVfxPath.Path,
+                resolvedVfxPath.Sources,
+                resolvedVfxPath.Contracts,
+                resolvedVfxPath.SearchTerms,
+                resolvedVfxPath.Family);
             bool hadRuntimeObservedStandalone = state.VfxAssets.TryGetValue(resolvedVfxPath.Path, out RuntimeVfxAssetState? existingStandalone)
                 && existingStandalone.SeenFromRuntime;
             state.StaticResolvedVfxPaths[resolvedVfxPath.Path] = resolvedVfxPath;
@@ -149,6 +172,8 @@ internal sealed class ObjectAssetStateIngestor(
             {
                 overlayDirtySections |= ObjectAssetCacheSectionSet.StandaloneVfx;
             }
+
+            progress.ReportItems(++completedAssetCount, totalAssetCount);
         }
 
         _logger.LogInformation(
@@ -217,7 +242,12 @@ internal sealed class ObjectAssetStateIngestor(
     {
         if (ObjectAssetPathRules.IsCatalogSharedGroupPath(path))
         {
-            _ = AddKnowledgePath(state, path, AssetPathSource.SqpackCollision, AssetPathContract.SqpackNamedLeak, [ObjectAssetCaptureSources.SqpackSharedGroup]);
+            _ = AddKnowledgePath(
+                state,
+                path,
+                AssetPathSource.SqpackCollision,
+                AssetPathContract.SqpackNamedLeak,
+                [ObjectAssetCaptureSources.SqpackSharedGroup, ObjectAssetCaptureSources.SqpackCollision]);
             return ObserveSharedGroup(state, path, ObjectAssetCaptureSources.SqpackSharedGroup, ObjectTerritoryMetadata.Empty) != ObservationApplyResult.None;
         }
 
@@ -336,7 +366,7 @@ internal sealed class ObjectAssetStateIngestor(
                     new VfxTimelineReferenceInfo(reference.Evidence, reference.ContextFlags),
                     source,
                     AssetPathContract.ParsedFileReference,
-                    ObjectSearchTermUtility.MergeTerms(searchTerms, reference.SearchTerms),
+                    SearchTermUtility.MergeTerms(searchTerms, reference.SearchTerms),
                     runtimeObserved));
         }
 
@@ -365,5 +395,7 @@ internal sealed class ObjectAssetStateIngestor(
     }
 
     private ObjectTerritoryMetadata GetCurrentTerritoryMetadata()
-        => ObjectTerritoryMetadataUtility.BuildForTerritoryId(_clientState.TerritoryType, _dataManager);
+        => ObjectTerritoryMetadataUtility.BuildForTerritoryId(
+            _locationService.GetCurrentLocationScope().TerritoryId,
+            _dataManager);
 }

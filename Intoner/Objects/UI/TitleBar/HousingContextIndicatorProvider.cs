@@ -19,7 +19,7 @@ internal sealed class HousingContextIndicatorProvider(IObjectHousingModePolicy h
             FontAwesomeIcon.Compass,
             label,
             HousingTitleBarText.FormatCompactContext(state),
-            EditorColors.AccentPurple);
+            ThemeColors.AccentPrimary);
         return true;
     }
 }

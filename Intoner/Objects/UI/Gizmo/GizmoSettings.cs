@@ -1,29 +1,22 @@
 using Intoner.Objects.Models;
-using System.Numerics;
+using Intoner.Scene;
+using System.Runtime.InteropServices;
 
 namespace Intoner.Objects.UI;
 
 /// <summary> editable gizmo properties for the editor </summary>
 internal sealed class GizmoSettings
 {
-    public static readonly ObjectTransformSnapSettings DefaultTransformSnapSettings = new();
+    public static readonly SceneTransformSnapSettings DefaultTransformSnapSettings = new();
 
-    public static readonly ObjectBoundsSelectedColors DefaultSelectedBoundsColors =
-        new(
-            BgObject: EditorColors.AccentOrange,
-            Furniture: EditorColors.AccentBlue,
-            Light: EditorColors.AccentGreen,
-            Vfx: EditorColors.AccentYellow);
-
-    public static readonly ObjectBoundsInteractionSettings DefaultBoundsInteractionSettings =
+    public static readonly SceneBoundsInteractionSettings DefaultBoundsInteractionSettings =
         new(
             SelectionEnabled: true,
             BoundsEnabled: false,
-            BoundsFilter: ObjectKind.Light | ObjectKind.BgObject | ObjectKind.Furniture | ObjectKind.Vfx,
+            BoundsFilter: SceneBoundsCategory.All,
             ShowSelectedOnly: false,
             InactiveBoundsOpacity: 0.28f,
-            SelectedBoundsOpacity: 0.68f,
-            SelectedBoundsColors: DefaultSelectedBoundsColors);
+            SelectedBoundsOpacity: 0.68f);
 
     public BoundsOverlaySpace BoundsOverlaySpace { get; set; } = BoundsOverlaySpace.World;
 
@@ -31,33 +24,33 @@ internal sealed class GizmoSettings
 
     public bool SurfaceAlignToNormal { get; set; }
 
-    public bool SurfaceObjectTargetsEnabled { get; set; } = true;
+    public bool SurfaceItemTargetsEnabled { get; set; } = true;
 
-    public SurfaceObjectTargetShape SurfaceObjectTargetShape { get; set; } = SurfaceObjectTargetShape.Bounds;
+    public SceneSurfaceTargetShape SurfaceTargetShape { get; set; } = SceneSurfaceTargetShape.Bounds;
 
-    public ObjectTransformSnapSettings TransformSnapSettings { get; set; } = DefaultTransformSnapSettings;
+    public SceneTransformSnapSettings TransformSnapSettings { get; set; } = DefaultTransformSnapSettings;
 
-    public ObjectBoundsInteractionSettings BoundsInteractionSettings { get; set; } = DefaultBoundsInteractionSettings;
+    public SceneBoundsInteractionSettings BoundsInteractionSettings { get; set; } = DefaultBoundsInteractionSettings;
 }
 
-internal readonly record struct ObjectBoundsInteractionSettings(
+[StructLayout(LayoutKind.Auto)]
+internal readonly record struct SceneBoundsInteractionSettings(
     bool SelectionEnabled,
     bool BoundsEnabled,
-    ObjectKind BoundsFilter,
+    SceneBoundsCategory BoundsFilter,
     bool ShowSelectedOnly,
     float InactiveBoundsOpacity,
-    float SelectedBoundsOpacity,
-    ObjectBoundsSelectedColors SelectedBoundsColors);
+    float SelectedBoundsOpacity)
+{
+    public bool Includes(SceneBoundsCategory category)
+        => (BoundsFilter & category) == category;
 
-internal readonly record struct ObjectBoundsSelectedColors(
-    Vector4 BgObject,
-    Vector4 Furniture,
-    Vector4 Light,
-    Vector4 Vfx);
+    public bool ShouldDraw(SceneBoundsCategory category, bool selected)
+        => Includes(category) && (!ShowSelectedOnly || selected);
+}
 
-internal enum SurfaceObjectTargetShape
+internal enum SceneSurfaceTargetShape
 {
     Bounds,
     Geometry,
 }
-

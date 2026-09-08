@@ -1,8 +1,5 @@
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility.Raii;
-using Intoner.Objects.Filesystem.Configuration;
-using Intoner.Objects.Interop;
-using Intoner.Objects.Runtime;
 using Intoner.Objects.UI.Components;
 using Intoner.Objects.UI.Settings.Components;
 using System.Numerics;
@@ -11,19 +8,24 @@ namespace Intoner.Objects.UI.Settings;
 
 internal sealed class SettingsPage
 {
-    private readonly SettingsCatalog _catalog = SettingsCatalog.CreateDefault();
-    private readonly DrawContext _drawContext;
+    private readonly SettingsCatalog _catalog;
+    private readonly IUiOverlayTarget? _overlayTarget;
+    private readonly bool[] _entryVisibility;
 
     private string _searchText = string.Empty;
-    private SettingsTab? _selectedTab;
+    private string? _selectedTabId;
+    private string _viewSearchText = string.Empty;
+    private string? _viewTabId;
+    private SettingsView? _view;
+    private int _visibleEntryCount;
 
     public SettingsPage(
-        IObjectConfigurationService configurationService,
-        IObjectHousingCullingService housingCullingService,
-        IObjectHousingModePolicy housingModePolicy,
-        IEditorOverlayTarget? overlayTarget = null)
+        SettingsCatalog catalog,
+        IUiOverlayTarget? overlayTarget = null)
     {
-        _drawContext = new DrawContext(configurationService, housingCullingService, housingModePolicy, overlayTarget);
+        _catalog = catalog;
+        _overlayTarget = overlayTarget;
+        _entryVisibility = new bool[catalog.EntryCount];
     }
 
     public void Draw()
@@ -38,31 +40,48 @@ internal sealed class SettingsPage
             return;
         }
 
-        var totalSettingCount = ResolveTotalSettingCount();
-        SettingsView view = BuildView();
-        if (Toolbar.Draw(view, ref _searchText, totalSettingCount))
+        SettingsView view = ResolveView();
+        if (Toolbar.Draw(view, ref _searchText, _visibleEntryCount))
         {
-            view = BuildView();
+            view = ResolveView();
         }
 
-        _selectedTab = BodyPanel.Draw(view, _drawContext, _selectedTab);
+        _selectedTabId = BodyPanel.Draw(view, _overlayTarget, _selectedTabId);
     }
 
-    private SettingsView BuildView()
+    private SettingsView ResolveView()
     {
-        SearchQuery query = SearchService.BuildQuery(_searchText);
-        return SearchService.BuildView(_catalog, _selectedTab, query);
-    }
-
-    private int ResolveTotalSettingCount()
-    {
-        var count = 0;
-        foreach (SettingsSection section in _catalog.Sections)
+        bool visibilityChanged = CaptureEntryVisibility();
+        if (_view is not null
+         && !visibilityChanged
+         && string.Equals(_viewSearchText, _searchText, StringComparison.Ordinal)
+         && string.Equals(_viewTabId, _selectedTabId, StringComparison.Ordinal))
         {
-            count += section.Entries.Count;
+            return _view;
         }
 
-        return count;
+        _viewSearchText = _searchText;
+        _viewTabId = _selectedTabId;
+        _view = SearchService.BuildView(
+            _catalog,
+            _selectedTabId,
+            SearchService.BuildQuery(_searchText));
+        return _view;
+    }
+
+    private bool CaptureEntryVisibility()
+    {
+        var changed = false;
+        _visibleEntryCount = 0;
+        for (var index = 0; index < _entryVisibility.Length; ++index)
+        {
+            bool isVisible = _catalog.Entries[index].IsVisible;
+            _visibleEntryCount += isVisible ? 1 : 0;
+            changed |= _entryVisibility[index] != isVisible;
+            _entryVisibility[index] = isVisible;
+        }
+
+        return changed;
     }
 }
 

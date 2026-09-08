@@ -1,18 +1,18 @@
 using Dalamud.Interface;
-using Intoner.Objects.Filesystem.Configuration;
+using Intoner.Services.Configuration;
 
 namespace Intoner.UI.Windows;
 
 internal sealed class WindowVisibilityService : IDisposable
 {
     private readonly IUiBuilder _uiBuilder;
-    private readonly IObjectConfigurationService _configurationService;
+    private readonly IIntonerConfigurationService _configurationService;
     private readonly Lock _lock = new();
 
     private bool _started;
     private bool _disposed;
 
-    public WindowVisibilityService(IUiBuilder uiBuilder, IObjectConfigurationService configurationService)
+    public WindowVisibilityService(IUiBuilder uiBuilder, IIntonerConfigurationService configurationService)
     {
         _uiBuilder = uiBuilder;
         _configurationService = configurationService;

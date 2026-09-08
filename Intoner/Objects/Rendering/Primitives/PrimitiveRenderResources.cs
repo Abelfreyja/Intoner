@@ -15,7 +15,7 @@ namespace Intoner.Objects.Rendering.Primitives;
 
 internal sealed class PrimitiveRenderResources : GpuUiDeviceResourceHost
 {
-    private const string ShaderResourceName = "Objects.Rendering.Primitives.Shaders.ObjectPrimitives.hlsl";
+    private const string ShaderResourceName = "Objects.Rendering.Primitives.Shaders.ScenePrimitives.hlsl";
 
     private static readonly PrimitiveLineCorner[] LineCorners =
     [
@@ -30,19 +30,19 @@ internal sealed class PrimitiveRenderResources : GpuUiDeviceResourceHost
     private static readonly GpuShaderBytecode LineVertexShader = GpuShaderCompileService.CreateVertexShader(
         typeof(PrimitiveRenderResources),
         ShaderResourceName,
-        "object native line primitive vertex shader",
+        "native line primitive vertex shader",
         "VSLineMain");
 
     private static readonly GpuShaderBytecode PointVertexShader = GpuShaderCompileService.CreateVertexShader(
         typeof(PrimitiveRenderResources),
         ShaderResourceName,
-        "object native point primitive vertex shader",
+        "native point primitive vertex shader",
         "VSPointMain");
 
     private static readonly GpuShaderBytecode PixelShader = GpuShaderCompileService.CreatePixelShader(
         typeof(PrimitiveRenderResources),
         ShaderResourceName,
-        "object native primitive pixel shader");
+        "native primitive pixel shader");
 
     private static readonly int LineCornerStride = Marshal.SizeOf<PrimitiveLineCorner>();
     private static readonly int LineInstanceStride = Marshal.SizeOf<PrimitiveLineInstance>();
@@ -68,7 +68,7 @@ internal sealed class PrimitiveRenderResources : GpuUiDeviceResourceHost
     public PrimitiveRenderResources(
         ILogger logger,
         IUiBuilder uiBuilder)
-        : base(logger, uiBuilder, "object native primitive renderer initialization failed")
+        : base(logger, uiBuilder, "native primitive renderer initialization failed")
     { }
 
     public DeviceContext? Context
@@ -76,6 +76,9 @@ internal sealed class PrimitiveRenderResources : GpuUiDeviceResourceHost
 
     public bool TryEnsure()
         => TryEnsureDevice(out _);
+
+    public void RequestReset()
+        => RequestDeviceReset();
 
     protected override void CreateDeviceResources(Device device, DeviceContext context)
     {
@@ -320,4 +323,3 @@ internal sealed class PrimitiveRenderResources : GpuUiDeviceResourceHost
         _screenVertexCapacity = 0;
     }
 }
-

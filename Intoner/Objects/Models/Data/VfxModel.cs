@@ -27,14 +27,14 @@ internal sealed record VfxModel : ObjectData
     {
         if (previousModel is null)
         {
-            return !ObjectMathUtility.IsNearlyEqual(Color, Vector4.One);
+            return !NumericsUtility.IsNearlyEqual(Color, Vector4.One);
         }
 
-        return !ObjectMathUtility.IsNearlyEqual(previousModel.Color, Color);
+        return !NumericsUtility.IsNearlyEqual(previousModel.Color, Color);
     }
 
     public bool NeedsPlaybackState(VfxModel previousModel)
-        => !ObjectMathUtility.IsNearlyEqual(previousModel.Speed, Speed)
+        => !NumericsUtility.IsNearlyEqual(previousModel.Speed, Speed)
            || previousModel.Paused != Paused;
 
     public static float ClampSpeed(float value)

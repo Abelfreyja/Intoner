@@ -9,7 +9,7 @@ internal static class ObjectLayoutFileUtility
     {
         string sanitizedName = string.IsNullOrWhiteSpace(fileName)
             ? Path.GetFileNameWithoutExtension(path)
-            : ObjectStringUtility.TrimOrEmpty(fileName);
+            : TextUtility.TrimOrEmpty(fileName);
         return string.IsNullOrWhiteSpace(sanitizedName)
             ? "Imported Layout"
             : sanitizedName;

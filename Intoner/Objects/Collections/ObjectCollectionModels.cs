@@ -37,15 +37,20 @@ internal enum ObjectCollectionModSettingsGroupKind
 
 internal readonly record struct ObjectCollectionModSettingsOption(
     string Name,
+    string Description,
     int Priority,
     bool DefaultSelected,
-    bool Selected);
+    bool Selected,
+    bool Available,
+    bool Visible);
 
 internal sealed record ObjectCollectionModSettingsGroup
 {
     public string Name { get; init; } = string.Empty;
+    public string Description { get; init; } = string.Empty;
     public ObjectCollectionModSettingsGroupKind Kind { get; init; }
     public bool HasOverride { get; init; }
+    public bool Available { get; init; } = true;
     public IReadOnlyList<ObjectCollectionModSettingsOption> Options { get; init; } = [];
 }
 
@@ -85,6 +90,7 @@ internal readonly record struct ObjectAvailableMod(
 
 internal sealed record ObjectModResolveResult
 {
+    public bool IsComplete { get; init; } = true;
     public ObjectCollectionResolveState ResolveState { get; init; } = ObjectCollectionResolveState.Inactive;
     public string StatusText { get; init; } = string.Empty;
     public bool KeepLastGoodSnapshot { get; init; }

@@ -11,6 +11,9 @@ using ClientFileInterface = FFXIVClientStructs.FFXIV.Client.System.File.FileInte
 using ClientFileMode = FFXIVClientStructs.FFXIV.Client.System.File.FileMode;
 using ClientFileThread = FFXIVClientStructs.FFXIV.Client.System.File.FileThread;
 
+using Intoner.Services.Interop;
+using Intoner.Utils;
+
 namespace Intoner.Objects.Resources;
 
 /// <summary>
@@ -85,7 +88,7 @@ internal sealed unsafe class ObjectFileReadService : IObjectFileReadService
     private readonly UpdateTextureCategoryDelegate? _updateTextureCategory;
     private readonly LoadScdFileLocalDelegate? _loadScdFileLocal;
     private readonly nint* _rsfService;
-    private readonly ObjectDisposalState _disposeState = new();
+    private readonly DisposalState _disposeState = new();
     private bool _loggedUninitializedRsfService;
 
     public ObjectFileReadService(
@@ -104,60 +107,60 @@ internal sealed unsafe class ObjectFileReadService : IObjectFileReadService
         _lodService = lodService;
         _createFileHook = new ObjectResourceCreateFileHook(gameInteropProvider);
 
-        _fileJobHook = ObjectInteropHookUtility.CreateHookFromAddress<FileJobDelegate>(
+        _fileJobHook = InteropHookUtility.CreateHookFromAddress<FileJobDelegate>(
             _logger,
             gameInteropProvider,
-            ObjectSignatures.ResourceFileJob,
+            IntonerSignatures.ResourceFileJob,
             FileJobDetour);
-        _checkFileStateHook = ObjectInteropHookUtility.CreateHook<CheckFileStateDelegate>(
+        _checkFileStateHook = InteropHookUtility.CreateHook<CheckFileStateDelegate>(
             _logger,
             gameInteropProvider,
             sigScanner,
-            ObjectSignatures.ResourceCheckFileState,
+            IntonerSignatures.ResourceCheckFileState,
             CheckFileStateDetour);
-        _loadMdlFileExternHook = ObjectInteropHookUtility.CreateHook<LoadMdlFileExternDelegate>(
+        _loadMdlFileExternHook = InteropHookUtility.CreateHook<LoadMdlFileExternDelegate>(
             _logger,
             gameInteropProvider,
             sigScanner,
-            ObjectSignatures.ResourceLoadMdlFileExtern,
+            IntonerSignatures.ResourceLoadMdlFileExtern,
             LoadMdlFileExternDetour);
-        _textureOnLoadHook = ObjectInteropHookUtility.CreateHook<TextureOnLoadDelegate>(
+        _textureOnLoadHook = InteropHookUtility.CreateHook<TextureOnLoadDelegate>(
             _logger,
             gameInteropProvider,
             sigScanner,
-            ObjectSignatures.ResourceTextureOnLoad,
+            IntonerSignatures.ResourceTextureOnLoad,
             TextureOnLoadDetour);
-        _soundOnLoadHook = ObjectInteropHookUtility.CreateHook<SoundOnLoadDelegate>(
+        _soundOnLoadHook = InteropHookUtility.CreateHook<SoundOnLoadDelegate>(
             _logger,
             gameInteropProvider,
             sigScanner,
-            ObjectSignatures.ResourceSoundOnLoad,
+            IntonerSignatures.ResourceSoundOnLoad,
             SoundOnLoadDetour);
 
-        _readFile = ObjectInteropHookUtility.CreateDelegate<ReadFileDelegate>(
+        _readFile = InteropHookUtility.CreateDelegate<ReadFileDelegate>(
             _logger,
             sigScanner,
-            ObjectSignatures.ResourceReadFile);
-        _loadMdlFileLocal = ObjectInteropHookUtility.CreateDelegate<LoadMdlFileLocalDelegate>(
+            IntonerSignatures.ResourceReadFile);
+        _loadMdlFileLocal = InteropHookUtility.CreateDelegate<LoadMdlFileLocalDelegate>(
             _logger,
             sigScanner,
-            ObjectSignatures.ResourceLoadMdlFileLocal);
-        _loadTexFileLocal = ObjectInteropHookUtility.CreateDelegate<LoadTexFileLocalDelegate>(
+            IntonerSignatures.ResourceLoadMdlFileLocal);
+        _loadTexFileLocal = InteropHookUtility.CreateDelegate<LoadTexFileLocalDelegate>(
             _logger,
             sigScanner,
-            ObjectSignatures.ResourceLoadTexFileLocal);
-        _loadScdFileLocal = ObjectInteropHookUtility.CreateDelegate<LoadScdFileLocalDelegate>(
+            IntonerSignatures.ResourceLoadTexFileLocal);
+        _loadScdFileLocal = InteropHookUtility.CreateDelegate<LoadScdFileLocalDelegate>(
             _logger,
             sigScanner,
-            ObjectSignatures.ResourceLoadScdFileLocal);
-        _updateTextureCategory = ObjectInteropHookUtility.CreateDelegate<UpdateTextureCategoryDelegate>(
+            IntonerSignatures.ResourceLoadScdFileLocal);
+        _updateTextureCategory = InteropHookUtility.CreateDelegate<UpdateTextureCategoryDelegate>(
             _logger,
             sigScanner,
-            ObjectSignatures.ResourceUpdateTextureCategory);
-        _rsfService = (nint*)ObjectNativeAddressResolver.TryResolveStaticAddress(
+            IntonerSignatures.ResourceUpdateTextureCategory);
+        _rsfService = (nint*)NativeAddressResolver.TryResolveStaticAddress(
             _logger,
             sigScanner,
-            ObjectSignatures.ResourceRsfService);
+            IntonerSignatures.ResourceRsfService);
 
         _localFileTracker = new ObjectLocalFileTracker(collectionStore, TryNormalizeLoadableLocalFilePath);
     }
@@ -169,11 +172,11 @@ internal sealed unsafe class ObjectFileReadService : IObjectFileReadService
             return;
         }
 
-        ObjectInteropHookUtility.DisposeHook(_fileJobHook);
-        ObjectInteropHookUtility.DisposeHook(_checkFileStateHook);
-        ObjectInteropHookUtility.DisposeHook(_loadMdlFileExternHook);
-        ObjectInteropHookUtility.DisposeHook(_textureOnLoadHook);
-        ObjectInteropHookUtility.DisposeHook(_soundOnLoadHook);
+        InteropHookUtility.DisposeHook(_fileJobHook);
+        InteropHookUtility.DisposeHook(_checkFileStateHook);
+        InteropHookUtility.DisposeHook(_loadMdlFileExternHook);
+        InteropHookUtility.DisposeHook(_textureOnLoadHook);
+        InteropHookUtility.DisposeHook(_soundOnLoadHook);
         _localFileTracker.Dispose();
         _createFileHook.Dispose();
         _activeLocalFileJob.Dispose();

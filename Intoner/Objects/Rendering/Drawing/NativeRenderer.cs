@@ -1,5 +1,5 @@
-using Intoner.Objects.Filesystem.Configuration;
 using Intoner.Objects.Rendering.Primitives;
+using Intoner.Services.Configuration;
 
 namespace Intoner.Objects.Rendering.Drawing;
 
@@ -7,14 +7,14 @@ internal sealed class NativeRenderer : IRenderer, IDisposable
 {
     private readonly ImGuiRenderer               _imguiRenderer = new();
     private readonly PrimitiveService            _primitives;
-    private readonly IObjectConfigurationService _configurationService;
+    private readonly IIntonerConfigurationService _configurationService;
     private readonly PrimitiveCommandEncoder     _encoder = new();
 
     private bool _disposed;
 
     public NativeRenderer(
         PrimitiveService primitives,
-        IObjectConfigurationService configurationService)
+        IIntonerConfigurationService configurationService)
     {
         _primitives            = primitives;
         _configurationService  = configurationService;

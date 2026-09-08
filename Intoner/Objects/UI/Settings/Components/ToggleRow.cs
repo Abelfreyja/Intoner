@@ -2,6 +2,7 @@ using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using Intoner.Objects.UI;
+using Intoner.Objects.UI.Components;
 using System.Numerics;
 
 namespace Intoner.Objects.UI.Settings.Components;
@@ -13,7 +14,7 @@ internal static class ToggleRow
     private const float ProminentToggleWidth = 54f;
     private const float ProminentToggleHeight = 28f;
 
-    private readonly record struct ControlMetrics(Vector2 BadgeSize, Vector2 BadgePadding, float BadgeRounding, Vector2 ToggleSize, float Spacing)
+    private readonly record struct ControlMetrics(Vector2 BadgeSize, Vector2 ToggleSize, float Spacing)
     {
         public float Width
             => BadgeSize.X + Spacing + ToggleSize.X;
@@ -47,8 +48,11 @@ internal static class ToggleRow
         bool enabled)
     {
         RowChrome.AlignControl(rowHeight, metrics.Height, metrics.Width, alignRight: true);
-        RowChrome.DrawStatusBadge(status.Text, status.Color, metrics.BadgeSize, metrics.BadgePadding, metrics.BadgeRounding);
+        float controlY = ImGui.GetCursorPosY();
+        ImGui.SetCursorPosY(controlY + (metrics.Height - metrics.BadgeSize.Y) * 0.5f);
+        EditorBadgeRenderer.Draw(EditorBadge.Label(status.Text, color: status.Color));
         ImGui.SameLine(0f, metrics.Spacing);
+        ImGui.SetCursorPosY(controlY + (metrics.Height - metrics.ToggleSize.Y) * 0.5f);
         bool changed = DrawToggleSwitch($"##objectSetting_{definition.Id}", ref value, accent, enabled, metrics.ToggleSize);
         RowChrome.DrawDescriptionTooltip(definition);
         return changed;
@@ -74,8 +78,8 @@ internal static class ToggleRow
         bool hovered = ImGui.IsItemHovered();
         Vector4 trackColor = ResolveToggleTrackColor(value, enabled, hovered, accent);
         Vector4 knobColor = enabled
-            ? EditorColors.Text
-            : EditorColors.TextDisabled;
+            ? ThemeColors.Text
+            : ThemeColors.TextDisabled;
         float radius = size.Y * 0.5f;
         float knobRadius = MathF.Max(1f, radius - (3f * scale));
         float knobX = value
@@ -84,7 +88,7 @@ internal static class ToggleRow
         Vector2 knobCenter = new(knobX, min.Y + radius);
 
         drawList.AddRectFilled(min, max, ImGui.GetColorU32(trackColor), radius);
-        drawList.AddRect(min, max, ImGui.GetColorU32(EditorColors.Border with { W = enabled ? 0.42f : 0.18f }), radius, ImDrawFlags.None, 1f * scale);
+        drawList.AddRect(min, max, ImGui.GetColorU32(ThemeColors.Border with { W = enabled ? 0.42f : 0.18f }), radius, ImDrawFlags.None, 1f * scale);
         drawList.AddCircleFilled(knobCenter, knobRadius, ImGui.GetColorU32(knobColor with { W = enabled ? 0.95f : 0.45f }));
         return changed;
     }
@@ -93,7 +97,7 @@ internal static class ToggleRow
     {
         if (!enabled)
         {
-            return EditorColors.ButtonDefault with { W = 0.24f };
+            return ThemeColors.ButtonDefault with { W = 0.24f };
         }
 
         if (value)
@@ -101,7 +105,7 @@ internal static class ToggleRow
             return accent with { W = hovered ? 0.74f : 0.58f };
         }
 
-        return EditorColors.ButtonDefault with { W = hovered ? 0.66f : 0.48f };
+        return ThemeColors.ButtonDefault with { W = hovered ? 0.66f : 0.48f };
     }
 
     private static ControlMetrics ResolveControlMetrics(string statusText, bool prominentControl)
@@ -110,15 +114,11 @@ internal static class ToggleRow
         Vector2 toggleSize = prominentControl
             ? new Vector2(ProminentToggleWidth * scale, ProminentToggleHeight * scale)
             : new Vector2(CompactToggleWidth * scale, CompactToggleHeight * scale);
-        Vector2 badgePadding = prominentControl
-            ? new Vector2(10f * scale, 5f * scale)
-            : new Vector2(7f * scale, 2f * scale);
-        Vector2 badgeSize = ImGui.CalcTextSize(statusText) + (badgePadding * 2f);
-        float badgeRounding = (prominentControl ? 6f : 4f) * scale;
+        Vector2 badgeSize = new(EditorBadgeRenderer.MeasureWidth(EditorBadge.Label(statusText)), EditorBadgeRenderer.Height);
         float spacing = prominentControl
             ? 8f * scale
             : ImGui.GetStyle().ItemSpacing.X;
-        return new ControlMetrics(badgeSize, badgePadding, badgeRounding, toggleSize, spacing);
+        return new ControlMetrics(badgeSize, toggleSize, spacing);
     }
 }
 

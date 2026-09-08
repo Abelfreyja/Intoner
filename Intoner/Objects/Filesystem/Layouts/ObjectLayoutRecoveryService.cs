@@ -1,6 +1,6 @@
 using Intoner.Objects.Api;
-using Intoner.Objects.Filesystem.Storage;
 using Intoner.Objects.Models;
+using Intoner.Services.Storage;
 using Microsoft.Extensions.Logging;
 
 namespace Intoner.Objects.Filesystem.Layouts;
@@ -21,8 +21,8 @@ internal interface IObjectLayoutRecoveryService
 
 internal sealed class ObjectLayoutRecoveryService(
     ILogger<ObjectLayoutRecoveryService> logger,
-    IObjectStoragePathService pathService,
-    IObjectFileSystem fileSystem) : IObjectLayoutRecoveryService
+    IPluginStoragePaths pathService,
+    IPluginFileSystem fileSystem) : IObjectLayoutRecoveryService
 {
     public bool HasCurrentRecovery()
         => fileSystem.FileExists(pathService.ObjectAutosaveCurrentPath);

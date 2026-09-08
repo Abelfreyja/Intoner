@@ -56,13 +56,13 @@ internal static class IntegerValueControl
         var rounding = height * 0.45f;
         Vector4 fill = enabled
             ? accent with { W = hovered ? 0.20f : 0.13f }
-            : EditorColors.ButtonDefault with { W = 0.20f };
+            : ThemeColors.ButtonDefault with { W = 0.20f };
         Vector4 border = enabled
             ? accent with { W = hovered ? 0.42f : 0.28f }
-            : EditorColors.Border with { W = 0.14f };
+            : ThemeColors.Border with { W = 0.14f };
         Vector4 textColor = enabled
-            ? EditorColors.Text with { W = 0.92f }
-            : EditorColors.TextDisabled with { W = 0.56f };
+            ? ThemeColors.Text with { W = 0.92f }
+            : ThemeColors.TextDisabled with { W = 0.56f };
         ImDrawListPtr drawList = ImGui.GetWindowDrawList();
 
         drawList.AddRectFilled(min, max, ImGui.GetColorU32(fill), rounding);

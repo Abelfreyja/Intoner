@@ -1,7 +1,7 @@
 using Dalamud.Bindings.ImGui;
-using Dalamud.Interface;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
+using Intoner.Objects.UI.Components;
 using System.Numerics;
 using static Intoner.Objects.UI.Settings.Components.SettingsChrome;
 
@@ -9,31 +9,31 @@ namespace Intoner.Objects.UI.Settings.Components;
 
 internal static class CategoryRail
 {
-    public static SettingsTab? Draw(SettingsView view, SettingsTab? selectedTab)
+    public static string? Draw(SettingsView view, string? selectedTabId)
     {
-        SettingsTab? nextSelectedTab = selectedTab;
+        string? nextSelectedTabId = selectedTabId;
 
         using var rowSpacing = ImRaii.PushStyle(
             ImGuiStyleVar.ItemSpacing,
             new Vector2(ImGui.GetStyle().ItemSpacing.X, 0f));
         for (var index = 0; index < view.Categories.Count; ++index)
         {
-            DrawCategory(view.Categories[index], ref nextSelectedTab, index + 1 < view.Categories.Count);
+            DrawCategory(view.Categories[index], ref nextSelectedTabId, index + 1 < view.Categories.Count);
         }
 
-        return nextSelectedTab;
+        return nextSelectedTabId;
     }
 
-    private static void DrawCategory(CategoryResult category, ref SettingsTab? selectedTab, bool drawBottomSpacing)
+    private static void DrawCategory(CategoryResult category, ref string? selectedTabId, bool drawBottomSpacing)
     {
-        bool selected = selectedTab == category.Tab;
+        bool selected = string.Equals(selectedTabId, category.Tab?.Id, StringComparison.Ordinal);
         float rowHeight = Scaled(CategoryRowHeight);
         Vector2 rowMin = ImGui.GetCursorScreenPos();
         Vector2 rowSize = new(Positive(ImGui.GetContentRegionAvail().X), rowHeight);
 
-        if (ImGui.InvisibleButton($"##objectSettingsCategory{category.Label}", rowSize))
+        if (ImGui.InvisibleButton($"##objectSettingsCategory{category.Tab?.Id ?? "all"}", rowSize))
         {
-            selectedTab = category.Tab;
+            selectedTabId = category.Tab?.Id;
         }
 
         DrawCategoryRow(category, rowMin, rowSize, selected, ImGui.IsItemHovered());
@@ -49,11 +49,15 @@ internal static class CategoryRail
         ImDrawListPtr drawList = ImGui.GetWindowDrawList();
         Vector2 rowMax = rowMin + rowSize;
         var rounding = Scaled(5f);
-        Vector4 fill = selected
-            ? accent with { W = 0.18f }
-            : hovered
-                ? EditorColors.ButtonDefault with { W = 0.36f }
-                : Vector4.Zero;
+        Vector4 fill = Vector4.Zero;
+        if (selected)
+        {
+            fill = accent with { W = 0.18f };
+        }
+        else if (hovered)
+        {
+            fill = ThemeColors.ButtonDefault with { W = 0.36f };
+        }
 
         if (fill.W > 0f)
         {
@@ -66,20 +70,20 @@ internal static class CategoryRail
             drawList.AddRectFilled(rowMin, accentMax, ImGui.GetColorU32(accent), rounding, ImDrawFlags.RoundCornersLeft);
         }
 
-        string icon = ResolveCategoryIcon(category.Tab).ToIconString();
         string count = category.Result.EntryCount.ToString();
-        Vector2 countSize = ImGui.CalcTextSize(count);
-        Vector2 countPadding = new(7f * ImGuiHelpers.GlobalScale, 1f * ImGuiHelpers.GlobalScale);
-        Vector2 countBadgeSize = countSize + (countPadding * 2f);
+        EditorBadge countBadge = EditorBadge.Label(count, color: selected ? accent : ThemeColors.TextDisabled);
         float centerY = rowMin.Y + ((rowSize.Y - ImGui.GetTextLineHeight()) * 0.5f);
         Vector2 iconPos = new(rowMin.X + Scaled(12f), centerY);
         Vector2 labelPos = new(rowMin.X + Scaled(34f), centerY);
-        Vector2 countBadgeMin = new(rowMax.X - countBadgeSize.X - Scaled(8f), rowMin.Y + ((rowSize.Y - countBadgeSize.Y) * 0.5f));
-        Vector4 textColor = selected ? EditorColors.Text : EditorColors.TextDisabled;
+        Vector4 textColor = selected ? ThemeColors.Text : ThemeColors.TextDisabled;
 
-        drawList.AddText(UiBuilder.IconFont, ImGui.GetFontSize(), iconPos, ImGui.GetColorU32(accent), icon);
-        drawList.AddText(labelPos, ImGui.GetColorU32(textColor), category.Label);
-        DrawBadge(drawList, countBadgeMin, countBadgeSize, count, countPadding, selected ? accent : EditorColors.TextDisabled);
+        EditorIcon.DrawCentered(drawList, ResolveCategoryIcon(category.Tab), iconPos, iconPos + new Vector2(Scaled(16f), ImGui.GetTextLineHeight()), accent);
+        float badgeLeft = EditorBadgeRenderer.DrawRightAligned(drawList, null, countBadge, rowMax.X - Scaled(8f),
+            rowMin.Y + (rowSize.Y - EditorBadgeRenderer.Height) * 0.5f, selected, 1f, panelSurface: true);
+        float labelWidth = MathF.Max(0f, badgeLeft - Scaled(4f) - labelPos.X);
+        EditorTextUtility.ClippedText label = EditorTextUtility.ClipTextToWidthResult(category.Label, labelWidth);
+        drawList.AddText(labelPos, ImGui.GetColorU32(textColor), label.Text);
+        EditorTextUtility.AttachTooltipIfClipped(labelPos, new Vector2(labelWidth, ImGui.GetTextLineHeight()), category.Label, label.IsClipped);
     }
 }
 

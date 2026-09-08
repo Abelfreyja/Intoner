@@ -2,6 +2,7 @@ using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Intoner.Objects.Rendering.Drawing;
 using Intoner.Services.Gpu;
+using Intoner.Services.Interop;
 using Microsoft.Extensions.Logging;
 using SharpDX.Direct3D11;
 using SharpDX.DXGI;
@@ -49,7 +50,11 @@ internal sealed unsafe class BackdropRenderer : GpuUiDeviceResourceHost
     private readonly ILogger<BackdropRenderer> _logger;
     private readonly BackdropEffectRegistry _effects;
     private readonly ImGuiDrawCallbackQueue<IDrawJob> _callbackJobs = new(static job => job.Process());
-    private readonly List<BackdropFramebuffer> _blurFramebuffers = [];
+    private readonly List<GpuColorTarget> _blurFramebuffers = [];
+    private readonly D3D11DrawStateSnapshot _drawState = new(
+        pixelConstantBufferCount: 2,
+        pixelShaderResourceViewCount: 2,
+        captureScissorRectangles: true);
     private BackdropBlurConstants _blurConstants;
 
     private PixelShader? _downsampleShader;
@@ -69,8 +74,8 @@ internal sealed unsafe class BackdropRenderer : GpuUiDeviceResourceHost
     private Texture2D? _gameSourceCopyTexture;
     private ShaderResourceView? _gameSourceShaderResourceView;
     private Format _gameSourceFormat = Format.Unknown;
-    private BackdropFramebuffer? _compositedSourceFramebuffer;
-    private BackdropFramebuffer? _outputFramebuffer;
+    private GpuColorTarget? _compositedSourceFramebuffer;
+    private GpuColorTarget? _outputFramebuffer;
     private int _frameWidth;
     private int _frameHeight;
     private int _capturedSourceWidth;
@@ -118,11 +123,14 @@ internal sealed unsafe class BackdropRenderer : GpuUiDeviceResourceHost
         => _effects.Get<T>();
 
     protected override void DisposeManagedResources()
-        => _callbackJobs.Dispose();
+    {
+        _callbackJobs.Dispose();
+        _drawState.Dispose();
+    }
 
     private bool TryPrepareFrame()
     {
-        if (!OperatingSystem.IsWindows())
+        if (!RuntimePlatform.IsWindowsRuntime)
         {
             return false;
         }
@@ -206,7 +214,7 @@ internal sealed unsafe class BackdropRenderer : GpuUiDeviceResourceHost
     }
 
     /// <summary> ensures an effect framebuffer exists at full viewport size </summary>
-    internal bool TryEnsureEffectFramebuffer(ref BackdropFramebuffer? framebuffer)
+    internal bool TryEnsureEffectFramebuffer(ref GpuColorTarget? framebuffer)
     {
         if (!TryPrepareFrame())
         {
@@ -226,13 +234,20 @@ internal sealed unsafe class BackdropRenderer : GpuUiDeviceResourceHost
             return true;
         }
 
-        framebuffer?.Dispose();
-        framebuffer = CreateFramebuffer(device, _frameWidth, _frameHeight);
+        GpuColorTarget replacement = new(device, _frameWidth, _frameHeight);
+        GpuColorTarget? previous = framebuffer;
+        framebuffer = replacement;
+        previous?.Dispose();
         return true;
     }
 
     internal bool TryEnsureEffectShader(GpuShaderBytecode shaderBytecode, ref PixelShader? shader)
     {
+        if (!shaderBytecode.IsCompilationComplete)
+        {
+            return false;
+        }
+
         if (ActiveDevice is null && !TryPrepareFrame())
         {
             return false;
@@ -265,7 +280,7 @@ internal sealed unsafe class BackdropRenderer : GpuUiDeviceResourceHost
     /// <summary> renders an effect shader over the captured backdrop </summary>
     internal bool TryRenderEffect(
         PixelShader shader,
-        BackdropFramebuffer framebuffer,
+        GpuColorTarget framebuffer,
         in BackdropSurfaceConstants surfaceConstants,
         Buffer? effectConstantBuffer,
         int scissorMinX,
@@ -297,11 +312,7 @@ internal sealed unsafe class BackdropRenderer : GpuUiDeviceResourceHost
 
         try
         {
-            using var state = D3D11DrawStateScope.Capture(
-                ActiveContext,
-                pixelConstantBufferCount: 1,
-                pixelShaderResourceViewCount: 2,
-                captureScissorRectangles: true);
+            using D3D11DrawStateSnapshot.Scope state = _drawState.Capture(ActiveContext);
             ApplyFullscreenPipeline();
             if (clearedFrame != ImGui.GetFrameCount())
             {
@@ -396,7 +407,11 @@ internal sealed unsafe class BackdropRenderer : GpuUiDeviceResourceHost
         => _callbackJobs.QueueDraw(drawList, callbackJob, drawContent);
 
     private bool TryEnsureDeviceResources()
-        => TryEnsureDevice(out _);
+        => VertexShader.IsCompilationComplete
+           && DownsampleShader.IsCompilationComplete
+           && UpsampleShader.IsCompilationComplete
+           && CompositeShader.IsCompilationComplete
+           && TryEnsureDevice(out _);
 
     protected override void CreateDeviceResources(Device device, DeviceContext context)
     {
@@ -517,11 +532,14 @@ internal sealed unsafe class BackdropRenderer : GpuUiDeviceResourceHost
         for (var index = 0; index <= BlurIterations; index++)
         {
             var divisor = 1 << index;
-            _blurFramebuffers.Add(CreateFramebuffer(device, Math.Max(1, scaledWidth / divisor), Math.Max(1, scaledHeight / divisor)));
+            _blurFramebuffers.Add(new GpuColorTarget(
+                device,
+                Math.Max(1, scaledWidth / divisor),
+                Math.Max(1, scaledHeight / divisor)));
         }
 
-        _compositedSourceFramebuffer = CreateFramebuffer(device, _frameWidth, _frameHeight);
-        _outputFramebuffer = CreateFramebuffer(device, scaledWidth, scaledHeight);
+        _compositedSourceFramebuffer = new GpuColorTarget(device, _frameWidth, _frameHeight);
+        _outputFramebuffer = new GpuColorTarget(device, scaledWidth, scaledHeight);
     }
 
     private void ProcessBackdropFrame()
@@ -552,11 +570,7 @@ internal sealed unsafe class BackdropRenderer : GpuUiDeviceResourceHost
 
         try
         {
-            using var state = D3D11DrawStateScope.Capture(
-                ActiveContext,
-                pixelConstantBufferCount: 1,
-                pixelShaderResourceViewCount: 2,
-                captureScissorRectangles: true);
+            using D3D11DrawStateSnapshot.Scope state = _drawState.Capture(ActiveContext);
             if (!TryCaptureGameBackBuffer()
                 || _gameSourceShaderResourceView is null
                 || !TryCaptureCurrentRenderTarget(state.PrimaryRenderTargetView)
@@ -702,11 +716,9 @@ internal sealed unsafe class BackdropRenderer : GpuUiDeviceResourceHost
             return false;
         }
 
-        Texture2D? backBufferTexture = null;
-        Marshal.AddRef(nativePointer);
         try
         {
-            backBufferTexture = new Texture2D(nativePointer);
+            using Texture2D backBufferTexture = D3D11ComReference.RetainTexture(nativePointer, this);
             var backBufferDescription = backBufferTexture.Description;
             if (backBufferDescription.Width <= 0 || backBufferDescription.Height <= 0)
             {
@@ -738,10 +750,6 @@ internal sealed unsafe class BackdropRenderer : GpuUiDeviceResourceHost
             }
 
             return false;
-        }
-        finally
-        {
-            backBufferTexture?.Dispose();
         }
     }
 
@@ -843,7 +851,7 @@ internal sealed unsafe class BackdropRenderer : GpuUiDeviceResourceHost
         ActiveContext.Rasterizer.State = _rasterizerState;
     }
 
-    private void RenderShaderPass(BackdropFramebuffer framebuffer, ShaderResourceView inputView, PixelShader shader)
+    private void RenderShaderPass(GpuColorTarget framebuffer, ShaderResourceView inputView, PixelShader shader)
     {
         if (ActiveContext is null || _blurConstantBuffer is null || _mirrorSampler is null)
         {
@@ -867,7 +875,7 @@ internal sealed unsafe class BackdropRenderer : GpuUiDeviceResourceHost
         ActiveContext.PixelShader.SetShaderResource(0, null);
     }
 
-    private void RenderCompositePass(BackdropFramebuffer framebuffer, ShaderResourceView gameView, ShaderResourceView overlayView)
+    private void RenderCompositePass(GpuColorTarget framebuffer, ShaderResourceView gameView, ShaderResourceView overlayView)
     {
         if (ActiveContext is null || _compositeShader is null || _mirrorSampler is null)
         {
@@ -886,7 +894,7 @@ internal sealed unsafe class BackdropRenderer : GpuUiDeviceResourceHost
     }
 
     private void RenderEffectPass(
-        BackdropFramebuffer framebuffer,
+        GpuColorTarget framebuffer,
         PixelShader shader,
         in BackdropSurfaceConstants surfaceConstants,
         Buffer? effectConstantBuffer,
@@ -938,27 +946,6 @@ internal sealed unsafe class BackdropRenderer : GpuUiDeviceResourceHost
 
     private static bool HasCorner(ImDrawFlags flags, ImDrawFlags corner)
         => (flags & corner) != ImDrawFlags.None;
-
-    private static BackdropFramebuffer CreateFramebuffer(Device device, int width, int height)
-    {
-        var texture = new Texture2D(device, new Texture2DDescription
-        {
-            Width = width,
-            Height = height,
-            MipLevels = 1,
-            ArraySize = 1,
-            Format = Format.R8G8B8A8_UNorm,
-            SampleDescription = new SampleDescription(1, 0),
-            Usage = ResourceUsage.Default,
-            BindFlags = BindFlags.RenderTarget | BindFlags.ShaderResource,
-            CpuAccessFlags = CpuAccessFlags.None,
-            OptionFlags = ResourceOptionFlags.None,
-        });
-
-        var renderTargetView = new RenderTargetView(device, texture);
-        var shaderResourceView = new ShaderResourceView(device, texture);
-        return new BackdropFramebuffer(texture, renderTargetView, shaderResourceView, width, height);
-    }
 
     private static bool IsMainViewportWindow()
     {
@@ -1055,31 +1042,6 @@ internal sealed unsafe class BackdropRenderer : GpuUiDeviceResourceHost
         public Vector4 CornerRadii;
     }
 #pragma warning restore S4487
-
-    internal sealed class BackdropFramebuffer : IDisposable
-    {
-        public BackdropFramebuffer(Texture2D texture, RenderTargetView renderTargetView, ShaderResourceView shaderResourceView, int width, int height)
-        {
-            Texture = texture;
-            RenderTargetView = renderTargetView;
-            ShaderResourceView = shaderResourceView;
-            Width = width;
-            Height = height;
-        }
-
-        public Texture2D Texture { get; }
-        public RenderTargetView RenderTargetView { get; }
-        public ShaderResourceView ShaderResourceView { get; }
-        public int Width { get; }
-        public int Height { get; }
-
-        public void Dispose()
-        {
-            ShaderResourceView.Dispose();
-            RenderTargetView.Dispose();
-            Texture.Dispose();
-        }
-    }
 
     internal readonly struct TextureDrawInfo
     {

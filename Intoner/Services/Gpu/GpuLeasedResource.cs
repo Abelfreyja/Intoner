@@ -1,3 +1,5 @@
+using System.Diagnostics.CodeAnalysis;
+
 namespace Intoner.Services.Gpu;
 
 internal sealed class GpuLeasedResource<TResource>(
@@ -14,13 +16,28 @@ internal sealed class GpuLeasedResource<TResource>(
 
     public Lease Acquire()
     {
-        lock (_sync)
+        if (!TryAcquire(out Lease? lease))
         {
-            ObjectDisposedException.ThrowIf(_disposeRequested, _resource);
-            _activeLeaseCount++;
+            throw new ObjectDisposedException(nameof(GpuLeasedResource<TResource>));
         }
 
-        return new Lease(this);
+        return lease;
+    }
+
+    public bool TryAcquire([NotNullWhen(true)] out Lease? lease)
+    {
+        lock (_sync)
+        {
+            if (_disposeRequested)
+            {
+                lease = null;
+                return false;
+            }
+
+            _activeLeaseCount++;
+            lease = new Lease(this);
+            return true;
+        }
     }
 
     public void Dispose()

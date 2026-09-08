@@ -1,4 +1,6 @@
+using Intoner.Scene;
 using System.Numerics;
+using System.Runtime.InteropServices;
 
 namespace Intoner.Objects.Utils;
 
@@ -6,6 +8,7 @@ internal static class GizmoRotationMath
 {
     private const float MinimumWorldRadius = 0.001f;
 
+    [StructLayout(LayoutKind.Auto)]
     internal readonly record struct Projection(
         Vector2 Center,
         float ScreenRadius,
@@ -46,7 +49,7 @@ internal static class GizmoRotationMath
     {
         screenPoint = projection.Center;
         isVisible = false;
-        if (!ObjectMathUtility.HasLength(axisDirection)
+        if (!NumericsUtility.HasLength(axisDirection)
             || projection.WorldRadius <= float.Epsilon
             || projection.ScreenRadius <= float.Epsilon)
         {
@@ -60,7 +63,7 @@ internal static class GizmoRotationMath
 
         var worldPoint = projection.WorldPosition
                          + ((planeX * MathF.Cos(angle)) + (planeY * MathF.Sin(angle))) * projection.WorldRadius;
-        if (!ObjectViewportProjectionUtility.TryProjectWorldPointToViewport(
+        if (!SceneViewportProjection.TryProjectWorldPointToViewport(
                 projection.ViewProjection,
                 worldPoint,
                 projection.ViewportPos,
@@ -91,7 +94,7 @@ internal static class GizmoRotationMath
         out float angle)
     {
         angle = 0f;
-        if (!ObjectMathUtility.HasLength(axisDirection))
+        if (!NumericsUtility.HasLength(axisDirection))
         {
             return false;
         }
@@ -270,7 +273,7 @@ internal static class GizmoRotationMath
         planeX = Vector3.Zero;
         planeY = Vector3.Zero;
 
-        if (!ObjectMathUtility.HasLength(axisDirection))
+        if (!NumericsUtility.HasLength(axisDirection))
         {
             return false;
         }
@@ -281,28 +284,28 @@ internal static class GizmoRotationMath
             tangent = Vector3.Cross(axisDirection, projection.CameraViewDirection.Value);
         }
 
-        if (!ObjectMathUtility.HasLength(tangent) && projection.CameraRight.HasValue)
+        if (!NumericsUtility.HasLength(tangent) && projection.CameraRight.HasValue)
         {
             tangent = Vector3.Cross(axisDirection, projection.CameraRight.Value);
         }
 
-        if (!ObjectMathUtility.HasLength(tangent) && projection.CameraUp.HasValue)
+        if (!NumericsUtility.HasLength(tangent) && projection.CameraUp.HasValue)
         {
             tangent = Vector3.Cross(axisDirection, projection.CameraUp.Value);
         }
 
-        if (!ObjectMathUtility.HasLength(tangent))
+        if (!NumericsUtility.HasLength(tangent))
         {
             tangent = Vector3.Cross(axisDirection, MathF.Abs(axisDirection.Y) < 0.95f ? Vector3.UnitY : Vector3.UnitX);
         }
 
-        if (!ObjectMathUtility.TryNormalize(tangent, out planeX))
+        if (!NumericsUtility.TryNormalize(tangent, out planeX))
         {
             return false;
         }
 
         planeY = Vector3.Cross(axisDirection, planeX);
-        if (!ObjectMathUtility.TryNormalize(planeY, out planeY))
+        if (!NumericsUtility.TryNormalize(planeY, out planeY))
         {
             return false;
         }
@@ -313,13 +316,13 @@ internal static class GizmoRotationMath
     private static bool IsNearCameraSide(in Projection projection, Vector3 worldPoint)
     {
         if (!projection.CameraViewDirection.HasValue
-            || !ObjectMathUtility.TryNormalize(projection.CameraViewDirection.Value, out var cameraDirection))
+            || !NumericsUtility.TryNormalize(projection.CameraViewDirection.Value, out var cameraDirection))
         {
             return true;
         }
 
         var offset = worldPoint - projection.WorldPosition;
-        return !ObjectMathUtility.HasLength(offset) || Vector3.Dot(offset, cameraDirection) >= -0.0001f;
+        return !NumericsUtility.HasLength(offset) || Vector3.Dot(offset, cameraDirection) >= -0.0001f;
     }
 
     private static bool TryResolveWorldRadius(
@@ -329,13 +332,13 @@ internal static class GizmoRotationMath
         out float worldRadius)
     {
         worldRadius = 0f;
-        if (!worldDirection.HasValue || !ObjectMathUtility.TryNormalize(worldDirection.Value, out var normalizedWorldDirection))
+        if (!worldDirection.HasValue || !NumericsUtility.TryNormalize(worldDirection.Value, out var normalizedWorldDirection))
         {
             return false;
         }
 
         var samplePoint = projection.WorldPosition + (normalizedWorldDirection * referenceWorldRadius);
-        if (!ObjectViewportProjectionUtility.TryProjectWorldPointToViewport(
+        if (!SceneViewportProjection.TryProjectWorldPointToViewport(
                 projection.ViewProjection,
                 samplePoint,
                 projection.ViewportPos,
@@ -346,7 +349,7 @@ internal static class GizmoRotationMath
         }
 
         var sampleScreenRadius = (projectedScreenPoint - projection.Center).Length();
-        if (ObjectMathUtility.IsNearlyZero(sampleScreenRadius))
+        if (NumericsUtility.IsNearlyZero(sampleScreenRadius))
         {
             return false;
         }

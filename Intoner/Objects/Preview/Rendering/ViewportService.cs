@@ -95,7 +95,6 @@ internal sealed class ViewportService : IDisposable
 
         _disposed = true;
         _renderJobs.Dispose();
-        _renderer.Dispose();
     }
 
     private void QueueRenderImage(

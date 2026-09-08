@@ -3,6 +3,7 @@ using FFXIVClientStructs.FFXIV.Client.System.Resource.Handle;
 using Intoner.Objects.Models;
 using Intoner.Objects.Resources;
 using Intoner.Objects.Utils;
+using Intoner.Scene;
 using System.Numerics;
 using System.Text;
 using DrawObject = FFXIVClientStructs.FFXIV.Client.Graphics.Scene.DrawObject;
@@ -68,7 +69,7 @@ internal static unsafe class BgObjectSceneInterop
         }
 
         bgObject->Position = snapshot.Transform.Position;
-        bgObject->Rotation = ObjectTransformMath.CreateRotationQuaternion(snapshot.Transform.RotationDegrees);
+        bgObject->Rotation = SceneTransformMath.CreateRotationQuaternion(snapshot.Transform.RotationDegrees);
         bgObject->Scale = snapshot.Transform.Scale;
 
         var drawObject = (DrawObject*)bgObject;
@@ -125,7 +126,7 @@ internal static unsafe class BgObjectSceneInterop
             MathF.Sqrt(Math.Clamp(dyeColor.Z, 0f, 1f)),
             Math.Clamp(dyeColor.W, 0f, 1f));
 
-        bgObject->TrySetStainColor(ObjectColorUtility.ToByteColor(srgbColor));
+        bgObject->TrySetStainColor(ColorUtility.ToByteColor(srgbColor));
     }
 }
 

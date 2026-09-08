@@ -1,5 +1,5 @@
 using Intoner.Objects.Catalog;
-using Intoner.Objects.Filesystem.Configuration;
+using Intoner.Services.Configuration;
 using Intoner.Objects.Runtime;
 
 namespace Intoner.Objects.Api;

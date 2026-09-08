@@ -1,7 +1,7 @@
 using Intoner.Objects.Catalog;
-using Intoner.Objects.Filesystem.Configuration;
 using Intoner.Objects.Models;
 using Intoner.Objects.Utils;
+using Intoner.Services.Configuration;
 using System.Numerics;
 
 namespace Intoner.Objects.Runtime;
@@ -11,7 +11,7 @@ internal sealed class AreaContainmentRule(
     PlacementEvaluationFactory evaluationFactory) : IPlacementRule
 {
     private const int MaxContainmentPointCount = 3;
-    private const float DuplicatePointDistanceSquared = ObjectMathUtility.ScalarEpsilon * ObjectMathUtility.ScalarEpsilon;
+    private const float DuplicatePointDistanceSquared = NumericsUtility.ScalarEpsilon * NumericsUtility.ScalarEpsilon;
 
     public bool TryEvaluate(
         PlacementValidationContext context,
@@ -121,7 +121,7 @@ internal sealed class AreaContainmentRule(
             && metadata.Surface == HousingPlacementSurface.Wall
             && WallPlacementGeometry.TryResolveContactPoints(snapshot, boundsSnapshot, out Vector3 forwardContactPoint, out Vector3 backwardContactPoint))
         {
-            Vector3 direction = ObjectMathUtility.TryNormalize(forwardContactPoint - backwardContactPoint, out Vector3 normalizedDirection)
+            Vector3 direction = NumericsUtility.TryNormalize(forwardContactPoint - backwardContactPoint, out Vector3 normalizedDirection)
                 ? normalizedDirection
                 : Vector3.Zero;
             count = AddContainmentPoint(queryPoints, count, forwardContactPoint - (direction * PlacementValidationConstants.SurfaceAlignmentTolerance));

@@ -17,14 +17,14 @@ internal static class ObjectMemoryResourcePathUtility
     private const char Separator = '/';
 
     public static bool IsMemoryResourcePath(string path)
-        => ObjectStringUtility.TrimOrEmpty(path).StartsWith(Prefix, StringComparison.Ordinal);
+        => TextUtility.TrimOrEmpty(path).StartsWith(Prefix, StringComparison.Ordinal);
 
     public static string Create(long resourceId, string gamePath)
         => Create(resourceId.ToString(CultureInfo.InvariantCulture), gamePath);
 
     public static string Create(string resourceId, string gamePath)
     {
-        string normalizedResourceId = ObjectStringUtility.TrimOrEmpty(resourceId);
+        string normalizedResourceId = TextUtility.TrimOrEmpty(resourceId);
         string normalizedGamePath = GameAssetPathRules.NormalizeGamePath(gamePath);
         return normalizedResourceId.Length > 0 && normalizedGamePath.Length > 0
             ? $"{Prefix}{normalizedResourceId}{Separator}{normalizedGamePath}"
@@ -40,7 +40,7 @@ internal static class ObjectMemoryResourcePathUtility
     {
         memoryPath = default;
 
-        string normalizedPath = ObjectStringUtility.TrimOrEmpty(path);
+        string normalizedPath = TextUtility.TrimOrEmpty(path);
         if (!normalizedPath.StartsWith(Prefix, StringComparison.Ordinal))
         {
             return false;

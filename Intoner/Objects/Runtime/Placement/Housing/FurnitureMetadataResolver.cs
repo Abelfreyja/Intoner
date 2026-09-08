@@ -25,18 +25,18 @@ internal sealed class FurnitureMetadataResolver(IObjectCatalogService catalogSer
             return false;
         }
 
-        if (!catalogService.TryResolveFurnitureMetadata(
+        if (!catalogService.TryResolveFurnitureVariant(
                 resolvedFurnitureModel.SharedGroupPath,
                 resolvedFurnitureModel.HousingRowId,
                 resolvedFurnitureModel.ItemRowId,
-                out HousingFurnitureMetadata? resolvedMetadata)
-            || resolvedMetadata is null)
+                out _,
+                out ObjectCatalogFurnitureVariant? variant))
         {
             return false;
         }
 
         furnitureModel = resolvedFurnitureModel;
-        metadata = resolvedMetadata;
+        metadata = variant.HousingMetadata;
         return true;
     }
 }

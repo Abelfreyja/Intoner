@@ -1,6 +1,5 @@
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility.Raii;
-using Intoner.UI;
 using System.Numerics;
 using static Intoner.Objects.UI.Settings.Components.SettingsChrome;
 
@@ -48,12 +47,12 @@ internal static class ChoiceRow
         bool changed = false;
         using (ImRaii.ItemWidth(controlWidth))
         using (ImRaii.Disabled(!enabled))
-        using (ImRaii.PushColor(ImGuiCol.FrameBg, EditorColors.ButtonDefault with { W = enabled ? 0.42f : 0.20f }))
-        using (ImRaii.PushColor(ImGuiCol.FrameBgHovered, EditorColors.ButtonDefault with { W = 0.54f }))
+        using (ImRaii.PushColor(ImGuiCol.FrameBg, ThemeColors.ButtonDefault with { W = enabled ? 0.42f : 0.20f }))
+        using (ImRaii.PushColor(ImGuiCol.FrameBgHovered, ThemeColors.ButtonDefault with { W = 0.54f }))
         using (ImRaii.PushColor(ImGuiCol.FrameBgActive, accent with { W = 0.22f }))
         using (ImRaii.PushColor(ImGuiCol.Border, accent with { W = 0.24f }))
         {
-            using var combo = UiSharedService.BeginCombo($"##objectChoice_{definition.Id}", preview);
+            using var combo = ImRaii.Combo($"##objectChoice_{definition.Id}", preview);
             if (combo)
             {
                 foreach (ChoiceOption<TValue> option in options)

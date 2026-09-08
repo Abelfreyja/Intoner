@@ -61,7 +61,7 @@ internal sealed class ResolvedVfxPathAccumulator
         Family = family;
         Sources = sources;
         Contracts = contracts;
-        SearchTerms = ObjectSearchTermUtility.CreateSet(path);
+        SearchTerms = SearchTermUtility.CreateSet(path);
     }
 
     public string Path { get; }
@@ -84,7 +84,7 @@ internal sealed class ResolvedVfxPathAccumulator
         Evidence |= evidence;
         Sources |= sources;
         Contracts |= contracts;
-        _ = ObjectSearchTermUtility.AddTerms(SearchTerms, searchTerms);
+        _ = SearchTermUtility.AddTerms(SearchTerms, searchTerms);
         Analysis ??= analysis;
     }
 
@@ -95,7 +95,7 @@ internal sealed class ResolvedVfxPathAccumulator
             Evidence,
             Sources,
             Contracts,
-            ObjectSearchTermUtility.BuildStableTerms(SearchTerms),
+            SearchTermUtility.BuildStableTerms(SearchTerms),
             Analysis);
 
     public static void MergeInto(

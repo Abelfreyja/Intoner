@@ -1,4 +1,5 @@
 using Intoner.Objects.Utils;
+using Intoner.Utils;
 using System.Collections.Immutable;
 
 namespace Intoner.Objects.Resources;
@@ -21,7 +22,7 @@ internal sealed class ObjectLocalFileTracker : IDisposable
     private readonly Func<string, string?> _tryNormalizeLocalFilePath;
     private readonly Lock _stateLock = new();
     private readonly Dictionary<string, CollectionLocalFileSnapshot> _localFilesByCollection = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ObjectDisposalState _disposeState = new();
+    private readonly DisposalState _disposeState = new();
     private ImmutableHashSet<string> _activePaths = ImmutableHashSet.Create<string>(StringComparer.OrdinalIgnoreCase);
 
     public ObjectLocalFileTracker(

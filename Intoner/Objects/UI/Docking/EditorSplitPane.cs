@@ -1,7 +1,6 @@
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
-using Intoner.UI;
 using System.Numerics;
 using System.Runtime.InteropServices;
 
@@ -96,7 +95,7 @@ internal static class EditorSplitPane
         if (hovered || active)
         {
             ImGui.SetMouseCursor(ImGuiMouseCursor.ResizeEw);
-            UiSharedService.AttachToolTip("Drag to resize panels. Double-click to reset.");
+            IntonerTooltip.Attach("Drag to resize panels. Double-click to reset.");
         }
 
         DrawDividerLine(min, size, options.Accent, hovered, active);
@@ -140,7 +139,7 @@ internal static class EditorSplitPane
 
         float inset = Scaled(3f);
         float x = min.X + (size.X * 0.5f);
-        Vector4 lineColor = EditorColors.Border with { W = 0.62f };
+        Vector4 lineColor = ThemeColors.Border with { W = 0.62f };
         if (active)
         {
             lineColor = accent with { W = 0.95f };

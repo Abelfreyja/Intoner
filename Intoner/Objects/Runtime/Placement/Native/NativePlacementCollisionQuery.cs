@@ -1,6 +1,8 @@
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Common.Component.BGCollision;
 using Intoner.Objects.Utils;
+using Intoner.Scene;
+using Intoner.Services.Interop;
 using Microsoft.Extensions.Logging;
 using System.Numerics;
 using System.Runtime.InteropServices;
@@ -18,25 +20,25 @@ internal sealed unsafe class NativePlacementCollisionQuery
         ILogger<NativePlacementCollisionQuery> logger,
         ISigScanner sigScanner)
     {
-        _raycast = ObjectInteropHookUtility.CreateDelegate<NativeRaycastDelegate>(
+        _raycast = InteropHookUtility.CreateDelegate<NativeRaycastDelegate>(
             logger,
             sigScanner,
-            ObjectSignatures.NativeHousingPlacementRaycast);
-        _sweepSphere = ObjectInteropHookUtility.CreateDelegate<NativeSweepSphereDelegate>(
+            IntonerSignatures.NativeHousingPlacementRaycast);
+        _sweepSphere = InteropHookUtility.CreateDelegate<NativeSweepSphereDelegate>(
             logger,
             sigScanner,
-            ObjectSignatures.NativeHousingPlacementSweepSphere);
+            IntonerSignatures.NativeHousingPlacementSweepSphere);
     }
 
     public bool TryRaycast(
         Vector3 origin,
         Vector3 direction,
         float maxDistance,
-        out ObjectSurfaceHit hit)
+        out SceneSurfaceHit hit)
     {
-        hit = ObjectSurfaceHit.Empty;
+        hit = SceneSurfaceHit.Empty;
         if (_raycast is null
-            || !ObjectMathUtility.TryNormalize(direction, out Vector3 normalizedDirection)
+            || !NumericsUtility.TryNormalize(direction, out Vector3 normalizedDirection)
             || !ObjectCollisionSceneQuery.HasScene())
         {
             return false;
@@ -52,7 +54,7 @@ internal sealed unsafe class NativePlacementCollisionQuery
         Vector3 hitNormal = default;
         ulong material = 0;
         Collider* collider = null;
-        float resolvedMaxDistance = ObjectRaycastMath.ResolveMaxDistance(maxDistance);
+        float resolvedMaxDistance = SceneRaycastMath.ResolveMaxDistance(maxDistance);
         if (_raycast(&ray, resolvedMaxDistance, &hitPoint, &hitNormal, &material, &collider) == 0)
         {
             return false;
@@ -67,11 +69,11 @@ internal sealed unsafe class NativePlacementCollisionQuery
         Vector3 direction,
         float maxDistance,
         ulong materialMask,
-        out ObjectSurfaceHit hit)
+        out SceneSurfaceHit hit)
     {
-        hit = ObjectSurfaceHit.Empty;
+        hit = SceneSurfaceHit.Empty;
         if (materialMask == 0
-            || !ObjectMathUtility.TryNormalize(direction, out Vector3 normalizedDirection)
+            || !NumericsUtility.TryNormalize(direction, out Vector3 normalizedDirection)
             || !ObjectCollisionSceneQuery.TryResolveModule(out BGCollisionModule* collisionModule))
         {
             return false;
@@ -87,7 +89,7 @@ internal sealed unsafe class NativePlacementCollisionQuery
 
         Vector3 rayOrigin = origin;
         Vector3 rayDirection = normalizedDirection;
-        float resolvedMaxDistance = ObjectRaycastMath.ResolveMaxDistance(maxDistance);
+        float resolvedMaxDistance = SceneRaycastMath.ResolveMaxDistance(maxDistance);
         if (!collisionModule->RaycastMaterialFilter(
                 &raycastHit,
                 &rayOrigin,
@@ -108,15 +110,15 @@ internal sealed unsafe class NativePlacementCollisionQuery
         Vector3 direction,
         float radius,
         float maxDistance,
-        out ObjectSurfaceHit hit,
+        out SceneSurfaceHit hit,
         out bool surfaceHit)
     {
-        hit = ObjectSurfaceHit.Empty;
+        hit = SceneSurfaceHit.Empty;
         surfaceHit = false;
         if (_sweepSphere is null
-            || !ObjectMathUtility.TryNormalize(direction, out Vector3 normalizedDirection)
+            || !NumericsUtility.TryNormalize(direction, out Vector3 normalizedDirection)
             || !float.IsFinite(radius)
-            || radius <= ObjectMathUtility.ScalarEpsilon
+            || radius <= NumericsUtility.ScalarEpsilon
             || !ObjectCollisionSceneQuery.HasScene())
         {
             return false;
@@ -132,28 +134,33 @@ internal sealed unsafe class NativePlacementCollisionQuery
         Vector3 hitNormal = default;
         ulong material = 0;
         Collider* collider = null;
-        float resolvedMaxDistance = ObjectRaycastMath.ResolveMaxDistance(maxDistance);
+        float resolvedMaxDistance = SceneRaycastMath.ResolveMaxDistance(maxDistance);
         surfaceHit = _sweepSphere(&sphere, &normalizedDirection, resolvedMaxDistance, &hitPoint, &hitNormal, &material, &collider) != 0;
 
         hit = CreateHit(origin, normalizedDirection, hitPoint, hitNormal, material, collider);
         return true;
     }
 
-    private static ObjectSurfaceHit CreateHit(
+    private static SceneSurfaceHit CreateHit(
         Vector3 origin,
         Vector3 direction,
         in RaycastHit raycastHit)
         => new(
             raycastHit.Point,
-            ObjectRaycastMath.ResolveSurfaceNormal(raycastHit, direction),
+            SceneRaycastMath.ResolveSurfaceNormal(
+                raycastHit.V1,
+                raycastHit.V2,
+                raycastHit.V3,
+                raycastHit.Normal,
+                direction),
             raycastHit.Material,
             (nint)raycastHit.Object,
-            raycastHit.Distance > ObjectRaycastMath.MinimumHitDistance
+            raycastHit.Distance > SceneRaycastMath.MinimumHitDistance
                 ? raycastHit.Distance
                 : Vector3.Distance(origin, raycastHit.Point),
-            ObjectSurfaceHitSource.Native);
+            SceneSurfaceHitSource.Native);
 
-    private static ObjectSurfaceHit CreateHit(
+    private static SceneSurfaceHit CreateHit(
         Vector3 origin,
         Vector3 direction,
         Vector3 hitPoint,
@@ -162,11 +169,11 @@ internal sealed unsafe class NativePlacementCollisionQuery
         Collider* collider)
         => new(
             hitPoint,
-            ObjectRaycastMath.OrientSurfaceNormal(hitNormal, direction),
+            SceneRaycastMath.OrientSurfaceNormal(hitNormal, direction),
             material,
             (nint)collider,
             Vector3.Distance(origin, hitPoint),
-            ObjectSurfaceHitSource.Native);
+            SceneSurfaceHitSource.Native);
 
     private delegate byte NativeRaycastDelegate(
         NativePlacementRay* ray,

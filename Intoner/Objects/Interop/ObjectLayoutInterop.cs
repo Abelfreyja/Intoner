@@ -4,6 +4,7 @@ using FFXIVClientStructs.FFXIV.Client.LayoutEngine.Node;
 using FFXIVClientStructs.FFXIV.Common.Component.BGCollision;
 using Intoner.Objects.Models;
 using Intoner.Objects.Utils;
+using Intoner.Scene;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using AxisAlignedBounds = FFXIVClientStructs.FFXIV.Common.Math.AxisAlignedBounds;
@@ -59,7 +60,7 @@ internal static unsafe class ObjectLayoutInterop
     /// </summary>
     /// <param name="transform">The object transform to convert.</param>
     /// <returns>The native layout transform.</returns>
-    public static Transform CreateTransform(ObjectTransform transform)
+    public static Transform CreateTransform(SceneTransform transform)
         => new()
         {
             Translation = transform.Position,
@@ -72,7 +73,7 @@ internal static unsafe class ObjectLayoutInterop
     /// </summary>
     /// <param name="instance">The layout instance to update.</param>
     /// <param name="transform">The object transform to apply.</param>
-    public static void ApplyTransform(ILayoutInstance* instance, ObjectTransform transform)
+    public static void ApplyTransform(ILayoutInstance* instance, SceneTransform transform)
     {
         var layoutTransform = CreateTransform(transform);
         instance->SetTransformImpl(&layoutTransform);
@@ -83,7 +84,7 @@ internal static unsafe class ObjectLayoutInterop
     /// </summary>
     /// <param name="instance">The shared group layout instance to update.</param>
     /// <param name="transform">The object transform to apply.</param>
-    public static void ApplyTransform(SharedGroupLayoutInstance* instance, ObjectTransform transform)
+    public static void ApplyTransform(SharedGroupLayoutInstance* instance, SceneTransform transform)
     {
         var layoutTransform = CreateTransform(transform);
         instance->SetTransformImpl(&layoutTransform);
@@ -330,7 +331,7 @@ internal static unsafe class ObjectLayoutInterop
     }
 
     private static Quaternion CreateRotation(Vector3 rotationDegrees)
-        => ObjectTransformMath.CreateRotationQuaternion(rotationDegrees);
+        => SceneTransformMath.CreateRotationQuaternion(rotationDegrees);
 
     private static void RefreshNestedVisualSharedGroupState(ChildNodeContainer* container)
     {

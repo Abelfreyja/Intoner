@@ -1,6 +1,7 @@
 using Intoner.Objects.Catalog;
 using Intoner.Objects.Models;
 using Intoner.Objects.Utils;
+using Intoner.Scene;
 using System.Numerics;
 
 namespace Intoner.Objects.Runtime;
@@ -116,7 +117,7 @@ internal sealed class FootprintRule(PlacementEvaluationFactory evaluationFactory
 
     private static PileFootprintRect BuildPileFootprintRect(ObjectSnapshot snapshot, HousingPileFootprint footprint)
     {
-        Quaternion rotation = ObjectTransformMath.CreateRotationQuaternion(snapshot.Transform.RotationDegrees);
+        Quaternion rotation = SceneTransformMath.CreateRotationQuaternion(snapshot.Transform.RotationDegrees);
         Vector2 right = ResolveFootprintAxis(Vector3.Transform(Vector3.UnitX, rotation), Vector2.UnitX);
         Vector2 forward = ResolveFootprintAxis(Vector3.Transform(Vector3.UnitZ, rotation), Vector2.UnitY);
         Vector2 halfExtents = new(
@@ -133,7 +134,7 @@ internal sealed class FootprintRule(PlacementEvaluationFactory evaluationFactory
     private static Vector2 ResolveFootprintAxis(Vector3 axis, Vector2 fallback)
     {
         Vector2 projectedAxis = new(axis.X, axis.Z);
-        return ObjectMathUtility.TryNormalize(projectedAxis, out Vector2 normalizedAxis)
+        return NumericsUtility.TryNormalize(projectedAxis, out Vector2 normalizedAxis)
             ? normalizedAxis
             : fallback;
     }

@@ -1,5 +1,8 @@
+using Intoner.Scene.Rendering;
 using Intoner.Objects.Utils;
 using System.Numerics;
+
+using Intoner.Scene;
 
 namespace Intoner.Objects.Rendering.Primitives;
 
@@ -9,9 +12,9 @@ internal sealed class PrimitiveGeometryBuilder
     private const float ClipEpsilon = 0.000001f;
     private const float DegenerateLineLengthSquared = 0.0001f;
 
-    private PrimitiveLineInstance[] _lineInstances  = [];
-    private PrimitiveVertex[]       _pointVertices  = [];
-    private PrimitiveVertex[]       _screenVertices = [];
+    private PrimitiveLineInstance[] _lineInstances = [];
+    private PrimitiveVertex[] _pointVertices = [];
+    private PrimitiveVertex[] _screenVertices = [];
 
     public PrimitiveLineInstance[] LineInstances
         => _lineInstances;
@@ -26,7 +29,7 @@ internal sealed class PrimitiveGeometryBuilder
         ReadOnlySpan<LineCommand> lines,
         ReadOnlySpan<PointCommand> points,
         ReadOnlySpan<ScreenCommand> screens,
-        in PrimitiveProjectionFrame frame,
+        in SceneProjection frame,
         PrimitiveAntiAliasParameters antiAlias,
         ref PrimitiveDrawDiagnostics diagnostics)
     {
@@ -52,20 +55,20 @@ internal sealed class PrimitiveGeometryBuilder
 
     public void ResetStorage()
     {
-        _lineInstances  = [];
-        _pointVertices  = [];
+        _lineInstances = [];
+        _pointVertices = [];
         _screenVertices = [];
     }
 
     private void AppendLineInstance(
         LineCommand line,
-        in PrimitiveProjectionFrame frame,
+        in SceneProjection frame,
         PrimitiveAntiAliasParameters antiAlias,
         ref int lineInstanceCount,
         ref PrimitiveDrawDiagnostics diagnostics)
     {
-        if (!ObjectMathUtility.IsFinite(line.Start)
-            || !ObjectMathUtility.IsFinite(line.End))
+        if (!NumericsUtility.IsFinite(line.Start)
+            || !NumericsUtility.IsFinite(line.End))
         {
             diagnostics.InvalidLines++;
             return;
@@ -73,7 +76,7 @@ internal sealed class PrimitiveGeometryBuilder
 
         var clippedStart = line.Start;
         var clippedEnd = line.End;
-        if (!ObjectViewportProjectionUtility.TryClipWorldLineToNearPlane(frame.ViewMatrix, frame.NearPlane, ref clippedStart, ref clippedEnd))
+        if (!SceneViewportProjection.TryClipWorldLineToNearPlane(frame.ViewMatrix, frame.NearPlane, ref clippedStart, ref clippedEnd))
         {
             diagnostics.NearPlaneRejectedLines++;
             return;
@@ -111,7 +114,7 @@ internal sealed class PrimitiveGeometryBuilder
     }
 
     private static bool TryClipLineToViewport(
-        in PrimitiveProjectionFrame frame,
+        in SceneProjection frame,
         float thickness,
         PrimitiveAntiAliasParameters antiAlias,
         ref PrimitiveProjectedPoint start,
@@ -210,11 +213,11 @@ internal sealed class PrimitiveGeometryBuilder
 
     private void AppendPointVertices(
         PointCommand point,
-        in PrimitiveProjectionFrame frame,
+        in SceneProjection frame,
         ref int pointVertexCount,
         ref PrimitiveDrawDiagnostics diagnostics)
     {
-        if (!ObjectMathUtility.IsFinite(point.Position))
+        if (!NumericsUtility.IsFinite(point.Position))
         {
             diagnostics.InvalidPoints++;
             return;
@@ -251,7 +254,7 @@ internal sealed class PrimitiveGeometryBuilder
     }
 
     private static bool TryProjectPoint(
-        in PrimitiveProjectionFrame frame,
+        in SceneProjection frame,
         Vector3 worldPoint,
         out PrimitiveProjectedPoint point)
     {
@@ -268,7 +271,7 @@ internal sealed class PrimitiveGeometryBuilder
         var screen = new Vector2(
             frame.Viewport.X + ((ndc.X + 1f) * frame.Viewport.Width * 0.5f),
             frame.Viewport.Y + ((1f - ndc.Y) * frame.Viewport.Height * 0.5f));
-        if (!ObjectMathUtility.IsFinite(screen)
+        if (!NumericsUtility.IsFinite(screen)
             || !float.IsFinite(ndc.Z)
             || !float.IsFinite(viewPosition.Z)
             || !float.IsFinite(invClipW))
@@ -303,7 +306,7 @@ internal sealed class PrimitiveGeometryBuilder
     private static bool IsRenderableScreenLine(Vector2 start, Vector2 end)
     {
         var line = end - start;
-        return ObjectMathUtility.IsFinite(line)
+        return NumericsUtility.IsFinite(line)
             && line.LengthSquared() > DegenerateLineLengthSquared;
     }
 
@@ -402,14 +405,14 @@ internal sealed class PrimitiveGeometryBuilder
 
     private static Vector2 ResolveScreenLineJoinOffset(Vector2 previous, Vector2 current, Vector2 next, Vector2 fallback)
     {
-        if (!ObjectMathUtility.TryNormalize(current - previous, out var previousDirection)
-            || !ObjectMathUtility.TryNormalize(next - current, out var nextDirection)
-            || !ObjectMathUtility.TryNormalize(previousDirection + nextDirection, out var tangent))
+        if (!NumericsUtility.TryNormalize(current - previous, out var previousDirection)
+            || !NumericsUtility.TryNormalize(next - current, out var nextDirection)
+            || !NumericsUtility.TryNormalize(previousDirection + nextDirection, out var tangent))
         {
             return fallback;
         }
 
-        if (!ObjectMathUtility.TryNormalize(fallback, out var fallbackNormal))
+        if (!NumericsUtility.TryNormalize(fallback, out var fallbackNormal))
         {
             return fallback;
         }
@@ -478,9 +481,9 @@ internal sealed class PrimitiveGeometryBuilder
 
     private static bool IsRenderableScreenTriangle(Vector2 first, Vector2 second, Vector2 third)
     {
-        if (!ObjectMathUtility.IsFinite(first)
-            || !ObjectMathUtility.IsFinite(second)
-            || !ObjectMathUtility.IsFinite(third))
+        if (!NumericsUtility.IsFinite(first)
+            || !NumericsUtility.IsFinite(second)
+            || !NumericsUtility.IsFinite(third))
         {
             return false;
         }
@@ -502,4 +505,3 @@ internal sealed class PrimitiveGeometryBuilder
         Array.Resize(ref values, nextCapacity);
     }
 }
-

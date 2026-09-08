@@ -40,7 +40,7 @@ internal static class VfxResolvedPathUtility
         string normalizedPath = GameAssetPathRules.NormalizeGamePath(resolvedPath.Path);
         IReadOnlyList<string> searchTerms = extraSearchTerms is null
             ? resolvedPath.SearchTerms
-            : ObjectSearchTermUtility.MergeTerms(resolvedPath.SearchTerms, extraSearchTerms);
+            : SearchTermUtility.MergeTerms(resolvedPath.SearchTerms, extraSearchTerms);
 
         return TryMergeResolvedPathCore(
             resolvedPaths,

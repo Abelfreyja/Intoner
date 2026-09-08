@@ -1,7 +1,7 @@
 using FFXIVClientStructs.FFXIV.Client.System.Resource.Handle;
 using Intoner.Objects.Utils;
+using Intoner.Utils;
 using Microsoft.Extensions.Logging;
-using System.Threading;
 
 namespace Intoner.Objects.Resources;
 
@@ -17,7 +17,7 @@ internal sealed unsafe class ObjectResourceIncRefGuard : IDisposable
     private int _loggedReloadBypass;
     private int _loggedReloadWithoutScope;
     private int _loggedScopeBypass;
-    private readonly ObjectDisposalState _disposeState = new();
+    private readonly DisposalState _disposeState = new();
 
     public ObjectResourceIncRefGuard(ILogger logger)
         => _logger = logger;

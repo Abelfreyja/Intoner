@@ -67,16 +67,16 @@ internal sealed class ObjectTerritoryMetadataSet
     public IReadOnlyList<string> BuildStableNames()
         => _territoryNames.Count == 0
             ? []
-            : ObjectSearchTermUtility.BuildStableTerms(_territoryNames);
+            : SearchTermUtility.BuildStableTerms(_territoryNames);
 
     public void AddSearchTerms(HashSet<string> searchTerms)
     {
         foreach (uint territoryId in _territoryIds.OrderBy(static value => value))
         {
-            _ = ObjectSearchTermUtility.AddTerm(searchTerms, territoryId.ToString(CultureInfo.InvariantCulture));
+            _ = SearchTermUtility.AddTerm(searchTerms, territoryId.ToString(CultureInfo.InvariantCulture));
         }
 
-        _ = ObjectSearchTermUtility.AddTerms(searchTerms, _territoryNames);
+        _ = SearchTermUtility.AddTerms(searchTerms, _territoryNames);
     }
 }
 
@@ -86,27 +86,27 @@ internal static class ObjectTerritoryMetadataUtility
     {
         string regionName = GetPlaceName(placeNames, territory.PlaceNameRegion.RowId);
         string placeName = GetPlaceName(placeNames, territory.PlaceName.RowId);
-        HashSet<string> searchTerms = ObjectSearchTermUtility.CreateSet(territory.RowId.ToString(CultureInfo.InvariantCulture));
+        HashSet<string> searchTerms = SearchTermUtility.CreateSet(territory.RowId.ToString(CultureInfo.InvariantCulture));
         if (!string.IsNullOrWhiteSpace(regionName))
         {
-            _ = ObjectSearchTermUtility.AddTerm(searchTerms, regionName);
+            _ = SearchTermUtility.AddTerm(searchTerms, regionName);
         }
 
         if (!string.IsNullOrWhiteSpace(placeName))
         {
-            _ = ObjectSearchTermUtility.AddTerm(searchTerms, placeName);
+            _ = SearchTermUtility.AddTerm(searchTerms, placeName);
         }
 
         string territoryName = BuildDisplayName(regionName, placeName);
         if (!string.IsNullOrWhiteSpace(territoryName))
         {
-            _ = ObjectSearchTermUtility.AddTerm(searchTerms, territoryName);
+            _ = SearchTermUtility.AddTerm(searchTerms, territoryName);
         }
 
         return new ObjectTerritoryMetadata(
             territory.RowId,
             territoryName,
-            ObjectSearchTermUtility.BuildStableTerms(searchTerms));
+            SearchTermUtility.BuildStableTerms(searchTerms));
     }
 
     public static ObjectTerritoryMetadata BuildForTerritoryId(uint territoryId, IDataManager gameData)
@@ -126,7 +126,7 @@ internal static class ObjectTerritoryMetadataUtility
         return new ObjectTerritoryMetadata(
             territoryId,
             string.Empty,
-            ObjectSearchTermUtility.BuildStableTerms(territoryId.ToString(CultureInfo.InvariantCulture)));
+            SearchTermUtility.BuildStableTerms(territoryId.ToString(CultureInfo.InvariantCulture)));
     }
 
     private static string GetPlaceName(ExcelSheet<PlaceName>? placeNames, uint rowId)

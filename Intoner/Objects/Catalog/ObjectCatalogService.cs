@@ -1,41 +1,19 @@
-using Dalamud.Plugin.Services;
 using Intoner.Objects.Assets;
 using Intoner.Objects.Utils;
+using Intoner.Services.Loading;
 using Microsoft.Extensions.Logging;
+using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
+
+using Intoner.Utils;
 
 namespace Intoner.Objects.Catalog;
 
 /// <summary>
 /// Provides cached object catalog data and preview model resolution.
 /// </summary>
-internal interface IObjectCatalogService
+internal interface IObjectCatalogService : ILoadOperation
 {
-    /// <summary>
-    /// Gets whether the catalog has finished loading.
-    /// </summary>
-    bool IsReady { get; }
-
-    /// <summary>
-    /// Gets whether the catalog is currently loading in the background.
-    /// </summary>
-    bool IsLoading { get; }
-
-    /// <summary>
-    /// Gets whether the most recent background load failed.
-    /// </summary>
-    bool HasFailed { get; }
-
-    /// <summary>
-    /// Gets the current warmup status text.
-    /// </summary>
-    string StatusText { get; }
-
-    /// <summary>
-    /// Starts background catalog warmup if needed.
-    /// </summary>
-    void EnsureWarmup();
-
     /// <summary>
     /// Gets the cached object catalog if it is already ready.
     /// </summary>
@@ -78,28 +56,31 @@ internal interface IObjectCatalogService
         [NotNullWhen(true)] out ObjectCatalogEntry? entry);
 
     /// <summary>
-    /// Resolves raw housing furniture metadata for a sgb path.
+    /// Resolves the exact furniture catalog variant for a sgb path and row identity.
     /// </summary>
     /// <param name="sharedGroupPath">the furniture sgb path.</param>
-    /// <param name="housingRowId">the exact housing row id when known.</param>
-    /// <param name="itemRowId">the exact item row id when known.</param>
-    /// <param name="metadata">the resolved housing metadata when available.</param>
-    /// <returns>true when the sgb path maps to a furniture catalog entry.</returns>
-    bool TryResolveFurnitureMetadata(
+    /// <param name="housingRowId">the housing row id.</param>
+    /// <param name="itemRowId">the item row id when available.</param>
+    /// <param name="entry">the resolved catalog entry.</param>
+    /// <param name="variant">the resolved furniture variant.</param>
+    /// <returns>true when the path and supplied row identity resolve to the same variant.</returns>
+    bool TryResolveFurnitureVariant(
         string sharedGroupPath,
         uint housingRowId,
         uint itemRowId,
-        [NotNullWhen(true)] out HousingFurnitureMetadata? metadata);
+        [NotNullWhen(true)] out ObjectCatalogEntry? entry,
+        [NotNullWhen(true)] out ObjectCatalogFurnitureVariant? variant);
 }
 
 internal sealed class ObjectCatalogService : IObjectCatalogService, IDisposable
 {
     private readonly ILogger<ObjectCatalogService> _logger;
-    private readonly ObjectWarmupState<ObjectCatalogData> _warmupState;
+    private readonly BackgroundLoad<ObjectCatalogData> _load;
+    private readonly LoadGroup _loading;
     private readonly Lock _updateLock = new();
     private readonly IObjectAssetIndex _assetIndex;
     private readonly ObjectCatalogBuilder _builder;
-    private readonly ObjectDisposalState _disposeState = new();
+    private readonly DisposalState _disposeState = new();
 
     private Task? _projectionUpdateTask;
     private CancellationTokenSource? _projectionUpdateCancellation;
@@ -109,43 +90,40 @@ internal sealed class ObjectCatalogService : IObjectCatalogService, IDisposable
 
     public ObjectCatalogService(
         ILogger<ObjectCatalogService> logger,
-        IDataManager gameData,
+        ObjectCatalogBuilder builder,
         IObjectAssetIndex assetIndex)
     {
         _logger = logger;
         _assetIndex = assetIndex;
-        _builder = new ObjectCatalogBuilder(gameData, assetIndex);
-        _warmupState = new ObjectWarmupState<ObjectCatalogData>(
+        _builder = builder;
+        _load = new BackgroundLoad<ObjectCatalogData>(
             logger,
             BuildCatalog,
-            "waiting to load object catalog",
-            "building object catalog",
-            "object catalog ready",
-            "object catalog load failed",
-            "failed to build object catalog in background");
+            new BackgroundLoadMessages(
+                "building object catalog",
+                "object catalog ready",
+                "object catalog load failed",
+                "failed to build object catalog in background"));
+        _loading = new LoadGroup(
+            (_assetIndex, 35d),
+            (_load, 65d));
         _assetIndex.AssetsChanged += HandleCatalogAssetsChanged;
     }
 
-    public bool IsReady
-        => _warmupState.IsReady;
+    public LoadStatus Status
+        => _loading.Status;
 
-    public bool IsLoading
-        => _warmupState.IsLoading;
-
-    public bool HasFailed
-        => _warmupState.HasFailed;
-
-    public string StatusText
-        => _warmupState.StatusText;
-
-    public void EnsureWarmup()
-        => _warmupState.EnsureWarmup();
+    public void EnsureLoaded()
+        => _loading.EnsureLoaded();
 
     public bool TryGetCatalog([NotNullWhen(true)] out ObjectCatalogData? catalog)
-        => _warmupState.TryGetValue(out catalog);
+        => _load.TryGet(out catalog);
 
     public ObjectCatalogData GetCatalog()
-        => _warmupState.GetValue();
+    {
+        EnsureLoaded();
+        return _load.Get();
+    }
 
     public IReadOnlyList<string> ResolvePreviewModelPaths(ObjectCatalogKind kind, string path)
     {
@@ -181,19 +159,26 @@ internal sealed class ObjectCatalogService : IObjectCatalogService, IDisposable
         return GetCatalog().TryResolveEntry(kind, normalizedPath, out entry);
     }
 
-    public bool TryResolveFurnitureMetadata(
+    public bool TryResolveFurnitureVariant(
         string sharedGroupPath,
         uint housingRowId,
         uint itemRowId,
-        [NotNullWhen(true)] out HousingFurnitureMetadata? metadata)
+        [NotNullWhen(true)] out ObjectCatalogEntry? entry,
+        [NotNullWhen(true)] out ObjectCatalogFurnitureVariant? variant)
     {
         if (!TryNormalizeCatalogPath(sharedGroupPath, out string normalizedPath))
         {
-            metadata = null;
+            entry = null;
+            variant = null;
             return false;
         }
 
-        return GetCatalog().TryResolveFurnitureMetadata(normalizedPath, housingRowId, itemRowId, out metadata);
+        return GetCatalog().TryResolveFurnitureVariant(
+            normalizedPath,
+            housingRowId,
+            itemRowId,
+            out entry,
+            out variant);
     }
 
     private static bool TryNormalizeCatalogPath(string path, out string normalizedPath)
@@ -219,28 +204,33 @@ internal sealed class ObjectCatalogService : IObjectCatalogService, IDisposable
         }
 
         projectionUpdateCancellation?.Cancel();
-        _warmupState.Dispose();
+        _load.Dispose();
         WaitForProjectionUpdate(projectionUpdateTask);
         projectionUpdateCancellation?.Dispose();
     }
 
-    private ObjectCatalogData BuildCatalog(CancellationToken cancellationToken)
+    private ObjectCatalogData BuildCatalog(LoadProgress progress)
     {
-        _assetIndex.EnsureWarmup();
+        CancellationToken cancellationToken = progress.CancellationToken;
+        long startedAt = Stopwatch.GetTimestamp();
 
         cancellationToken.ThrowIfCancellationRequested();
         long bgObjectSectionVersion = _assetIndex.GetBgObjectSectionVersion(cancellationToken);
         long standaloneVfxSectionVersion = _assetIndex.GetStandaloneVfxSectionVersion(cancellationToken);
-        ObjectCatalogData catalog = _builder.Build(cancellationToken);
+        TimeSpan assetWaitTime = Stopwatch.GetElapsedTime(startedAt);
+        ObjectCatalogData catalog = _builder.Build(progress);
+        TimeSpan totalTime = Stopwatch.GetElapsedTime(startedAt);
         _appliedBgObjectSectionVersion = bgObjectSectionVersion;
         _appliedStandaloneVfxSectionVersion = standaloneVfxSectionVersion;
 
         _logger.LogInformation(
-            "built object catalog with {TotalCount} entries, {FurnitureCount} furniture entries, {BgObjectCount} bgobject entries, {VfxCount} vfx entries",
+            "built object catalog with {TotalCount} entries, {FurnitureCount} furniture entries, {BgObjectCount} bgobject entries, and {VfxCount} vfx entries in {ElapsedMilliseconds:F0} ms after waiting {AssetWaitMilliseconds:F0} ms for assets",
             catalog.EntryCount,
             catalog.Furniture.Count,
             catalog.BgObjects.Count,
-            catalog.Vfx.Count);
+            catalog.Vfx.Count,
+            totalTime.TotalMilliseconds,
+            assetWaitTime.TotalMilliseconds);
 
         return catalog;
     }
@@ -297,7 +287,7 @@ internal sealed class ObjectCatalogService : IObjectCatalogService, IDisposable
 
                 try
                 {
-                    ApplyProjectionUpdate(_warmupState.GetValue(cancellationToken), cancellationToken);
+                    ApplyProjectionUpdate(_load.Get(cancellationToken), cancellationToken);
                 }
                 catch (ObjectDisposedException) when (IsDisposing)
                 {
@@ -323,6 +313,7 @@ internal sealed class ObjectCatalogService : IObjectCatalogService, IDisposable
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            // cancellation is expected during disposal
         }
 
         lock (_updateLock)
@@ -338,7 +329,6 @@ internal sealed class ObjectCatalogService : IObjectCatalogService, IDisposable
             return;
         }
 
-        _assetIndex.EnsureWarmup();
         cancellationToken.ThrowIfCancellationRequested();
 
         IReadOnlyList<ObjectCatalogEntry>? bgObjectEntries = null;
@@ -346,13 +336,13 @@ internal sealed class ObjectCatalogService : IObjectCatalogService, IDisposable
         long bgObjectSectionVersion = _assetIndex.GetBgObjectSectionVersion(cancellationToken);
         if (bgObjectSectionVersion != _appliedBgObjectSectionVersion)
         {
-            bgObjectEntries = _builder.BuildBgObjectEntries(cancellationToken);
+            bgObjectEntries = _builder.BuildBgObjectEntries(LoadProgress.Unreported(cancellationToken));
         }
 
         long standaloneVfxSectionVersion = _assetIndex.GetStandaloneVfxSectionVersion(cancellationToken);
         if (standaloneVfxSectionVersion != _appliedStandaloneVfxSectionVersion)
         {
-            vfxEntries = _builder.BuildVfxEntries(cancellationToken);
+            vfxEntries = _builder.BuildVfxEntries(LoadProgress.Unreported(cancellationToken));
         }
 
         if (bgObjectEntries is null && vfxEntries is null)
@@ -362,7 +352,8 @@ internal sealed class ObjectCatalogService : IObjectCatalogService, IDisposable
 
         catalog.ReplaceSections(
             bgObjectEntries: bgObjectEntries,
-            vfxEntries: vfxEntries);
+            vfxEntries: vfxEntries,
+            cancellationToken: cancellationToken);
 
         if (bgObjectEntries is not null)
         {
@@ -393,6 +384,7 @@ internal sealed class ObjectCatalogService : IObjectCatalogService, IDisposable
         }
         catch (OperationCanceledException)
         {
+            // cancellation is expected during disposal
         }
         catch (Exception ex)
         {

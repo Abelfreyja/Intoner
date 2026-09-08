@@ -12,16 +12,16 @@ internal sealed record BgObjectModel : ObjectData
 
     public bool NeedsVisualState(BgObjectModel? previousModel)
     {
-        if (!ObjectMathUtility.IsNearlyZero(Transparency)
-         || !ObjectMathUtility.IsNearlyEqual(DyeColor, Vector4.One)
+        if (!NumericsUtility.IsNearlyZero(Transparency)
+         || !NumericsUtility.IsNearlyEqual(DyeColor, Vector4.One)
          || IsCoveredFromRain)
         {
             return true;
         }
 
         return previousModel is not null
-            && (!ObjectMathUtility.IsNearlyEqual(previousModel.Transparency, Transparency)
-                || !ObjectMathUtility.IsNearlyEqual(previousModel.DyeColor, DyeColor)
+            && (!NumericsUtility.IsNearlyEqual(previousModel.Transparency, Transparency)
+                || !NumericsUtility.IsNearlyEqual(previousModel.DyeColor, DyeColor)
                 || previousModel.IsCoveredFromRain != IsCoveredFromRain);
     }
 }

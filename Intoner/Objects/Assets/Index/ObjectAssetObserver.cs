@@ -10,6 +10,9 @@ using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using SceneVfxObject = FFXIVClientStructs.FFXIV.Client.Graphics.Scene.VfxObject;
 
+using Intoner.Services.Interop;
+using Intoner.Utils;
+
 namespace Intoner.Objects.Assets;
 
 internal enum ObjectAssetObservationKind
@@ -46,7 +49,7 @@ internal sealed unsafe class ObjectAssetObserver : IDisposable
     private readonly Hook<ActorVfxRemoveDelegate>? _actorVfxRemoveHook;
     private readonly Hook<VfxUseTriggerDelegate>? _vfxUseTriggerHook;
 
-    private readonly ObjectDisposalState _disposeState = new();
+    private readonly DisposalState _disposeState = new();
     private int _drainScheduled;
 
     public ObjectAssetObserver(
@@ -58,45 +61,45 @@ internal sealed unsafe class ObjectAssetObserver : IDisposable
         _logger = logger;
         _observeBatch = observeBatch;
 
-        _getResourceSyncHook = ObjectInteropHookUtility.CreateHookFromAddress<GetResourceSyncDelegate>(
+        _getResourceSyncHook = InteropHookUtility.CreateHookFromAddress<GetResourceSyncDelegate>(
             _logger,
             gameInteropProvider,
-            ObjectSignatures.AssetResourceSync,
+            IntonerSignatures.AssetResourceSync,
             GetResourceSyncDetour);
-        _getResourceAsyncHook = ObjectInteropHookUtility.CreateHookFromAddress<GetResourceAsyncDelegate>(
+        _getResourceAsyncHook = InteropHookUtility.CreateHookFromAddress<GetResourceAsyncDelegate>(
             _logger,
             gameInteropProvider,
-            ObjectSignatures.AssetResourceAsync,
+            IntonerSignatures.AssetResourceAsync,
             GetResourceAsyncDetour);
-        _staticVfxCreateHook = ObjectInteropHookUtility.CreateHookFromAddress<StaticVfxCreateDelegate>(
+        _staticVfxCreateHook = InteropHookUtility.CreateHookFromAddress<StaticVfxCreateDelegate>(
             _logger,
             gameInteropProvider,
-            ObjectSignatures.AssetStaticVfxCreate,
+            IntonerSignatures.AssetStaticVfxCreate,
             StaticVfxCreateDetour);
-        _staticVfxRemoveHook = ObjectInteropHookUtility.CreateHook<StaticVfxRemoveDelegate>(
+        _staticVfxRemoveHook = InteropHookUtility.CreateHook<StaticVfxRemoveDelegate>(
             _logger,
             gameInteropProvider,
             sigScanner,
-            ObjectSignatures.AssetStaticVfxRemove,
+            IntonerSignatures.AssetStaticVfxRemove,
             StaticVfxRemoveDetour);
-        _actorVfxCreateHook = ObjectInteropHookUtility.CreateHook<ActorVfxCreateDelegate>(
+        _actorVfxCreateHook = InteropHookUtility.CreateHook<ActorVfxCreateDelegate>(
             _logger,
             gameInteropProvider,
             sigScanner,
-            ObjectSignatures.AssetActorVfxCreate,
+            IntonerSignatures.AssetActorVfxCreate,
             ActorVfxCreateDetour);
-        _actorVfxRemoveHook = ObjectInteropHookUtility.CreateHookFromAddress<ActorVfxRemoveDelegate>(
+        _actorVfxRemoveHook = InteropHookUtility.CreateHookFromAddress<ActorVfxRemoveDelegate>(
             _logger,
             gameInteropProvider,
-            ObjectNativeAddressResolver.TryResolveRipRelativePointerTarget(_logger, sigScanner, ObjectSignatures.AssetActorVfxRemove),
+            NativeAddressResolver.TryResolveRipRelativePointerTarget(_logger, sigScanner, IntonerSignatures.AssetActorVfxRemove),
             ActorVfxRemoveDetour,
-            ObjectSignatures.AssetActorVfxRemove);
-        _vfxUseTriggerHook = ObjectInteropHookUtility.CreateHookFromAddress<VfxUseTriggerDelegate>(
+            IntonerSignatures.AssetActorVfxRemove);
+        _vfxUseTriggerHook = InteropHookUtility.CreateHookFromAddress<VfxUseTriggerDelegate>(
             _logger,
             gameInteropProvider,
-            ObjectNativeAddressResolver.TryResolveJmpCallTarget(_logger, sigScanner, ObjectSignatures.AssetVfxTrigger),
+            NativeAddressResolver.TryResolveJmpCallTarget(_logger, sigScanner, IntonerSignatures.AssetVfxTrigger),
             VfxUseTriggerDetour,
-            ObjectSignatures.AssetVfxTrigger);
+            IntonerSignatures.AssetVfxTrigger);
 
         _getResourceSyncHook?.Enable();
         _getResourceAsyncHook?.Enable();
@@ -114,13 +117,13 @@ internal sealed unsafe class ObjectAssetObserver : IDisposable
             return;
         }
 
-        ObjectInteropHookUtility.DisposeHook(_getResourceSyncHook);
-        ObjectInteropHookUtility.DisposeHook(_getResourceAsyncHook);
-        ObjectInteropHookUtility.DisposeHook(_staticVfxCreateHook);
-        ObjectInteropHookUtility.DisposeHook(_staticVfxRemoveHook);
-        ObjectInteropHookUtility.DisposeHook(_actorVfxCreateHook);
-        ObjectInteropHookUtility.DisposeHook(_actorVfxRemoveHook);
-        ObjectInteropHookUtility.DisposeHook(_vfxUseTriggerHook);
+        InteropHookUtility.DisposeHook(_getResourceSyncHook);
+        InteropHookUtility.DisposeHook(_getResourceAsyncHook);
+        InteropHookUtility.DisposeHook(_staticVfxCreateHook);
+        InteropHookUtility.DisposeHook(_staticVfxRemoveHook);
+        InteropHookUtility.DisposeHook(_actorVfxCreateHook);
+        InteropHookUtility.DisposeHook(_actorVfxRemoveHook);
+        InteropHookUtility.DisposeHook(_vfxUseTriggerHook);
 
         lock (_activeVfxLock)
         {

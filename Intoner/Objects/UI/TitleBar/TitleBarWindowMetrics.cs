@@ -43,6 +43,7 @@ internal readonly record struct TitleBarRenderContext(
     bool ShowCloseButton,
     bool AllowPinning,
     bool AllowClickthrough,
+    bool IsWindowHovered,
     IReadOnlyList<TitleBarButton> TitleBarButtons)
 {
     public ImDrawListPtr DrawList => Window.DrawList;
@@ -62,6 +63,7 @@ internal readonly record struct TitleBarRenderContext(
             window.ShowCloseButton,
             window.AllowPinning,
             window.AllowClickthrough,
+            window.IsHovered,
             window.TitleBarButtons);
 }
 

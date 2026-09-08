@@ -1,20 +1,99 @@
+using Intoner.Scene;
 using System.Numerics;
+using System.Runtime.InteropServices;
 using OrientedBounds = FFXIVClientStructs.FFXIV.Common.Math.OrientedBounds;
 
 namespace Intoner.Objects.Models;
 
-internal sealed record ObjectBoundsSnapshot(
-    Guid Id,
-    string Name,
-    ObjectKind Kind,
-    nint NativeAddress,
-    Vector3 Min,
-    Vector3 Max,
-    OrientedBounds? LocalBounds,
-    ObjectPlacementClearance? PlacementClearance,
-    ObjectPlacementSurfaceSupport PlacementSurfaceSupport,
-    ObjectOverlayShapeSnapshot? OverlayShape);
+internal sealed record ObjectBoundsSnapshot : SceneItemBoundsSnapshot
+{
+    public ObjectBoundsSnapshot(
+        Guid id,
+        string name,
+        ObjectKind kind,
+        nint nativeAddress,
+        Vector3 min,
+        Vector3 max,
+        OrientedBounds? localBounds,
+        ObjectPlacementClearance? placementClearance,
+        ObjectPlacementSurfaceSupport placementSurfaceSupport,
+        IReadOnlyList<ObjectOverlayShapeSnapshot>? overlayShapes)
+        : base(
+            id,
+            ResolveCategory(kind),
+            min,
+            max,
+            localBounds is { } bounds
+                ? new SceneOrientedBounds(bounds.Transform, bounds.HalfExtents)
+                : null,
+            kind is ObjectKind.BgObject or ObjectKind.Furniture)
+    {
+        Name = name;
+        Kind = kind;
+        NativeAddress = nativeAddress;
+        LocalBounds = localBounds;
+        PlacementClearance = placementClearance;
+        PlacementSurfaceSupport = placementSurfaceSupport;
+        OverlayShapes = overlayShapes;
+    }
 
+    public string Name { get; }
+    public ObjectKind Kind { get; }
+    public nint NativeAddress { get; }
+    public OrientedBounds? LocalBounds { get; }
+    public ObjectPlacementClearance? PlacementClearance { get; }
+    public ObjectPlacementSurfaceSupport PlacementSurfaceSupport { get; }
+    public IReadOnlyList<ObjectOverlayShapeSnapshot>? OverlayShapes { get; init; }
+
+    public bool HasSameContent(ObjectBoundsSnapshot other)
+        => Id == other.Id
+           && string.Equals(Name, other.Name, StringComparison.Ordinal)
+           && Kind == other.Kind
+           && NativeAddress == other.NativeAddress
+           && Min == other.Min
+           && Max == other.Max
+           && Equals(LocalBounds, other.LocalBounds)
+           && PlacementClearance == other.PlacementClearance
+           && PlacementSurfaceSupport == other.PlacementSurfaceSupport
+           && OverlayShapesEqual(OverlayShapes, other.OverlayShapes);
+
+    private static SceneBoundsCategory ResolveCategory(ObjectKind kind)
+        => kind switch
+        {
+            ObjectKind.BgObject => SceneBoundsCategory.BgObject,
+            ObjectKind.Furniture => SceneBoundsCategory.Furniture,
+            ObjectKind.Vfx => SceneBoundsCategory.Vfx,
+            ObjectKind.Light => SceneBoundsCategory.Light,
+            _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null),
+        };
+
+    private static bool OverlayShapesEqual(
+        IReadOnlyList<ObjectOverlayShapeSnapshot>? left,
+        IReadOnlyList<ObjectOverlayShapeSnapshot>? right)
+    {
+        if (ReferenceEquals(left, right))
+        {
+            return true;
+        }
+
+        if (left is null || right is null || left.Count != right.Count)
+        {
+            return false;
+        }
+
+        for (int index = 0; index < left.Count; ++index)
+        {
+            if (left[index] != right[index])
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+}
+
+[StructLayout(LayoutKind.Auto)]
 internal readonly record struct ObjectPlacementClearance(
     float Radius,
     float SnapAboveSurface,
@@ -53,26 +132,15 @@ internal enum ObjectOverlayShapeKind
 {
     Sphere,
     Cone,
-    SquarePyramid,
+    Box,
 }
 
 internal sealed record ObjectOverlayShapeSnapshot(
     ObjectOverlayShapeKind Kind,
     Matrix4x4 Transform,
-    float Range,
-    float AngleDegrees);
-
-internal readonly record struct ObjectLocationScope(
-    ushort WorldId,
-    uint TerritoryId,
-    uint DivisionId,
-    uint WardId,
-    uint HouseId,
-    uint RoomId)
-{
-    public bool IsValid
-        => WorldId != 0 && TerritoryId != 0;
-}
+    float Extent,
+    float AngleDegrees,
+    float OpacityScale = 1f);
 
 internal enum ObjectSceneSourceKind
 {
@@ -87,6 +155,7 @@ internal enum ObjectSceneLifetimeKind
     RuntimeOnly = 2,
 }
 
+[StructLayout(LayoutKind.Auto)]
 internal readonly record struct ObjectSceneSource(
     ObjectSceneSourceKind Kind,
     Guid? LayoutId,

@@ -21,17 +21,19 @@ internal sealed class PrimitiveCommandStore(TimeSpan commandLifetime)
         }
     }
 
-    public bool TryGetLiveDrawOverGameUi(out bool drawOverGameUi)
+    public bool TryGetLiveRequest(out PrimitiveDrawState state, out bool hasWorldPrimitives)
     {
         lock (_lock)
         {
             if (!HasLiveCommandsLocked())
             {
-                drawOverGameUi = false;
+                state = default;
+                hasWorldPrimitives = false;
                 return false;
             }
 
-            drawOverGameUi = _committedState.DrawOverGameUi;
+            state = _committedState;
+            hasWorldPrimitives = _committed.LineCount > 0 || _committed.PointCount > 0;
             return true;
         }
     }

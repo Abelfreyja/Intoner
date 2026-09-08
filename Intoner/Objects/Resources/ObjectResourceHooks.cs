@@ -1,13 +1,13 @@
 using Dalamud.Hooking;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine;
-using FFXIVClientStructs.FFXIV.Client.LayoutEngine.Group;
 using FFXIVClientStructs.FFXIV.Client.System.Resource;
 using FFXIVClientStructs.FFXIV.Client.System.Resource.Handle;
 using FFXIVClientStructs.FFXIV.Client.System.Scheduler.Base;
 using FFXIVClientStructs.FFXIV.Client.System.Scheduler.Instance;
 using FFXIVClientStructs.FFXIV.Client.System.Scheduler.Resource;
 using Intoner.Objects.Utils;
+using Intoner.Services.Interop;
 using Microsoft.Extensions.Logging;
 using System.Runtime.InteropServices;
 using SceneBgObject = FFXIVClientStructs.FFXIV.Client.Graphics.Scene.BgObject;
@@ -97,52 +97,52 @@ internal sealed unsafe class ObjectResourceHooks : IDisposable
         SchedulerTimelineLoadResourcesDelegate schedulerTimelineLoadResourcesDetour,
         GetCachedScheduleResourceDelegate getCachedScheduleResourceDetour)
     {
-        GetResourceSyncHook = ObjectInteropHookUtility.CreateHookFromAddress(logger, gameInteropProvider, ObjectSignatures.ResourceSync, getResourceSyncDetour);
-        GetResourceAsyncHook = ObjectInteropHookUtility.CreateHookFromAddress(logger, gameInteropProvider, ObjectSignatures.ResourceAsync, getResourceAsyncDetour);
-        ModelResourceLoadHook = ObjectInteropHookUtility.CreateHook(logger, gameInteropProvider, sigScanner, ObjectSignatures.ModelLoad, modelResourceLoadDetour);
-        ModelResourceLoadMaterialsHook = ObjectInteropHookUtility.CreateHookFromAddress(logger, gameInteropProvider, ObjectSignatures.ModelResourceLoadMaterials, modelResourceLoadMaterialsDetour);
-        MaterialResourceLoadTexFilesHook = ObjectInteropHookUtility.CreateHookFromAddress(logger, gameInteropProvider, ObjectSignatures.MaterialTextureLoad, materialResourceLoadTexFilesDetour);
-        MaterialResourceLoadShpkFilesHook = ObjectInteropHookUtility.CreateHookFromAddress(logger, gameInteropProvider, ObjectSignatures.MaterialShaderLoad, materialResourceLoadShpkFilesDetour);
-        ApricotResourceLoadHook = ObjectInteropHookUtility.CreateHook(logger, gameInteropProvider, sigScanner, ObjectSignatures.ApricotLoad, apricotResourceLoadDetour);
-        BgObjectLoadAnimationDataHook = ObjectInteropHookUtility.CreateHookFromAddress(logger, gameInteropProvider, ObjectSignatures.BgObjectAnimationLoad, bgObjectLoadAnimationDataDetour);
-        SharedGroupLayoutResourceLoadHook = ObjectInteropHookUtility.CreateHook(logger, gameInteropProvider, sigScanner, ObjectSignatures.SharedGroupLayoutResourceLoadHook, sharedGroupLayoutResourceLoadDetour);
-        LayoutSharedGroupInsertObjectHook = ObjectInteropHookUtility.CreateHookFromAddress(logger, gameInteropProvider, ObjectSignatures.LayoutSharedGroupInsertObject, layoutSharedGroupInsertObjectDetour);
-        ResourceHandleIncRefHook = ObjectInteropHookUtility.CreateHookFromAddress(logger, gameInteropProvider, ObjectSignatures.ResourceHandleIncRef, resourceHandleIncRefDetour);
-        SchedulerTimelineLoadResourcesHook = ObjectInteropHookUtility.CreateHookFromAddress(logger, gameInteropProvider, ObjectSignatures.SchedulerTimelineLoadResources, schedulerTimelineLoadResourcesDetour);
-        GetCachedScheduleResourceHook = ObjectInteropHookUtility.CreateHook(logger, gameInteropProvider, sigScanner, ObjectSignatures.CachedScheduleResource, getCachedScheduleResourceDetour);
+        GetResourceSyncHook = InteropHookUtility.CreateHookFromAddress(logger, gameInteropProvider, IntonerSignatures.ResourceSync, getResourceSyncDetour);
+        GetResourceAsyncHook = InteropHookUtility.CreateHookFromAddress(logger, gameInteropProvider, IntonerSignatures.ResourceAsync, getResourceAsyncDetour);
+        ModelResourceLoadHook = InteropHookUtility.CreateHook(logger, gameInteropProvider, sigScanner, IntonerSignatures.ModelLoad, modelResourceLoadDetour);
+        ModelResourceLoadMaterialsHook = InteropHookUtility.CreateHookFromAddress(logger, gameInteropProvider, IntonerSignatures.ModelResourceLoadMaterials, modelResourceLoadMaterialsDetour);
+        MaterialResourceLoadTexFilesHook = InteropHookUtility.CreateHookFromAddress(logger, gameInteropProvider, IntonerSignatures.MaterialTextureLoad, materialResourceLoadTexFilesDetour);
+        MaterialResourceLoadShpkFilesHook = InteropHookUtility.CreateHookFromAddress(logger, gameInteropProvider, IntonerSignatures.MaterialShaderLoad, materialResourceLoadShpkFilesDetour);
+        ApricotResourceLoadHook = InteropHookUtility.CreateHook(logger, gameInteropProvider, sigScanner, IntonerSignatures.ApricotLoad, apricotResourceLoadDetour);
+        BgObjectLoadAnimationDataHook = InteropHookUtility.CreateHookFromAddress(logger, gameInteropProvider, IntonerSignatures.BgObjectAnimationLoad, bgObjectLoadAnimationDataDetour);
+        SharedGroupLayoutResourceLoadHook = InteropHookUtility.CreateHook(logger, gameInteropProvider, sigScanner, IntonerSignatures.SharedGroupLayoutResourceLoadHook, sharedGroupLayoutResourceLoadDetour);
+        LayoutSharedGroupInsertObjectHook = InteropHookUtility.CreateHookFromAddress(logger, gameInteropProvider, IntonerSignatures.LayoutSharedGroupInsertObject, layoutSharedGroupInsertObjectDetour);
+        ResourceHandleIncRefHook = InteropHookUtility.CreateHookFromAddress(logger, gameInteropProvider, IntonerSignatures.ResourceHandleIncRef, resourceHandleIncRefDetour);
+        SchedulerTimelineLoadResourcesHook = InteropHookUtility.CreateHookFromAddress(logger, gameInteropProvider, IntonerSignatures.SchedulerTimelineLoadResources, schedulerTimelineLoadResourcesDetour);
+        GetCachedScheduleResourceHook = InteropHookUtility.CreateHook(logger, gameInteropProvider, sigScanner, IntonerSignatures.CachedScheduleResource, getCachedScheduleResourceDetour);
 
         _enableHooks =
         [
-            ObjectInteropHookUtility.CreateEnableAction(GetResourceSyncHook),
-            ObjectInteropHookUtility.CreateEnableAction(GetResourceAsyncHook),
-            ObjectInteropHookUtility.CreateEnableAction(ModelResourceLoadHook),
-            ObjectInteropHookUtility.CreateEnableAction(ModelResourceLoadMaterialsHook),
-            ObjectInteropHookUtility.CreateEnableAction(MaterialResourceLoadTexFilesHook),
-            ObjectInteropHookUtility.CreateEnableAction(MaterialResourceLoadShpkFilesHook),
-            ObjectInteropHookUtility.CreateEnableAction(ApricotResourceLoadHook),
-            ObjectInteropHookUtility.CreateEnableAction(BgObjectLoadAnimationDataHook),
-            ObjectInteropHookUtility.CreateEnableAction(SharedGroupLayoutResourceLoadHook),
-            ObjectInteropHookUtility.CreateEnableAction(LayoutSharedGroupInsertObjectHook),
-            ObjectInteropHookUtility.CreateEnableAction(ResourceHandleIncRefHook),
-            ObjectInteropHookUtility.CreateEnableAction(SchedulerTimelineLoadResourcesHook),
-            ObjectInteropHookUtility.CreateEnableAction(GetCachedScheduleResourceHook),
+            InteropHookUtility.CreateEnableAction(GetResourceSyncHook),
+            InteropHookUtility.CreateEnableAction(GetResourceAsyncHook),
+            InteropHookUtility.CreateEnableAction(ModelResourceLoadHook),
+            InteropHookUtility.CreateEnableAction(ModelResourceLoadMaterialsHook),
+            InteropHookUtility.CreateEnableAction(MaterialResourceLoadTexFilesHook),
+            InteropHookUtility.CreateEnableAction(MaterialResourceLoadShpkFilesHook),
+            InteropHookUtility.CreateEnableAction(ApricotResourceLoadHook),
+            InteropHookUtility.CreateEnableAction(BgObjectLoadAnimationDataHook),
+            InteropHookUtility.CreateEnableAction(SharedGroupLayoutResourceLoadHook),
+            InteropHookUtility.CreateEnableAction(LayoutSharedGroupInsertObjectHook),
+            InteropHookUtility.CreateEnableAction(ResourceHandleIncRefHook),
+            InteropHookUtility.CreateEnableAction(SchedulerTimelineLoadResourcesHook),
+            InteropHookUtility.CreateEnableAction(GetCachedScheduleResourceHook),
         ];
 
         _disposeHooks =
         [
-            ObjectInteropHookUtility.CreateDisposeAction(GetResourceSyncHook),
-            ObjectInteropHookUtility.CreateDisposeAction(GetResourceAsyncHook),
-            ObjectInteropHookUtility.CreateDisposeAction(ModelResourceLoadHook),
-            ObjectInteropHookUtility.CreateDisposeAction(ModelResourceLoadMaterialsHook),
-            ObjectInteropHookUtility.CreateDisposeAction(MaterialResourceLoadTexFilesHook),
-            ObjectInteropHookUtility.CreateDisposeAction(MaterialResourceLoadShpkFilesHook),
-            ObjectInteropHookUtility.CreateDisposeAction(ApricotResourceLoadHook),
-            ObjectInteropHookUtility.CreateDisposeAction(BgObjectLoadAnimationDataHook),
-            ObjectInteropHookUtility.CreateDisposeAction(SharedGroupLayoutResourceLoadHook),
-            ObjectInteropHookUtility.CreateDisposeAction(LayoutSharedGroupInsertObjectHook),
-            ObjectInteropHookUtility.CreateDisposeAction(ResourceHandleIncRefHook),
-            ObjectInteropHookUtility.CreateDisposeAction(SchedulerTimelineLoadResourcesHook),
-            ObjectInteropHookUtility.CreateDisposeAction(GetCachedScheduleResourceHook),
+            InteropHookUtility.CreateDisposeAction(GetResourceSyncHook),
+            InteropHookUtility.CreateDisposeAction(GetResourceAsyncHook),
+            InteropHookUtility.CreateDisposeAction(ModelResourceLoadHook),
+            InteropHookUtility.CreateDisposeAction(ModelResourceLoadMaterialsHook),
+            InteropHookUtility.CreateDisposeAction(MaterialResourceLoadTexFilesHook),
+            InteropHookUtility.CreateDisposeAction(MaterialResourceLoadShpkFilesHook),
+            InteropHookUtility.CreateDisposeAction(ApricotResourceLoadHook),
+            InteropHookUtility.CreateDisposeAction(BgObjectLoadAnimationDataHook),
+            InteropHookUtility.CreateDisposeAction(SharedGroupLayoutResourceLoadHook),
+            InteropHookUtility.CreateDisposeAction(LayoutSharedGroupInsertObjectHook),
+            InteropHookUtility.CreateDisposeAction(ResourceHandleIncRefHook),
+            InteropHookUtility.CreateDisposeAction(SchedulerTimelineLoadResourcesHook),
+            InteropHookUtility.CreateDisposeAction(GetCachedScheduleResourceHook),
         ];
     }
 

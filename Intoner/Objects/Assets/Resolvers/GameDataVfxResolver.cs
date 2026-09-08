@@ -301,7 +301,7 @@ internal sealed class GameDataVfxResolver
             return;
         }
 
-        IReadOnlyList<string> searchTerms = ObjectSearchTermUtility.MergeTerms(baseSearchTerms, [normalizedTimelinePath]);
+        IReadOnlyList<string> searchTerms = SearchTermUtility.MergeTerms(baseSearchTerms, [normalizedTimelinePath]);
         foreach (TmbVfxReference reference in timelineReferenceCache.Get(normalizedTimelinePath))
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -314,7 +314,7 @@ internal sealed class GameDataVfxResolver
                 sourceEvidence | reference.Evidence,
                 recoverySource,
                 AssetPathContract.ParsedFileReference,
-                ObjectSearchTermUtility.MergeTerms(searchTerms, reference.SearchTerms));
+                SearchTermUtility.MergeTerms(searchTerms, reference.SearchTerms));
         }
     }
 
@@ -323,6 +323,6 @@ internal sealed class GameDataVfxResolver
         string rowId,
         string sourcePath,
         params IReadOnlyList<string>?[] relatedTerms)
-        => ObjectSearchTermUtility.BuildStableTerms([source, rowId, sourcePath], relatedTerms);
+        => SearchTermUtility.BuildStableTerms([source, rowId, sourcePath], relatedTerms);
 }
 

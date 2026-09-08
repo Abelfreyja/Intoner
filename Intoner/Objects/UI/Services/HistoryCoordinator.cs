@@ -1,10 +1,12 @@
 using Intoner.Objects.Models;
 using Intoner.Objects.Runtime;
+using Intoner.Objects.Utils;
+using Intoner.Scene;
 using Microsoft.Extensions.Logging;
 
 namespace Intoner.Objects.UI.Services;
 
-/// <summary> coordinates object editor undo and redo recording around editor mutations </summary>
+/// <summary> coordinates scene editor undo and redo recording around editor mutations </summary>
 internal interface IHistoryCoordinator : IDisposable
 {
     /// <summary> connects selection callbacks used for history restore and capture </summary>
@@ -19,7 +21,7 @@ internal interface IHistoryCoordinator : IDisposable
     /// <param name="currentContext">the latest object creation context</param>
     /// <param name="commitPendingChanges">commits any pending editor change before the context swap</param>
     /// <returns>true when the context changed and history was reset</returns>
-    bool RefreshContext(ObjectCreationContext currentContext, Action commitPendingChanges);
+    bool RefreshContext(SceneCreationContext currentContext, Action commitPendingChanges);
 
     /// <summary> forces any pending inspector edits to become one history step </summary>
     void CommitPendingInspectorEdits();
@@ -34,7 +36,7 @@ internal interface IHistoryCoordinator : IDisposable
     /// <param name="startSnapshot">snapshot captured before the edit started</param>
     /// <param name="nextSnapshot">latest replacement snapshot to apply</param>
     /// <param name="recordImmediately">whether the edit should record immediately instead of waiting for deactivation</param>
-    void ApplyInspectorSnapshotEdit(string editId, ObjectHistoryKind kind, string title, ObjectSnapshot startSnapshot, ObjectSnapshot? nextSnapshot, bool recordImmediately = false);
+    void ApplyInspectorSnapshotEdit(string editId, SceneHistoryKind kind, string title, SceneItemSnapshot startSnapshot, SceneItemSnapshot? nextSnapshot, bool recordImmediately = false);
 
     /// <summary> tries to undo one history step </summary>
     /// <returns>true when one history step was undone</returns>
@@ -56,15 +58,23 @@ internal interface IHistoryCoordinator : IDisposable
     /// <returns>true when the object was created and recorded</returns>
     bool TryCreateObject(string title, ObjectKind kind, ObjectPlacementOverrides? overrides);
 
-    /// <summary> tries to import one snapshot and record the change </summary>
-    /// <param name="snapshot">the snapshot to import</param>
-    /// <returns>true when the snapshot was imported and recorded</returns>
-    bool TryImportObjectSnapshot(ObjectSnapshot snapshot);
+    /// <summary> tries to assign one collection to the supplied objects and record the change </summary>
+    /// <param name="title">display title for the history entry</param>
+    /// <param name="collectionId">the collection id, or an empty value to unassign</param>
+    /// <param name="snapshots">current object snapshots</param>
+    /// <returns>true when the collection assignment succeeded and was recorded</returns>
+    bool TryAssignObjectCollection(string title, string collectionId, IReadOnlyList<ObjectSnapshot> snapshots);
 
-    /// <summary> tries to move one object to the player and record the change </summary>
-    /// <param name="objectId">the object id to move</param>
+    /// <summary> tries to move one scene item to the player and record the change </summary>
+    /// <param name="itemId">the scene item id to move</param>
     /// <returns>true when the move succeeded and was recorded</returns>
-    bool TryMoveObjectToPlayer(Guid objectId);
+    bool TryMoveItemToPlayer(Guid itemId);
+
+    /// <summary> changes only an object's world and records the applied location for undo </summary>
+    /// <param name="snapshot"> the unchanged object snapshot shown by the location editor </param>
+    /// <param name="world"> the destination world resolved from the game sheets </param>
+    /// <returns> true when the checked world change succeeded and was recorded </returns>
+    bool TryChangeObjectWorld(ObjectSnapshot snapshot, SceneWorldInfo world);
 
     /// <summary> tries to apply one selected object update batch and record the change </summary>
     /// <param name="kind">main history kind for the update</param>
@@ -72,21 +82,30 @@ internal interface IHistoryCoordinator : IDisposable
     /// <param name="selectedSnapshots">current selected snapshots</param>
     /// <param name="updateFactory">builds the next snapshot for each selected object</param>
     /// <returns>true when the batch update succeeded and was recorded</returns>
-    bool TryApplySelectedSnapshotUpdate(ObjectHistoryKind kind, string title, IReadOnlyList<ObjectSnapshot> selectedSnapshots, Func<ObjectSnapshot, ObjectSnapshot> updateFactory);
+    bool TryApplySelectedSnapshotUpdate(SceneHistoryKind kind, string title, IReadOnlyList<ObjectSnapshot> selectedSnapshots, Func<ObjectSnapshot, ObjectSnapshot> updateFactory);
 
-    /// <summary> tries to duplicate multiple selected objects and record the change </summary>
+    /// <summary> tries to apply one selected scene item update batch and record the change </summary>
+    /// <param name="kind">main history kind for the update</param>
+    /// <param name="title">display title for the history entry</param>
+    /// <param name="selectedSnapshots">current selected snapshots</param>
+    /// <param name="updateFactory">builds the next snapshot for each selected item</param>
+    /// <returns>true when the batch update succeeded and was recorded</returns>
+    bool TryApplySceneItemUpdate(SceneHistoryKind kind, string title, IReadOnlyList<SceneItemSnapshot> selectedSnapshots, Func<SceneItemSnapshot, SceneItemSnapshot> updateFactory);
+
+    /// <summary> tries to duplicate multiple selected scene items and record the change </summary>
     /// <param name="selectedSnapshots">the selected snapshots to duplicate</param>
     /// <returns>true when the duplicate batch succeeded and was recorded</returns>
-    bool TryDuplicateObjects(IReadOnlyList<ObjectSnapshot> selectedSnapshots);
+    bool TryDuplicateSceneItems(IReadOnlyList<SceneItemSnapshot> selectedSnapshots);
 
-    /// <summary> tries to remove multiple selected objects and record the change </summary>
+    /// <summary> tries to remove multiple selected scene items and record the change </summary>
     /// <param name="selectedSnapshots">the selected snapshots to remove</param>
     /// <returns>true when the remove batch succeeded and was recorded</returns>
-    bool TryRemoveObjects(IReadOnlyList<ObjectSnapshot> selectedSnapshots);
+    bool TryRemoveSceneItems(IReadOnlyList<SceneItemSnapshot> selectedSnapshots);
 
-    /// <summary> tries to clear all placed objects and record the change </summary>
+    /// <summary> tries to clear all placed objects in the confirmed scene revision and record the change </summary>
+    /// <param name="persistentRevision">the persistent scene revision shown when the clear was confirmed</param>
     /// <returns>true when the clear succeeded and was recorded</returns>
-    bool TryClearPlacedObjects();
+    bool TryClearPlacedObjects(long persistentRevision);
 
     /// <summary> records one completed before and after snapshot change </summary>
     /// <param name="kind">main history kind for the change</param>
@@ -96,67 +115,30 @@ internal interface IHistoryCoordinator : IDisposable
     /// <param name="selectionAfterApply">optional selection to restore after apply or redo</param>
     /// <param name="selectionAfterRevert">optional selection to restore after revert or undo</param>
     /// <returns>true when a replayable history action was recorded</returns>
-    bool TryRecordCompletedAction(ObjectHistoryKind kind, string title, IReadOnlyList<ObjectSnapshot> beforeSnapshots, IReadOnlyList<ObjectSnapshot> afterSnapshots, IReadOnlyList<Guid>? selectionAfterApply, IReadOnlyList<Guid>? selectionAfterRevert);
+    bool TryRecordCompletedAction(SceneHistoryKind kind, string title, IReadOnlyList<SceneItemSnapshot> beforeSnapshots, IReadOnlyList<SceneItemSnapshot> afterSnapshots, IReadOnlyList<Guid>? selectionAfterApply, IReadOnlyList<Guid>? selectionAfterRevert);
 
     /// <summary> records an already applied history action and synchronizes persistent revision tracking </summary>
     /// <param name="action">the completed action to record</param>
-    void RecordCompletedAction(IObjectHistoryAction action);
+    void RecordCompletedAction(ISceneHistoryAction action);
 }
 
 internal sealed class HistoryCoordinator : IHistoryCoordinator
 {
-    private sealed class SelectionRestoreAction : ObjectHistoryActionBase
-    {
-        private readonly IObjectHistoryAction _action;
-
-        public SelectionRestoreAction(
-            IObjectHistoryAction action,
-            IReadOnlyList<Guid>? selectionAfterApply,
-            IReadOnlyList<Guid>? selectionAfterRevert)
-            : base(action.Title, action.Kind)
-        {
-            _action = action;
-            SelectionAfterApply = selectionAfterApply is not null ? [.. selectionAfterApply] : null;
-            SelectionAfterRevert = selectionAfterRevert is not null ? [.. selectionAfterRevert] : null;
-        }
-
-        public IReadOnlyList<Guid>? SelectionAfterApply { get; }
-        public IReadOnlyList<Guid>? SelectionAfterRevert { get; }
-
-        protected override void ApplyCore()
-            => _action.Apply();
-
-        protected override void RevertCore()
-            => _action.Revert();
-
-        public override void Dispose()
-            => _action.Dispose();
-
-        internal override void MarkRecordedApplied()
-        {
-            base.MarkRecordedApplied();
-            if (_action is ObjectHistoryActionBase historyAction)
-            {
-                historyAction.MarkRecordedApplied();
-            }
-        }
-    }
-
     private sealed class PendingInspectorEdit
     {
         public PendingInspectorEdit(
             string editId,
             string title,
-            ObjectHistoryKind kind,
-            Guid objectId,
-            ObjectSnapshot startSnapshot,
-            ObjectSnapshot latestSnapshot,
+            SceneHistoryKind kind,
+            Guid itemId,
+            SceneItemSnapshot startSnapshot,
+            SceneItemSnapshot latestSnapshot,
             IReadOnlyList<Guid> selectionIds)
         {
             EditId = editId;
             Title = title;
             Kind = kind;
-            ObjectId = objectId;
+            ItemId = itemId;
             StartSnapshot = startSnapshot;
             LatestSnapshot = latestSnapshot;
             SelectionIds = [.. selectionIds];
@@ -164,35 +146,44 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
 
         public string EditId { get; }
         public string Title { get; }
-        public ObjectHistoryKind Kind { get; }
-        public Guid ObjectId { get; }
-        public ObjectSnapshot StartSnapshot { get; }
-        public ObjectSnapshot LatestSnapshot { get; set; }
+        public SceneHistoryKind Kind { get; }
+        public Guid ItemId { get; }
+        public SceneItemSnapshot StartSnapshot { get; }
+        public SceneItemSnapshot LatestSnapshot { get; set; }
         public Guid[] SelectionIds { get; }
     }
 
     private readonly ILogger<HistoryCoordinator> _logger;
-    private readonly IObjectHistoryManager _historyManager;
+    private readonly ISceneHistoryManager _historyManager;
     private readonly IObjectMutationService _mutationService;
+    private readonly IObjectOrganizationService _organizationService;
     private readonly IObjectSceneView _sceneView;
+    private readonly ISceneItemService _sceneItemService;
+    private readonly IScenePlacementService _placementService;
     private PendingInspectorEdit? _pendingInspectorEdit;
 
     private Func<IReadOnlyList<Guid>>? _captureSelectionIds;
     private Action<IReadOnlyList<Guid>?>? _applySelectionIds;
-    private ObjectCreationContext? _currentContext;
+    private SceneCreationContext? _currentContext;
     private long _historyPersistentSceneRevision;
 
     public HistoryCoordinator(
         ILogger<HistoryCoordinator> logger,
-        IObjectHistoryManager historyManager,
+        ISceneHistoryManager historyManager,
         IObjectMutationService mutationService,
-        IObjectSceneView sceneView)
+        IObjectOrganizationService organizationService,
+        IObjectSceneView sceneView,
+        ISceneItemService sceneItemService,
+        IScenePlacementService placementService)
     {
         _logger = logger;
         _historyManager = historyManager;
         _mutationService = mutationService;
+        _organizationService = organizationService;
         _sceneView = sceneView;
-        _historyPersistentSceneRevision = _sceneView.GetPersistentSceneRevision();
+        _sceneItemService = sceneItemService;
+        _placementService = placementService;
+        _historyPersistentSceneRevision = _sceneItemService.GetRevisions().Persistent;
 
         _historyManager.ActionApplied += HandleHistoryActionApplied;
         _historyManager.ActionReverted += HandleHistoryActionReverted;
@@ -213,7 +204,7 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
         _applySelectionIds = null;
     }
 
-    public bool RefreshContext(ObjectCreationContext currentContext, Action commitPendingChanges)
+    public bool RefreshContext(SceneCreationContext currentContext, Action commitPendingChanges)
     {
         ArgumentNullException.ThrowIfNull(currentContext);
         ArgumentNullException.ThrowIfNull(commitPendingChanges);
@@ -246,11 +237,11 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
         ResetHistoryForUntrackedPersistentChange();
     }
 
-    public void ApplyInspectorSnapshotEdit(string editId, ObjectHistoryKind kind, string title, ObjectSnapshot startSnapshot, ObjectSnapshot? nextSnapshot, bool recordImmediately = false)
+    public void ApplyInspectorSnapshotEdit(string editId, SceneHistoryKind kind, string title, SceneItemSnapshot startSnapshot, SceneItemSnapshot? nextSnapshot, bool recordImmediately = false)
     {
         if (_pendingInspectorEdit is not null
             && (!string.Equals(_pendingInspectorEdit.EditId, editId, StringComparison.Ordinal)
-                || _pendingInspectorEdit.ObjectId != startSnapshot.Id))
+                || _pendingInspectorEdit.ItemId != startSnapshot.Id))
         {
             FinalizeInspectorSnapshotEdit();
         }
@@ -258,7 +249,7 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
         if (nextSnapshot is not null)
         {
             ResetHistoryForUntrackedPersistentChange();
-            if (!_mutationService.TryUpdate(nextSnapshot, out var appliedSnapshot))
+            if (!_sceneItemService.Update(nextSnapshot, out SceneItemSnapshot appliedSnapshot).IsApplied())
             {
                 return;
             }
@@ -306,53 +297,129 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
             return false;
         }
 
-        return TryRecordCompletedAction(ObjectHistoryKind.Create, title, [], [createdSnapshot], [createdId.Value], selectionBefore);
+        return TryRecordCompletedAction(SceneHistoryKind.Create, title, [], [createdSnapshot], [createdId.Value], selectionBefore);
     }
 
-    public bool TryImportObjectSnapshot(ObjectSnapshot snapshot)
+    public bool TryAssignObjectCollection(string title, string collectionId, IReadOnlyList<ObjectSnapshot> snapshots)
     {
-        PrepareForMutation();
-        var selectionBefore = CaptureCurrentSelectionIds();
-        var importedId = _mutationService.ImportObjectSnapshot(snapshot, out var importedSnapshot);
-        if (!importedId.HasValue)
+        string normalizedCollectionId = ObjectCollectionKeyUtility.NormalizeCollectionId(collectionId);
+        IReadOnlyList<ObjectSnapshot> beforeSnapshots = snapshots
+            .Where(snapshot => !string.Equals(
+                ObjectCollectionKeyUtility.NormalizeCollectionId(snapshot.CollectionId),
+                normalizedCollectionId,
+                StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (beforeSnapshots.Count == 0)
         {
             return false;
         }
 
-        return TryRecordCompletedAction(ObjectHistoryKind.Import, "Import Object", [], [importedSnapshot], [importedId.Value], selectionBefore);
+        PrepareForMutation();
+        if (!_organizationService.AssignCollection(
+                normalizedCollectionId,
+                beforeSnapshots,
+                out IReadOnlyList<ObjectSnapshot> afterSnapshots).IsApplied())
+        {
+            return false;
+        }
+
+        IReadOnlyList<Guid> selectionIds = CaptureCurrentSelectionIds();
+        return TryRecordCompletedAction(
+            SceneHistoryKind.Organization,
+            title,
+            beforeSnapshots,
+            afterSnapshots,
+            selectionIds,
+            selectionIds);
     }
 
-    public bool TryMoveObjectToPlayer(Guid objectId)
+    public bool TryMoveItemToPlayer(Guid itemId)
     {
         PrepareForMutation();
-        if (!_sceneView.TryGetSceneObjectSnapshot(objectId, out var beforeSnapshot)
-            && !_sceneView.TryGetPersistedObjectSnapshot(objectId, out beforeSnapshot))
+        if (!_sceneItemService.TryGetPlacedItem(itemId, out SceneItemSnapshot beforeSnapshot)
+            || !_placementService.TryResolveFromPlayer(out SceneTransform placement))
         {
             return false;
         }
 
         var selectionIds = CaptureCurrentSelectionIds();
-        if (!_mutationService.TryMoveToPlayer(objectId, out var movedSnapshot))
+        SceneItemSnapshot requestedSnapshot = beforeSnapshot with
+        {
+            Transform = beforeSnapshot.Transform with
+            {
+                Position = placement.Position,
+                RotationDegrees = placement.RotationDegrees,
+            },
+        };
+        if (!_sceneItemService.Update(requestedSnapshot, out SceneItemSnapshot movedSnapshot).IsApplied())
         {
             return false;
         }
 
-        return TryRecordCompletedAction(ObjectHistoryKind.Move, "Move Object To Player", [beforeSnapshot], [movedSnapshot], selectionIds, selectionIds);
+        return TryRecordCompletedAction(
+            SceneHistoryKind.Move,
+            "Move Item To Player",
+            [beforeSnapshot],
+            [movedSnapshot],
+            selectionIds,
+            selectionIds);
     }
 
-    public bool TryApplySelectedSnapshotUpdate(ObjectHistoryKind kind, string title, IReadOnlyList<ObjectSnapshot> selectedSnapshots, Func<ObjectSnapshot, ObjectSnapshot> updateFactory)
+    public bool TryApplySelectedSnapshotUpdate(SceneHistoryKind kind, string title, IReadOnlyList<ObjectSnapshot> selectedSnapshots, Func<ObjectSnapshot, ObjectSnapshot> updateFactory)
+        => TryApplySceneItemUpdate(
+            kind,
+            title,
+            selectedSnapshots,
+            snapshot => updateFactory((ObjectSnapshot)snapshot));
+
+    public bool TryChangeObjectWorld(ObjectSnapshot snapshot, SceneWorldInfo world)
     {
+        if (!snapshot.CreatedIn.Scope.IsValid || world.Id == 0 || world.Id == snapshot.CreatedIn.WorldId)
+        {
+            return false;
+        }
+
         PrepareForMutation();
+        ObjectSnapshot requested = snapshot with
+        {
+            CreatedIn = snapshot.CreatedIn with { WorldId = world.Id, WorldName = world.Name },
+        };
+        SceneItemSnapshot applied = null!;
+        SceneMutationStatus status = _sceneItemService.ApplyChanges(
+            [new SceneItemSnapshotChange(snapshot, requested)],
+            () => _sceneItemService.TryGetPlacedItem(snapshot.Id, out applied));
+        if (!status.IsApplied())
+        {
+            return false;
+        }
+
+        IReadOnlyList<Guid> selectionIds = CaptureCurrentSelectionIds();
+        return TryRecordCompletedAction(
+            SceneHistoryKind.Organization,
+            "Change Object World",
+            [snapshot],
+            [applied],
+            selectionIds,
+            selectionIds);
+    }
+
+    public bool TryApplySceneItemUpdate(
+        SceneHistoryKind kind,
+        string title,
+        IReadOnlyList<SceneItemSnapshot> selectedSnapshots,
+        Func<SceneItemSnapshot, SceneItemSnapshot> updateFactory)
+    {
         if (selectedSnapshots.Count == 0)
         {
             return false;
         }
 
-        var beforeSnapshots = new List<ObjectSnapshot>(selectedSnapshots.Count);
-        var requestedSnapshots = new List<ObjectSnapshot>(selectedSnapshots.Count);
-        foreach (var snapshot in selectedSnapshots)
+        PrepareForMutation();
+        var beforeSnapshots = new List<SceneItemSnapshot>(selectedSnapshots.Count);
+        var requestedSnapshots = new List<SceneItemSnapshot>(selectedSnapshots.Count);
+        foreach (SceneItemSnapshot snapshot in selectedSnapshots)
         {
-            var nextSnapshot = updateFactory(snapshot);
+            SceneItemSnapshot nextSnapshot = updateFactory(snapshot);
             if (Equals(snapshot, nextSnapshot))
             {
                 continue;
@@ -363,7 +430,9 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
         }
 
         if (requestedSnapshots.Count == 0
-            || !_mutationService.TryUpdateMany(requestedSnapshots, out var afterSnapshots))
+            || !_sceneItemService.UpdateMany(
+                requestedSnapshots,
+                out IReadOnlyList<SceneItemSnapshot> afterSnapshots).IsApplied())
         {
             return false;
         }
@@ -372,19 +441,18 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
         return TryRecordCompletedAction(kind, title, beforeSnapshots, afterSnapshots, selectionIds, selectionIds);
     }
 
-    public bool TryDuplicateObjects(IReadOnlyList<ObjectSnapshot> selectedSnapshots)
+    public bool TryDuplicateSceneItems(IReadOnlyList<SceneItemSnapshot> selectedSnapshots)
     {
-        PrepareForMutation();
         if (selectedSnapshots.Count == 0)
         {
             return false;
         }
 
+        PrepareForMutation();
         var selectionBefore = CaptureCurrentSelectionIds();
-        var selectedIds = selectedSnapshots
-            .Select(static snapshot => snapshot.Id)
-            .ToArray();
-        if (!_mutationService.TryDuplicateMany(selectedIds, out var duplicateSnapshots)
+        if (!_sceneItemService.DuplicateMany(
+                selectedSnapshots,
+                out IReadOnlyList<SceneItemSnapshot> duplicateSnapshots).IsApplied()
             || duplicateSnapshots.Count == 0)
         {
             return false;
@@ -394,83 +462,94 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
             .Select(static snapshot => snapshot.Id)
             .ToArray();
         return TryRecordCompletedAction(
-            ObjectHistoryKind.Create,
-            duplicateSnapshots.Count == 1 ? "Duplicate Object" : "Duplicate Objects",
+            SceneHistoryKind.Create,
+            duplicateSnapshots.Count == 1 ? "Duplicate Item" : "Duplicate Items",
             [],
             duplicateSnapshots,
             selectionAfterApply,
             selectionBefore);
     }
 
-    public bool TryRemoveObjects(IReadOnlyList<ObjectSnapshot> selectedSnapshots)
+    public bool TryRemoveSceneItems(IReadOnlyList<SceneItemSnapshot> selectedSnapshots)
     {
-        PrepareForMutation();
         if (selectedSnapshots.Count == 0)
         {
             return false;
         }
 
+        PrepareForMutation();
         var selectionBefore = CaptureCurrentSelectionIds();
-        var selectedIds = selectedSnapshots
-            .Select(static snapshot => snapshot.Id)
-            .ToArray();
-        if (!_mutationService.TryRemoveMany(selectedIds, out var removedSnapshots)
-            || removedSnapshots.Count == 0)
+        IReadOnlyList<SceneItemSnapshotChange> changes = selectedSnapshots
+            .Select(static snapshot => new SceneItemSnapshotChange(snapshot, null))
+            .ToList();
+        if (!_sceneItemService.ApplyChanges(changes).IsApplied())
         {
             return false;
         }
 
         return TryRecordCompletedAction(
-            ObjectHistoryKind.Remove,
-            removedSnapshots.Count == 1 ? "Remove Object" : "Remove Objects",
-            removedSnapshots,
+            SceneHistoryKind.Remove,
+            selectedSnapshots.Count == 1 ? "Remove Item" : "Remove Items",
+            selectedSnapshots,
             [],
             Array.Empty<Guid>(),
             selectionBefore);
     }
 
-    public bool TryClearPlacedObjects()
+    public bool TryClearPlacedObjects(long persistentRevision)
     {
         PrepareForMutation();
+        if (_sceneItemService.GetRevisions().Persistent != persistentRevision)
+        {
+            return false;
+        }
+
         var persistedSnapshots = _sceneView.GetPlacedObjectSnapshots();
-        if (persistedSnapshots.Count == 0)
+        if (_sceneItemService.GetRevisions().Persistent != persistentRevision || persistedSnapshots.Count == 0)
         {
             return false;
         }
 
         var selectionBefore = CaptureCurrentSelectionIds();
-        var persistedIds = persistedSnapshots
-            .Select(static snapshot => snapshot.Id)
-            .ToArray();
-        if (!_mutationService.TryRemoveMany(persistedIds, out var removedSnapshots)
-            || removedSnapshots.Count == 0)
+        IReadOnlyList<SceneItemSnapshotChange> changes = persistedSnapshots
+            .Select(static snapshot => new SceneItemSnapshotChange(snapshot, null))
+            .ToList();
+        if (!_sceneItemService.ApplyChanges(changes).IsApplied())
         {
             return false;
         }
 
-        return TryRecordCompletedAction(ObjectHistoryKind.Clear, "Clear Placed Objects", removedSnapshots, [], Array.Empty<Guid>(), selectionBefore);
+        return TryRecordCompletedAction(
+            SceneHistoryKind.Clear,
+            "Clear Placed Objects",
+            persistedSnapshots,
+            [],
+            Array.Empty<Guid>(),
+            selectionBefore);
     }
 
     public bool TryRecordCompletedAction(
-        ObjectHistoryKind kind,
+        SceneHistoryKind kind,
         string title,
-        IReadOnlyList<ObjectSnapshot> beforeSnapshots,
-        IReadOnlyList<ObjectSnapshot> afterSnapshots,
+        IReadOnlyList<SceneItemSnapshot> beforeSnapshots,
+        IReadOnlyList<SceneItemSnapshot> afterSnapshots,
         IReadOnlyList<Guid>? selectionAfterApply,
         IReadOnlyList<Guid>? selectionAfterRevert)
     {
-        var changes = ObjectSnapshotHistoryChanges.Build(beforeSnapshots, afterSnapshots);
+        IReadOnlyList<SceneItemSnapshotChange> changes = SceneItemHistoryChanges.Build(
+            beforeSnapshots,
+            afterSnapshots);
         if (changes.Count == 0)
         {
-            var kindLabel = ObjectHistoryDescription.GetKindLabel(kind);
+            var kindLabel = SceneHistoryDescription.GetKindLabel(kind);
             if (string.IsNullOrWhiteSpace(title))
             {
-                _logger.LogError("object history could not build replayable changes for {HistoryKind}", kindLabel);
+                _logger.LogError("scene history could not build replayable changes for {HistoryKind}", kindLabel);
             }
             else
             {
                 _logger.LogError(
-                    "object history could not build replayable changes for {HistoryKind} ({HistoryTitle})",
+                    "scene history could not build replayable changes for {HistoryKind} ({HistoryTitle})",
                     kindLabel,
                     title.Trim());
             }
@@ -479,14 +558,14 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
         }
 
         RecordCompletedAction(
-            new SelectionRestoreAction(
-                new ObjectSnapshotHistoryAction(_mutationService, kind, title, changes),
+            new SelectionHistoryAction(
+                new SceneItemHistoryAction(_sceneItemService, kind, title, changes),
                 selectionAfterApply,
                 selectionAfterRevert));
         return true;
     }
 
-    public void RecordCompletedAction(IObjectHistoryAction action)
+    public void RecordCompletedAction(ISceneHistoryAction action)
     {
         ArgumentNullException.ThrowIfNull(action);
 
@@ -505,17 +584,17 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
         DisconnectSelectionHandlers();
     }
 
-    private void HandleHistoryActionApplied(IObjectHistoryAction action)
+    private void HandleHistoryActionApplied(ISceneHistoryAction action)
     {
-        if (action is SelectionRestoreAction selectionAction)
+        if (action is SelectionHistoryAction selectionAction)
         {
             ApplyHistorySelection(selectionAction.SelectionAfterApply);
         }
     }
 
-    private void HandleHistoryActionReverted(IObjectHistoryAction action)
+    private void HandleHistoryActionReverted(ISceneHistoryAction action)
     {
-        if (action is SelectionRestoreAction selectionAction)
+        if (action is SelectionHistoryAction selectionAction)
         {
             ApplyHistorySelection(selectionAction.SelectionAfterRevert);
         }
@@ -534,11 +613,11 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
             return;
         }
 
-        var validObjectIds = _sceneView.GetPlacedObjectSnapshots()
+        var validItemIds = _sceneItemService.GetPlacedItems()
             .Select(static snapshot => snapshot.Id)
             .ToHashSet();
         var resolvedSelection = selectionIds
-            .Where(validObjectIds.Contains)
+            .Where(validItemIds.Contains)
             .ToArray();
         _applySelectionIds(resolvedSelection);
     }
@@ -559,13 +638,17 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
         }
 
         _pendingInspectorEdit = null;
-        _ = TryRecordCompletedAction(
-            edit.Kind,
-            edit.Title,
+        IReadOnlyList<SceneItemSnapshotChange> changes = SceneItemHistoryChanges.Build(
             [edit.StartSnapshot],
-            [edit.LatestSnapshot],
-            edit.SelectionIds,
-            edit.SelectionIds);
+            [edit.LatestSnapshot]);
+        if (changes.Count > 0)
+        {
+            RecordCompletedAction(
+                new SelectionHistoryAction(
+                    new SceneItemHistoryAction(_sceneItemService, edit.Kind, edit.Title, changes),
+                    edit.SelectionIds,
+                    edit.SelectionIds));
+        }
     }
 
     private bool TryReplayHistory(Func<bool> replay)
@@ -579,7 +662,7 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
 
     private bool ResetHistoryForUntrackedPersistentChange()
     {
-        long persistentSceneRevision = _sceneView.GetPersistentSceneRevision();
+        long persistentSceneRevision = _sceneItemService.GetRevisions().Persistent;
         if (_historyPersistentSceneRevision == persistentSceneRevision)
         {
             return false;
@@ -593,7 +676,7 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
             _pendingInspectorEdit = null;
             _historyManager.ClearHistory();
             _logger.LogDebug(
-                "cleared object history after persistent scene revision changed outside history from {TrackedRevision} to {CurrentRevision}",
+                "cleared scene history after persistent scene revision changed outside history from {TrackedRevision} to {CurrentRevision}",
                 _historyPersistentSceneRevision,
                 persistentSceneRevision);
         }
@@ -603,5 +686,5 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
     }
 
     private void TrackPersistentSceneRevision()
-        => _historyPersistentSceneRevision = _sceneView.GetPersistentSceneRevision();
+        => _historyPersistentSceneRevision = _sceneItemService.GetRevisions().Persistent;
 }

@@ -26,14 +26,14 @@ internal sealed record FurnitureModel : ObjectData
 
     public bool NeedsVisualState(FurnitureModel? previousModel)
     {
-        if (Color.HasManualColor || !ObjectMathUtility.IsNearlyZero(Transparency) || OutlineColor != ObjectOutlineColor.None)
+        if (Color.HasManualColor || !NumericsUtility.IsNearlyZero(Transparency) || OutlineColor != ObjectOutlineColor.None)
         {
             return true;
         }
 
         return previousModel is not null
             && (previousModel.Color.HasManualColor
-                || !ObjectMathUtility.IsNearlyEqual(previousModel.Transparency, Transparency)
+                || !NumericsUtility.IsNearlyEqual(previousModel.Transparency, Transparency)
                 || previousModel.OutlineColor != OutlineColor);
     }
 

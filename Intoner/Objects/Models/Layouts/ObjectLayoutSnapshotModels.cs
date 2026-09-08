@@ -10,20 +10,11 @@ internal sealed record ObjectLayoutSnapshot
 {
     public Guid Id { get; init; }
     public string Name { get; init; } = string.Empty;
+    public long Revision { get; init; } = 1;
     public DateTime CreatedAtUtc { get; init; } = DateTime.UtcNow;
     public DateTime UpdatedAtUtc { get; init; } = DateTime.UtcNow;
     public IReadOnlyList<string> Folders { get; init; } = [];
     public IReadOnlyDictionary<string, string> FolderColors { get; init; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-    public IReadOnlyList<ObjectSnapshot> Objects { get; init; } = [];
-}
-
-internal sealed record ObjectTemporaryLayoutSnapshot
-{
-    public string SourceKey { get; init; } = string.Empty;
-    public Guid SourceSessionId { get; init; }
-    public string Name { get; init; } = string.Empty;
-    public long Revision { get; init; }
-    public DateTime UpdatedAtUtc { get; init; } = DateTime.UtcNow;
     public IReadOnlyList<ObjectSnapshot> Objects { get; init; } = [];
 }
 
@@ -36,6 +27,28 @@ internal sealed record ObjectPersistentWorkspaceSnapshot
     public string Name { get; init; } = string.Empty;
     public long Revision { get; init; }
     public DateTime CapturedAtUtc { get; init; } = DateTime.UtcNow;
+}
+
+internal sealed record ObjectTemporaryLayoutSnapshot
+{
+    public string SourceKey { get; init; } = string.Empty;
+    public Guid SourceSessionId { get; init; }
+    public string Name { get; init; } = string.Empty;
+    public long Revision { get; init; }
+    public DateTime UpdatedAtUtc { get; init; } = DateTime.UtcNow;
+    public IReadOnlyList<ObjectSnapshot> Objects { get; init; } = [];
+}
+
+internal sealed record ObjectPersistentSceneUpdate
+{
+    public long ExpectedRevision { get; init; }
+    public IReadOnlyList<ObjectSnapshot> StandaloneObjects { get; init; } = [];
+    public IReadOnlyList<string> StandaloneFolders { get; init; } = [];
+    public IReadOnlyDictionary<string, string> StandaloneFolderColors { get; init; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    public Guid? DefaultLayoutId { get; init; }
+    public IReadOnlyList<ObjectSnapshot> DefaultLayoutObjects { get; init; } = [];
+    public IReadOnlyList<string> DefaultLayoutFolders { get; init; } = [];
+    public IReadOnlyDictionary<string, string> DefaultLayoutFolderColors { get; init; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 }
 
 internal sealed record ObjectLoadedLayoutSnapshot

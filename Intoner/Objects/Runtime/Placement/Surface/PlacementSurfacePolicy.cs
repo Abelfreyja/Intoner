@@ -1,5 +1,6 @@
 using Intoner.Objects.Catalog;
 using Intoner.Objects.Models;
+using Intoner.Scene;
 using System.Numerics;
 
 namespace Intoner.Objects.Runtime;
@@ -14,7 +15,7 @@ internal static class PlacementSurfacePolicy
 
     public static bool TryValidateSurface(
         HousingFurnitureMetadata metadata,
-        ObjectSurfaceHit hit,
+        SceneSurfaceHit hit,
         out string errorMessage)
     {
         if (AllowsSurface(metadata, hit))
@@ -38,7 +39,7 @@ internal static class PlacementSurfacePolicy
         return false;
     }
 
-    public static bool AllowsSurface(HousingFurnitureMetadata metadata, ObjectSurfaceHit hit)
+    public static bool AllowsSurface(HousingFurnitureMetadata metadata, SceneSurfaceHit hit)
         => metadata.Surface == HousingPlacementSurface.Floor
             ? AllowsFloorSurface(hit)
             : hit.HasMaterial(ResolveAllowedMaterialMask(metadata));
@@ -75,14 +76,14 @@ internal static class PlacementSurfacePolicy
             : 0;
     }
 
-    private static bool AllowsFloorSurface(ObjectSurfaceHit hit)
+    private static bool AllowsFloorSurface(SceneSurfaceHit hit)
     {
         if (hit.HasMaterial(FloorMaterial))
         {
             return true;
         }
 
-        return hit.Source == ObjectSurfaceHitSource.Native
+        return hit.Source == SceneSurfaceHitSource.Native
             && hit.Normal.Y >= TabletopNormalThreshold;
     }
 

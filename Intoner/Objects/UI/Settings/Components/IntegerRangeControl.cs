@@ -1,5 +1,6 @@
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
+using Intoner.Objects.UI.Components;
 using System.Numerics;
 using static Intoner.Objects.UI.Settings.Components.SettingsChrome;
 
@@ -37,7 +38,7 @@ internal static class IntegerRangeControl
         float valuePillWidth = MathF.Max(Scaled(72f), width - (buttonEdge * 2f) - (spacing * 2f));
         Vector2 controlPos = ImGui.GetCursorPos();
 
-        if (IconButton.DrawSquare($"##objectIntegerMinus_{id}", FontAwesomeIcon.Minus, buttonEdge, accent, directControlsEnabled && nextValue > range.Minimum))
+        if (EditorIconButton.DrawCompact($"objectIntegerMinus_{id}", FontAwesomeIcon.Minus, "Decrease value", accent, directControlsEnabled && nextValue > range.Minimum, buttonEdge))
         {
             ApplyStep(ref nextValue, -range.StepSize, range, originalValue, ref commit, ref hasUpdate);
         }
@@ -58,7 +59,7 @@ internal static class IntegerRangeControl
 
         ImGui.SameLine(0f, spacing);
         bool controlsEnabledAfterValue = directControlsEnabled && !editState.IsActive;
-        if (IconButton.DrawSquare($"##objectIntegerPlus_{id}", FontAwesomeIcon.Plus, buttonEdge, accent, controlsEnabledAfterValue && nextValue < range.Maximum))
+        if (EditorIconButton.DrawCompact($"objectIntegerPlus_{id}", FontAwesomeIcon.Plus, "Increase value", accent, controlsEnabledAfterValue && nextValue < range.Maximum, buttonEdge))
         {
             ApplyStep(ref nextValue, range.StepSize, range, originalValue, ref commit, ref hasUpdate);
         }

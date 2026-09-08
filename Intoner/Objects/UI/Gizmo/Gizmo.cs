@@ -3,9 +3,10 @@ using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using Intoner.Objects.Models;
 using Intoner.Objects.Rendering.Drawing;
-using Intoner.Objects.Runtime;
 using Intoner.Objects.UI.Services;
+using Intoner.Services.Input;
 using Intoner.Objects.Utils;
+using Intoner.Scene;
 using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 
@@ -17,7 +18,7 @@ internal interface IGizmoHost
     /// <summary> gets the current editor selection revision </summary>
     int GetSelectionRevision();
 
-    /// <summary> gets the current object scene revision </summary>
+    /// <summary> gets the current scene revision </summary>
     long GetSceneRevision();
 
     /// <summary> captures current editor selection ids for history entries </summary>
@@ -28,40 +29,39 @@ internal interface IGizmoHost
 
     /// <summary> records a completed history action after a gizmo drag finishes </summary>
     bool TryRecordCompletedHistoryAction(
-        ObjectHistoryKind kind,
+        SceneHistoryKind kind,
         string title,
-        IReadOnlyList<ObjectSnapshot> beforeSnapshots,
-        IReadOnlyList<ObjectSnapshot> afterSnapshots,
+        IReadOnlyList<SceneItemSnapshot> beforeSnapshots,
+        IReadOnlyList<SceneItemSnapshot> afterSnapshots,
         IReadOnlyList<Guid>? selectionAfterApply,
         IReadOnlyList<Guid>? selectionAfterRevert);
 
-    /// <summary> duplicates the provided selected objects through the normal history path </summary>
-    bool TryDuplicateSelectedObjects(IReadOnlyList<ObjectSnapshot> selectedSnapshots);
+    /// <summary> duplicates the provided selected items through the normal history path </summary>
+    bool TryDuplicateSelectedItems(IReadOnlyList<SceneItemSnapshot> selectedSnapshots);
 
-    /// <summary> removes the provided selected objects through the normal history path </summary>
-    bool TryRemoveSelectedObjects(IReadOnlyList<ObjectSnapshot> selectedSnapshots);
+    /// <summary> removes the provided selected items through the normal history path </summary>
+    bool TryRemoveSelectedItems(IReadOnlyList<SceneItemSnapshot> selectedSnapshots);
 
-    /// <summary> moves one selected object to the player through the normal history path </summary>
-    bool TryMoveObjectToPlayerWithHistory(Guid objectId);
+    /// <summary> moves one selected item to the player through the normal history path </summary>
+    bool TryMoveItemToPlayerWithHistory(Guid itemId);
 
-    /// <summary> applies a batch object update through the normal history path </summary>
+    /// <summary> applies a selected item update through the normal history path </summary>
     bool TryApplySelectedSnapshotUpdateWithHistory(
-        ObjectHistoryKind kind,
+        SceneHistoryKind kind,
         string title,
-        IReadOnlyList<ObjectSnapshot> selectedSnapshots,
-        Func<ObjectSnapshot, ObjectSnapshot> updateFactory);
+        IReadOnlyList<SceneItemSnapshot> selectedSnapshots,
+        Func<SceneItemSnapshot, SceneItemSnapshot> updateFactory);
 }
 
 internal sealed partial class Gizmo : IDisposable
 {
-    private readonly IGizmoHost                       _host;
-    private readonly IGameInputSuppressionService     _gameInputSuppressionService;
-    private readonly IObjectMutationService           _mutationService;
-    private readonly IObjectPlacementResolver         _placementResolver;
-    private readonly IObjectSurfaceTargetService      _surfaceTargetService;
-    private readonly SurfacePlacementService          _surfacePlacementService;
-    private readonly SurfaceAttachmentService         _surfaceAttachmentService;
-    private readonly DrawManager                      _drawManager;
+    private readonly IGizmoHost _host;
+    private readonly IKeyboardInputService _keyboardInput;
+    private readonly ISceneItemService _sceneItemService;
+    private readonly ISceneSurfaceService _surfaceService;
+    private readonly DrawManager _drawManager;
+    private IReadOnlyList<SceneItemBoundsSnapshot>? _boundsLookupSource;
+    private SceneItemBoundsLookup _boundsLookup = new([]);
 
     public GizmoSettings Settings { get; } = new();
 
@@ -85,10 +85,10 @@ internal sealed partial class Gizmo : IDisposable
     private bool HasActiveTransformDrag
         => TranslationDragState.IsDragging || RotationDragState.IsDragging || ScaleDragState.IsDragging;
 
-    private IGameInputSuppressionLease? SurfaceDragInputSuppressionLease
+    private IKeyboardInputLease? SurfaceDragKeyboardInputLease
     {
-        get => State.SurfaceDragInputSuppressionLease;
-        set => State.SurfaceDragInputSuppressionLease = value;
+        get => State.SurfaceDragKeyboardInputLease;
+        set => State.SurfaceDragKeyboardInputLease = value;
     }
 
     private Vector2 WheelCenter
@@ -169,39 +169,33 @@ internal sealed partial class Gizmo : IDisposable
     public Gizmo(
         IGizmoHost host,
         DrawManager drawManager,
-        IGameInputSuppressionService gameInputSuppressionService,
-        IObjectMutationService mutationService,
-        IObjectPlacementResolver placementResolver,
-        IObjectSurfaceTargetService surfaceTargetService,
-        SurfacePlacementService surfacePlacementService,
-        SurfaceAttachmentService surfaceAttachmentService)
+        IKeyboardInputService keyboardInput,
+        ISceneItemService sceneItemService,
+        ISceneSurfaceService surfaceService)
     {
         _host = host;
         _drawManager = drawManager;
-        _gameInputSuppressionService = gameInputSuppressionService;
-        _mutationService = mutationService;
-        _placementResolver = placementResolver;
-        _surfaceTargetService = surfaceTargetService;
-        _surfacePlacementService = surfacePlacementService;
-        _surfaceAttachmentService = surfaceAttachmentService;
+        _keyboardInput = keyboardInput;
+        _sceneItemService = sceneItemService;
+        _surfaceService = surfaceService;
     }
 
     public void Dispose()
-        => DisposeSurfaceDragInputSuppressionLease();
+        => DisposeSurfaceDragKeyboardInputLease();
 
-    public void NormalizeMode(IReadOnlyList<ObjectSnapshot> selectedObjects)
+    public void NormalizeMode(IReadOnlyList<SceneItemSnapshot> selectedItems)
     {
-        if (!CanUseScaleGizmo(selectedObjects) && Mode == GizmoTransformMode.Scale)
+        if (!CanUseScaleGizmo(selectedItems) && Mode == GizmoTransformMode.Scale)
         {
             Mode = GizmoTransformMode.Rotation;
         }
 
-        if (selectedObjects.Count == 0 && HasActiveTransformDrag)
+        if (selectedItems.Count == 0 && HasActiveTransformDrag)
         {
             CompleteGizmoDrag();
         }
 
-        if (selectedObjects.Count == 0 && SurfaceDragState.IsDragging)
+        if (selectedItems.Count == 0 && SurfaceDragState.IsDragging)
         {
             CompleteGizmoSurfaceDrag();
         }
@@ -213,22 +207,26 @@ internal sealed partial class Gizmo : IDisposable
         CompleteGizmoSurfaceDrag();
     }
 
-    internal static bool CanUseScaleGizmo(ObjectSnapshot snapshot)
-        => snapshot.Kind is ObjectKind.BgObject or ObjectKind.Furniture;
+    internal bool CanUseScaleGizmo(SceneItemSnapshot snapshot)
+        => TryGetManipulation(snapshot, out _, out SceneItemManipulation manipulation)
+           && manipulation.SupportsScale;
 
-    internal static bool CanUseScaleGizmo(IReadOnlyList<ObjectSnapshot> selectedObjects)
-        => selectedObjects.Count == 1 && CanUseScaleGizmo(selectedObjects[0]);
+    internal bool CanUseScaleGizmo(IReadOnlyList<SceneItemSnapshot> selectedItems)
+        => selectedItems.Count == 1 && CanUseScaleGizmo(selectedItems[0]);
 
-    public void Draw(IReadOnlyList<ObjectSnapshot> selectedObjects, IReadOnlyList<ObjectBoundsSnapshot> boundsSnapshots)
+    public void Draw(
+        IReadOnlyList<SceneItemSnapshot> selectedItems,
+        IReadOnlyList<SceneItemBoundsSnapshot> boundsSnapshots,
+        in GizmoDrawOptions options)
     {
-        if (!TryBuildCurrentFrame(selectedObjects, boundsSnapshots, ImGui.GetIO().MousePos, out var frame))
+        if (!TryBuildCurrentFrame(selectedItems, boundsSnapshots, ImGui.GetIO().MousePos, options, out var frame))
         {
             return;
         }
 
         try
         {
-            DrawGizmoFrame(frame);
+            DrawGizmoFrame(frame, options);
             DrawGizmoWheel(frame.Context);
         }
         finally
@@ -242,19 +240,21 @@ internal sealed partial class Gizmo : IDisposable
     }
 
     private bool TryBuildCurrentFrame(
-        IReadOnlyList<ObjectSnapshot> selectedObjects,
-        IReadOnlyList<ObjectBoundsSnapshot> boundsSnapshots,
+        IReadOnlyList<SceneItemSnapshot> selectedItems,
+        IReadOnlyList<SceneItemBoundsSnapshot> boundsSnapshots,
         Vector2 mousePos,
+        in GizmoDrawOptions options,
         out GizmoFrame frame)
     {
-        var request = CreateFrameRequest(mousePos);
+        bool pointerAvailable = options.CanUsePointer(mousePos);
+        var request = CreateFrameRequest(mousePos, pointerAvailable);
         if (State.TryGetCachedFrame(request, out frame))
         {
             return true;
         }
 
         frame = default;
-        if (!TryPrepareGizmoContext(selectedObjects, boundsSnapshots, out var context))
+        if (!TryPrepareGizmoContext(selectedItems, boundsSnapshots, out var context))
         {
             return false;
         }
@@ -262,11 +262,14 @@ internal sealed partial class Gizmo : IDisposable
         var scale = ImGuiHelpers.GlobalScale;
         if (Mode == GizmoTransformMode.Rotation)
         {
-            var radius = ResolveObjectAwareScreenSize(GizmoConstants.RotationRingBaseRadius, context.AxisWorldLength, scale);
+            var radius = ResolveWorldScaledScreenSize(GizmoConstants.RotationRingBaseRadius, context.AxisWorldLength, scale);
             var rotationProjection = IsGizmoDragActive(context.PrimarySnapshot.Id, GizmoTransformMode.Rotation) && RotationDragState.RotationProjection.HasValue
                 ? RotationDragState.RotationProjection.Value
                 : CreateRotationProjectionContext(context, radius);
-            frame = new GizmoFrame(context, rotationProjection, ResolveRotationInteractionState(context, rotationProjection, mousePos, scale));
+            frame = new GizmoFrame(
+                context,
+                rotationProjection,
+                ResolveRotationInteractionState(context, rotationProjection, mousePos, scale, pointerAvailable));
             State.StoreCachedFrame(request, frame);
             return true;
         }
@@ -278,12 +281,15 @@ internal sealed partial class Gizmo : IDisposable
             return false;
         }
 
-        frame = new GizmoFrame(context, axisCount, ResolveLinearInteractionState(context, Mode, axisCount, mousePos, scale));
+        frame = new GizmoFrame(
+            context,
+            axisCount,
+            ResolveLinearInteractionState(context, Mode, axisCount, mousePos, scale, pointerAvailable));
         State.StoreCachedFrame(request, frame);
         return true;
     }
 
-    private GizmoFrameRequest CreateFrameRequest(Vector2 mousePos)
+    private GizmoFrameRequest CreateFrameRequest(Vector2 mousePos, bool pointerAvailable)
         => new(
             ImGui.GetFrameCount(),
             State.InteractionRevision,
@@ -291,14 +297,15 @@ internal sealed partial class Gizmo : IDisposable
             CurrentBoundsOverlaySpace,
             _host.GetSelectionRevision(),
             _host.GetSceneRevision(),
-            mousePos);
+            mousePos,
+            pointerAvailable);
 
     private bool TryPrepareGizmoContext(
-        IReadOnlyList<ObjectSnapshot> selectedObjects,
-        IReadOnlyList<ObjectBoundsSnapshot> boundsSnapshots,
+        IReadOnlyList<SceneItemSnapshot> selectedItems,
+        IReadOnlyList<SceneItemBoundsSnapshot> boundsSnapshots,
         out GizmoContext context)
     {
-        if (!TryBuildGizmoContext(selectedObjects, boundsSnapshots, out context))
+        if (!TryBuildGizmoContext(selectedItems, boundsSnapshots, out context))
         {
             CompleteGizmoDrag();
             CompleteGizmoSurfaceDrag();
@@ -317,33 +324,42 @@ internal sealed partial class Gizmo : IDisposable
             CompleteGizmoDrag();
         }
 
-        if (SurfaceDragState.IsDragging && SurfaceDragState.ObjectId != context.PrimarySnapshot.Id)
+        if (SurfaceDragState.IsDragging && SurfaceDragState.ItemId != context.PrimarySnapshot.Id)
         {
             CompleteGizmoSurfaceDrag();
         }
     }
 
     private bool TryBuildGizmoContext(
-        IReadOnlyList<ObjectSnapshot> selectedObjects,
-        IReadOnlyList<ObjectBoundsSnapshot> boundsSnapshots,
+        IReadOnlyList<SceneItemSnapshot> selectedItems,
+        IReadOnlyList<SceneItemBoundsSnapshot> boundsSnapshots,
         out GizmoContext context)
     {
         context = default;
 
-        if (selectedObjects.Count == 0 || Mode == GizmoTransformMode.None)
+        if (selectedItems.Count == 0 || Mode == GizmoTransformMode.None)
         {
             return false;
         }
 
-        if (!ObjectViewportProjectionUtility.TryGetEditorCameraProjection(out var viewProjection, out var viewMatrix, out _))
+        if (!SceneViewportProjection.TryGetEditorCameraProjection(out var viewProjection, out var viewMatrix, out _))
         {
             return false;
         }
 
-        var primarySnapshot = selectedObjects[^1];
-        var pivotPosition = ObjectSelectionTransformMath.ResolveSelectionPivotPosition(selectedObjects, boundsSnapshots);
+        var primarySnapshot = selectedItems[^1];
+        if (!TryGetManipulation(
+                primarySnapshot,
+                out SceneItemManipulationPolicy? manipulation,
+                out SceneItemManipulation manipulationOptions))
+        {
+            return false;
+        }
+
+        SceneItemBoundsLookup boundsLookup = GetBoundsLookup(boundsSnapshots);
+        var pivotPosition = SceneSelectionTransformMath.ResolveSelectionPivotPosition(selectedItems, boundsLookup);
         var viewport = ImGui.GetMainViewport();
-        if (!ObjectViewportProjectionUtility.TryProjectWorldPointToViewport(
+        if (!SceneViewportProjection.TryProjectWorldPointToViewport(
                 viewProjection,
                 pivotPosition,
                 viewport.Pos,
@@ -353,33 +369,117 @@ internal sealed partial class Gizmo : IDisposable
             return false;
         }
         ResolveCameraOrientation(viewMatrix, pivotPosition, out var cameraViewDirection, out var cameraRight, out var cameraUp);
+        ResolveSelectionManipulation(
+            selectedItems,
+            boundsLookup,
+            manipulationOptions,
+            out float axisWorldLength,
+            out bool surfaceDragSupported);
 
-        var boundsSnapshot = selectedObjects.Count == 1
-            ? ObjectSelectionTransformMath.FindBoundsSnapshot(boundsSnapshots, primarySnapshot.Id)
+        var boundsSnapshot = selectedItems.Count == 1
+            ? SceneSelectionTransformMath.FindManipulationBoundsSnapshot(primarySnapshot, boundsLookup)
             : null;
         context = new GizmoContext(
-            selectedObjects,
+            selectedItems,
             primarySnapshot,
             boundsSnapshots,
+            boundsLookup,
             boundsSnapshot,
+            manipulation,
+            manipulationOptions,
             pivotPosition,
             screenPos,
             viewport.Pos,
             viewport.Size,
             viewProjection,
-            ObjectTransformMath.CreateRotationQuaternion(primarySnapshot.Transform.RotationDegrees),
+            SceneTransformMath.CreateRotationQuaternion(primarySnapshot.Transform.RotationDegrees),
             cameraViewDirection,
             cameraRight,
             cameraUp,
-            ObjectSelectionTransformMath.ResolveSelectionGizmoAxisLength(selectedObjects, boundsSnapshots),
+            axisWorldLength,
             CurrentBoundsOverlaySpace == BoundsOverlaySpace.World,
-            CanUseScaleGizmo(selectedObjects));
+            selectedItems.Count == 1 && manipulationOptions.SupportsScale,
+            surfaceDragSupported);
         return true;
+    }
+
+    private bool TryGetManipulation(
+        SceneItemSnapshot snapshot,
+        [NotNullWhen(true)] out SceneItemManipulationPolicy? policy,
+        out SceneItemManipulation manipulation)
+    {
+        if (_sceneItemService.TryGetManipulation(snapshot, out SceneItemManipulationPolicy resolvedPolicy))
+        {
+            policy = resolvedPolicy;
+            manipulation = resolvedPolicy.Describe(snapshot);
+            return true;
+        }
+
+        policy = null;
+        manipulation = SceneItemManipulation.Default;
+        return false;
+    }
+
+    private void ResolveSelectionManipulation(
+        IReadOnlyList<SceneItemSnapshot> selectedItems,
+        SceneItemBoundsLookup boundsLookup,
+        SceneItemManipulation primaryManipulation,
+        out float axisLength,
+        out bool surfaceDragSupported)
+    {
+        if (selectedItems.Count == 1)
+        {
+            axisLength = SceneSelectionTransformMath.ResolveItemGizmoAxisLength(
+                selectedItems[0],
+                boundsLookup,
+                primaryManipulation.GizmoAxisLength);
+            surfaceDragSupported = primaryManipulation.SupportsSurfaceDrag;
+            return;
+        }
+
+        axisLength = SceneSelectionTransformMath.ResolveSelectionGizmoAxisLength(selectedItems, boundsLookup);
+        surfaceDragSupported = primaryManipulation.SupportsSurfaceDrag;
+        IncludePreferredAxisLength(primaryManipulation, ref axisLength);
+        for (int index = 0; index < selectedItems.Count - 1; ++index)
+        {
+            if (!TryGetManipulation(selectedItems[index], out _, out SceneItemManipulation manipulation))
+            {
+                surfaceDragSupported = false;
+                continue;
+            }
+
+            surfaceDragSupported &= manipulation.SupportsSurfaceDrag;
+            IncludePreferredAxisLength(manipulation, ref axisLength);
+        }
+
+        axisLength = Math.Clamp(axisLength, 0.25f, 4f);
+    }
+
+    private SceneItemBoundsLookup GetBoundsLookup(IReadOnlyList<SceneItemBoundsSnapshot> boundsSnapshots)
+    {
+        if (ReferenceEquals(_boundsLookupSource, boundsSnapshots))
+        {
+            return _boundsLookup;
+        }
+
+        _boundsLookupSource = boundsSnapshots;
+        _boundsLookup = new SceneItemBoundsLookup(boundsSnapshots);
+        return _boundsLookup;
+    }
+
+    private static void IncludePreferredAxisLength(SceneItemManipulation manipulation, ref float axisLength)
+    {
+        if (manipulation.GizmoAxisLength is float preferredLength
+            && preferredLength > 0f
+            && float.IsFinite(preferredLength))
+        {
+            axisLength = MathF.Max(axisLength, preferredLength);
+        }
     }
 
     private static void ResolveCameraOrientation(
         Matrix4x4 viewMatrix,
-        Vector3 objectPosition,
+        Vector3 itemPosition,
         out Vector3? cameraViewDirection,
         out Vector3? cameraRight,
         out Vector3? cameraUp)
@@ -393,59 +493,59 @@ internal sealed partial class Gizmo : IDisposable
             return;
         }
 
-        var toCamera = cameraWorld.Translation - objectPosition;
-        if (ObjectMathUtility.TryNormalize(toCamera, out var normalizedViewDirection))
+        var toCamera = cameraWorld.Translation - itemPosition;
+        if (NumericsUtility.TryNormalize(toCamera, out var normalizedViewDirection))
         {
             cameraViewDirection = normalizedViewDirection;
         }
 
         var right = Vector3.TransformNormal(Vector3.UnitX, cameraWorld);
-        if (ObjectMathUtility.TryNormalize(right, out var normalizedRight))
+        if (NumericsUtility.TryNormalize(right, out var normalizedRight))
         {
             cameraRight = normalizedRight;
         }
 
         var up = Vector3.TransformNormal(Vector3.UnitY, cameraWorld);
-        if (ObjectMathUtility.TryNormalize(up, out var normalizedUp))
+        if (NumericsUtility.TryNormalize(up, out var normalizedUp))
         {
             cameraUp = normalizedUp;
         }
     }
 
-    private void DrawGizmoFrame(in GizmoFrame frame)
+    private void DrawGizmoFrame(in GizmoFrame frame, in GizmoDrawOptions options)
     {
         switch (Mode)
         {
             case GizmoTransformMode.Translation:
-                DrawLinearGizmo(frame, GizmoTransformMode.Translation);
+                DrawLinearGizmo(frame, GizmoTransformMode.Translation, options);
                 break;
             case GizmoTransformMode.Rotation:
-                DrawRotationGizmo(frame);
+                DrawRotationGizmo(frame, options);
                 break;
             case GizmoTransformMode.Scale:
                 if (frame.Context.ScaleSupported)
                 {
-                    DrawLinearGizmo(frame, GizmoTransformMode.Scale);
+                    DrawLinearGizmo(frame, GizmoTransformMode.Scale, options);
                 }
                 break;
         }
     }
 
     public bool IsSelectionBlocked(
-        IReadOnlyList<ObjectSnapshot> activeSelectedObjects,
-        IReadOnlyList<ObjectBoundsSnapshot> boundsSnapshots,
+        IReadOnlyList<SceneItemSnapshot> activeSelectedItems,
+        IReadOnlyList<SceneItemBoundsSnapshot> boundsSnapshots,
         Vector2 mousePos)
-        => TryGetSelectionBlockFrame(activeSelectedObjects, boundsSnapshots, mousePos, out var frame)
+        => TryGetSelectionBlockFrame(activeSelectedItems, boundsSnapshots, mousePos, out var frame)
             && frame.BlocksSelection;
 
     private bool TryGetSelectionBlockFrame(
-        IReadOnlyList<ObjectSnapshot> activeSelectedObjects,
-        IReadOnlyList<ObjectBoundsSnapshot> boundsSnapshots,
+        IReadOnlyList<SceneItemSnapshot> activeSelectedItems,
+        IReadOnlyList<SceneItemBoundsSnapshot> boundsSnapshots,
         Vector2 mousePos,
         out GizmoFrame frame)
     {
         frame = default;
-        if (activeSelectedObjects.Count == 0
+        if (activeSelectedItems.Count == 0
             || Mode == GizmoTransformMode.None
             || HasActiveTransformDrag
             || SurfaceDragState.IsDragging
@@ -454,10 +554,18 @@ internal sealed partial class Gizmo : IDisposable
             return false;
         }
 
-        return TryBuildCurrentFrame(activeSelectedObjects, boundsSnapshots, mousePos, out frame);
+        return TryBuildCurrentFrame(
+            activeSelectedItems,
+            boundsSnapshots,
+            mousePos,
+            GizmoDrawOptions.Unobstructed,
+            out frame);
     }
 
-    private void DrawLinearGizmo(in GizmoFrame frame, GizmoTransformMode mode)
+    private void DrawLinearGizmo(
+        in GizmoFrame frame,
+        GizmoTransformMode mode,
+        in GizmoDrawOptions options)
     {
         var context = frame.Context;
         var drawList = ImGui.GetForegroundDrawList();
@@ -475,11 +583,14 @@ internal sealed partial class Gizmo : IDisposable
 
         if (mode == GizmoTransformMode.Translation || common.SurfaceDragActive)
         {
-            var preferredAxis = mode == GizmoTransformMode.Translation
-                ? common.DragActive
+            GizmoAxis preferredAxis = GizmoAxis.None;
+            if (mode == GizmoTransformMode.Translation)
+            {
+                preferredAxis = common.DragActive
                     ? common.ActiveAxis
-                    : interaction.HoveredAxis
-                : GizmoAxis.None;
+                    : interaction.HoveredAxis;
+            }
+
             DrawTranslationSnapGrid(context, scale, preferredAxis);
         }
 
@@ -487,7 +598,7 @@ internal sealed partial class Gizmo : IDisposable
         batch.AddScreenCircleFilled(
             context.ScreenPos,
             centerGlowRadius,
-            EditorColors.Color(0f, 0f, 0f, GizmoConstants.CenterGlowOpacity),
+            ThemeColors.Color(0f, 0f, 0f, GizmoConstants.CenterGlowOpacity),
             64);
 
         if (common.DragActive && mode == GizmoTransformMode.Translation)
@@ -520,7 +631,7 @@ internal sealed partial class Gizmo : IDisposable
                 ? EditorColors.GizmoTranslationDragActive
                 : GetAxisColorVector(state.Axis, isActive, isHovered);
             var glowColor = common.DragActive && isActive
-                ? EditorColors.Color(axisColor.X, axisColor.Y, axisColor.Z, 0.45f)
+                ? ThemeColors.Color(axisColor.X, axisColor.Y, axisColor.Z, 0.45f)
                 : GetAxisGlowColorVector(state.Axis, isActive);
             var visualScale = state.VisualScale;
             var trimmedEnd = mode == GizmoTransformMode.Translation
@@ -547,10 +658,18 @@ internal sealed partial class Gizmo : IDisposable
                 DrawAxisArrowhead(batch, state, visualScale, axisColor);
             }
 
-            DrawAxisLabel(drawList, state, visualScale, axisColor, AxisLabel(state.Axis), isActive, isHovered);
+            DrawAxisLabel(
+                drawList,
+                state,
+                visualScale,
+                axisColor,
+                AxisLabel(state.Axis),
+                isActive,
+                isHovered,
+                options);
         }
 
-        DrawCommonModeElements(batch, drawList, context, scale, common.CenterHovered, common.SurfaceDragActive);
+        DrawCommonModeElements(batch, drawList, context, scale, common.CenterHovered, common.SurfaceDragActive, options);
 
         if (interaction.CanStartAxisDrag || common.CanStartSurfaceDrag)
         {
@@ -565,16 +684,18 @@ internal sealed partial class Gizmo : IDisposable
             BeginLinearGizmoDrag(context, interaction.HoveredAxis, interaction.HoveredAxisState, mode);
         }
 
-        if (HandleGizmoDragLifecycle(context, mode) && mode == GizmoTransformMode.Translation)
+        if (HandleGizmoDragLifecycle(context, mode)
+            && mode == GizmoTransformMode.Translation)
         {
             DrawTranslationDragPath(context, scale);
         }
 
         HandleCommonModeTail(context, common.PointerInRegion, interaction.AxisHovered, common.CenterHovered, common.SurfaceDragActive);
+
         _drawManager.DrawLayer(context.ViewportPos, context.ViewportSize, DrawLayer.Foreground, ImGui.GetStyle().Alpha);
     }
 
-    private void DrawRotationGizmo(in GizmoFrame frame)
+    private void DrawRotationGizmo(in GizmoFrame frame, in GizmoDrawOptions options)
     {
         var context = frame.Context;
         var drawList = ImGui.GetForegroundDrawList();
@@ -601,7 +722,7 @@ internal sealed partial class Gizmo : IDisposable
         batch.AddScreenCircleFilled(
             context.ScreenPos,
             radius,
-            EditorColors.Color(0f, 0f, 0f, GizmoConstants.RotationBackgroundAlpha),
+            ThemeColors.Color(0f, 0f, 0f, GizmoConstants.RotationBackgroundAlpha),
             96);
 
         DrawRotationAxes(batch, rotationProjection, scale, common, interaction.HoverState, RotationAxisSegmentPass.Visible);
@@ -614,11 +735,16 @@ internal sealed partial class Gizmo : IDisposable
         var snapPolicy = ResolveActiveTransformSnapPolicy(context);
         if (snapPolicy.RotationEnabled && snapPolicy.RotationStepDegrees > 0f)
         {
-            var tickAxis = common.DragActive
-                ? common.ActiveAxis
-                : common.Phase == GizmoInteractionPhase.HoverAxis
-                    ? interaction.HoverState.Axis
-                    : GizmoAxis.None;
+            GizmoAxis tickAxis = GizmoAxis.None;
+            if (common.DragActive)
+            {
+                tickAxis = common.ActiveAxis;
+            }
+            else if (common.Phase == GizmoInteractionPhase.HoverAxis)
+            {
+                tickAxis = interaction.HoverState.Axis;
+            }
+
             if (tickAxis != GizmoAxis.None)
             {
                 var tickAngleOffset = common.DragActive && RotationDragState.RotationDragStartAngle.HasValue
@@ -651,7 +777,7 @@ internal sealed partial class Gizmo : IDisposable
                 48);
         }
 
-        DrawCommonModeElements(batch, drawList, context, scale, common.CenterHovered, common.SurfaceDragActive);
+        DrawCommonModeElements(batch, drawList, context, scale, common.CenterHovered, common.SurfaceDragActive, options);
 
         if (interaction.CanStartRotationDrag || common.CanStartSurfaceDrag)
         {
@@ -668,6 +794,7 @@ internal sealed partial class Gizmo : IDisposable
 
         HandleGizmoDragLifecycle(context, GizmoTransformMode.Rotation);
         HandleCommonModeTail(context, common.PointerInRegion, interaction.AxisHovered, common.CenterHovered, common.SurfaceDragActive);
+
         _drawManager.DrawLayer(context.ViewportPos, context.ViewportSize, DrawLayer.Foreground, ImGui.GetStyle().Alpha);
     }
 
@@ -677,19 +804,25 @@ internal sealed partial class Gizmo : IDisposable
         in GizmoContext context,
         float scale,
         bool centerHovered,
-        bool surfaceDragActive)
+        bool surfaceDragActive,
+        in GizmoDrawOptions options)
     {
         DrawCircularCenterHandle(batch, context.ScreenPos, scale, centerHovered, surfaceDragActive, SurfaceAlignToNormal);
-        DrawGizmoLabel(drawList, context, scale);
+        if (!centerHovered)
+        {
+            DrawGizmoLabel(drawList, context, scale, options);
+        }
+
         if (centerHovered)
         {
-            ImGui.SetTooltip(GizmoConstants.SurfaceDragTooltip);
+            IntonerTooltip.DrawText(GizmoConstants.SurfaceDragTooltip);
         }
     }
 
     private bool TryStartSurfaceDragIfRequested(in GizmoContext context, bool canStartSurfaceDrag)
     {
-        if (!canStartSurfaceDrag || !ImGui.IsMouseClicked(ImGuiMouseButton.Left))
+        if (!canStartSurfaceDrag
+            || !ImGui.IsMouseClicked(ImGuiMouseButton.Left))
         {
             return false;
         }
@@ -710,24 +843,24 @@ internal sealed partial class Gizmo : IDisposable
         HandleGizmoRadialInput(pointerInRegion || hasHoveredModeTarget || centerHovered || surfaceDragActive);
     }
 
-    private bool IsGizmoWheelOpen()
+    private static bool IsGizmoWheelOpen()
         => ImGui.IsPopupOpen(GizmoConstants.WheelPopupId);
 
-    private bool IsGizmoDragActive(Guid objectId, GizmoTransformMode mode)
+    private bool IsGizmoDragActive(Guid itemId, GizmoTransformMode mode)
         => mode switch
         {
-            GizmoTransformMode.Translation => TranslationDragState.Matches(objectId, mode),
-            GizmoTransformMode.Rotation => RotationDragState.Matches(objectId, mode),
-            GizmoTransformMode.Scale => ScaleDragState.Matches(objectId, mode),
+            GizmoTransformMode.Translation => TranslationDragState.Matches(itemId, mode),
+            GizmoTransformMode.Rotation => RotationDragState.Matches(itemId, mode),
+            GizmoTransformMode.Scale => ScaleDragState.Matches(itemId, mode),
             _ => false,
         };
 
     private bool TryGetMatchingTransformDragState(
-        Guid objectId,
+        Guid itemId,
         GizmoTransformMode mode,
         [NotNullWhen(true)] out GizmoTransformDragSession? dragState)
     {
-        if (TryGetActiveTransformDragState(out dragState) && dragState.Matches(objectId, mode))
+        if (TryGetActiveTransformDragState(out dragState) && dragState.Matches(itemId, mode))
         {
             return true;
         }
@@ -736,9 +869,9 @@ internal sealed partial class Gizmo : IDisposable
         return false;
     }
 
-    private bool IsGizmoSurfaceDragActive(Guid objectId)
+    private bool IsGizmoSurfaceDragActive(Guid itemId)
         => SurfaceDragState.IsDragging
-           && SurfaceDragState.ObjectId == objectId;
+           && SurfaceDragState.ItemId == itemId;
 
     private static bool ResolveTransformSnapActive(bool alwaysEnabled)
         => alwaysEnabled
@@ -766,7 +899,7 @@ internal sealed partial class Gizmo : IDisposable
     private GizmoTransformSnapPolicy ResolveSurfaceDragSnapPolicy(Vector3 referencePosition)
         => CreateTransformSnapPolicy(referencePosition, ResolveSurfaceDragSnapBasis());
 
-    private GizmoTransformSnapPolicy CreateTransformSnapPolicy(Vector3 referencePosition, in ObjectSnapBasis positionBasis)
+    private GizmoTransformSnapPolicy CreateTransformSnapPolicy(Vector3 referencePosition, in SceneSnapBasis positionBasis)
     {
         var snapSettings = Settings.TransformSnapSettings;
         var positionEnabled = snapSettings.PositionDragEnabled && ResolveTransformSnapActive(snapSettings.PositionEnabled);
@@ -784,33 +917,37 @@ internal sealed partial class Gizmo : IDisposable
             BoundsEnabled = !Settings.BoundsInteractionSettings.BoundsEnabled,
         };
 
-    private static ObjectSnapBasis WorldTransformSnapBasis
+    private static SceneSnapBasis WorldTransformSnapBasis
         => GizmoSnapBasisUtility.World;
 
-    private static ObjectSnapBasis CreateLocalTransformSnapBasis(Quaternion rotation)
+    private static SceneSnapBasis CreateLocalTransformSnapBasis(Quaternion rotation)
         => GizmoSnapBasisUtility.CreateLocal(rotation);
 
-    private static ObjectSnapBasis ResolvePreviewPositionSnapBasis(in GizmoContext context)
+    private static SceneSnapBasis ResolvePreviewPositionSnapBasis(in GizmoContext context)
         => context.UseWorldSpace
             ? WorldTransformSnapBasis
             : CreateLocalTransformSnapBasis(context.Rotation);
 
-    private ObjectSnapBasis ResolveTranslationDragSnapBasis()
+    private SceneSnapBasis ResolveTranslationDragSnapBasis()
         => TranslationDragState.UseWorldSpace
             ? WorldTransformSnapBasis
             : CreateLocalTransformSnapBasis(TranslationDragState.StartRotationQuaternion);
 
-    private ObjectSnapBasis ResolveCurrentSurfaceDragSnapBasis()
+    private SceneSnapBasis ResolveCurrentSurfaceDragSnapBasis()
         => CurrentBoundsOverlaySpace == BoundsOverlaySpace.World
             ? WorldTransformSnapBasis
-            : CreateLocalTransformSnapBasis(ObjectTransformMath.CreateRotationQuaternion(SurfaceDragState.LastResolvedRotationDegrees));
+            : CreateLocalTransformSnapBasis(SceneTransformMath.CreateRotationQuaternion(SurfaceDragState.LastResolvedRotationDegrees));
 
-    private ObjectSnapBasis ResolveSurfaceDragSnapBasis()
-        => !SurfaceDragState.IsDragging
-            ? CurrentBoundsOverlaySpace == BoundsOverlaySpace.World
-                ? WorldTransformSnapBasis
-                : CreateLocalTransformSnapBasis(SurfaceDragState.StartRotationQuaternion)
-            : ResolveCurrentSurfaceDragSnapBasis();
+    private SceneSnapBasis ResolveSurfaceDragSnapBasis()
+    {
+        if (SurfaceDragState.IsDragging)
+        {
+            return ResolveCurrentSurfaceDragSnapBasis();
+        }
+
+        return CurrentBoundsOverlaySpace == BoundsOverlaySpace.World
+            ? WorldTransformSnapBasis
+            : CreateLocalTransformSnapBasis(SurfaceDragState.StartRotationQuaternion);
+    }
 
 }
-

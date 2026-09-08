@@ -52,10 +52,10 @@ internal static class VfxTimelineReferenceInfoExtensions
 
     public static IReadOnlyList<string> BuildSearchTerms(this VfxTimelineReferenceInfo referenceInfo)
     {
-        HashSet<string> searchTerms = ObjectSearchTermUtility.CreateSet("timeline referenced", "timeline vfx");
+        HashSet<string> searchTerms = SearchTermUtility.CreateSet("timeline referenced", "timeline vfx");
         AppendEvidenceTerms(searchTerms, referenceInfo.NormalizedEvidence);
         AppendContextTerms(searchTerms, referenceInfo.Context);
-        return ObjectSearchTermUtility.BuildStableTerms(searchTerms);
+        return SearchTermUtility.BuildStableTerms(searchTerms);
     }
 
     private static void AppendEvidenceTerms(HashSet<string> searchTerms, RuntimeVfxEvidence evidence)
@@ -64,7 +64,7 @@ internal static class VfxTimelineReferenceInfoExtensions
         {
             if (evidence.HasAny(rule.Evidence))
             {
-                _ = ObjectSearchTermUtility.AddTerms(searchTerms, rule.Terms);
+                _ = SearchTermUtility.AddTerms(searchTerms, rule.Terms);
             }
         }
     }
@@ -75,7 +75,7 @@ internal static class VfxTimelineReferenceInfoExtensions
         {
             if (context.HasAny(rule.Context))
             {
-                _ = ObjectSearchTermUtility.AddTerms(searchTerms, rule.Terms);
+                _ = SearchTermUtility.AddTerms(searchTerms, rule.Terms);
             }
         }
     }

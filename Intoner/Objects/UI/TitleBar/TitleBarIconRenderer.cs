@@ -117,7 +117,7 @@ internal sealed record TitleBarIconOptions(string Label, string EmbeddedResource
     public float IconGap { get; init; } = 5f;
     public float ReserveGap { get; init; } = 8f;
     public float VerticalReserve { get; init; } = 2f;
-    public Vector4 TextColor { get; init; } = EditorColors.Color(1f, 1f, 1f, 0.96f);
+    public Vector4 TextColor { get; init; } = ThemeColors.Color(1f, 1f, 1f, 0.96f);
 
     public static TitleBarIconOptions Embedded(string label, string resourceName)
         => new(label, resourceName);

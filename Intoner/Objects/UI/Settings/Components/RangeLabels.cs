@@ -10,8 +10,8 @@ internal static class RangeLabels
     {
         Vector2 min = ImGui.GetCursorScreenPos();
         Vector4 color = enabled
-            ? EditorColors.TextDisabled with { W = 0.74f }
-            : EditorColors.TextDisabled with { W = 0.42f };
+            ? ThemeColors.TextDisabled with { W = 0.74f }
+            : ThemeColors.TextDisabled with { W = 0.42f };
         Vector2 minimumTextSize = ImGui.CalcTextSize(minimumText);
         Vector2 maximumTextSize = ImGui.CalcTextSize(maximumText);
         ImDrawListPtr drawList = ImGui.GetWindowDrawList();

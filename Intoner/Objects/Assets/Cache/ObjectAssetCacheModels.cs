@@ -1,5 +1,4 @@
 using System.Diagnostics.CodeAnalysis;
-using System.Numerics;
 
 namespace Intoner.Objects.Assets.Cache;
 
@@ -47,9 +46,6 @@ internal static class ObjectAssetCacheSectionSetExtensions
             ? descriptor.SectionSet
             : ObjectAssetCacheSectionSet.None;
 
-    public static int CountSections(this ObjectAssetCacheSectionSet sections)
-        => BitOperations.PopCount((uint)(sections & ObjectAssetCacheSectionSet.All));
-
     public static IEnumerable<ObjectAssetCacheSectionDescriptor> EnumerateDescriptors(this ObjectAssetCacheSectionSet sections)
     {
         foreach (ObjectAssetCacheSectionDescriptor descriptor in SectionDescriptors)
@@ -72,7 +68,7 @@ internal static class ObjectAssetCacheSectionSetExtensions
             return true;
         }
 
-        kind = 0;
+        kind = ObjectAssetCacheSectionKind.Unknown;
         return false;
     }
 
@@ -86,6 +82,20 @@ internal static class ObjectAssetCacheSectionSetExtensions
         [NotNullWhen(true)] out IReadOnlyDictionary<ObjectAssetCacheSectionKind, ObjectAssetCacheManifestSection>? sectionMap,
         [NotNullWhen(false)] out string? error)
     {
+        if (manifest.PayloadLength < 0 || manifest.Sections is null)
+        {
+            error = "invalid cache payload metadata";
+            sectionMap = null;
+            return false;
+        }
+
+        if ((manifest.Sections.Count == 0) != (manifest.PayloadLength == 0))
+        {
+            error = "cache sections do not match the payload length";
+            sectionMap = null;
+            return false;
+        }
+
         Dictionary<ObjectAssetCacheSectionKind, ObjectAssetCacheManifestSection> map = [];
         foreach (ObjectAssetCacheManifestSection section in manifest.Sections)
         {
@@ -103,12 +113,45 @@ internal static class ObjectAssetCacheSectionSetExtensions
                 return false;
             }
 
+            long sectionEnd = section.Offset + section.Length;
+            if (section.Count < 0
+             || section.Offset < 0
+             || section.Length <= 0
+             || sectionEnd < section.Offset
+             || sectionEnd > manifest.PayloadLength
+             || !IsSha256Hash(section.Hash))
+            {
+                error = $"invalid payload metadata for cache section '{section.Kind}'";
+                sectionMap = null;
+                return false;
+            }
+
             if (!map.TryAdd(kind, section))
             {
                 error = $"duplicate cache section kind '{section.Kind}'";
                 sectionMap = null;
                 return false;
             }
+        }
+
+        long previousEnd = 0;
+        foreach (ObjectAssetCacheManifestSection section in map.Values.OrderBy(static section => section.Offset))
+        {
+            if (section.Offset != previousEnd)
+            {
+                error = $"non-contiguous payload range for cache section '{section.Kind}'";
+                sectionMap = null;
+                return false;
+            }
+
+            previousEnd = section.Offset + section.Length;
+        }
+
+        if (previousEnd != manifest.PayloadLength)
+        {
+            error = "cache section ranges do not cover the payload";
+            sectionMap = null;
+            return false;
         }
 
         error = null;
@@ -138,8 +181,7 @@ internal static class ObjectAssetCacheSectionSetExtensions
         ObjectAssetCacheSectionSet reusableSections = ObjectAssetCacheSectionSet.None;
         foreach (ObjectAssetCacheSectionDescriptor descriptor in requestedSections.EnumerateDescriptors())
         {
-            if (!sectionMap.TryGetValue(descriptor.Kind, out ObjectAssetCacheManifestSection? section)
-             || !section.HasReusablePayload())
+            if (!sectionMap.ContainsKey(descriptor.Kind))
             {
                 continue;
             }
@@ -149,9 +191,8 @@ internal static class ObjectAssetCacheSectionSetExtensions
 
         return reusableSections;
     }
-
-    private static bool HasReusablePayload(this ObjectAssetCacheManifestSection section)
-        => section.Length > 0 && !string.IsNullOrWhiteSpace(section.Hash);
+    private static bool IsSha256Hash(string? hash)
+        => hash is { Length: 64 } && hash.All(Uri.IsHexDigit);
 }
 
 internal readonly record struct ObjectAssetCacheSectionDescriptor(
@@ -240,7 +281,6 @@ internal sealed record ObjectAssetCacheManifest(
     string? SqpackIndexFingerprint,
     DateTime CreatedUtc,
     long PayloadLength,
-    string PayloadHash,
     IReadOnlyList<ObjectAssetCacheManifestSection> Sections);
 
 internal sealed record ObjectAssetCacheManifestSection(
@@ -252,6 +292,7 @@ internal sealed record ObjectAssetCacheManifestSection(
 
 internal enum ObjectAssetCacheSectionKind : byte
 {
+    Unknown                = 0,
     StaticCollisionPaths   = 1,
     StaticBgObjects        = 2,
     StaticResolvedVfx      = 3,

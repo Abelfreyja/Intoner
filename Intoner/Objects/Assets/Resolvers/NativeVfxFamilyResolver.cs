@@ -500,7 +500,7 @@ internal sealed class NativeVfxFamilyResolver
         => $"vfx/lovm/eff/{effectId:D3}.avfx";
 
     private static IReadOnlyList<string> BuildSearchTerms(params string?[] terms)
-        => ObjectSearchTermUtility.BuildStableTerms(terms);
+        => SearchTermUtility.BuildStableTerms(terms);
 
     private static IReadOnlyList<string> BuildEquipmentSearchTerms(PrimaryId equipmentId, Variant variant, byte effectId, EquipSlot slot)
         => BuildSearchTerms(

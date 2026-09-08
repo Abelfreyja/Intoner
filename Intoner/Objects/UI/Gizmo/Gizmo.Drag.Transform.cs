@@ -1,7 +1,7 @@
 using Dalamud.Bindings.ImGui;
 using Intoner.Objects.Models;
-using Intoner.Objects.Runtime;
 using Intoner.Objects.Utils;
+using Intoner.Scene;
 using System.Globalization;
 using System.Numerics;
 
@@ -12,7 +12,7 @@ internal sealed partial class Gizmo
     private static float GetGizmoDragSpeedMultiplier()
         => GizmoInputUtility.GetGizmoDragSpeedMultiplier(GizmoConstants.SlowDragMultiplier);
 
-    private bool HandleActiveGizmoDragLifecycle(
+    private static bool HandleActiveGizmoDragLifecycle(
         bool matchesCurrentTarget,
         bool captureKeyboard,
         Action updateDrag,
@@ -125,7 +125,7 @@ internal sealed partial class Gizmo
 
     private float ResolveTranslationMetricValue()
     {
-        if (!ObjectMathUtility.TryNormalize(TranslationDragState.AxisWorldDirection, out var axisWorldDirection))
+        if (!NumericsUtility.TryNormalize(TranslationDragState.AxisWorldDirection, out var axisWorldDirection))
         {
             return 0f;
         }
@@ -157,10 +157,10 @@ internal sealed partial class Gizmo
         Vector2 viewportSize,
         out Vector3 rayOrigin,
         out Vector3 rayDirection)
-        => ObjectScreenRaycaster.TryBuildScreenRay(viewportPos, viewportSize, ImGui.GetIO().MousePos, out rayOrigin, out rayDirection);
+        => SceneScreenRaycaster.TryBuildScreenRay(viewportPos, viewportSize, ImGui.GetIO().MousePos, out rayOrigin, out rayDirection);
 
     private static bool HasDragValueChanged(Vector3 nextValue, Vector3 lastValue)
-        => ObjectMathUtility.HasMeaningfulChange(nextValue, lastValue);
+        => NumericsUtility.HasMeaningfulChange(nextValue, lastValue);
 
     private static bool HasSurfaceDragTransformChanged(
         Vector3 nextPosition,
@@ -174,7 +174,7 @@ internal sealed partial class Gizmo
         GizmoTransformDragSession dragState,
         Vector3 nextValue,
         Vector3 lastValue,
-        Func<GizmoSelectionEntry, ObjectTransform> transformFactory)
+        Func<GizmoSelectionEntry, SceneTransform> transformFactory)
         => HasDragValueChanged(nextValue, lastValue)
            && TryApplyDragSelectionTransforms(dragState, transformFactory);
 
@@ -182,13 +182,13 @@ internal sealed partial class Gizmo
         GizmoTransformDragSession dragState,
         Vector3 nextValue,
         Vector3 lastValue,
-        ObjectTransform transform)
+        SceneTransform transform)
         => HasDragValueChanged(nextValue, lastValue)
            && TryApplyDragTransform(dragState, transform);
 
-    private bool TryApplyDragTransform(GizmoTransformDragSession dragState, ObjectTransform transform)
+    private bool TryApplyDragTransform(GizmoTransformDragSession dragState, SceneTransform transform)
     {
-        if (!_mutationService.TryUpdate(dragState.StartSnapshot with { Transform = transform }, out var appliedSnapshot))
+        if (!_sceneItemService.Update(dragState.StartSnapshot with { Transform = transform }, out var appliedSnapshot).IsApplied())
         {
             return false;
         }
@@ -199,17 +199,17 @@ internal sealed partial class Gizmo
 
     private bool TryApplyDragSelectionTransforms(
         GizmoTransformDragSession dragState,
-        Func<GizmoSelectionEntry, ObjectTransform> transformFactory)
+        Func<GizmoSelectionEntry, SceneTransform> transformFactory)
     {
         var selectionEntries = dragState.SelectionEntries;
-        var snapshots = new ObjectSnapshot[selectionEntries.Length];
-        for (var index = 0; index < selectionEntries.Length; ++index)
+        var snapshots = new SceneItemSnapshot[selectionEntries.Count];
+        for (var index = 0; index < selectionEntries.Count; ++index)
         {
             var entry = selectionEntries[index];
             snapshots[index] = entry.Snapshot with { Transform = transformFactory(entry) };
         }
 
-        if (!_mutationService.TryUpdateMany(snapshots, out var appliedSnapshots))
+        if (!_sceneItemService.UpdateMany(snapshots, out var appliedSnapshots).IsApplied())
         {
             return false;
         }
@@ -219,10 +219,10 @@ internal sealed partial class Gizmo
     }
 
     private bool TryRecordGizmoHistoryAction(
-        ObjectHistoryKind kind,
+        SceneHistoryKind kind,
         string title,
-        IReadOnlyList<ObjectSnapshot> beforeSnapshots,
-        IReadOnlyList<ObjectSnapshot> afterSnapshots)
+        IReadOnlyList<SceneItemSnapshot> beforeSnapshots,
+        IReadOnlyList<SceneItemSnapshot> afterSnapshots)
     {
         var selectionIds = _host.CaptureCurrentSelectionIds();
         return _host.TryRecordCompletedHistoryAction(
@@ -255,7 +255,7 @@ internal sealed partial class Gizmo
 
     private void ResetGizmoSurfaceDrag()
     {
-        DisposeSurfaceDragInputSuppressionLease();
+        DisposeSurfaceDragKeyboardInputLease();
         State.ResetSurfaceDrag();
     }
 
@@ -277,31 +277,31 @@ internal sealed partial class Gizmo
             return;
         }
 
-        var title = beforeSnapshots.Length == 1 ? "Move Object On Surface" : "Move Objects On Surface";
-        _ = TryRecordGizmoHistoryAction(ObjectHistoryKind.Move, title, beforeSnapshots, afterSnapshots);
+        var title = beforeSnapshots.Length == 1 ? "Move Item On Surface" : "Move Items On Surface";
+        _ = TryRecordGizmoHistoryAction(SceneHistoryKind.Move, title, beforeSnapshots, afterSnapshots);
     }
 
-    private static (ObjectHistoryKind Kind, string Title) ResolveGizmoDragHistoryMetadata(GizmoTransformMode mode, int selectionCount)
+    private static (SceneHistoryKind Kind, string Title) ResolveGizmoDragHistoryMetadata(GizmoTransformMode mode, int selectionCount)
         => mode switch
         {
             GizmoTransformMode.Translation => (
-                ObjectHistoryKind.Move,
-                selectionCount == 1 ? "Move Object" : "Move Objects"),
+                SceneHistoryKind.Move,
+                selectionCount == 1 ? "Move Item" : "Move Items"),
             GizmoTransformMode.Rotation => (
-                ObjectHistoryKind.Transform,
-                selectionCount == 1 ? "Rotate Object" : "Rotate Objects"),
+                SceneHistoryKind.Transform,
+                selectionCount == 1 ? "Rotate Item" : "Rotate Items"),
             GizmoTransformMode.Scale => (
-                ObjectHistoryKind.Transform,
-                selectionCount == 1 ? "Scale Object" : "Scale Objects"),
+                SceneHistoryKind.Transform,
+                selectionCount == 1 ? "Scale Item" : "Scale Items"),
             _ => (
-                ObjectHistoryKind.Transform,
-                selectionCount == 1 ? "Transform Object" : "Transform Objects"),
+                SceneHistoryKind.Transform,
+                selectionCount == 1 ? "Transform Item" : "Transform Items"),
         };
 
-    private void DisposeSurfaceDragInputSuppressionLease()
+    private void DisposeSurfaceDragKeyboardInputLease()
     {
-        SurfaceDragInputSuppressionLease?.Dispose();
-        SurfaceDragInputSuppressionLease = null;
+        SurfaceDragKeyboardInputLease?.Dispose();
+        SurfaceDragKeyboardInputLease = null;
     }
 
     private void BeginLinearGizmoDrag(in GizmoContext context, GizmoAxis axis, GizmoAxisVisualState state, GizmoTransformMode mode)
@@ -355,7 +355,7 @@ internal sealed partial class Gizmo
                 context.CameraUp,
                 out var planeNormal)
             || !TryBuildCurrentMouseRay(context.ViewportPos, context.ViewportSize, out var rayOrigin, out var rayDirection)
-            || !ObjectRaycastMath.TryIntersectRayPlane(rayOrigin, rayDirection, context.PivotPosition, planeNormal, out var startPlanePoint))
+            || !SceneRaycastMath.TryIntersectRayPlane(rayOrigin, rayDirection, context.PivotPosition, planeNormal, out var startPlanePoint))
         {
             return;
         }
@@ -365,7 +365,7 @@ internal sealed partial class Gizmo
 
     private void UpdateTranslationGizmoDrag(GizmoTranslationDragSession dragState)
     {
-        if (!ObjectMathUtility.HasLength(dragState.AxisWorldLength))
+        if (!NumericsUtility.HasLength(dragState.AxisWorldLength))
         {
             return;
         }
@@ -395,7 +395,7 @@ internal sealed partial class Gizmo
         dragState.RecordAppliedPosition(newPosition);
     }
 
-    private bool TryResolveTranslationGizmoDragPosition(GizmoTranslationDragSession dragState, out Vector3 position)
+    private static bool TryResolveTranslationGizmoDragPosition(GizmoTranslationDragSession dragState, out Vector3 position)
     {
         position = default;
         if (!dragState.TranslationPlane.HasValue)
@@ -405,7 +405,7 @@ internal sealed partial class Gizmo
 
         var translationPlane = dragState.TranslationPlane.Value;
         if (!TryBuildCurrentMouseRay(translationPlane.ViewportPos, translationPlane.ViewportSize, out var rayOrigin, out var rayDirection)
-            || !ObjectRaycastMath.TryIntersectRayPlane(rayOrigin, rayDirection, translationPlane.PlanePoint, translationPlane.PlaneNormal, out var planePoint))
+            || !SceneRaycastMath.TryIntersectRayPlane(rayOrigin, rayDirection, translationPlane.PlanePoint, translationPlane.PlaneNormal, out var planePoint))
         {
             return false;
         }
@@ -416,16 +416,16 @@ internal sealed partial class Gizmo
         return true;
     }
 
-    private Vector3 ResolveTranslationGizmoDragPositionFromScreen(GizmoTranslationDragSession dragState)
+    private static Vector3 ResolveTranslationGizmoDragPositionFromScreen(GizmoTranslationDragSession dragState)
     {
-        if (!ObjectMathUtility.HasLength(dragState.AxisScreenLength))
+        if (!NumericsUtility.HasLength(dragState.AxisScreenLength))
         {
             return dragState.StartPosition;
         }
 
         var mouseDelta = ImGui.GetIO().MousePos - dragState.StartMouse;
         var axisPixels = Vector2.Dot(mouseDelta, dragState.AxisScreenDirection) * GetGizmoDragSpeedMultiplier();
-        if (ObjectMathUtility.IsNearlyZero(axisPixels))
+        if (NumericsUtility.IsNearlyZero(axisPixels))
         {
             return dragState.StartPosition;
         }
@@ -514,7 +514,7 @@ internal sealed partial class Gizmo
             }
 
             var radiusScale = resolvedProjection.ScreenRadius / projectedRadius;
-            if (!float.IsFinite(radiusScale) || radiusScale <= 0f || ObjectMathUtility.IsNearlyEqual(radiusScale, 1f, 0.01f))
+            if (!float.IsFinite(radiusScale) || radiusScale <= 0f || NumericsUtility.IsNearlyEqual(radiusScale, 1f, 0.01f))
             {
                 break;
             }
@@ -579,13 +579,13 @@ internal sealed partial class Gizmo
         var snappedDegrees = snapPolicy.SnapRotationDegrees(radiansDelta * (180f / MathF.PI));
         radiansDelta = snappedDegrees * (MathF.PI / 180f);
 
-        var startRotationQuaternion = ObjectTransformMath.NormalizeQuaternion(dragState.StartRotationQuaternion);
-        var localDeltaQuaternion = ObjectTransformMath.NormalizeQuaternion(Quaternion.CreateFromAxisAngle(GizmoAxisUtility.ToUnitVector(dragState.ActiveAxis), radiansDelta));
+        var startRotationQuaternion = SceneTransformMath.NormalizeQuaternion(dragState.StartRotationQuaternion);
+        var localDeltaQuaternion = SceneTransformMath.NormalizeQuaternion(Quaternion.CreateFromAxisAngle(GizmoAxisUtility.ToUnitVector(dragState.ActiveAxis), radiansDelta));
         var groupDeltaQuaternion = dragState.UseWorldSpace
             ? localDeltaQuaternion
             : ResolveLocalRotationDeltaQuaternion(dragState.ActiveAxis, startRotationQuaternion, radiansDelta);
 
-        if (ObjectMathUtility.IsNearlyZero(radiansDelta - dragState.RotationDragAppliedRadians)
+        if (NumericsUtility.IsNearlyZero(radiansDelta - dragState.RotationDragAppliedRadians)
             || !TryApplyDragSelectionTransforms(dragState, entry =>
                 GizmoSelectionTransformUtility.ApplyRigidRotation(
                     entry,
@@ -602,12 +602,12 @@ internal sealed partial class Gizmo
     private static Quaternion ResolveLocalRotationDeltaQuaternion(GizmoAxis axis, Quaternion startRotationQuaternion, float radiansDelta)
     {
         Vector3 worldAxis = Vector3.Transform(GizmoAxisUtility.ToUnitVector(axis), startRotationQuaternion);
-        return ObjectMathUtility.TryNormalize(worldAxis, out worldAxis)
-            ? ObjectTransformMath.NormalizeQuaternion(Quaternion.CreateFromAxisAngle(worldAxis, radiansDelta))
+        return NumericsUtility.TryNormalize(worldAxis, out worldAxis)
+            ? SceneTransformMath.NormalizeQuaternion(Quaternion.CreateFromAxisAngle(worldAxis, radiansDelta))
             : Quaternion.Identity;
     }
 
-    private bool TryResolveRotationDragDeltaRadians(GizmoRotationDragSession dragState, out float radiansDelta)
+    private static bool TryResolveRotationDragDeltaRadians(GizmoRotationDragSession dragState, out float radiansDelta)
     {
         radiansDelta = 0f;
         if (!dragState.RotationProjection.HasValue
@@ -627,7 +627,7 @@ internal sealed partial class Gizmo
         return true;
     }
 
-    private bool TryResolveRotationRingDeltaRadians(GizmoRotationDragSession dragState, out float radiansDelta)
+    private static bool TryResolveRotationRingDeltaRadians(GizmoRotationDragSession dragState, out float radiansDelta)
     {
         radiansDelta = 0f;
 
@@ -682,7 +682,7 @@ internal sealed partial class Gizmo
         out int sign)
     {
         sign = 0;
-        if (!ObjectMathUtility.HasLength(mouseDelta))
+        if (!NumericsUtility.HasLength(mouseDelta))
         {
             return false;
         }
@@ -692,13 +692,13 @@ internal sealed partial class Gizmo
         var startPoint = GizmoRotationMath.ProjectAxisPoint(rotationProjection, axisDirection, referenceAngle);
         var nextPoint = GizmoRotationMath.ProjectAxisPoint(rotationProjection, axisDirection, referenceAngle + tangentStep);
         var tangent = nextPoint - startPoint;
-        if (!ObjectMathUtility.TryNormalize(tangent, out var normalizedTangent))
+        if (!NumericsUtility.TryNormalize(tangent, out var normalizedTangent))
         {
             return false;
         }
 
         var tangentStepDelta = Vector2.Dot(mouseDelta, normalizedTangent);
-        if (ObjectMathUtility.IsNearlyZero(tangentStepDelta))
+        if (NumericsUtility.IsNearlyZero(tangentStepDelta))
         {
             return false;
         }
@@ -709,7 +709,7 @@ internal sealed partial class Gizmo
 
     private void UpdateScaleGizmoDrag(GizmoScaleDragSession dragState)
     {
-        if (!ObjectMathUtility.HasLength(dragState.AxisScreenLength))
+        if (!NumericsUtility.HasLength(dragState.AxisScreenLength))
         {
             return;
         }
@@ -725,7 +725,7 @@ internal sealed partial class Gizmo
         axisPixels *= GetGizmoDragSpeedMultiplier();
 
         var scaleDelta = axisPixels * GizmoConstants.ScaleUnitsPerPixel;
-        if (ObjectMathUtility.IsNearlyZero(scaleDelta))
+        if (NumericsUtility.IsNearlyZero(scaleDelta))
         {
             return;
         }

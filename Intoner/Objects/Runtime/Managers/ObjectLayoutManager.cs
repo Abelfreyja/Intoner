@@ -1,7 +1,9 @@
-using Intoner.Objects.Filesystem.Configuration;
 using Intoner.Objects.Filesystem.Layouts;
 using Intoner.Objects.Models;
 using Intoner.Objects.Utils;
+using Intoner.Scene;
+using Intoner.Services.Configuration;
+using Microsoft.Extensions.Logging;
 
 namespace Intoner.Objects.Runtime;
 
@@ -10,11 +12,6 @@ namespace Intoner.Objects.Runtime;
 /// </summary>
 internal interface IObjectLayoutManager
 {
-    /// <summary>
-    /// Raised when saved layout files are reloaded from disk.
-    /// </summary>
-    event Action SavedLayoutsReloaded;
-
     /// <summary>
     /// Gets all saved local layouts.
     /// </summary>
@@ -75,8 +72,9 @@ internal interface IObjectLayoutManager
     /// Creates a new empty saved layout.
     /// </summary>
     /// <param name="name">The requested layout name.</param>
-    /// <returns>The created layout snapshot.</returns>
-    ObjectLayoutSnapshot CreateLayout(string name);
+    /// <param name="layout">The created layout snapshot when storage succeeds.</param>
+    /// <returns>true when the layout was stored and added.</returns>
+    bool TryCreateLayout(string name, out ObjectLayoutSnapshot layout);
 
     /// <summary>
     /// Creates a new saved layout with initial object and folder contents.
@@ -85,8 +83,14 @@ internal interface IObjectLayoutManager
     /// <param name="objects">the initial layout objects.</param>
     /// <param name="folders">the initial folders.</param>
     /// <param name="folderColors">the initial folder color map.</param>
-    /// <returns>the created layout snapshot.</returns>
-    ObjectLayoutSnapshot CreateLayout(string name, IReadOnlyList<ObjectSnapshot> objects, IReadOnlyList<string> folders, IReadOnlyDictionary<string, string> folderColors);
+    /// <param name="layout">the created layout snapshot when storage succeeds.</param>
+    /// <returns>true when the layout was stored and added.</returns>
+    bool TryCreateLayout(
+        string name,
+        IReadOnlyList<ObjectSnapshot> objects,
+        IReadOnlyList<string> folders,
+        IReadOnlyDictionary<string, string> folderColors,
+        out ObjectLayoutSnapshot layout);
 
     /// <summary>
     /// Renames one saved layout.
@@ -103,6 +107,27 @@ internal interface IObjectLayoutManager
     /// <param name="objects">The replacement object list.</param>
     /// <returns>true when the layout exists and was updated.</returns>
     bool TryReplaceLayoutObjects(Guid id, IReadOnlyList<ObjectSnapshot> objects);
+
+    /// <summary>
+    /// Replaces objects and folder organization for one saved layout in one write.
+    /// </summary>
+    /// <param name="id">The saved layout id.</param>
+    /// <param name="objects">The replacement object list.</param>
+    /// <param name="folders">The replacement explicit folder list.</param>
+    /// <param name="folderColors">The replacement folder color map.</param>
+    /// <returns>true when the layout exists and was updated.</returns>
+    bool TryReplaceLayoutContent(
+        Guid id,
+        IReadOnlyList<ObjectSnapshot> objects,
+        IReadOnlyList<string> folders,
+        IReadOnlyDictionary<string, string> folderColors);
+
+    /// <summary>
+    /// Restores one saved layout snapshot without changing its metadata.
+    /// </summary>
+    /// <param name="layout">The exact layout snapshot to restore.</param>
+    /// <returns>true when the layout exists and was restored.</returns>
+    bool TryRestoreLayout(ObjectLayoutSnapshot layout);
 
     /// <summary>
     /// Replaces the explicit folders for one saved layout.
@@ -129,6 +154,14 @@ internal interface IObjectLayoutManager
     /// <returns>true when the layout exists and was updated.</returns>
     bool TryReplaceLayoutFolderState(Guid id, IReadOnlyList<string> folders, IReadOnlyDictionary<string, string> folderColors);
 
+    /// <summary> advances revisions for saved layouts that reference any supplied object collection </summary>
+    /// <param name="collectionIds">the changed collection ids</param>
+    /// <param name="defaultLayoutAffected">true when the current default layout references a changed collection</param>
+    /// <returns>the durable update status</returns>
+    PersistentMutationStatus AdvanceCollectionDependencyRevisions(
+        IReadOnlySet<string> collectionIds,
+        out bool defaultLayoutAffected);
+
     /// <summary>
     /// Sets the default local layout.
     /// </summary>
@@ -136,85 +169,24 @@ internal interface IObjectLayoutManager
     /// <returns>true when the layout selection was valid.</returns>
     bool TrySetDefaultLayout(Guid? id);
 
-    /// <summary>
-    /// Replaces one temporary source layout with a full snapshot.
-    /// </summary>
-    /// <param name="sourceKey">The temporary source key.</param>
-    /// <param name="sessionId">The source session id.</param>
-    /// <param name="name">The temporary layout name.</param>
-    /// <param name="objects">The replacement temporary objects.</param>
-    /// <param name="revision">The source revision for this write.</param>
-    /// <returns>The result of the temporary layout mutation.</returns>
-    ObjectTemporaryMutationResult TryApplyTemporaryLayout(string sourceKey, Guid sessionId, string name, IReadOnlyList<ObjectSnapshot> objects, long revision);
-
-    /// <summary>
-    /// Applies a batched temporary change set for one source.
-    /// </summary>
-    /// <param name="sourceKey">The temporary source key.</param>
-    /// <param name="sessionId">The source session id.</param>
-    /// <param name="name">The temporary layout name.</param>
-    /// <param name="changes">The ordered changes to apply.</param>
-    /// <param name="revision">The source revision for this write.</param>
-    /// <returns>The result of the temporary mutation batch.</returns>
-    ObjectTemporaryMutationResult TryApplyTemporaryChanges(string sourceKey, Guid sessionId, string name, IReadOnlyList<ObjectTemporaryChange> changes, long revision);
-
-    /// <summary>
-    /// Creates or updates one temporary object for a source.
-    /// </summary>
-    /// <param name="sourceKey">The temporary source key.</param>
-    /// <param name="sessionId">The source session id.</param>
-    /// <param name="name">The temporary layout name.</param>
-    /// <param name="snapshot">The incoming temporary object snapshot.</param>
-    /// <param name="revision">The source revision for this write.</param>
-    /// <param name="appliedSnapshot">The remapped temporary snapshot that was stored.</param>
-    /// <returns>The result of the temporary object mutation.</returns>
-    ObjectTemporaryMutationResult TryUpsertTemporaryObject(string sourceKey, Guid sessionId, string name, ObjectSnapshot snapshot, long revision, out ObjectSnapshot appliedSnapshot);
-
-    /// <summary>
-    /// Applies a partial update to one temporary object.
-    /// </summary>
-    /// <param name="sourceKey">The temporary source key.</param>
-    /// <param name="sessionId">The source session id.</param>
-    /// <param name="name">The temporary layout name.</param>
-    /// <param name="objectId">The source object id.</param>
-    /// <param name="patch">The partial object patch to apply.</param>
-    /// <param name="revision">The source revision for this write.</param>
-    /// <param name="appliedSnapshot">The remapped temporary snapshot after patching.</param>
-    /// <returns>The result of the temporary object mutation.</returns>
-    ObjectTemporaryMutationResult TryPatchTemporaryObject(string sourceKey, Guid sessionId, string name, Guid objectId, ObjectSnapshotPatch patch, long revision, out ObjectSnapshot appliedSnapshot);
-
-    /// <summary>
-    /// Removes one temporary object from a source layout.
-    /// </summary>
-    /// <param name="sourceKey">The temporary source key.</param>
-    /// <param name="sessionId">The source session id.</param>
-    /// <param name="objectId">The source object id.</param>
-    /// <param name="revision">The source revision for this write.</param>
-    /// <param name="mappedObjectId">The remapped local temporary object id when the object existed.</param>
-    /// <returns>The result of the temporary object removal.</returns>
-    ObjectTemporaryMutationResult TryRemoveTemporaryObject(string sourceKey, Guid sessionId, Guid objectId, long revision, out Guid mappedObjectId);
-
-    /// <summary>
-    /// Removes one temporary source layout entirely.
-    /// </summary>
-    /// <param name="sourceKey">The temporary source key.</param>
-    /// <param name="sessionId">The source session id.</param>
-    /// <param name="revision">The source revision for this write.</param>
-    /// <returns>The result of the temporary layout removal.</returns>
-    ObjectTemporaryMutationResult TryRemoveTemporaryLayout(string sourceKey, Guid sessionId, long revision);
+    /// <summary>applies a complete saved layout set loaded from disk</summary>
+    /// <param name="layouts">the complete validated saved layout set</param>
+    /// <returns>the reload result, including whether active scene content changed</returns>
+    ObjectLayoutReloadResult ApplySavedLayoutReload(IReadOnlyList<ObjectLayoutSnapshot> layouts);
 
     /// <summary>
     /// Deletes one saved layout.
     /// </summary>
     /// <param name="id">The layout id.</param>
-    /// <returns>true when the layout existed and was deleted.</returns>
-    bool TryDeleteLayout(Guid id);
+    /// <returns>The deletion status.</returns>
+    PersistentMutationStatus DeleteLayout(Guid id);
 
     /// <summary>
     /// Clears object contents and folder metadata from saved layouts.
     /// </summary>
     /// <param name="persistChanges">true when saved layout files should be rewritten with empty contents.</param>
-    void ClearAllLayoutObjects(bool persistChanges);
+    /// <returns>The clear status.</returns>
+    PersistentMutationStatus ClearAllLayoutObjects(bool persistChanges);
 
     /// <summary>
     /// Checks whether any saved layout objects exist.
@@ -229,47 +201,64 @@ internal interface IObjectLayoutManager
     bool HasAnyLoadedLayouts();
 }
 
-internal sealed class ObjectLayoutManager : IObjectLayoutManager, IDisposable
+/// <summary> describes whether a saved layout reload was applied and whether configuration remained synchronized </summary>
+internal enum ObjectLayoutReloadStatus
 {
-    private readonly record struct TemporaryWriteContext(
-        string SourceKey,
-        ObjectTemporaryLayoutSnapshot? ExistingLayout,
-        ObjectTemporarySourceState CurrentState,
-        bool ResetSource);
+    Applied,
+    IdentityConflict,
+    ConfigurationWriteFailed,
+}
 
-    private readonly Lock _stateLock = new();
+/// <summary> reports the committed saved layout reload state </summary>
+internal readonly record struct ObjectLayoutReloadResult(
+    ObjectLayoutReloadStatus Status,
+    bool ActiveLayoutChanged,
+    Guid ConflictingId = default)
+{
+    public bool IsApplied
+        => Status is ObjectLayoutReloadStatus.Applied or ObjectLayoutReloadStatus.ConfigurationWriteFailed;
+}
+
+internal sealed class ObjectLayoutManager : IObjectLayoutManager
+{
+    private readonly Lock _stateLock;
     private readonly IObjectLayoutStore _layoutStore;
-    private readonly IObjectConfigurationService _configurationService;
+    private readonly IIntonerConfigurationService _configurationService;
+    private readonly ITemporarySourceStore _temporarySourceStore;
+    private readonly IObjectRevisionTracker _revisionTracker;
     private readonly Dictionary<Guid, ObjectLayoutSnapshot> _layouts = [];
-    private readonly Dictionary<string, ObjectTemporaryLayoutSnapshot> _temporaryLayouts = [];
-    private readonly Dictionary<string, ObjectTemporarySourceState> _temporarySourceStates = [];
     private readonly List<Guid> _layoutOrder = [];
-    private readonly List<string> _temporaryLayoutOrder = [];
 
     private Guid? _defaultLayoutId;
     private int _layoutCounter;
-    private Action? _savedLayoutsReloaded;
-    private bool _disposed;
 
     public ObjectLayoutManager(
+        ILogger<ObjectLayoutManager> logger,
+        ObjectStateLock stateLock,
         IObjectLayoutStore layoutStore,
-        IObjectConfigurationService configurationService)
+        IIntonerConfigurationService configurationService,
+        ITemporarySourceStore temporarySourceStore,
+        IObjectRevisionTracker revisionTracker)
     {
+        _stateLock = stateLock.Value;
         _layoutStore = layoutStore;
         _configurationService = configurationService;
+        _temporarySourceStore = temporarySourceStore;
+        _revisionTracker = revisionTracker;
 
-        if (ReplaceSavedLayouts(_layoutStore.LoadLayouts(), _configurationService.Current.Layouts.DefaultLayoutId))
+        IReadOnlyList<ObjectLayoutSnapshot> loadedLayouts = _layoutStore.LoadLayouts();
+        if (!TryValidateLayoutSet(loadedLayouts, out Guid conflictingId))
         {
-            _configurationService.Update(static configuration => configuration.Layouts.DefaultLayoutId = null);
+            logger.LogWarning(
+                "saved layouts contain conflicting object id {ObjectId}; starting without saved layouts",
+                conflictingId);
+            loadedLayouts = [];
         }
 
-        _layoutStore.LayoutFilesChanged += HandleLayoutFilesChanged;
-    }
-
-    public event Action SavedLayoutsReloaded
-    {
-        add => _savedLayoutsReloaded += value;
-        remove => _savedLayoutsReloaded -= value;
+        if (ReplaceSavedLayouts(loadedLayouts, _configurationService.Current.Layouts.DefaultLayoutId))
+        {
+            _ = _configurationService.TryUpdate(static configuration => configuration.Layouts.DefaultLayoutId = null);
+        }
     }
 
     public IReadOnlyList<ObjectLayoutSnapshot> GetLayouts()
@@ -284,65 +273,54 @@ internal sealed class ObjectLayoutManager : IObjectLayoutManager, IDisposable
     }
 
     public IReadOnlyList<ObjectTemporaryLayoutSnapshot> GetTemporaryLayouts()
-    {
-        lock (_stateLock)
-        {
-            return _temporaryLayoutOrder
-                .Select(key => _temporaryLayouts[key])
-                .ToList();
-        }
-    }
+        => _temporarySourceStore.GetSources().Select(ToTemporaryLayout).ToList();
 
     public bool TryGetTemporaryLayout(string sourceKey, out ObjectTemporaryLayoutSnapshot layout)
     {
-        var sanitizedSourceKey = ObjectTemporarySourceUtility.NormalizeSourceKey(sourceKey);
+        string sanitizedSourceKey = TemporarySourceUtility.NormalizeKey(sourceKey);
         if (string.IsNullOrEmpty(sanitizedSourceKey))
         {
             layout = null!;
             return false;
         }
 
-        lock (_stateLock)
+        if (_temporarySourceStore.TryGetSource(sanitizedSourceKey, out ObjectTemporarySourceSnapshot source))
         {
-            return _temporaryLayouts.TryGetValue(sanitizedSourceKey, out layout!);
+            layout = ToTemporaryLayout(source);
+            return true;
         }
+
+        layout = null!;
+        return false;
     }
 
     public long GetTemporarySourceRevision(string sourceKey)
     {
-        var sanitizedSourceKey = ObjectTemporarySourceUtility.NormalizeSourceKey(sourceKey);
+        string sanitizedSourceKey = TemporarySourceUtility.NormalizeKey(sourceKey);
         if (string.IsNullOrEmpty(sanitizedSourceKey))
         {
             return 0;
         }
 
-        lock (_stateLock)
-        {
-            return ResolveCurrentTemporarySourceState(
-                sanitizedSourceKey,
-                _temporaryLayouts.GetValueOrDefault(sanitizedSourceKey)).Revision;
-        }
+        return _temporarySourceStore.GetRevision(sanitizedSourceKey);
     }
 
     public bool TryGetTemporaryObjectSnapshot(string sourceKey, Guid objectId, out ObjectSnapshot snapshot)
     {
-        var sanitizedSourceKey = ObjectTemporarySourceUtility.NormalizeSourceKey(sourceKey);
+        string sanitizedSourceKey = TemporarySourceUtility.NormalizeKey(sourceKey);
         if (string.IsNullOrEmpty(sanitizedSourceKey))
         {
             snapshot = default!;
             return false;
         }
 
-        lock (_stateLock)
+        if (_temporarySourceStore.TryGetSource(sanitizedSourceKey, out ObjectTemporarySourceSnapshot source))
         {
-            if (_temporaryLayouts.TryGetValue(sanitizedSourceKey, out var layout))
+            Guid mappedObjectId = ObjectIdentityUtility.CreateTemporaryObjectId(sanitizedSourceKey, objectId);
+            if (TemporarySourceUtility.TryFindObject(source.RuntimeObjects, mappedObjectId, out ObjectSnapshot foundSnapshot))
             {
-                var mappedObjectId = ObjectIdentityUtility.CreateTemporaryObjectId(sanitizedSourceKey, objectId);
-                if (ObjectTemporaryLayoutUtility.TryFindObject(layout.Objects, mappedObjectId, out var foundSnapshot))
-                {
-                    snapshot = foundSnapshot;
-                    return true;
-                }
+                snapshot = foundSnapshot;
+                return true;
             }
         }
 
@@ -365,25 +343,23 @@ internal sealed class ObjectLayoutManager : IObjectLayoutManager, IDisposable
                     SourceKey = defaultLayout.Id.ToString("D"),
                     SourceSessionId = Guid.Empty,
                     Name = defaultLayout.Name,
-                    Revision = 0,
+                    Revision = defaultLayout.Revision,
                     UpdatedAtUtc = defaultLayout.UpdatedAtUtc,
                     Objects = defaultLayout.Objects,
                 });
             }
 
-            loadedLayouts.AddRange(_temporaryLayoutOrder
-                .Where(_temporaryLayouts.ContainsKey)
-                .Select(key => _temporaryLayouts[key])
-                .Select(layout => new ObjectLoadedLayoutSnapshot
+            loadedLayouts.AddRange(_temporarySourceStore.GetSources()
+                .Select(source => new ObjectLoadedLayoutSnapshot
                 {
                     Kind = ObjectLoadedLayoutKind.Temporary,
                     LayoutId = null,
-                    SourceKey = layout.SourceKey,
-                    SourceSessionId = layout.SourceSessionId,
-                    Name = layout.Name,
-                    Revision = layout.Revision,
-                    UpdatedAtUtc = layout.UpdatedAtUtc,
-                    Objects = layout.Objects,
+                    SourceKey = source.SourceKey,
+                    SourceSessionId = source.SessionId,
+                    Name = source.Name,
+                    Revision = source.Revision,
+                    UpdatedAtUtc = source.UpdatedAtUtc,
+                    Objects = source.RuntimeObjects,
                 }));
             return loadedLayouts;
         }
@@ -405,166 +381,205 @@ internal sealed class ObjectLayoutManager : IObjectLayoutManager, IDisposable
         }
     }
 
-    public ObjectLayoutSnapshot CreateLayout(string name)
-        => CreateLayout(name, [], [], new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
+    public bool TryCreateLayout(string name, out ObjectLayoutSnapshot layout)
+        => TryCreateLayout(name, [], [], new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase), out layout);
 
-    public ObjectLayoutSnapshot CreateLayout(
+    public bool TryCreateLayout(
         string name,
         IReadOnlyList<ObjectSnapshot> objects,
         IReadOnlyList<string> folders,
-        IReadOnlyDictionary<string, string> folderColors)
+        IReadOnlyDictionary<string, string> folderColors,
+        out ObjectLayoutSnapshot layout)
     {
-        ObjectLayoutSnapshot layout = BuildCreatedLayout(name, objects, folders, folderColors);
-        AddLayout(layout);
-        return layout;
+        lock (_stateLock)
+        {
+            layout = BuildCreatedLayout(name, objects, folders, folderColors);
+            if (!TryValidateLayoutCandidate(layout, out _))
+            {
+                layout = null!;
+                return false;
+            }
+
+            if (!_layoutStore.TrySaveLayout(layout))
+            {
+                layout = null!;
+                return false;
+            }
+
+            _layouts.Add(layout.Id, layout);
+            _layoutOrder.Add(layout.Id);
+            _revisionTracker.IncrementSavedLayouts();
+            return true;
+        }
     }
 
     public bool TryRenameLayout(Guid id, string name)
     {
-        string sanitizedName = ObjectStringUtility.TrimOrEmpty(name);
+        string sanitizedName = TextUtility.TrimOrEmpty(name);
         if (sanitizedName.Length == 0)
         {
             return false;
         }
 
-        ObjectLayoutSnapshot updatedLayout;
-        lock (_stateLock)
-        {
-            if (!_layouts.TryGetValue(id, out ObjectLayoutSnapshot? layout))
-            {
-                return false;
-            }
-
-            if (string.Equals(layout.Name, sanitizedName, StringComparison.Ordinal))
-            {
-                return true;
-            }
-
-            updatedLayout = layout with
-            {
-                Name = sanitizedName,
-                UpdatedAtUtc = DateTime.UtcNow,
-            };
-            _layouts[id] = updatedLayout;
-        }
-
-        _layoutStore.SaveLayout(updatedLayout);
-        return true;
+        return TryUpdateLayout(
+            id,
+            layout => string.Equals(layout.Name, sanitizedName, StringComparison.Ordinal)
+                ? null
+                : layout with
+                {
+                    Name = sanitizedName,
+                });
     }
 
     public bool TryReplaceLayoutObjects(Guid id, IReadOnlyList<ObjectSnapshot> objects)
-    {
-        ObjectLayoutSnapshot updatedLayout;
-        lock (_stateLock)
-        {
-            if (!_layouts.TryGetValue(id, out var layout))
-            {
-                return false;
-            }
-
-            updatedLayout = layout with
+        => TryUpdateLayout(
+            id,
+            layout => layout with
             {
                 Objects = objects
                     .Select(snapshot => snapshot with { LayoutId = id })
                     .OrderBy(static snapshot => snapshot.CreatedAtUtc)
                     .ToList(),
-                UpdatedAtUtc = DateTime.UtcNow,
-            };
-            _layouts[id] = updatedLayout;
-        }
-
-        _layoutStore.SaveLayout(updatedLayout);
-        return true;
-    }
+            });
 
     public bool TryReplaceLayoutFolderState(Guid id, IReadOnlyList<string> folders, IReadOnlyDictionary<string, string> folderColors)
-    {
-        ObjectLayoutSnapshot updatedLayout;
-        lock (_stateLock)
-        {
-            if (!_layouts.TryGetValue(id, out var layout))
+        => TryUpdateLayout(
+            id,
+            layout =>
             {
-                return false;
-            }
-
-            IReadOnlyList<string> orderedFolders = ObjectFolderUtility.OrderFolders(folders);
-            IReadOnlyDictionary<string, string> orderedFolderColors = ObjectFolderUtility.OrderFolderColorMap(folderColors, orderedFolders);
-            if (ObjectFolderUtility.FolderListsMatch(layout.Folders, orderedFolders)
-                && ObjectFolderUtility.FolderColorMapsMatch(layout.FolderColors, orderedFolderColors))
-            {
-                return true;
-            }
-
-            updatedLayout = layout with
-            {
-                Folders = orderedFolders,
-                FolderColors = orderedFolderColors,
-                UpdatedAtUtc = DateTime.UtcNow,
-            };
-            _layouts[id] = updatedLayout;
-        }
-
-        _layoutStore.SaveLayout(updatedLayout);
-        return true;
-    }
+                IReadOnlyList<string> orderedFolders = ObjectFolderUtility.OrderFolders(folders);
+                IReadOnlyDictionary<string, string> orderedFolderColors = ObjectFolderUtility.OrderFolderColorMap(folderColors, orderedFolders);
+                return ObjectFolderUtility.FolderListsMatch(layout.Folders, orderedFolders)
+                    && ObjectFolderUtility.FolderColorMapsMatch(layout.FolderColors, orderedFolderColors)
+                        ? null
+                        : layout with
+                        {
+                            Folders = orderedFolders,
+                            FolderColors = orderedFolderColors,
+                        };
+            });
 
     public bool TryReplaceLayoutFolders(Guid id, IReadOnlyList<string> folders)
-    {
-        ObjectLayoutSnapshot updatedLayout;
-        lock (_stateLock)
-        {
-            if (!_layouts.TryGetValue(id, out var layout))
+        => TryUpdateLayout(
+            id,
+            layout =>
             {
-                return false;
-            }
-
-            var orderedFolders = ObjectFolderUtility.OrderFolders(folders);
-            var orderedFolderColors = ObjectFolderUtility.OrderFolderColorMap(layout.FolderColors, orderedFolders);
-            if (ObjectFolderUtility.FolderListsMatch(layout.Folders, orderedFolders)
-                && ObjectFolderUtility.FolderColorMapsMatch(layout.FolderColors, orderedFolderColors))
-            {
-                return true;
-            }
-
-            updatedLayout = layout with
-            {
-                Folders = orderedFolders,
-                FolderColors = orderedFolderColors,
-                UpdatedAtUtc = DateTime.UtcNow,
-            };
-            _layouts[id] = updatedLayout;
-        }
-
-        _layoutStore.SaveLayout(updatedLayout);
-        return true;
-    }
+                IReadOnlyList<string> orderedFolders = ObjectFolderUtility.OrderFolders(folders);
+                IReadOnlyDictionary<string, string> orderedFolderColors = ObjectFolderUtility.OrderFolderColorMap(layout.FolderColors, orderedFolders);
+                return ObjectFolderUtility.FolderListsMatch(layout.Folders, orderedFolders)
+                    && ObjectFolderUtility.FolderColorMapsMatch(layout.FolderColors, orderedFolderColors)
+                        ? null
+                        : layout with
+                        {
+                            Folders = orderedFolders,
+                            FolderColors = orderedFolderColors,
+                        };
+            });
 
     public bool TryReplaceLayoutFolderColors(Guid id, IReadOnlyDictionary<string, string> folderColors)
+        => TryUpdateLayout(
+            id,
+            layout =>
+            {
+                IReadOnlyDictionary<string, string> orderedFolderColors = ObjectFolderUtility.OrderFolderColorMap(folderColors, layout.Folders);
+                return ObjectFolderUtility.FolderColorMapsMatch(layout.FolderColors, orderedFolderColors)
+                    ? null
+                    : layout with
+                    {
+                        FolderColors = orderedFolderColors,
+                    };
+            });
+
+    public PersistentMutationStatus AdvanceCollectionDependencyRevisions(
+        IReadOnlySet<string> collectionIds,
+        out bool defaultLayoutAffected)
     {
-        ObjectLayoutSnapshot updatedLayout;
+        ArgumentNullException.ThrowIfNull(collectionIds);
+
         lock (_stateLock)
         {
-            if (!_layouts.TryGetValue(id, out var layout))
+            HashSet<string> normalizedCollectionIds = collectionIds
+                .Select(ObjectCollectionKeyUtility.NormalizeCollectionId)
+                .Where(static collectionId => collectionId.Length > 0)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (normalizedCollectionIds.Count == 0)
+            {
+                defaultLayoutAffected = false;
+                return PersistentMutationStatus.Success;
+            }
+
+            DateTime now = DateTime.UtcNow;
+            List<ObjectLayoutSnapshot> previousLayouts = [];
+            List<ObjectLayoutSnapshot> updatedLayouts = [];
+            foreach (Guid layoutId in _layoutOrder)
+            {
+                ObjectLayoutSnapshot layout = _layouts[layoutId];
+                if (!layout.Objects.Any(snapshot => normalizedCollectionIds.Contains(
+                        ObjectCollectionKeyUtility.NormalizeCollectionId(snapshot.CollectionId))))
+                {
+                    continue;
+                }
+
+                previousLayouts.Add(layout);
+                updatedLayouts.Add(CreateUpdatedLayout(layout, layout, now));
+            }
+
+            defaultLayoutAffected = _defaultLayoutId.HasValue
+                && updatedLayouts.Any(layout => layout.Id == _defaultLayoutId.Value);
+            PersistentMutationStatus status = TrySaveLayoutBatch(previousLayouts, updatedLayouts);
+            if (status != PersistentMutationStatus.Success)
+            {
+                defaultLayoutAffected = false;
+                return status;
+            }
+
+            foreach (ObjectLayoutSnapshot layout in updatedLayouts)
+            {
+                _layouts[layout.Id] = layout;
+            }
+
+            if (updatedLayouts.Count > 0)
+            {
+                _revisionTracker.IncrementSavedLayouts();
+            }
+
+            return PersistentMutationStatus.Success;
+        }
+    }
+
+    public bool TryReplaceLayoutContent(
+        Guid id,
+        IReadOnlyList<ObjectSnapshot> objects,
+        IReadOnlyList<string> folders,
+        IReadOnlyDictionary<string, string> folderColors)
+        => TryUpdateLayout(
+            id,
+            layout =>
+            {
+                IReadOnlyList<string> orderedFolders = ObjectFolderUtility.OrderFolders(folders);
+                return layout with
+                {
+                    Objects = objects
+                        .Select(snapshot => snapshot with { LayoutId = id })
+                        .OrderBy(static snapshot => snapshot.CreatedAtUtc)
+                        .ToList(),
+                    Folders = orderedFolders,
+                    FolderColors = ObjectFolderUtility.OrderFolderColorMap(folderColors, orderedFolders),
+                };
+            });
+
+    public bool TryRestoreLayout(ObjectLayoutSnapshot layout)
+    {
+        ArgumentNullException.ThrowIfNull(layout);
+        lock (_stateLock)
+        {
+            if (!_layouts.TryGetValue(layout.Id, out ObjectLayoutSnapshot? previousLayout))
             {
                 return false;
             }
 
-            var orderedFolderColors = ObjectFolderUtility.OrderFolderColorMap(folderColors, layout.Folders);
-            if (ObjectFolderUtility.FolderColorMapsMatch(layout.FolderColors, orderedFolderColors))
-            {
-                return true;
-            }
-
-            updatedLayout = layout with
-            {
-                FolderColors = orderedFolderColors,
-                UpdatedAtUtc = DateTime.UtcNow,
-            };
-            _layouts[id] = updatedLayout;
+            return LayoutsMatch(previousLayout, layout) || TryCommitLayout(layout);
         }
-
-        _layoutStore.SaveLayout(updatedLayout);
-        return true;
     }
 
     public bool TrySetDefaultLayout(Guid? id)
@@ -576,274 +591,144 @@ internal sealed class ObjectLayoutManager : IObjectLayoutManager, IDisposable
                 return false;
             }
 
-            _defaultLayoutId = id;
-        }
-
-        _configurationService.Update(configuration => configuration.Layouts.DefaultLayoutId = id);
-        return true;
-    }
-
-    public ObjectTemporaryMutationResult TryApplyTemporaryLayout(string sourceKey, Guid sessionId, string name, IReadOnlyList<ObjectSnapshot> objects, long revision)
-    {
-        lock (_stateLock)
-        {
-            if (!TryPrepareTemporaryWrite(
-                    sourceKey,
-                    sessionId,
-                    revision,
-                    clearExistingLayoutOnNewSession: true,
-                    out var context,
-                    out var error))
-            {
-                return error;
-            }
-
-            return CommitTemporaryLayout(
-                context,
-                sessionId,
-                name,
-                ObjectTemporaryLayoutUtility.OrderObjects(objects.Select(snapshot => ObjectTemporaryLayoutUtility.RemapSnapshot(context.SourceKey, snapshot))),
-                revision);
-        }
-    }
-
-    public ObjectTemporaryMutationResult TryApplyTemporaryChanges(string sourceKey, Guid sessionId, string name, IReadOnlyList<ObjectTemporaryChange> changes, long revision)
-    {
-        lock (_stateLock)
-        {
-            if (!TryPrepareTemporaryWrite(
-                    sourceKey,
-                    sessionId,
-                    revision,
-                    clearExistingLayoutOnNewSession: true,
-                    out var context,
-                    out var error))
-            {
-                return error;
-            }
-
-            var nextObjects = ObjectTemporaryLayoutUtility.CreateObjectMap(context.ExistingLayout?.Objects);
-
-            foreach (var change in changes)
-            {
-                switch (change.Kind)
-                {
-                    case ObjectTemporaryChangeKind.Upsert when change.Snapshot is not null:
-                        var remappedSnapshot = ObjectTemporaryLayoutUtility.RemapSnapshot(context.SourceKey, change.Snapshot);
-                        nextObjects[remappedSnapshot.Id] = remappedSnapshot;
-                        break;
-                    case ObjectTemporaryChangeKind.Patch when change.Patch is not null:
-                        var mappedPatchObjectId = ObjectIdentityUtility.CreateTemporaryObjectId(context.SourceKey, change.ObjectId);
-                        if (!nextObjects.TryGetValue(mappedPatchObjectId, out var existingSnapshot))
-                        {
-                            return new ObjectTemporaryMutationResult(ObjectTemporaryMutationStatus.ObjectNotFound, context.CurrentState.Revision);
-                        }
-
-                        nextObjects[mappedPatchObjectId] = ObjectSnapshotUtility.ApplyPatch(existingSnapshot, change.Patch);
-                        break;
-                    case ObjectTemporaryChangeKind.Remove:
-                        var mappedObjectId = ObjectIdentityUtility.CreateTemporaryObjectId(context.SourceKey, change.ObjectId);
-                        if (!nextObjects.Remove(mappedObjectId) && !context.ResetSource)
-                        {
-                            return new ObjectTemporaryMutationResult(ObjectTemporaryMutationStatus.ObjectNotFound, context.CurrentState.Revision);
-                        }
-
-                        break;
-                    default:
-                        return new ObjectTemporaryMutationResult(ObjectTemporaryMutationStatus.InvalidObject, context.CurrentState.Revision);
-                }
-            }
-
-            return CommitTemporaryLayout(
-                context,
-                sessionId,
-                name,
-                ObjectTemporaryLayoutUtility.OrderObjects(nextObjects.Values),
-                revision);
-        }
-    }
-
-    public ObjectTemporaryMutationResult TryUpsertTemporaryObject(string sourceKey, Guid sessionId, string name, ObjectSnapshot snapshot, long revision, out ObjectSnapshot appliedSnapshot)
-    {
-        lock (_stateLock)
-        {
-            if (!TryPrepareTemporaryWrite(
-                    sourceKey,
-                    sessionId,
-                    revision,
-                    clearExistingLayoutOnNewSession: true,
-                    out var context,
-                    out var error))
-            {
-                appliedSnapshot = default!;
-                return error;
-            }
-
-            var remappedSnapshot = ObjectTemporaryLayoutUtility.RemapSnapshot(context.SourceKey, snapshot);
-            appliedSnapshot = remappedSnapshot;
-            return CommitTemporaryLayout(
-                context,
-                sessionId,
-                name,
-                ObjectTemporaryLayoutUtility.ReplaceObject(context.ExistingLayout?.Objects, remappedSnapshot),
-                revision);
-        }
-    }
-
-    public ObjectTemporaryMutationResult TryPatchTemporaryObject(string sourceKey, Guid sessionId, string name, Guid objectId, ObjectSnapshotPatch patch, long revision, out ObjectSnapshot appliedSnapshot)
-    {
-        lock (_stateLock)
-        {
-            if (!TryPrepareTemporaryWrite(
-                    sourceKey,
-                    sessionId,
-                    revision,
-                    clearExistingLayoutOnNewSession: true,
-                    out var context,
-                    out var error))
-            {
-                appliedSnapshot = default!;
-                return error;
-            }
-
-            var mappedObjectId = ObjectIdentityUtility.CreateTemporaryObjectId(context.SourceKey, objectId);
-            if (!ObjectTemporaryLayoutUtility.TryFindObject(context.ExistingLayout?.Objects, mappedObjectId, out var existingSnapshot))
-            {
-                appliedSnapshot = default!;
-                return new ObjectTemporaryMutationResult(ObjectTemporaryMutationStatus.ObjectNotFound, context.CurrentState.Revision);
-            }
-
-            appliedSnapshot = ObjectSnapshotUtility.ApplyPatch(existingSnapshot, patch);
-            return CommitTemporaryLayout(
-                context,
-                sessionId,
-                name,
-                ObjectTemporaryLayoutUtility.ReplaceObject(context.ExistingLayout?.Objects, appliedSnapshot),
-                revision);
-        }
-    }
-
-    public ObjectTemporaryMutationResult TryRemoveTemporaryObject(string sourceKey, Guid sessionId, Guid objectId, long revision, out Guid mappedObjectId)
-    {
-        lock (_stateLock)
-        {
-            if (!TryPrepareTemporaryWrite(
-                    sourceKey,
-                    sessionId,
-                    revision,
-                    clearExistingLayoutOnNewSession: true,
-                    out var context,
-                    out var error))
-            {
-                mappedObjectId = Guid.Empty;
-                return error;
-            }
-
-            mappedObjectId = ObjectIdentityUtility.CreateTemporaryObjectId(context.SourceKey, objectId);
-            if (!ObjectTemporaryLayoutUtility.TryFindObject(context.ExistingLayout?.Objects, mappedObjectId, out _)
-                && !context.ResetSource)
-            {
-                return new ObjectTemporaryMutationResult(ObjectTemporaryMutationStatus.ObjectNotFound, context.CurrentState.Revision);
-            }
-
-            return CommitTemporaryLayout(
-                context,
-                sessionId,
-                string.Empty,
-                ObjectTemporaryLayoutUtility.RemoveObject(context.ExistingLayout?.Objects, mappedObjectId),
-                revision);
-        }
-    }
-
-    public ObjectTemporaryMutationResult TryRemoveTemporaryLayout(string sourceKey, Guid sessionId, long revision)
-    {
-        lock (_stateLock)
-        {
-            if (!TryPrepareTemporaryWrite(
-                    sourceKey,
-                    sessionId,
-                    revision,
-                    clearExistingLayoutOnNewSession: false,
-                    out var context,
-                    out var error))
-            {
-                return error;
-            }
-
-            if (context.ExistingLayout is null && context.CurrentState.Revision == 0)
-            {
-                return new ObjectTemporaryMutationResult(ObjectTemporaryMutationStatus.ObjectNotFound, 0);
-            }
-
-            if (context.ExistingLayout is not null)
-            {
-                _temporaryLayouts.Remove(context.SourceKey);
-                _temporaryLayoutOrder.Remove(context.SourceKey);
-            }
-
-            return CommitTemporarySourceState(context, sessionId, revision);
-        }
-    }
-
-    public bool TryDeleteLayout(Guid id)
-    {
-        lock (_stateLock)
-        {
-            if (!_layouts.Remove(id))
-            {
-                return false;
-            }
-
-            _layoutOrder.Remove(id);
             if (_defaultLayoutId == id)
             {
-                _defaultLayoutId = null;
+                return true;
             }
-        }
 
-        _layoutStore.DeleteLayout(id);
-        if (_configurationService.Current.Layouts.DefaultLayoutId == id)
-        {
-            _configurationService.Update(static configuration => configuration.Layouts.DefaultLayoutId = null);
-        }
+            Guid? previousId = _defaultLayoutId;
+            _defaultLayoutId = id;
+            if (_configurationService.TryUpdate(configuration => configuration.Layouts.DefaultLayoutId = id))
+            {
+                return true;
+            }
 
-        return true;
+            _defaultLayoutId = previousId;
+            return false;
+        }
     }
 
-    public void ClearAllLayoutObjects(bool persistChanges)
+    public ObjectLayoutReloadResult ApplySavedLayoutReload(IReadOnlyList<ObjectLayoutSnapshot> layouts)
     {
-        var now = DateTime.UtcNow;
-        List<ObjectLayoutSnapshot> updatedLayouts = [];
-
+        ArgumentNullException.ThrowIfNull(layouts);
         lock (_stateLock)
         {
-            foreach (var layoutId in _layoutOrder)
+            if (!TryValidateLayoutSet(layouts, out Guid conflictingId))
             {
-                if (!_layouts.TryGetValue(layoutId, out var layout)
+                return new ObjectLayoutReloadResult(
+                    ObjectLayoutReloadStatus.IdentityConflict,
+                    ActiveLayoutChanged: false,
+                    conflictingId);
+            }
+
+            if (LayoutSetsMatch(layouts))
+            {
+                return new ObjectLayoutReloadResult(
+                    ObjectLayoutReloadStatus.Applied,
+                    ActiveLayoutChanged: false);
+            }
+
+            Guid? requestedDefaultLayoutId = _defaultLayoutId;
+            ObjectLayoutSnapshot? previousDefaultLayout = GetLayoutOrDefault(requestedDefaultLayoutId);
+            bool clearedDefaultLayout = ReplaceSavedLayouts(layouts, requestedDefaultLayoutId);
+            bool configurationStored = !clearedDefaultLayout
+                || _configurationService.TryUpdate(static configuration => configuration.Layouts.DefaultLayoutId = null);
+            ObjectLayoutSnapshot? currentDefaultLayout = GetLayoutOrDefault(_defaultLayoutId);
+            bool activeLayoutChanged = !LayoutsMatch(previousDefaultLayout, currentDefaultLayout);
+
+            _revisionTracker.IncrementSavedLayouts();
+            if (activeLayoutChanged)
+            {
+                _revisionTracker.Increment(persistentChanged: true);
+            }
+
+            return new ObjectLayoutReloadResult(
+                configurationStored
+                    ? ObjectLayoutReloadStatus.Applied
+                    : ObjectLayoutReloadStatus.ConfigurationWriteFailed,
+                activeLayoutChanged);
+        }
+    }
+
+    public PersistentMutationStatus DeleteLayout(Guid id)
+    {
+        lock (_stateLock)
+        {
+            if (!_layouts.ContainsKey(id))
+            {
+                return PersistentMutationStatus.NotFound;
+            }
+
+            bool wasDefault = _defaultLayoutId == id;
+            if (wasDefault && !TrySetDefaultLayout(null))
+            {
+                return PersistentMutationStatus.StorageFailed;
+            }
+
+            if (!_layoutStore.TryDeleteLayout(id))
+            {
+                if (wasDefault && !TrySetDefaultLayout(id))
+                {
+                    return PersistentMutationStatus.RecoveryRequired;
+                }
+
+                return PersistentMutationStatus.StorageFailed;
+            }
+
+            _layouts.Remove(id);
+            _layoutOrder.Remove(id);
+            _revisionTracker.IncrementSavedLayouts();
+            return PersistentMutationStatus.Success;
+        }
+    }
+
+    public PersistentMutationStatus ClearAllLayoutObjects(bool persistChanges)
+    {
+        lock (_stateLock)
+        {
+            DateTime now = DateTime.UtcNow;
+            List<ObjectLayoutSnapshot> previousLayouts = [];
+            List<ObjectLayoutSnapshot> updatedLayouts = [];
+            foreach (Guid layoutId in _layoutOrder)
+            {
+                if (!_layouts.TryGetValue(layoutId, out ObjectLayoutSnapshot? layout)
                     || layout.Objects.Count == 0 && layout.Folders.Count == 0 && layout.FolderColors.Count == 0)
                 {
                     continue;
                 }
 
-                _layouts[layoutId] = layout with
-                {
-                    Folders = [],
-                    FolderColors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
-                    Objects = [],
-                    UpdatedAtUtc = now,
-                };
-                updatedLayouts.Add(_layouts[layoutId]);
+                previousLayouts.Add(layout);
+                updatedLayouts.Add(CreateUpdatedLayout(
+                    layout,
+                    layout with
+                    {
+                        Folders = [],
+                        FolderColors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
+                        Objects = [],
+                    },
+                    now));
             }
-        }
 
-        if (!persistChanges)
-        {
-            return;
-        }
+            if (persistChanges)
+            {
+                PersistentMutationStatus status = TrySaveLayoutBatch(previousLayouts, updatedLayouts);
+                if (status != PersistentMutationStatus.Success)
+                {
+                    return status;
+                }
+            }
 
-        foreach (ObjectLayoutSnapshot layout in updatedLayouts)
-        {
-            _layoutStore.SaveLayout(layout);
+            foreach (ObjectLayoutSnapshot layout in updatedLayouts)
+            {
+                _layouts[layout.Id] = layout;
+            }
+
+            if (updatedLayouts.Count > 0)
+            {
+                _revisionTracker.IncrementSavedLayouts();
+            }
+
+            return PersistentMutationStatus.Success;
         }
     }
 
@@ -859,31 +744,8 @@ internal sealed class ObjectLayoutManager : IObjectLayoutManager, IDisposable
     {
         lock (_stateLock)
         {
-            return _defaultLayoutId.HasValue || _temporaryLayouts.Count > 0;
+            return _defaultLayoutId.HasValue || _temporarySourceStore.GetSources().Count > 0;
         }
-    }
-
-    public void Dispose()
-    {
-        if (_disposed)
-        {
-            return;
-        }
-
-        _disposed = true;
-        _layoutStore.LayoutFilesChanged -= HandleLayoutFilesChanged;
-    }
-
-    private void HandleLayoutFilesChanged()
-    {
-        Guid? requestedDefaultLayoutId = GetDefaultLayoutId();
-        bool clearedDefaultLayout = ReplaceSavedLayouts(_layoutStore.LoadLayouts(), requestedDefaultLayoutId);
-        if (clearedDefaultLayout)
-        {
-            _configurationService.Update(static configuration => configuration.Layouts.DefaultLayoutId = null);
-        }
-
-        _savedLayoutsReloaded?.Invoke();
     }
 
     private bool ReplaceSavedLayouts(IReadOnlyList<ObjectLayoutSnapshot> layouts, Guid? requestedDefaultLayoutId)
@@ -917,7 +779,7 @@ internal sealed class ObjectLayoutManager : IObjectLayoutManager, IDisposable
 
     private string SanitizeLayoutName(string name)
     {
-        var trimmed = ObjectStringUtility.TrimOrEmpty(name);
+        var trimmed = TextUtility.TrimOrEmpty(name);
         if (!string.IsNullOrEmpty(trimmed))
         {
             return trimmed;
@@ -928,17 +790,6 @@ internal sealed class ObjectLayoutManager : IObjectLayoutManager, IDisposable
             _layoutCounter++;
             return $"Layout {_layoutCounter:00}";
         }
-    }
-
-    private void AddLayout(ObjectLayoutSnapshot layout)
-    {
-        lock (_stateLock)
-        {
-            _layouts[layout.Id] = layout;
-            _layoutOrder.Add(layout.Id);
-        }
-
-        _layoutStore.SaveLayout(layout);
     }
 
     private ObjectLayoutSnapshot BuildCreatedLayout(
@@ -960,6 +811,7 @@ internal sealed class ObjectLayoutManager : IObjectLayoutManager, IDisposable
         {
             Id = layoutId,
             Name = SanitizeLayoutName(name),
+            Revision = 1,
             CreatedAtUtc = now,
             UpdatedAtUtc = now,
             Objects = layoutObjects,
@@ -968,97 +820,165 @@ internal sealed class ObjectLayoutManager : IObjectLayoutManager, IDisposable
         };
     }
 
-    private bool TryPrepareTemporaryWrite(
-        string sourceKey,
-        Guid sessionId,
-        long revision,
-        bool clearExistingLayoutOnNewSession,
-        out TemporaryWriteContext context,
-        out ObjectTemporaryMutationResult error)
+    private bool TryUpdateLayout(
+        Guid id,
+        Func<ObjectLayoutSnapshot, ObjectLayoutSnapshot?> createUpdate)
     {
-        var sanitizedSourceKey = ObjectTemporarySourceUtility.NormalizeSourceKey(sourceKey);
-        if (string.IsNullOrEmpty(sanitizedSourceKey))
+        lock (_stateLock)
         {
-            context = default;
-            error = new ObjectTemporaryMutationResult(ObjectTemporaryMutationStatus.InvalidSource, 0);
-            return false;
-        }
-
-        _temporaryLayouts.TryGetValue(sanitizedSourceKey, out var existingLayout);
-        var currentState = ResolveCurrentTemporarySourceState(sanitizedSourceKey, existingLayout);
-        var resetSource = ObjectTemporarySourceUtility.IsNewSession(currentState.SessionId, sessionId);
-        if (resetSource)
-        {
-            if (clearExistingLayoutOnNewSession)
+            if (!_layouts.TryGetValue(id, out ObjectLayoutSnapshot? previousLayout)
+                || previousLayout is null)
             {
-                existingLayout = null;
+                return false;
             }
 
-            currentState = new ObjectTemporarySourceState(sessionId, 0);
-        }
+            ObjectLayoutSnapshot? candidate = createUpdate(previousLayout);
+            if (candidate is null || LayoutStateMatches(previousLayout, candidate))
+            {
+                return true;
+            }
 
-        if (ObjectTemporarySourceUtility.IsStaleRevision(currentState.Revision, revision))
+            return TryCommitLayout(CreateUpdatedLayout(previousLayout, candidate, DateTime.UtcNow));
+        }
+    }
+
+    private bool TryCommitLayout(ObjectLayoutSnapshot layout)
+    {
+        if (!TryValidateLayoutCandidate(layout, out _)
+            || !_layoutStore.TrySaveLayout(layout))
         {
-            context = default;
-            error = new ObjectTemporaryMutationResult(ObjectTemporaryMutationStatus.StaleRevision, currentState.Revision);
             return false;
         }
 
-        context = new TemporaryWriteContext(
-            sanitizedSourceKey,
-            existingLayout,
-            currentState,
-            resetSource);
-        error = default;
+        _layouts[layout.Id] = layout;
+        _revisionTracker.IncrementSavedLayouts();
         return true;
     }
 
-    private ObjectTemporarySourceState ResolveCurrentTemporarySourceState(string sourceKey, ObjectTemporaryLayoutSnapshot? existingLayout)
-        => existingLayout is not null
-            ? new ObjectTemporarySourceState(existingLayout.SourceSessionId, existingLayout.Revision)
-            : _temporarySourceStates.GetValueOrDefault(sourceKey);
-
-    private ObjectTemporaryMutationResult CommitTemporaryLayout(
-        TemporaryWriteContext context,
-        Guid sessionId,
-        string name,
-        IReadOnlyList<ObjectSnapshot> objects,
-        long revision)
+    private PersistentMutationStatus TrySaveLayoutBatch(
+        IReadOnlyList<ObjectLayoutSnapshot> previousLayouts,
+        IReadOnlyList<ObjectLayoutSnapshot> updatedLayouts)
     {
-        var nextSessionId = ObjectTemporarySourceUtility.ResolveSessionId(context.CurrentState.SessionId, sessionId);
-        var nextRevision = ObjectTemporarySourceUtility.ResolveRevision(context.CurrentState.Revision, revision);
-        EnsureTemporaryLayoutOrder(context.SourceKey);
-        _temporaryLayouts[context.SourceKey] = new ObjectTemporaryLayoutSnapshot
+        for (int index = 0; index < updatedLayouts.Count; ++index)
         {
-            SourceKey = context.SourceKey,
-            SourceSessionId = nextSessionId,
-            Name = ObjectTemporarySourceUtility.ResolveName(context.ExistingLayout?.Name, name, context.SourceKey),
-            Revision = nextRevision,
-            UpdatedAtUtc = DateTime.UtcNow,
-            Objects = objects,
-        };
-        _temporarySourceStates[context.SourceKey] = new ObjectTemporarySourceState(nextSessionId, nextRevision);
-        return new ObjectTemporaryMutationResult(ObjectTemporaryMutationStatus.Success, nextRevision);
-    }
+            if (_layoutStore.TrySaveLayout(updatedLayouts[index]))
+            {
+                continue;
+            }
 
-    private ObjectTemporaryMutationResult CommitTemporarySourceState(
-        TemporaryWriteContext context,
-        Guid sessionId,
-        long revision)
-    {
-        var nextSessionId = ObjectTemporarySourceUtility.ResolveSessionId(context.CurrentState.SessionId, sessionId);
-        var nextRevision = ObjectTemporarySourceUtility.ResolveRevision(context.CurrentState.Revision, revision);
-        _temporarySourceStates[context.SourceKey] = new ObjectTemporarySourceState(nextSessionId, nextRevision);
-        return new ObjectTemporaryMutationResult(ObjectTemporaryMutationStatus.Success, nextRevision);
-    }
+            bool restored = true;
+            for (int restoreIndex = index - 1; restoreIndex >= 0; --restoreIndex)
+            {
+                if (!_layoutStore.TrySaveLayout(previousLayouts[restoreIndex]))
+                {
+                    restored = false;
+                }
+            }
 
-    private void EnsureTemporaryLayoutOrder(string sourceKey)
-    {
-        if (!_temporaryLayouts.ContainsKey(sourceKey))
-        {
-            _temporaryLayoutOrder.Add(sourceKey);
+            return restored
+                ? PersistentMutationStatus.StorageFailed
+                : PersistentMutationStatus.RecoveryRequired;
         }
+
+        return PersistentMutationStatus.Success;
     }
 
+    private static ObjectLayoutSnapshot CreateUpdatedLayout(
+        ObjectLayoutSnapshot previous,
+        ObjectLayoutSnapshot candidate,
+        DateTime updatedAtUtc)
+        => candidate with
+        {
+            Id = previous.Id,
+            Revision = checked(previous.Revision + 1),
+            CreatedAtUtc = previous.CreatedAtUtc,
+            UpdatedAtUtc = updatedAtUtc,
+        };
+
+    private bool TryValidateLayoutCandidate(ObjectLayoutSnapshot candidate, out Guid conflictingId)
+    {
+        IEnumerable<ObjectLayoutSnapshot> layouts = _layoutOrder
+            .Where(id => id != candidate.Id)
+            .Select(id => _layouts[id])
+            .Append(candidate);
+        return TryValidateLayoutSet(layouts, out conflictingId);
+    }
+
+    private bool TryValidateLayoutSet(IEnumerable<ObjectLayoutSnapshot> layouts, out Guid conflictingId)
+    {
+        IReadOnlyList<ObjectLayoutSnapshot> candidates = layouts as IReadOnlyList<ObjectLayoutSnapshot>
+            ?? layouts.ToList();
+        HashSet<Guid> layoutIds = [];
+        foreach (ObjectLayoutSnapshot layout in candidates)
+        {
+            if (layout.Id == Guid.Empty || layout.Revision <= 0 || !layoutIds.Add(layout.Id))
+            {
+                conflictingId = layout.Id;
+                return false;
+            }
+        }
+
+        IEnumerable<IEnumerable<Guid>> ownedObjectIds = candidates
+            .Select(static layout => layout.Objects.Select(static snapshot => snapshot.Id))
+            .Concat(_temporarySourceStore.GetSources()
+                .Select(static source => source.RuntimeObjects.Select(static snapshot => snapshot.Id)));
+        return SceneIdentityValidation.TryValidate(
+            ownedObjectIds,
+            out conflictingId);
+    }
+
+    private bool LayoutSetsMatch(IReadOnlyList<ObjectLayoutSnapshot> layouts)
+    {
+        if (_layoutOrder.Count != layouts.Count)
+        {
+            return false;
+        }
+
+        for (int index = 0; index < layouts.Count; ++index)
+        {
+            if (_layoutOrder[index] != layouts[index].Id
+                || !LayoutsMatch(_layouts[_layoutOrder[index]], layouts[index]))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private ObjectLayoutSnapshot? GetLayoutOrDefault(Guid? id)
+        => id.HasValue && TryGetLayout(id.Value, out ObjectLayoutSnapshot layout)
+            ? layout
+            : null;
+
+    private static bool LayoutStateMatches(ObjectLayoutSnapshot? left, ObjectLayoutSnapshot? right)
+        => ReferenceEquals(left, right)
+           || left is not null
+           && right is not null
+           && left.Id == right.Id
+           && string.Equals(left.Name, right.Name, StringComparison.Ordinal)
+           && left.CreatedAtUtc == right.CreatedAtUtc
+           && left.Objects.SequenceEqual(right.Objects)
+           && ObjectFolderUtility.FolderListsMatch(left.Folders, right.Folders)
+           && ObjectFolderUtility.FolderColorMapsMatch(left.FolderColors, right.FolderColors);
+
+    private static bool LayoutsMatch(ObjectLayoutSnapshot? left, ObjectLayoutSnapshot? right)
+        => ReferenceEquals(left, right)
+           || left is not null
+           && right is not null
+           && LayoutStateMatches(left, right)
+           && left.Revision == right.Revision
+           && left.UpdatedAtUtc == right.UpdatedAtUtc;
+
+    private static ObjectTemporaryLayoutSnapshot ToTemporaryLayout(ObjectTemporarySourceSnapshot source)
+        => new()
+        {
+            SourceKey = source.SourceKey,
+            SourceSessionId = source.SessionId,
+            Name = source.Name,
+            Revision = source.Revision,
+            UpdatedAtUtc = source.UpdatedAtUtc,
+            Objects = source.RuntimeObjects,
+        };
 }
 

@@ -1,12 +1,12 @@
-using Intoner.Objects.Models;
 using Intoner.Objects.Utils;
+using Intoner.Scene;
 using System.Numerics;
 
 namespace Intoner.Objects.UI;
 
 internal static class GizmoSelectionTransformUtility
 {
-    public static GizmoSelectionEntry[] CreateSelectionEntries(IReadOnlyList<ObjectSnapshot> selectedSnapshots, Vector3 pivotPosition)
+    public static GizmoSelectionEntry[] CreateSelectionEntries(IReadOnlyList<SceneItemSnapshot> selectedSnapshots, Vector3 pivotPosition)
     {
         var entries = new GizmoSelectionEntry[selectedSnapshots.Count];
         for (var index = 0; index < selectedSnapshots.Count; ++index)
@@ -18,15 +18,15 @@ internal static class GizmoSelectionTransformUtility
     }
 
     public static GizmoSelectionEntry[] CreateSelectionEntries(
-        IReadOnlyList<ObjectSnapshot> selectedSnapshots,
-        IReadOnlyList<ObjectBoundsSnapshot> boundsSnapshots,
+        IReadOnlyList<SceneItemSnapshot> selectedSnapshots,
+        SceneItemBoundsLookup boundsLookup,
         Vector3 pivotPosition)
     {
         var entries = new GizmoSelectionEntry[selectedSnapshots.Count];
         for (var index = 0; index < selectedSnapshots.Count; ++index)
         {
             var snapshot = selectedSnapshots[index];
-            var boundsSnapshot = ObjectSelectionTransformMath.FindBoundsSnapshot(boundsSnapshots, snapshot.Id);
+            var boundsSnapshot = SceneSelectionTransformMath.FindManipulationBoundsSnapshot(snapshot, boundsLookup);
             entries[index] = CreateSelectionEntry(snapshot, boundsSnapshot, pivotPosition);
         }
 
@@ -35,34 +35,34 @@ internal static class GizmoSelectionTransformUtility
 
     public static Quaternion ResolveRotationDelta(Quaternion startRotation, Quaternion targetRotation)
     {
-        var normalizedStart = ObjectTransformMath.NormalizeQuaternion(startRotation);
-        var normalizedTarget = ObjectTransformMath.NormalizeQuaternion(targetRotation);
-        return ObjectTransformMath.NormalizeQuaternion(normalizedTarget * Quaternion.Inverse(normalizedStart));
+        var normalizedStart = SceneTransformMath.NormalizeQuaternion(startRotation);
+        var normalizedTarget = SceneTransformMath.NormalizeQuaternion(targetRotation);
+        return SceneTransformMath.NormalizeQuaternion(normalizedTarget * Quaternion.Inverse(normalizedStart));
     }
 
-    public static ObjectTransform ApplyRigidRotation(
+    public static SceneTransform ApplyRigidRotation(
         in GizmoSelectionEntry entry,
         Vector3 pivotPosition,
         Quaternion rotationDelta,
         Vector3 referenceRotationDegrees)
     {
-        var normalizedRotationDelta = ObjectTransformMath.NormalizeQuaternion(rotationDelta);
-        var nextRotation = ObjectTransformMath.NormalizeQuaternion(normalizedRotationDelta * entry.StartRotationQuaternion);
+        var normalizedRotationDelta = SceneTransformMath.NormalizeQuaternion(rotationDelta);
+        var nextRotation = SceneTransformMath.NormalizeQuaternion(normalizedRotationDelta * entry.StartRotationQuaternion);
         return entry.Snapshot.Transform with
         {
             Position = pivotPosition + Vector3.Transform(entry.PivotOffset, normalizedRotationDelta),
-            RotationDegrees = ObjectTransformMath.ToRotationDegrees(nextRotation, referenceRotationDegrees),
+            RotationDegrees = SceneTransformMath.ToRotationDegrees(nextRotation, referenceRotationDegrees),
         };
     }
 
     private static GizmoSelectionEntry CreateSelectionEntry(
-        ObjectSnapshot snapshot,
-        ObjectBoundsSnapshot? boundsSnapshot,
+        SceneItemSnapshot snapshot,
+        SceneItemBoundsSnapshot? boundsSnapshot,
         Vector3 pivotPosition)
     {
         var pivotOffset = snapshot.Transform.Position - pivotPosition;
-        var startRotationQuaternion = ObjectTransformMath.CreateRotationQuaternion(snapshot.Transform.RotationDegrees);
-        if (boundsSnapshot?.LocalBounds is not { } localBounds)
+        var startRotationQuaternion = SceneTransformMath.CreateRotationQuaternion(snapshot.Transform.RotationDegrees);
+        if (boundsSnapshot?.OrientedBounds is not { } localBounds)
         {
             return new GizmoSelectionEntry(snapshot, pivotOffset, startRotationQuaternion);
         }

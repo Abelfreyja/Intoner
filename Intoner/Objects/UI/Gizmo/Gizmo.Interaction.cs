@@ -4,6 +4,8 @@ using Intoner.Objects.Models;
 using Intoner.Objects.Utils;
 using System.Numerics;
 
+using Intoner.Scene;
+
 namespace Intoner.Objects.UI;
 
 internal sealed partial class Gizmo
@@ -33,11 +35,12 @@ internal sealed partial class Gizmo
         GizmoTransformMode mode,
         int axisCount,
         Vector2 mousePos,
-        float scale)
+        float scale,
+        bool pointerAvailable)
     {
         TryGetGizmoInteractionBounds(axisCount, context.ScreenPos, scale, out var boundsMin, out var boundsMax);
         var availability = new GizmoInteractionAvailability(
-            IsMouseWithinRect(boundsMin, boundsMax),
+            pointerAvailable && IsMouseWithinRect(boundsMin, boundsMax),
             IsGizmoDragActive(context.PrimarySnapshot.Id, mode),
             IsGizmoSurfaceDragActive(context.PrimarySnapshot.Id),
             IsGizmoWheelOpen());
@@ -51,7 +54,8 @@ internal sealed partial class Gizmo
                 : GizmoAxis.None;
         }
 
-        var centerHovered = availability.CanResolveHover
+        var centerHovered = context.SurfaceDragSupported
+                            && availability.CanResolveHover
                             && IsMouseWithinCircle(context.ScreenPos, ResolveCenterInteractionRadius(scale));
         if (centerHovered)
         {
@@ -77,11 +81,12 @@ internal sealed partial class Gizmo
         in GizmoContext context,
         in RotationProjectionContext projection,
         Vector2 mousePos,
-        float scale)
+        float scale,
+        bool pointerAvailable)
     {
         var padding = new Vector2(ResolveRotationInteractionRadius(projection, scale));
         var availability = new GizmoInteractionAvailability(
-            IsMouseWithinRect(context.ScreenPos - padding, context.ScreenPos + padding),
+            pointerAvailable && IsMouseWithinRect(context.ScreenPos - padding, context.ScreenPos + padding),
             IsGizmoDragActive(context.PrimarySnapshot.Id, GizmoTransformMode.Rotation),
             IsGizmoSurfaceDragActive(context.PrimarySnapshot.Id),
             IsGizmoWheelOpen());
@@ -89,10 +94,11 @@ internal sealed partial class Gizmo
         var hoverState = RotationHoverState.None(float.MaxValue);
         if (availability.CanResolveHover)
         {
-            TryFindRotationHoverState(projection, mousePos, scale, out hoverState);
+            hoverState = FindRotationHoverState(projection, mousePos, scale);
         }
 
-        var centerHovered = availability.CanResolveHover
+        var centerHovered = context.SurfaceDragSupported
+                            && availability.CanResolveHover
                             && IsMouseWithinCircle(context.ScreenPos, ResolveCenterInteractionRadius(scale));
         if (centerHovered)
         {
@@ -113,11 +119,12 @@ internal sealed partial class Gizmo
     }
 
     private GizmoAxis ResolveCurrentLinearActiveAxis(GizmoTransformMode mode)
-        => mode == GizmoTransformMode.Translation
-            ? TranslationDragState.ActiveAxis
-            : mode == GizmoTransformMode.Scale
-                ? ScaleDragState.ActiveAxis
-                : GizmoAxis.None;
+        => mode switch
+        {
+            GizmoTransformMode.Translation => TranslationDragState.ActiveAxis,
+            GizmoTransformMode.Scale => ScaleDragState.ActiveAxis,
+            _ => GizmoAxis.None,
+        };
 
     private bool TryFindHoveredLinearAxis(
         int axisCount,
@@ -144,20 +151,19 @@ internal sealed partial class Gizmo
         return hoveredState.Axis != GizmoAxis.None;
     }
 
-    private bool TryFindRotationHoverState(
+    private static RotationHoverState FindRotationHoverState(
         in RotationProjectionContext projection,
         Vector2 mousePos,
-        float scale,
-        out RotationHoverState hoverState)
+        float scale)
     {
-        hoverState = RotationHoverState.None(GizmoConstants.RotationHoverTolerance * scale);
+        var hoverState = RotationHoverState.None(GizmoConstants.RotationHoverTolerance * scale);
 
         for (var index = 0; index < GizmoAxisUtility.AxisCount; ++index)
         {
             TryUpdateRotationAxisHoverState(projection, GizmoAxisUtility.FromIndex(index), mousePos, ref hoverState);
         }
 
-        return hoverState.Axis != GizmoAxis.None && hoverState.Distance <= GizmoConstants.RotationHoverTolerance * scale;
+        return hoverState;
     }
 
     private static void TryUpdateRotationAxisHoverState(
@@ -186,9 +192,9 @@ internal sealed partial class Gizmo
         var targetLength = context.AxisWorldLength;
         var scale = ImGuiHelpers.GlobalScale;
         var maxScreenLength = GizmoConstants.AxisMaxScreenLength * scale;
-        var baseScreenLength = ResolveObjectAwareScreenSize(GizmoConstants.AxisBaseScreenLength, context.AxisWorldLength, scale);
+        var baseScreenLength = ResolveWorldScaledScreenSize(GizmoConstants.AxisBaseScreenLength, context.AxisWorldLength, scale);
         var worldDirection = ResolveAxisWorldDirection(axis, context.Rotation, useWorldSpace);
-        if (!ObjectMathUtility.HasLength(worldDirection))
+        if (!NumericsUtility.HasLength(worldDirection))
         {
             return false;
         }
@@ -196,7 +202,7 @@ internal sealed partial class Gizmo
         Vector2? projectedScreenDirection = null;
         var projectedScreenLength = 0f;
         var axisWorldEnd = context.PivotPosition + (worldDirection * targetLength);
-        if (ObjectViewportProjectionUtility.TryProjectWorldPointToViewport(
+        if (SceneViewportProjection.TryProjectWorldPointToViewport(
                 context.ViewProjection,
                 axisWorldEnd,
                 context.ViewportPos,
@@ -205,7 +211,7 @@ internal sealed partial class Gizmo
         {
             var projectedScreenVector = projectedScreenEnd - context.ScreenPos;
             projectedScreenLength = projectedScreenVector.Length();
-            if (ObjectMathUtility.HasLength(projectedScreenLength))
+            if (NumericsUtility.HasLength(projectedScreenLength))
             {
                 projectedScreenDirection = projectedScreenVector / projectedScreenLength;
             }
@@ -215,7 +221,7 @@ internal sealed partial class Gizmo
             ? storedScreenDirection
             : (Vector2?)null;
         var fallbackScreenDirection = ResolveAxisFallbackScreenDirection(context, axis, projectedScreenDirection, previousScreenDirection);
-        if (!ObjectMathUtility.HasLength(fallbackScreenDirection))
+        if (!NumericsUtility.HasLength(fallbackScreenDirection))
         {
             return false;
         }
@@ -241,14 +247,14 @@ internal sealed partial class Gizmo
                 }
             }
 
-            var lengthBlend = projectedScreenLength < baseScreenLength && ObjectMathUtility.HasLength(baseScreenLength)
+            var lengthBlend = projectedScreenLength < baseScreenLength && NumericsUtility.HasLength(baseScreenLength)
                 ? Math.Clamp(1f - (projectedScreenLength / baseScreenLength), 0f, 1f)
                 : 0f;
             var blend = MathF.Max(alignmentBlend, lengthBlend);
             if (blend > 0f)
             {
                 var blendedDirection = Vector2.Lerp(drawScreenDirection, fallbackScreenDirection, blend);
-                if (ObjectMathUtility.TryNormalize(blendedDirection, out var normalizedDirection))
+                if (NumericsUtility.TryNormalize(blendedDirection, out var normalizedDirection))
                 {
                     drawScreenDirection = normalizedDirection;
                 }
@@ -272,7 +278,7 @@ internal sealed partial class Gizmo
 
     private static float ResolveCompensatedLinearVisualScale(float projectedScreenLength, float drawScreenLength, float scale)
     {
-        if (!ObjectMathUtility.HasLength(projectedScreenLength) || projectedScreenLength >= drawScreenLength)
+        if (!NumericsUtility.HasLength(projectedScreenLength) || projectedScreenLength >= drawScreenLength)
         {
             return scale;
         }
@@ -324,7 +330,7 @@ internal sealed partial class Gizmo
 
         var cachedScreenDirection = State.PreviousAxisScreenDirections[index];
         if (!cachedScreenDirection.HasValue
-            || !ObjectMathUtility.TryNormalize(cachedScreenDirection.Value, out screenDirection))
+            || !NumericsUtility.TryNormalize(cachedScreenDirection.Value, out screenDirection))
         {
             screenDirection = default;
             return false;
@@ -336,7 +342,7 @@ internal sealed partial class Gizmo
     private void CacheAxisScreenDirection(GizmoAxis axis, Vector2 screenDirection)
     {
         var index = GizmoAxisUtility.ToIndex(axis);
-        if (index < 0 || !ObjectMathUtility.TryNormalize(screenDirection, out var normalizedScreenDirection))
+        if (index < 0 || !NumericsUtility.TryNormalize(screenDirection, out var normalizedScreenDirection))
         {
             return;
         }
@@ -380,7 +386,7 @@ internal sealed partial class Gizmo
                 var fromPos = previousPos.Value;
                 var segment = currentPos - fromPos;
                 var segmentLengthSq = segment.LengthSquared();
-                if (ObjectMathUtility.HasLength(segmentLengthSq))
+                if (NumericsUtility.HasLength(segmentLengthSq))
                 {
                     var t = Vector2.Dot(mousePos - fromPos, segment) / segmentLengthSq;
                     t = Math.Clamp(t, 0f, 1f);
@@ -390,7 +396,7 @@ internal sealed partial class Gizmo
                     {
                         var previousAngle = ((index - 1) / (float)GizmoConstants.RotationRingSegments) * (MathF.PI * 2f);
                         distance = projectedDistance;
-                        tangent = ObjectMathUtility.TryNormalize(segment, out var normalizedTangent)
+                        tangent = NumericsUtility.TryNormalize(segment, out var normalizedTangent)
                             ? normalizedTangent
                             : Vector2.UnitX;
                         screenPoint = projectedPoint;
@@ -413,7 +419,7 @@ internal sealed partial class Gizmo
         Vector2? projectedScreenDirection,
         Vector2? previousScreenDirection)
     {
-        if (previousScreenDirection.HasValue && ObjectMathUtility.TryNormalize(previousScreenDirection.Value, out var normalizedPreviousDirection))
+        if (previousScreenDirection.HasValue && NumericsUtility.TryNormalize(previousScreenDirection.Value, out var normalizedPreviousDirection))
         {
             return normalizedPreviousDirection;
         }
@@ -426,13 +432,13 @@ internal sealed partial class Gizmo
                 context,
                 context.CameraRight.HasValue
                 && context.CameraUp.HasValue
-                && ObjectMathUtility.TryNormalize(context.CameraRight.Value - context.CameraUp.Value, out var diagonalDirection)
+                && NumericsUtility.TryNormalize(context.CameraRight.Value - context.CameraUp.Value, out var diagonalDirection)
                     ? diagonalDirection
                     : null),
             _ => null,
         };
 
-        if (fallbackDirection.HasValue && ObjectMathUtility.TryNormalize(fallbackDirection.Value, out var normalizedFallback))
+        if (fallbackDirection.HasValue && NumericsUtility.TryNormalize(fallbackDirection.Value, out var normalizedFallback))
         {
             if (projectedScreenDirection.HasValue && Vector2.Dot(normalizedFallback, projectedScreenDirection.Value) < 0f)
             {
@@ -453,13 +459,13 @@ internal sealed partial class Gizmo
 
     private static Vector2? TryProjectCameraPlaneScreenDirection(in GizmoContext context, Vector3? worldDirection)
     {
-        if (!worldDirection.HasValue || !ObjectMathUtility.HasLength(worldDirection.Value))
+        if (!worldDirection.HasValue || !NumericsUtility.HasLength(worldDirection.Value))
         {
             return null;
         }
 
         var projectedPoint = context.PivotPosition + (worldDirection.Value * context.AxisWorldLength);
-        if (!ObjectViewportProjectionUtility.TryProjectWorldPointToViewport(
+        if (!SceneViewportProjection.TryProjectWorldPointToViewport(
                 context.ViewProjection,
                 projectedPoint,
                 context.ViewportPos,
@@ -470,7 +476,7 @@ internal sealed partial class Gizmo
         }
 
         var screenVector = projectedScreenPoint - context.ScreenPos;
-        return !ObjectMathUtility.TryNormalize(screenVector, out var normalizedScreenVector)
+        return !NumericsUtility.TryNormalize(screenVector, out var normalizedScreenVector)
             ? null
             : normalizedScreenVector;
     }
@@ -503,20 +509,20 @@ internal sealed partial class Gizmo
     private static Vector3 ResolveAxisWorldDirection(GizmoAxis axis, Quaternion rotation, bool useWorldSpace)
     {
         var axisDirection = GizmoAxisUtility.ToUnitVector(axis);
-        if (!ObjectMathUtility.HasLength(axisDirection) || useWorldSpace)
+        if (!NumericsUtility.HasLength(axisDirection) || useWorldSpace)
         {
             return axisDirection;
         }
 
         var rotated = Vector3.Transform(axisDirection, rotation);
-        return !ObjectMathUtility.TryNormalize(rotated, out var normalizedRotated)
+        return !NumericsUtility.TryNormalize(rotated, out var normalizedRotated)
             ? axisDirection
             : normalizedRotated;
     }
 
     private static Vector2 GetLinearGizmoInteractionStart(GizmoAxisVisualState state, float scale)
     {
-        if (!ObjectMathUtility.TryNormalize(state.ScreenDirection, out var screenDirection))
+        if (!NumericsUtility.TryNormalize(state.ScreenDirection, out var screenDirection))
         {
             return state.ScreenStart;
         }
@@ -531,7 +537,7 @@ internal sealed partial class Gizmo
 
     private static Vector2 GetLinearGizmoInteractionEnd(GizmoAxisVisualState state, GizmoTransformMode mode, float scale)
     {
-        if (!ObjectMathUtility.TryNormalize(state.ScreenDirection, out var screenDirection))
+        if (!NumericsUtility.TryNormalize(state.ScreenDirection, out var screenDirection))
         {
             return state.ScreenEnd;
         }
@@ -573,7 +579,7 @@ internal sealed partial class Gizmo
     private static bool TryGetTranslationArrowHitDistance(Vector2 point, in GizmoAxisVisualState state, float scale, out float distance)
     {
         distance = float.MaxValue;
-        if (!ObjectMathUtility.TryNormalize(state.ScreenDirection, out var direction))
+        if (!NumericsUtility.TryNormalize(state.ScreenDirection, out var direction))
         {
             return false;
         }
@@ -611,7 +617,7 @@ internal sealed partial class Gizmo
         var max = center + new Vector2(halfExtent);
         var clamped = Vector2.Clamp(point, min, max);
         distance = Vector2.Distance(point, clamped);
-        return ObjectMathUtility.IsNearlyZero(distance);
+        return NumericsUtility.IsNearlyZero(distance);
     }
 
     private static float GetScaleHandleVisualHalfExtent(float scale)
@@ -620,7 +626,7 @@ internal sealed partial class Gizmo
     private static bool IsPointWithinTriangle(Vector2 point, Vector2 a, Vector2 b, Vector2 c)
     {
         var denominator = ((b.Y - c.Y) * (a.X - c.X)) + ((c.X - b.X) * (a.Y - c.Y));
-        if (ObjectMathUtility.IsNearlyZero(denominator))
+        if (NumericsUtility.IsNearlyZero(denominator))
         {
             return false;
         }
@@ -635,7 +641,7 @@ internal sealed partial class Gizmo
     {
         var segment = end - start;
         var lengthSq = segment.LengthSquared();
-        if (!ObjectMathUtility.HasLength(lengthSq))
+        if (!NumericsUtility.HasLength(lengthSq))
         {
             return (point - start).Length();
         }
@@ -657,7 +663,7 @@ internal sealed partial class Gizmo
 
     private static Vector2 GetTrimmedGizmoEndpoint(GizmoAxisVisualState state, float scale)
     {
-        if (!ObjectMathUtility.TryNormalize(state.ScreenDirection, out var screenDirection))
+        if (!NumericsUtility.TryNormalize(state.ScreenDirection, out var screenDirection))
         {
             return state.ScreenEnd;
         }
@@ -669,7 +675,7 @@ internal sealed partial class Gizmo
     }
 
     private static Vector2 ResolveFallbackZScreenDirection()
-        => ObjectMathUtility.TryNormalize(new Vector2(0.85f, -0.65f), out var direction)
+        => NumericsUtility.TryNormalize(new Vector2(0.85f, -0.65f), out var direction)
             ? direction
             : Vector2.UnitX;
 }

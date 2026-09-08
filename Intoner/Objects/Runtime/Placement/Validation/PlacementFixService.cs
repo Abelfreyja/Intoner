@@ -1,5 +1,6 @@
 using Intoner.Objects.Catalog;
 using Intoner.Objects.Models;
+using Intoner.Scene;
 using System.Numerics;
 
 namespace Intoner.Objects.Runtime;
@@ -9,7 +10,7 @@ internal sealed class PlacementFixService(
     NativePlacementQuery nativeQuery,
     IObjectRuntimeLocationService locationService,
     IObjectHousingModePolicy housingModePolicy,
-    IObjectPlacementResolver placementResolver,
+    IScenePlacementService placementResolver,
     IObjectSceneView sceneView,
     PlacementValidationContextBuilder contextBuilder,
     PlacementSurfaceResolver surfaceResolver,
@@ -57,13 +58,13 @@ internal sealed class PlacementFixService(
         ObjectBoundsSnapshot? boundsSnapshot = FindCurrentBounds(snapshot.Id);
         if (!metadataResolver.TryResolve(snapshot, out HousingFurnitureMetadata metadata)
             || metadata.Surface == HousingPlacementSurface.Wall
-            || !TryResolveSnapSurface(snapshot, boundsSnapshot, metadata, out ObjectSurfaceHit hit))
+            || !TryResolveSnapSurface(snapshot, boundsSnapshot, metadata, out SceneSurfaceHit hit))
         {
             return false;
         }
 
         Vector3 position = snapshot.Transform.Position;
-        ObjectTransform transform = snapshot.Transform with
+        SceneTransform transform = snapshot.Transform with
         {
             Position = new Vector3(position.X, hit.Point.Y, position.Z),
         };
@@ -75,7 +76,7 @@ internal sealed class PlacementFixService(
         ObjectSnapshot snapshot,
         ObjectBoundsSnapshot? boundsSnapshot,
         HousingFurnitureMetadata metadata,
-        out ObjectSurfaceHit hit)
+        out SceneSurfaceHit hit)
     {
         PlacementValidationContext context = BuildCurrentValidationContext(housingModePolicy.GetState());
         return surfaceResolver.TryResolveSurface(context, snapshot, boundsSnapshot, metadata, out hit, out _, out _);
@@ -129,7 +130,7 @@ internal sealed class PlacementFixService(
         fixedSnapshot = snapshot;
         ObjectHousingModeState state = housingModePolicy.GetState();
         if (!state.IsHousingMode
-            || !placementResolver.TryResolveFromPlayer(out ObjectTransform placementTransform))
+            || !placementResolver.TryResolveFromPlayer(out SceneTransform placementTransform))
         {
             return false;
         }

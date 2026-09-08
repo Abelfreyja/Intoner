@@ -16,9 +16,14 @@ internal static class ObjectRuntimeFailureCodes
     public const string InvalidObject = "invalid_object";
 
     /// <summary>
-    /// The runtime failed while creating the scene object for the snapshot.
+    /// The runtime failed while creating the object for the snapshot.
     /// </summary>
     public const string CreateFailed = "create_failed";
+
+    /// <summary>
+    /// Another active object already owns the requested runtime id.
+    /// </summary>
+    public const string DuplicateObject = "duplicate_object";
 
     /// <summary>
     /// The snapshot root resource path is empty, malformed, or not valid for the object kind.
@@ -52,9 +57,19 @@ internal static class ObjectRuntimeFailureCodes
     public const string ResourceHooksUnavailable = "resource_hooks_unavailable";
 
     /// <summary>
-    /// The scene object rejected the snapshot update and was not recreated.
+    /// The object runtime rejected the snapshot update and was not recreated.
     /// </summary>
     public const string UpdateRejected = "update_rejected";
+
+    /// <summary>
+    /// Persistent storage rejected a runtime object mutation.
+    /// </summary>
+    public const string PersistenceFailed = "persistence_failed";
+
+    /// <summary>
+    /// Runtime collection ownership could not be updated for the object.
+    /// </summary>
+    public const string CollectionUsageFailed = "collection_usage_failed";
 
     /// <summary>
     /// Native creation returned a layout instance outside the object runtime contract.

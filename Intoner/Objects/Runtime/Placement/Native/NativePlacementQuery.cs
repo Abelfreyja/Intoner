@@ -2,8 +2,10 @@ using Dalamud.Game.ClientState.Objects.SubKinds;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine;
-using Intoner.Objects.Filesystem.Configuration;
 using Intoner.Objects.Utils;
+using Intoner.Scene;
+using Intoner.Services.Configuration;
+using Intoner.Utils;
 using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 
@@ -21,13 +23,13 @@ internal sealed class NativePlacementQuery(
     NativePlacementCollisionQuery collisionQuery,
     NativePlacementAreaQuery areaQuery)
 {
-    public bool TryRaycast(Vector3 rayOrigin, Vector3 rayDirection, float maxDistance, out ObjectSurfaceHit hit)
+    public bool TryRaycast(Vector3 rayOrigin, Vector3 rayDirection, float maxDistance, out SceneSurfaceHit hit)
     {
-        (bool Success, ObjectSurfaceHit Hit) result = ObjectFrameworkUtility.RunOnFrameworkThread(framework, () =>
+        (bool Success, SceneSurfaceHit Hit) result = FrameworkThreadUtility.Run(framework, () =>
         {
-            return collisionQuery.TryRaycast(rayOrigin, rayDirection, maxDistance, out ObjectSurfaceHit resolvedHit)
+            return collisionQuery.TryRaycast(rayOrigin, rayDirection, maxDistance, out SceneSurfaceHit resolvedHit)
                 ? (Success: true, Hit: resolvedHit)
-                : (Success: false, Hit: ObjectSurfaceHit.Empty);
+                : (Success: false, Hit: SceneSurfaceHit.Empty);
         });
 
         hit = result.Hit;
@@ -38,22 +40,22 @@ internal sealed class NativePlacementQuery(
         Vector3 rayOrigin,
         Vector3 rayDirection,
         float radius,
-        out ObjectSurfaceHit hit)
+        out SceneSurfaceHit hit)
     {
-        hit = ObjectSurfaceHit.Empty;
-        if (!ObjectMathUtility.TryNormalize(rayDirection, out Vector3 normalizedDirection))
+        hit = SceneSurfaceHit.Empty;
+        if (!NumericsUtility.TryNormalize(rayDirection, out Vector3 normalizedDirection))
         {
             return false;
         }
 
-        (bool Success, ObjectSurfaceHit Hit) result = ObjectFrameworkUtility.RunOnFrameworkThread(framework, () =>
+        (bool Success, SceneSurfaceHit Hit) result = FrameworkThreadUtility.Run(framework, () =>
             TryResolveFloorPlacementFromRayOnFramework(rayOrigin, normalizedDirection, radius));
 
         hit = result.Hit;
         return result.Success;
     }
 
-    private (bool Success, ObjectSurfaceHit Hit) TryResolveFloorPlacementFromRayOnFramework(
+    private (bool Success, SceneSurfaceHit Hit) TryResolveFloorPlacementFromRayOnFramework(
         Vector3 rayOrigin,
         Vector3 normalizedDirection,
         float radius)
@@ -62,12 +64,12 @@ internal sealed class NativePlacementQuery(
                 rayOrigin,
                 normalizedDirection,
                 PlacementValidationConstants.NativeRayMaxDistance,
-                out ObjectSurfaceHit rayHit))
+                out SceneSurfaceHit rayHit))
         {
-            return (false, ObjectSurfaceHit.Empty);
+            return (false, SceneSurfaceHit.Empty);
         }
 
-        if (!float.IsFinite(radius) || radius <= ObjectMathUtility.ScalarEpsilon)
+        if (!float.IsFinite(radius) || radius <= NumericsUtility.ScalarEpsilon)
         {
             return (true, rayHit);
         }
@@ -78,7 +80,7 @@ internal sealed class NativePlacementQuery(
                 normalizedDirection,
                 radius,
                 PlacementValidationConstants.NativeRayMaxDistance,
-                out ObjectSurfaceHit sweepHit,
+                out SceneSurfaceHit sweepHit,
                 out _))
         {
             return (false, rayHit);
@@ -100,18 +102,18 @@ internal sealed class NativePlacementQuery(
         Vector3 rayDirection,
         float maxDistance,
         ulong materialMask,
-        out ObjectSurfaceHit hit)
+        out SceneSurfaceHit hit)
     {
-        (bool Success, ObjectSurfaceHit Hit) result = ObjectFrameworkUtility.RunOnFrameworkThread(framework, () =>
+        (bool Success, SceneSurfaceHit Hit) result = FrameworkThreadUtility.Run(framework, () =>
         {
             return collisionQuery.TryRaycastMaterialMask(
                     rayOrigin,
                     rayDirection,
                     maxDistance,
                     materialMask,
-                    out ObjectSurfaceHit resolvedHit)
+                    out SceneSurfaceHit resolvedHit)
                 ? (Success: true, Hit: resolvedHit)
-                : (Success: false, Hit: ObjectSurfaceHit.Empty);
+                : (Success: false, Hit: SceneSurfaceHit.Empty);
         });
 
         hit = result.Hit;
@@ -119,7 +121,7 @@ internal sealed class NativePlacementQuery(
     }
 
     public NativeHousingPlacementState ResolveCurrentHousingState()
-        => ObjectFrameworkUtility.RunOnFrameworkThread(framework, ResolveCurrentHousingStateOnFramework);
+        => FrameworkThreadUtility.Run(framework, ResolveCurrentHousingStateOnFramework);
 
     public PlacementValidationStatus CheckPlacementAreaContainment(HousingPlacementContext context, Vector3 position)
     {
@@ -128,7 +130,7 @@ internal sealed class NativePlacementQuery(
             return PlacementValidationStatus.Unknown;
         }
 
-        return ObjectFrameworkUtility.RunOnFrameworkThread(framework, () =>
+        return FrameworkThreadUtility.Run(framework, () =>
             context.CurrentArea == ObjectHousingArea.Indoor
                 ? areaQuery.CheckCurrentBlock(position, blockId)
                 : areaQuery.CheckCurrentPlot(position));

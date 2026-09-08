@@ -4,7 +4,7 @@ using SharpDX.Direct3D11;
 namespace Intoner.Services.Gpu;
 
 [Flags]
-public enum GpuJobFlags
+public enum GpuJobOptions
 {
     None = 0,
     TextureProcessing = 1 << 0,
@@ -21,7 +21,7 @@ internal sealed class GpuJobContext : IDisposable
         GpuProcessingService gpuProcessingService,
         ILogger logger,
         CancellationToken cancellationToken,
-        GpuJobFlags flags,
+        GpuJobOptions options,
         Device device,
         DeviceContext context,
         GpuResourcePoolService resourcePool,
@@ -30,7 +30,7 @@ internal sealed class GpuJobContext : IDisposable
         GpuProcessingService = gpuProcessingService;
         Logger = logger;
         CancellationToken = cancellationToken;
-        Flags = flags;
+        Options = options;
         Device = device;
         Context = context;
         ResourcePool = resourcePool;
@@ -41,7 +41,7 @@ internal sealed class GpuJobContext : IDisposable
     public GpuProcessingService GpuProcessingService { get; }
     public ILogger Logger { get; }
     public CancellationToken CancellationToken { get; }
-    public GpuJobFlags Flags { get; }
+    public GpuJobOptions Options { get; }
     public Device Device { get; }
     public DeviceContext Context { get; }
     public GpuResourcePoolService ResourcePool { get; }
@@ -89,7 +89,7 @@ internal static class GpuJobContextFactory
         GpuProcessingService gpuProcessingService,
         ILogger logger,
         CancellationToken cancellationToken,
-        GpuJobFlags flags,
+        GpuJobOptions options,
         out GpuJobContext? jobContext)
     {
         jobContext = null;
@@ -105,7 +105,7 @@ internal static class GpuJobContextFactory
         nint d3d11Device = nint.Zero;
         try
         {
-            if (!gpuProcessingService.TryEnterOperationScope(cancellationToken, flags, out operationScope) || operationScope is null)
+            if (!gpuProcessingService.TryEnterOperationScope(cancellationToken, options, out operationScope) || operationScope is null)
             {
                 return false;
             }
@@ -127,7 +127,7 @@ internal static class GpuJobContextFactory
                 gpuProcessingService,
                 logger,
                 cancellationToken,
-                flags,
+                options,
                 device,
                 context,
                 resourcePool,
@@ -171,7 +171,7 @@ internal static class GpuJobContextFactory
         {
             if (d3d11Device != nint.Zero)
             {
-                GpuProcessingService.ReleaseComObject(ref d3d11Device);
+                D3D11ComReference.Release(ref d3d11Device);
             }
         }
     }
@@ -180,7 +180,7 @@ internal static class GpuJobContextFactory
         GpuProcessingService? gpuProcessingService,
         ILogger logger,
         CancellationToken cancellationToken,
-        GpuJobFlags flags)
+        GpuJobOptions options)
     {
         if (gpuProcessingService is null || cancellationToken.IsCancellationRequested || gpuProcessingService.IsDisposed)
         {
@@ -194,7 +194,7 @@ internal static class GpuJobContextFactory
         nint d3d11Device = nint.Zero;
         try
         {
-            operationScope = await gpuProcessingService.EnterOperationScopeAsync(cancellationToken, flags).ConfigureAwait(false);
+            operationScope = await gpuProcessingService.EnterOperationScopeAsync(cancellationToken, options).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
 
             if (!gpuProcessingService.TryCreateOperationDeviceClone(out d3d11Device) || d3d11Device == nint.Zero)
@@ -213,7 +213,7 @@ internal static class GpuJobContextFactory
                 gpuProcessingService,
                 logger,
                 cancellationToken,
-                flags,
+                options,
                 device,
                 context,
                 resourcePool,
@@ -253,7 +253,7 @@ internal static class GpuJobContextFactory
         }
         finally
         {
-            GpuProcessingService.ReleaseComObject(ref d3d11Device);
+            D3D11ComReference.Release(ref d3d11Device);
         }
     }
 }

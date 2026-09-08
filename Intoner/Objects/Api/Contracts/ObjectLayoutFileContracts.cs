@@ -10,6 +10,7 @@ internal sealed record ObjectLayoutFileDocument
     public required int FormatVersion { get; init; }
     public required Guid Id { get; init; }
     public required string Name { get; init; }
+    public required long Revision { get; init; }
     public required DateTime ExportedAtUtc { get; init; }
     public required DateTime CreatedAtUtc { get; init; }
     public required DateTime UpdatedAtUtc { get; init; }

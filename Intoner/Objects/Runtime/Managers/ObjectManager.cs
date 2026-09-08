@@ -1,9 +1,10 @@
-using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Plugin.Services;
 using Intoner.Objects.Filesystem.Layouts;
 using Intoner.Objects.Models;
 using Intoner.Objects.Resources;
 using Intoner.Objects.Utils;
+using Intoner.Scene;
+using Intoner.Utils;
 using Microsoft.Extensions.Logging;
 
 namespace Intoner.Objects.Runtime;
@@ -14,33 +15,43 @@ namespace Intoner.Objects.Runtime;
 internal interface IObjectManager
 {
     /// <summary>
-    /// Saves the current persisted local objects into a new layout.
+    /// Saves the current persisted local objects, optionally checking that the caller revision is still current.
     /// </summary>
     /// <param name="name">The requested layout name.</param>
-    /// <param name="layoutId">The new layout id when saving succeeded.</param>
-    /// <returns>true when the layout was created and populated.</returns>
-    bool TrySaveCurrentObjectsAsLayout(string name, out Guid layoutId);
+    /// <param name="expectedPersistentRevision">The persistent scene revision that must still be current, or null for a local mutation.</param>
+    /// <returns>The save result and new layout id.</returns>
+    PersistentMutationResult SaveCurrentObjectsAsLayout(string name, long? expectedPersistentRevision = null);
 
     /// <summary>
     /// Creates a new empty saved layout.
     /// </summary>
     /// <param name="name">The requested layout name.</param>
-    /// <returns>The created layout id.</returns>
-    Guid CreateEmptyLayout(string name);
+    /// <returns>The creation result and new layout id.</returns>
+    PersistentMutationResult CreateEmptyLayout(string name);
 
     /// <summary>
-    /// Selects the current default local layout.
+    /// Selects the current default local layout, optionally checking caller revisions.
     /// </summary>
     /// <param name="layoutId">The layout id to select, or null to clear the default layout.</param>
-    /// <returns>true when the layout selection was valid.</returns>
-    bool TrySelectLayout(Guid? layoutId);
+    /// <param name="expectedPersistentRevision">The persistent scene revision that must still be current, or null for a local mutation.</param>
+    /// <param name="expectedLayoutRevision">The selected layout revision that must still be current, or null for a local mutation.</param>
+    /// <returns>The selection and runtime reconciliation result.</returns>
+    PersistentMutationResult SelectLayout(
+        Guid? layoutId,
+        long? expectedPersistentRevision = null,
+        long? expectedLayoutRevision = null);
 
     /// <summary>
-    /// Deletes one saved layout.
+    /// Deletes one saved layout, optionally checking caller revisions.
     /// </summary>
     /// <param name="layoutId">The layout id to delete.</param>
-    /// <returns>true when the layout existed and was deleted.</returns>
-    bool TryDeleteLayout(Guid layoutId);
+    /// <param name="expectedLayoutRevision">The target layout revision that must still be current, or null for a local mutation.</param>
+    /// <param name="expectedPersistentRevision">The persistent scene revision that must still be current, or null for a local mutation.</param>
+    /// <returns>The deletion and runtime reconciliation result.</returns>
+    PersistentMutationResult DeleteLayout(
+        Guid layoutId,
+        long? expectedLayoutRevision = null,
+        long? expectedPersistentRevision = null);
 
     /// <summary>
     /// Replaces the current persisted workspace with an autosaved workspace snapshot.
@@ -51,14 +62,17 @@ internal interface IObjectManager
     bool TryRecoverWorkspace(ObjectPersistentWorkspaceSnapshot workspace, out string message);
 
     /// <summary>
+    /// Replaces the persistent scene when the caller revision is still current.
+    /// </summary>
+    /// <param name="update">The complete persistent scene replacement.</param>
+    /// <returns>The persistent scene apply result.</returns>
+    PersistentMutationResult TryApplyPersistentScene(ObjectPersistentSceneUpdate update);
+
+    /// <summary>
     /// Clears all object state, layouts, and runtime entries.
     /// </summary>
     void ClearAll();
 
-    /// <summary>
-    /// Raised when the persistent local object scene changes.
-    /// </summary>
-    event Action PersistentSceneChanged;
 }
 
 internal sealed class ObjectManager : IObjectManager, IDisposable
@@ -69,225 +83,425 @@ internal sealed class ObjectManager : IObjectManager, IDisposable
         IReadOnlyList<ObjectSnapshot> DefaultLayoutObjects);
 
     private readonly ILogger<ObjectManager> _logger;
+    private readonly Lock _stateLock;
     private readonly IFramework _framework;
     private readonly IClientState _clientState;
-    private readonly ICondition _condition;
+    private readonly ISceneLocationService _locationService;
+    private readonly IObjectLayoutStore _layoutStore;
     private readonly IObjectLayoutManager _layoutManager;
     private readonly IObjectPersistenceState _persistenceState;
+    private readonly IObjectIdentityService _objectIdentityService;
     private readonly IObjectFolderService _objectFolderService;
     private readonly IObjectHousingModePolicy _housingModePolicy;
     private readonly IObjectRevisionTracker _revisionTracker;
-    private readonly IObjectMutationService _mutationService;
+    private readonly IObjectSceneMutationService _sceneMutations;
     private readonly IObjectScene _scene;
     private readonly IObjectResolvedCollectionStore _collectionStore;
     private readonly IObjectLayoutAutoSaveService _layoutAutoSaveService;
 
     private int _pendingSavedLayoutReload;
-    private uint _lastZone;
-    private bool _sentBetweenAreas;
+    private bool _isTransitioning;
     private bool _disposed;
 
     public ObjectManager(
         ILogger<ObjectManager> logger,
+        ObjectStateLock stateLock,
         IFramework framework,
         IClientState clientState,
-        ICondition condition,
+        ISceneLocationService locationService,
+        IObjectLayoutStore layoutStore,
         IObjectLayoutManager layoutManager,
         IObjectPersistenceState persistenceState,
+        IObjectIdentityService objectIdentityService,
         IObjectFolderService objectFolderService,
         IObjectHousingModePolicy housingModePolicy,
         IObjectRevisionTracker revisionTracker,
-        IObjectMutationService mutationService,
+        IObjectSceneMutationService sceneMutations,
         IObjectScene scene,
         IObjectResolvedCollectionStore collectionStore,
         IObjectLayoutAutoSaveService layoutAutoSaveService)
     {
         _logger = logger;
+        _stateLock = stateLock.Value;
         _framework = framework;
         _clientState = clientState;
-        _condition = condition;
+        _locationService = locationService;
+        _layoutStore = layoutStore;
         _layoutManager = layoutManager;
         _persistenceState = persistenceState;
+        _objectIdentityService = objectIdentityService;
         _objectFolderService = objectFolderService;
         _housingModePolicy = housingModePolicy;
         _revisionTracker = revisionTracker;
-        _mutationService = mutationService;
+        _sceneMutations = sceneMutations;
         _scene = scene;
         _collectionStore = collectionStore;
         _layoutAutoSaveService = layoutAutoSaveService;
+        _isTransitioning = _locationService.IsTransitioning;
 
         _framework.Update += HandleFrameworkUpdate;
         _clientState.Logout += HandleClientLogout;
-        _layoutManager.SavedLayoutsReloaded += HandleSavedLayoutsReloaded;
+        _locationService.TransitionStarted += HandleLocationTransitionStarted;
+        _locationService.LocationInvalidated += HandleLocationInvalidated;
+        _layoutStore.LayoutFilesChanged += HandleSavedLayoutFilesChanged;
         _collectionStore.CollectionChanged += HandleResolvedCollectionChanged;
+
+        if (_isTransitioning)
+        {
+            HandleZoneSwitchStart();
+        }
     }
 
-    public event Action PersistentSceneChanged
+    public PersistentMutationResult SaveCurrentObjectsAsLayout(string name, long? expectedPersistentRevision = null)
     {
-        add => _revisionTracker.PersistentSceneChanged += value;
-        remove => _revisionTracker.PersistentSceneChanged -= value;
-    }
-
-    public bool TrySaveCurrentObjectsAsLayout(string name, out Guid layoutId)
-    {
-        layoutId = Guid.Empty;
-
-        var persistedSnapshots = _persistenceState.GetPersistedSnapshots();
-        var shouldPromoteStandaloneObjects = !_layoutManager.GetDefaultLayoutId().HasValue
-            && persistedSnapshots.Count > 0;
-        var layoutSnapshots = persistedSnapshots
-            .Select(snapshot => snapshot with
+        PersistentMutationResult committedResult;
+        bool reloadScene = false;
+        lock (_stateLock)
+        {
+            if (TryGetRevisionFailure(
+                    expectedPersistentRevision,
+                    _revisionTracker.GetPersistentSceneRevision(),
+                    "persistent scene revision",
+                    out PersistentMutationResult validationFailure))
             {
-                Id = shouldPromoteStandaloneObjects ? snapshot.Id : Guid.NewGuid(),
-            })
-            .ToList();
-        if (!_housingModePolicy.TryValidateLayout(layoutSnapshots, out _))
-        {
-            return false;
-        }
-
-        var layoutFolderExport = _objectFolderService.BuildLayoutExport(layoutSnapshots);
-        var layout = _layoutManager.CreateLayout(
-            name,
-            layoutSnapshots,
-            layoutFolderExport.Folders,
-            layoutFolderExport.FolderColors);
-
-        if (shouldPromoteStandaloneObjects)
-        {
-            _persistenceState.ClearStandaloneSnapshots();
-            _layoutManager.TrySetDefaultLayout(layout.Id);
-            IncrementPersistentSceneRevision();
-            _ = _scene.ReloadForCurrentLocation();
-        }
-        else
-        {
-            IncrementSceneRevision();
-        }
-
-        layoutId = layout.Id;
-        return true;
-    }
-
-    public Guid CreateEmptyLayout(string name)
-    {
-        var layout = _layoutManager.CreateLayout(name);
-        IncrementSceneRevision();
-        return layout.Id;
-    }
-
-    public bool TrySelectLayout(Guid? layoutId)
-    {
-        if (!layoutId.HasValue)
-        {
-            if (!_layoutManager.GetDefaultLayoutId().HasValue)
-            {
-                return true;
+                return validationFailure;
             }
 
-            if (!_layoutManager.TrySetDefaultLayout(null))
+            IReadOnlyList<ObjectSnapshot> persistedSnapshots = _persistenceState.GetPersistedSnapshots();
+            bool shouldPromoteStandaloneObjects = !_layoutManager.GetDefaultLayoutId().HasValue
+                && persistedSnapshots.Count > 0;
+            List<ObjectSnapshot> layoutSnapshots = persistedSnapshots
+                .Select(snapshot => snapshot with
+                {
+                    Id = shouldPromoteStandaloneObjects ? snapshot.Id : Guid.NewGuid(),
+                })
+                .ToList();
+            if (!_housingModePolicy.TryValidateLayout(layoutSnapshots, out _))
             {
-                return false;
+                return PersistentMutationResult.Failed(
+                    PersistentMutationStatus.InvalidRequest,
+                    "current objects are not valid for the active housing mode");
+            }
+
+            ObjectLayoutFolderExport layoutFolderExport = _objectFolderService.BuildLayoutExport(layoutSnapshots);
+            if (!_layoutManager.TryCreateLayout(
+                    name,
+                    layoutSnapshots,
+                    layoutFolderExport.Folders,
+                    layoutFolderExport.FolderColors,
+                    out ObjectLayoutSnapshot layout))
+            {
+                return PersistentMutationResult.Failed(
+                    PersistentMutationStatus.StorageFailed,
+                    "layout could not be stored");
+            }
+
+            if (shouldPromoteStandaloneObjects)
+            {
+                if (!_layoutManager.TrySetDefaultLayout(layout.Id))
+                {
+                    PersistentMutationStatus cleanupStatus = _layoutManager.DeleteLayout(layout.Id);
+                    bool removed = cleanupStatus == PersistentMutationStatus.Success;
+                    return PersistentMutationResult.Failed(
+                        removed ? PersistentMutationStatus.StorageFailed : PersistentMutationStatus.RecoveryRequired,
+                        removed
+                            ? "layout selection could not be stored"
+                            : "layout selection failed and the new layout could not be removed");
+                }
+
+                _persistenceState.ClearStandaloneSnapshots();
+                IncrementPersistentSceneRevision();
+                reloadScene = true;
+            }
+
+            committedResult = WithCurrentRevisions(PersistentMutationResult.Success(layout.Id));
+        }
+
+        return reloadScene
+            ? ReconcileCommittedLayoutChange(
+                committedResult,
+                "layout was saved but runtime reconciliation is pending")
+            : committedResult;
+    }
+
+    public PersistentMutationResult CreateEmptyLayout(string name)
+    {
+        lock (_stateLock)
+        {
+            return _layoutManager.TryCreateLayout(name, out ObjectLayoutSnapshot layout)
+                ? WithCurrentRevisions(PersistentMutationResult.Success(layout.Id))
+                : PersistentMutationResult.Failed(
+                    PersistentMutationStatus.StorageFailed,
+                    "layout could not be stored");
+        }
+    }
+
+    public PersistentMutationResult SelectLayout(
+        Guid? layoutId,
+        long? expectedPersistentRevision = null,
+        long? expectedLayoutRevision = null)
+    {
+        PersistentMutationResult committedResult;
+        lock (_stateLock)
+        {
+            if (TryGetRevisionFailure(
+                    expectedPersistentRevision,
+                    _revisionTracker.GetPersistentSceneRevision(),
+                    "persistent scene revision",
+                    out PersistentMutationResult validationFailure))
+            {
+                return validationFailure;
+            }
+
+            if (layoutId.HasValue)
+            {
+                if (!_layoutManager.TryGetLayout(layoutId.Value, out ObjectLayoutSnapshot layout))
+                {
+                    return PersistentMutationResult.Failed(PersistentMutationStatus.NotFound, "layout was not found");
+                }
+
+                if (TryGetRevisionFailure(
+                        expectedLayoutRevision,
+                        layout.Revision,
+                        "layout revision",
+                        out validationFailure))
+                {
+                    return validationFailure;
+                }
+
+                if (!_housingModePolicy.TryValidateLayout(layout.Objects, out string validationMessage))
+                {
+                    return PersistentMutationResult.Failed(PersistentMutationStatus.InvalidRequest, validationMessage);
+                }
+
+                if (!_objectIdentityService.TryValidatePersistentSceneSelection(layout.Objects, out Guid conflictingId))
+                {
+                    return PersistentMutationResult.Failed(
+                        PersistentMutationStatus.Conflict,
+                        $"layout contains object id {conflictingId:D} already owned by another active scene source");
+                }
+            }
+
+            Guid? previousLayoutId = _layoutManager.GetDefaultLayoutId();
+            if (previousLayoutId == layoutId)
+            {
+                return WithCurrentRevisions(PersistentMutationResult.Success(layoutId));
+            }
+
+            if (!_layoutManager.TrySetDefaultLayout(layoutId))
+            {
+                return PersistentMutationResult.Failed(
+                    PersistentMutationStatus.StorageFailed,
+                    "default layout selection could not be stored");
             }
 
             IncrementPersistentSceneRevision();
-            IncrementSceneRevision();
-            _ = _scene.ReloadForCurrentLocation();
-            return true;
+            committedResult = WithCurrentRevisions(PersistentMutationResult.Success(layoutId));
         }
 
-        var defaultLayoutId = _layoutManager.GetDefaultLayoutId();
-        if (defaultLayoutId.HasValue)
-        {
-            return defaultLayoutId.Value == layoutId.Value;
-        }
-
-        if (!_layoutManager.TryGetLayout(layoutId.Value, out var layout))
-        {
-            return false;
-        }
-
-        if (!_housingModePolicy.TryValidateLayout(layout.Objects, out _))
-        {
-            return false;
-        }
-
-        if (!_layoutManager.TrySetDefaultLayout(layout.Id))
-        {
-            return false;
-        }
-
-        IncrementPersistentSceneRevision();
-        IncrementSceneRevision();
-        _ = _scene.ReloadForCurrentLocation();
-        return true;
+        return ReconcileCommittedLayoutChange(
+            committedResult,
+            "layout selection was stored but runtime reconciliation is pending");
     }
 
-    public bool TryDeleteLayout(Guid layoutId)
+    public PersistentMutationResult DeleteLayout(
+        Guid layoutId,
+        long? expectedLayoutRevision = null,
+        long? expectedPersistentRevision = null)
     {
-        var defaultLayoutId = _layoutManager.GetDefaultLayoutId();
-        var deleted = _layoutManager.TryDeleteLayout(layoutId);
-        if (!deleted)
+        PersistentMutationResult committedResult;
+        bool reloadScene;
+        lock (_stateLock)
         {
-            return false;
+            if (TryGetRevisionFailure(
+                    expectedPersistentRevision,
+                    _revisionTracker.GetPersistentSceneRevision(),
+                    "persistent scene revision",
+                    out PersistentMutationResult validationFailure))
+            {
+                return validationFailure;
+            }
+
+            Guid? defaultLayoutId = _layoutManager.GetDefaultLayoutId();
+            if (!_layoutManager.TryGetLayout(layoutId, out ObjectLayoutSnapshot layout))
+            {
+                return PersistentMutationResult.Failed(PersistentMutationStatus.NotFound, "layout was not found");
+            }
+
+            if (TryGetRevisionFailure(
+                    expectedLayoutRevision,
+                    layout.Revision,
+                    "layout revision",
+                    out validationFailure))
+            {
+                return validationFailure;
+            }
+
+            PersistentMutationStatus deleteStatus = _layoutManager.DeleteLayout(layoutId);
+            if (deleteStatus != PersistentMutationStatus.Success)
+            {
+                return deleteStatus == PersistentMutationStatus.RecoveryRequired
+                    ? CreatePersistentRecoveryFailure(
+                        "layout deletion failed and the previous default selection could not be restored")
+                    : PersistentMutationResult.Failed(deleteStatus, "layout could not be deleted");
+            }
+
+            reloadScene = defaultLayoutId == layoutId;
+            if (reloadScene)
+            {
+                IncrementPersistentSceneRevision();
+            }
+
+            committedResult = WithCurrentRevisions(PersistentMutationResult.Success(layoutId));
         }
 
-        if (defaultLayoutId == layoutId)
-        {
-            IncrementPersistentSceneRevision();
-        }
-
-        IncrementSceneRevision();
-        if (defaultLayoutId == layoutId)
-        {
-            _ = _scene.ReloadForCurrentLocation();
-        }
-
-        return true;
+        return reloadScene
+            ? ReconcileCommittedLayoutChange(
+                committedResult,
+                "layout was deleted but runtime reconciliation is pending")
+            : committedResult;
     }
 
     public bool TryRecoverWorkspace(ObjectPersistentWorkspaceSnapshot workspace, out string message)
     {
         ArgumentNullException.ThrowIfNull(workspace);
 
-        RecoveredWorkspace recovered = BuildRecoveredWorkspace(workspace);
-        IReadOnlyList<ObjectSnapshot> recoveredObjects = recovered.StandaloneObjects
-            .Concat(recovered.DefaultLayoutObjects)
-            .ToList();
-        if (!_housingModePolicy.TryValidateLayout(recoveredObjects, out message))
+        PersistentMutationResult commitResult;
+        lock (_stateLock)
         {
-            return false;
+            RecoveredWorkspace recovered = BuildRecoveredWorkspace(workspace);
+            IReadOnlyList<ObjectSnapshot> recoveredObjects = recovered.StandaloneObjects
+                .Concat(recovered.DefaultLayoutObjects)
+                .ToList();
+            if (!_housingModePolicy.TryValidateLayout(recoveredObjects, out message))
+            {
+                return false;
+            }
+
+            if (!_objectIdentityService.TryValidatePersistentSceneReplacement(recoveredObjects, recovered.DefaultLayoutId, out _))
+            {
+                message = "an object id belongs to another scene source";
+                return false;
+            }
+
+            ObjectFolderSceneState recoveredFolderState = BuildRecoveredFolderState(workspace, recovered);
+            commitResult = CommitPersistentScene(new ObjectPersistentSceneUpdate
+            {
+                StandaloneObjects = recovered.StandaloneObjects,
+                StandaloneFolders = recoveredFolderState.StandaloneFolders,
+                StandaloneFolderColors = recoveredFolderState.StandaloneFolderColors,
+                DefaultLayoutId = recovered.DefaultLayoutId,
+                DefaultLayoutObjects = recovered.DefaultLayoutObjects,
+                DefaultLayoutFolders = recoveredFolderState.DefaultLayoutFolders,
+                DefaultLayoutFolderColors = recoveredFolderState.DefaultLayoutFolderColors,
+            });
+            if (!commitResult.IsAccepted)
+            {
+                message = commitResult.Message;
+                return false;
+            }
         }
 
-        if (!TryApplyRecoveredDefaultLayout(recovered, workspace, out message))
+        try
         {
-            return false;
+            SceneReloadResult reloadResult = _scene.ReloadForCurrentLocation();
+            message = reloadResult switch
+            {
+                { CanApply: false } => "Recovered the autosave. Objects will load when the current location can display them.",
+                { NeedsRetry: true } => "Recovered the autosave. Some objects need another scene refresh to finish loading.",
+                _ => "Recovered the last autosaved object workspace.",
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "autosaved persistent scene was stored but runtime reconciliation failed");
+            _scene.MarkNeedsRefresh();
+            message = "Recovered the autosave. Objects will load after the scene refreshes.";
         }
 
-        if (!_layoutManager.TrySetDefaultLayout(recovered.DefaultLayoutId))
-        {
-            message = "Failed to select the recovered default layout.";
-            return false;
-        }
-
-        _mutationService.ClearAllActiveEntries(removePersistedState: false);
-        _persistenceState.ClearStandaloneSnapshots();
-        foreach (ObjectSnapshot snapshot in recovered.StandaloneObjects)
-        {
-            _persistenceState.UpsertPersistedSnapshot(snapshot);
-        }
-
-        _objectFolderService.TryApplySceneState(BuildRecoveredFolderState(workspace, recovered));
-        IncrementPersistentSceneRevision();
-
-        SceneReloadResult reloadResult = _scene.ReloadForCurrentLocation();
-        message = reloadResult switch
-        {
-            { CanApply: false } => "Recovered the autosave. Objects will load when the current location can display them.",
-            { NeedsRetry: true } => "Recovered the autosave. Some objects need another scene refresh to finish loading.",
-            _ => "Recovered the last autosaved object workspace.",
-        };
         return true;
+    }
+
+    public PersistentMutationResult TryApplyPersistentScene(ObjectPersistentSceneUpdate update)
+    {
+        ArgumentNullException.ThrowIfNull(update);
+
+        PersistentMutationResult commitResult;
+
+        lock (_stateLock)
+        {
+            long persistentRevision = _revisionTracker.GetPersistentSceneRevision();
+            if (update.ExpectedRevision <= 0)
+            {
+                return WithCurrentRevisions(PersistentMutationResult.Failed(
+                    PersistentMutationStatus.InvalidRequest,
+                    "expected revision must be positive"));
+            }
+
+            if (update.ExpectedRevision != persistentRevision)
+            {
+                return WithCurrentRevisions(PersistentMutationResult.Failed(
+                    PersistentMutationStatus.Conflict,
+                    "persistent scene revision has changed"));
+            }
+
+            Guid? previousDefaultLayoutId = _layoutManager.GetDefaultLayoutId();
+            if (update.DefaultLayoutId.HasValue && update.DefaultLayoutId != previousDefaultLayoutId)
+            {
+                return WithCurrentRevisions(PersistentMutationResult.Failed(
+                    PersistentMutationStatus.Conflict,
+                    "default layout must match the current persistent scene"));
+            }
+
+            if (update.DefaultLayoutId.HasValue
+                && !_layoutManager.TryGetLayout(update.DefaultLayoutId.Value, out _))
+            {
+                return WithCurrentRevisions(PersistentMutationResult.Failed(
+                    PersistentMutationStatus.NotFound,
+                    "default layout was not found"));
+            }
+
+            IReadOnlyList<ObjectSnapshot> objects = update.StandaloneObjects
+                .Concat(update.DefaultLayoutObjects)
+                .ToList();
+            if (!_housingModePolicy.TryValidateLayout(objects, out string validationMessage))
+            {
+                return WithCurrentRevisions(PersistentMutationResult.Failed(
+                    PersistentMutationStatus.InvalidRequest,
+                    validationMessage));
+            }
+
+            if (!_objectIdentityService.TryValidatePersistentSceneReplacement(objects, update.DefaultLayoutId, out _))
+            {
+                return WithCurrentRevisions(PersistentMutationResult.Failed(
+                    PersistentMutationStatus.Conflict,
+                    "an object id belongs to another scene source"));
+            }
+
+            commitResult = CommitPersistentScene(update);
+        }
+
+        try
+        {
+            SceneReloadResult reloadResult = _scene.ReloadForCurrentLocation();
+            return reloadResult.IsApplied
+                ? commitResult
+                : commitResult with
+                {
+                    Status = PersistentMutationStatus.RuntimeApplyFailed,
+                    Message = "persistent state was accepted but runtime reconciliation is pending",
+                };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "persistent scene was stored but runtime reconciliation failed");
+            _scene.MarkNeedsRefresh();
+            return commitResult with
+            {
+                Status = PersistentMutationStatus.RuntimeApplyFailed,
+                Message = "persistent state was accepted but runtime reconciliation failed",
+            };
+        }
     }
 
     public void ClearAll()
@@ -295,11 +509,23 @@ internal sealed class ObjectManager : IObjectManager, IDisposable
 
     private void ClearAll(bool persistLayoutChanges)
     {
-        var hadPersistentSceneState = _persistenceState.HasPersistentSceneState();
-        _mutationService.ClearAllActiveEntries(removePersistedState: false);
-        _persistenceState.ClearStandaloneSnapshots();
-        _layoutManager.ClearAllLayoutObjects(persistLayoutChanges);
-        IncrementSceneRevision(persistentChanged: hadPersistentSceneState);
+        lock (_stateLock)
+        {
+            bool hadPersistentSceneState = _persistenceState.HasPersistentSceneState();
+            PersistentMutationStatus clearStatus = _layoutManager.ClearAllLayoutObjects(persistLayoutChanges);
+            if (clearStatus != PersistentMutationStatus.Success)
+            {
+                _logger.LogError(
+                    "could not clear saved layout state ({Status}); active object state was left unchanged",
+                    clearStatus);
+                return;
+            }
+
+            _persistenceState.ClearStandaloneSnapshots();
+            IncrementSceneRevision(persistentChanged: hadPersistentSceneState);
+        }
+
+        _sceneMutations.ClearAllActiveEntries(removePersistedState: false);
     }
 
     public void Dispose()
@@ -312,10 +538,12 @@ internal sealed class ObjectManager : IObjectManager, IDisposable
         _disposed = true;
         _framework.Update -= HandleFrameworkUpdate;
         _clientState.Logout -= HandleClientLogout;
-        _layoutManager.SavedLayoutsReloaded -= HandleSavedLayoutsReloaded;
+        _locationService.TransitionStarted -= HandleLocationTransitionStarted;
+        _locationService.LocationInvalidated -= HandleLocationInvalidated;
+        _layoutStore.LayoutFilesChanged -= HandleSavedLayoutFilesChanged;
         _collectionStore.CollectionChanged -= HandleResolvedCollectionChanged;
 
-        if (ObjectFrameworkUtility.IsGameFrameworkDestroying())
+        if (FrameworkUnloadUtility.IsGameFrameworkDestroying())
         {
             _logger.LogWarning("framework is unloading, skipping object manager clear during dispose");
             return;
@@ -324,11 +552,220 @@ internal sealed class ObjectManager : IObjectManager, IDisposable
         ClearAll(persistLayoutChanges: false);
     }
 
+    private PersistentMutationResult ReconcileCommittedLayoutChange(
+        PersistentMutationResult committedResult,
+        string pendingMessage)
+    {
+        try
+        {
+            SceneReloadResult reloadResult = _scene.ReloadForCurrentLocation();
+            if (reloadResult.IsApplied)
+            {
+                return committedResult;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "layout state was stored but runtime reconciliation failed");
+        }
+
+        _scene.MarkNeedsRefresh();
+        return committedResult with
+        {
+            Status = PersistentMutationStatus.RuntimeApplyFailed,
+            Message = pendingMessage,
+        };
+    }
+
+    private PersistentMutationResult WithCurrentRevisions(PersistentMutationResult result)
+    {
+        ObjectRevisionSnapshot revisions = _revisionTracker.GetSnapshot();
+        return result.WithRevisions(
+            revisions.SceneRevision,
+            revisions.PersistentSceneRevision,
+            revisions.SavedLayoutsRevision);
+    }
+
+    private static bool TryGetRevisionFailure(
+        long? expectedRevision,
+        long currentRevision,
+        string revisionName,
+        out PersistentMutationResult failure)
+    {
+        if (!expectedRevision.HasValue)
+        {
+            failure = default;
+            return false;
+        }
+
+        if (expectedRevision.Value <= 0)
+        {
+            failure = PersistentMutationResult.Failed(
+                PersistentMutationStatus.InvalidRequest,
+                $"expected {revisionName} must be positive");
+            return true;
+        }
+
+        if (expectedRevision.Value != currentRevision)
+        {
+            failure = PersistentMutationResult.Failed(
+                PersistentMutationStatus.Conflict,
+                $"{revisionName} has changed");
+            return true;
+        }
+
+        failure = default;
+        return false;
+    }
+
     private void IncrementPersistentSceneRevision()
         => IncrementSceneRevision(persistentChanged: true);
 
     private void IncrementSceneRevision(bool persistentChanged = false)
         => _revisionTracker.Increment(persistentChanged);
+
+    private PersistentMutationResult CommitPersistentScene(ObjectPersistentSceneUpdate update)
+    {
+        Guid? previousDefaultLayoutId = _layoutManager.GetDefaultLayoutId();
+        ObjectLayoutSnapshot? previousTargetLayout = null;
+        if (update.DefaultLayoutId.HasValue
+            && !_layoutManager.TryGetLayout(update.DefaultLayoutId.Value, out previousTargetLayout!))
+        {
+            return WithCurrentRevisions(PersistentMutationResult.Failed(
+                PersistentMutationStatus.NotFound,
+                "default layout was not found"));
+        }
+
+        IReadOnlyList<ObjectSnapshot> previousStandaloneObjects = _persistenceState.GetStandaloneSnapshots();
+        ObjectFolderSceneState previousFolderState = _objectFolderService.CaptureSceneState();
+        bool layoutUpdateStarted = false;
+        bool defaultLayoutChanged = false;
+        try
+        {
+            if (update.DefaultLayoutId.HasValue)
+            {
+                layoutUpdateStarted = true;
+                bool layoutReplaced = _layoutManager.TryReplaceLayoutContent(
+                    update.DefaultLayoutId.Value,
+                    update.DefaultLayoutObjects,
+                    update.DefaultLayoutFolders,
+                    update.DefaultLayoutFolderColors);
+                if (!layoutReplaced)
+                {
+                    return WithCurrentRevisions(PersistentMutationResult.Failed(
+                        PersistentMutationStatus.StorageFailed,
+                        "default layout could not be stored"));
+                }
+            }
+
+            defaultLayoutChanged = previousDefaultLayoutId != update.DefaultLayoutId;
+            if (defaultLayoutChanged && !_layoutManager.TrySetDefaultLayout(update.DefaultLayoutId))
+            {
+                bool restored = RestorePersistentScene(
+                    previousDefaultLayoutId,
+                    previousTargetLayout,
+                    previousStandaloneObjects,
+                    previousFolderState,
+                    layoutUpdateStarted);
+                return restored
+                    ? WithCurrentRevisions(PersistentMutationResult.Failed(
+                        PersistentMutationStatus.StorageFailed,
+                        "default layout selection could not be stored"))
+                    : CreatePersistentRecoveryFailure("persistent scene could not be restored");
+            }
+
+            _persistenceState.ReplaceStandaloneSnapshots(update.StandaloneObjects);
+            _objectFolderService.ReplaceStandaloneState(update.StandaloneFolders, update.StandaloneFolderColors);
+            IncrementPersistentSceneRevision();
+            return WithCurrentRevisions(PersistentMutationResult.Success());
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "failed to replace persistent scene state");
+            bool restored = RestorePersistentScene(
+                previousDefaultLayoutId,
+                previousTargetLayout,
+                previousStandaloneObjects,
+                previousFolderState,
+                layoutUpdateStarted,
+                defaultLayoutChanged);
+            return restored
+                ? WithCurrentRevisions(PersistentMutationResult.Failed(
+                    PersistentMutationStatus.StorageFailed,
+                    "persistent scene could not be stored"))
+                : CreatePersistentRecoveryFailure(
+                    "persistent scene storage failed and previous state could not be restored");
+        }
+    }
+
+    private PersistentMutationResult CreatePersistentRecoveryFailure(string message)
+    {
+        IncrementPersistentSceneRevision();
+        return WithCurrentRevisions(PersistentMutationResult.Failed(
+            PersistentMutationStatus.RecoveryRequired,
+            message));
+    }
+
+    private bool RestorePersistentScene(
+        Guid? previousDefaultLayoutId,
+        ObjectLayoutSnapshot? previousTargetLayout,
+        IReadOnlyList<ObjectSnapshot> previousStandaloneObjects,
+        ObjectFolderSceneState previousFolderState,
+        bool restoreTargetLayout,
+        bool defaultLayoutChanged = false)
+    {
+        bool restored = true;
+        if (defaultLayoutChanged)
+        {
+            restored = TryRestorePersistentSceneStep(
+                () => _layoutManager.TrySetDefaultLayout(previousDefaultLayoutId),
+                "default layout");
+        }
+
+        if (restoreTargetLayout && previousTargetLayout is not null)
+        {
+            restored = TryRestorePersistentSceneStep(
+                () => _layoutManager.TryRestoreLayout(previousTargetLayout),
+                "layout content") && restored;
+        }
+
+        restored = TryRestorePersistentSceneStep(
+            () =>
+            {
+                _persistenceState.ReplaceStandaloneSnapshots(previousStandaloneObjects);
+                return true;
+            },
+            "standalone objects") && restored;
+        restored = TryRestorePersistentSceneStep(
+            () =>
+            {
+                _objectFolderService.ReplaceStandaloneState(
+                    previousFolderState.StandaloneFolders,
+                    previousFolderState.StandaloneFolderColors);
+                return true;
+            },
+            "standalone folders") && restored;
+        return restored;
+    }
+
+    private bool TryRestorePersistentSceneStep(Func<bool> restore, string state)
+    {
+        try
+        {
+            if (restore())
+            {
+                return true;
+            }
+
+            _logger.LogCritical("failed to restore persistent scene {State} after an apply error", state);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogCritical(ex, "failed to restore persistent scene {State} after an apply error", state);
+        }
+
+        return false;
+    }
 
     private RecoveredWorkspace BuildRecoveredWorkspace(ObjectPersistentWorkspaceSnapshot workspace)
     {
@@ -363,27 +800,6 @@ internal sealed class ObjectManager : IObjectManager, IDisposable
         return new RecoveredWorkspace(defaultLayoutId, standaloneObjects, defaultLayoutObjects);
     }
 
-    private bool TryApplyRecoveredDefaultLayout(
-        RecoveredWorkspace recovered,
-        ObjectPersistentWorkspaceSnapshot workspace,
-        out string message)
-    {
-        if (!recovered.DefaultLayoutId.HasValue)
-        {
-            message = string.Empty;
-            return true;
-        }
-
-        if (!_layoutManager.TryReplaceLayoutObjects(recovered.DefaultLayoutId.Value, recovered.DefaultLayoutObjects))
-        {
-            message = $"Failed to restore autosave objects into layout '{workspace.Name}'.";
-            return false;
-        }
-
-        message = string.Empty;
-        return true;
-    }
-
     private static ObjectFolderSceneState BuildRecoveredFolderState(ObjectPersistentWorkspaceSnapshot workspace, RecoveredWorkspace recovered)
     {
         IReadOnlyList<string> standaloneFolders = ResolveRecoveredFolders(workspace, recovered.StandaloneObjects);
@@ -416,21 +832,20 @@ internal sealed class ObjectManager : IObjectManager, IDisposable
     {
         string sanitizedFolder = ObjectFolderUtility.SanitizeFolderPath(folder);
         return !string.IsNullOrWhiteSpace(sanitizedFolder)
-            && objectFolders.Any(objectFolder =>
-                string.Equals(objectFolder, sanitizedFolder, StringComparison.OrdinalIgnoreCase)
-                || objectFolder.StartsWith($"{sanitizedFolder}/", StringComparison.OrdinalIgnoreCase));
+            && objectFolders.Any(objectFolder => ObjectFolderUtility.IsSameOrDescendant(
+                objectFolder,
+                sanitizedFolder));
     }
 
     private void HandleFrameworkUpdate(IFramework framework)
     {
         _ = framework;
-        ProcessZoneTransitionState();
         ProcessPendingSavedLayoutReload();
         _layoutAutoSaveService.FrameworkUpdate();
         _scene.FrameworkUpdate();
     }
 
-    private void HandleSavedLayoutsReloaded()
+    private void HandleSavedLayoutFilesChanged()
         => Interlocked.Exchange(ref _pendingSavedLayoutReload, 1);
 
     private void ProcessPendingSavedLayoutReload()
@@ -440,34 +855,69 @@ internal sealed class ObjectManager : IObjectManager, IDisposable
             return;
         }
 
-        IncrementPersistentSceneRevision();
-        _ = _scene.ReloadForCurrentLocation();
-    }
-
-    private void ProcessZoneTransitionState()
-    {
-        if (_condition[ConditionFlag.BetweenAreas] || _condition[ConditionFlag.BetweenAreas51])
+        ObjectLayoutReloadResult reloadResult;
+        lock (_stateLock)
         {
-            uint zone = _clientState.TerritoryType;
-            if (_lastZone != zone)
+            IReadOnlyList<ObjectLayoutSnapshot> loadedLayouts = _layoutStore.LoadLayouts();
+            if (!_objectIdentityService.TryValidateSavedLayoutSet(loadedLayouts, out Guid conflictingId))
             {
-                _lastZone = zone;
-                if (!_sentBetweenAreas)
-                {
-                    _sentBetweenAreas = true;
-                    HandleZoneSwitchStart();
-                }
+                _logger.LogWarning(
+                    "saved layout reload rejected conflicting object id {ObjectId}",
+                    conflictingId);
+                return;
             }
 
+            reloadResult = _layoutManager.ApplySavedLayoutReload(loadedLayouts);
+        }
+
+        if (!reloadResult.IsApplied)
+        {
+            _logger.LogWarning(
+                "saved layout reload rejected conflicting identity {Identity}",
+                reloadResult.ConflictingId);
             return;
         }
 
-        if (!_sentBetweenAreas)
+        if (reloadResult.Status == ObjectLayoutReloadStatus.ConfigurationWriteFailed)
+        {
+            _logger.LogWarning("saved layouts were reloaded but the removed default layout could not be cleared from configuration");
+        }
+
+        if (!reloadResult.ActiveLayoutChanged)
         {
             return;
         }
 
-        _sentBetweenAreas = false;
+        try
+        {
+            _ = _scene.ReloadForCurrentLocation();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "saved layouts were reloaded but runtime reconciliation failed");
+            _scene.MarkNeedsRefresh();
+        }
+    }
+
+    private void HandleLocationTransitionStarted()
+    {
+        if (_isTransitioning)
+        {
+            return;
+        }
+
+        _isTransitioning = true;
+        HandleZoneSwitchStart();
+    }
+
+    private void HandleLocationInvalidated()
+    {
+        if (!_isTransitioning)
+        {
+            return;
+        }
+
+        _isTransitioning = false;
         HandleZoneSwitchEnd();
     }
 
@@ -475,7 +925,7 @@ internal sealed class ObjectManager : IObjectManager, IDisposable
     {
         _ = type;
         _ = code;
-        ObjectFrameworkUtility.RunOnFrameworkThread(_framework, HandleLogout);
+        FrameworkThreadUtility.Run(_framework, HandleLogout);
     }
 
     private void HandleZoneSwitchStart()

@@ -1,8 +1,8 @@
 using Intoner.Objects.Api;
-using Intoner.Objects.Filesystem.Configuration;
-using Intoner.Objects.Filesystem.Storage;
 using Intoner.Objects.Models;
 using Intoner.Objects.Runtime;
+using Intoner.Services.Configuration;
+using Intoner.Services.Storage;
 using Microsoft.Extensions.Logging;
 
 namespace Intoner.Objects.Filesystem.Layouts;
@@ -17,9 +17,9 @@ internal interface IObjectLayoutAutoSaveService
 internal sealed class ObjectLayoutAutoSaveService : IObjectLayoutAutoSaveService
 {
     private readonly ILogger<ObjectLayoutAutoSaveService> _logger;
-    private readonly IObjectConfigurationService          _configurationService;
-    private readonly IObjectStoragePathService            _pathService;
-    private readonly IObjectFileSystem                    _fileSystem;
+    private readonly IIntonerConfigurationService          _configurationService;
+    private readonly IPluginStoragePaths                  _pathService;
+    private readonly IPluginFileSystem                    _fileSystem;
     private readonly IObjectPersistenceState              _persistenceState;
     private readonly IObjectFolderService                 _folderService;
     private readonly IObjectLayoutManager                 _layoutManager;
@@ -31,9 +31,9 @@ internal sealed class ObjectLayoutAutoSaveService : IObjectLayoutAutoSaveService
 
     public ObjectLayoutAutoSaveService(
         ILogger<ObjectLayoutAutoSaveService> logger,
-        IObjectConfigurationService configurationService,
-        IObjectStoragePathService pathService,
-        IObjectFileSystem fileSystem,
+        IIntonerConfigurationService configurationService,
+        IPluginStoragePaths pathService,
+        IPluginFileSystem fileSystem,
         IObjectPersistenceState persistenceState,
         IObjectFolderService folderService,
         IObjectLayoutManager layoutManager,

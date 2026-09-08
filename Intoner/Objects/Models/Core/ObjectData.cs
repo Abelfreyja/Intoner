@@ -1,4 +1,3 @@
-using System;
 using System.Text.Json.Serialization;
 
 namespace Intoner.Objects.Models;
@@ -20,4 +19,3 @@ internal enum ObjectKind
     JsonDerivedType(typeof(VfxModel), typeDiscriminator: "vfx"),
 ]
 internal abstract record ObjectData;
-

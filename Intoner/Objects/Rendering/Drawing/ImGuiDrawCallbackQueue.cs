@@ -12,6 +12,7 @@ internal sealed unsafe class ImGuiDrawCallbackQueue : IDisposable
     private static readonly Action EmptyDrawContent = static () => { };
     private static long _nextJobId;
 
+    private readonly Lock _stateLock = new();
     private bool _disposed;
 
     /// <summary> queues a callback job with no draw commands between process and release </summary>
@@ -36,17 +37,29 @@ internal sealed unsafe class ImGuiDrawCallbackQueue : IDisposable
         ArgumentNullException.ThrowIfNull(processJob);
         ArgumentNullException.ThrowIfNull(drawContent);
 
-        if (_disposed)
+        long jobId = 0;
+        bool disposed;
+        bool queued;
+        lock (_stateLock)
         {
-            releaseJob?.Invoke(job);
-            throw new ObjectDisposedException(nameof(ImGuiDrawCallbackQueue));
+            disposed = _disposed;
+            if (disposed)
+            {
+                queued = false;
+            }
+            else
+            {
+                jobId = Interlocked.Increment(ref _nextJobId);
+                queued = Jobs.TryAdd(jobId, new Entry(this, new QueuedJob<TJob>(job, processJob, releaseJob)));
+            }
         }
 
-        long jobId = Interlocked.Increment(ref _nextJobId);
-        if (!Jobs.TryAdd(jobId, new Entry(this, new QueuedJob<TJob>(job, processJob, releaseJob))))
+        if (!queued)
         {
             releaseJob?.Invoke(job);
-            throw new InvalidOperationException("Failed to queue ImGui draw callback.");
+            throw disposed
+                ? new ObjectDisposedException(nameof(ImGuiDrawCallbackQueue))
+                : new InvalidOperationException("Failed to queue ImGui draw callback.");
         }
 
         var releaseQueued = false;
@@ -69,12 +82,16 @@ internal sealed unsafe class ImGuiDrawCallbackQueue : IDisposable
 
     public void Dispose()
     {
-        if (_disposed)
+        lock (_stateLock)
         {
-            return;
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
         }
 
-        _disposed = true;
         ReleaseOwnedJobs();
     }
 
@@ -88,7 +105,7 @@ internal sealed unsafe class ImGuiDrawCallbackQueue : IDisposable
 
         try
         {
-            entry.Job.Process();
+            entry.Process();
         }
         catch
         {
@@ -104,7 +121,7 @@ internal sealed unsafe class ImGuiDrawCallbackQueue : IDisposable
     {
         if (Jobs.TryRemove(jobId, out Entry? entry))
         {
-            entry.Job.Release();
+            entry.Release(waitForProcessing: false);
         }
     }
 
@@ -112,14 +129,87 @@ internal sealed unsafe class ImGuiDrawCallbackQueue : IDisposable
     {
         foreach ((long jobId, Entry entry) in Jobs)
         {
-            if (ReferenceEquals(entry.Owner, this))
+            if (ReferenceEquals(entry.Owner, this)
+                && Jobs.TryRemove(jobId, out Entry? removed))
             {
-                ReleaseJob(jobId);
+                removed.Release(waitForProcessing: true);
             }
         }
     }
 
-    private sealed record Entry(ImGuiDrawCallbackQueue Owner, IQueuedJob Job);
+    private sealed class Entry(ImGuiDrawCallbackQueue owner, IQueuedJob job)
+    {
+        private readonly object _stateLock = new();
+        private bool _processing;
+        private bool _releaseRequested;
+        private bool _released;
+
+        public ImGuiDrawCallbackQueue Owner { get; } = owner;
+
+        public void Process()
+        {
+            lock (_stateLock)
+            {
+                if (_releaseRequested || _processing)
+                {
+                    return;
+                }
+
+                _processing = true;
+            }
+
+            try
+            {
+                job.Process();
+            }
+            finally
+            {
+                bool release;
+                lock (_stateLock)
+                {
+                    _processing = false;
+                    release = TryMarkReleasedLocked();
+                    Monitor.PulseAll(_stateLock);
+                }
+
+                if (release)
+                {
+                    job.Release();
+                }
+            }
+        }
+
+        public void Release(bool waitForProcessing)
+        {
+            bool release;
+            lock (_stateLock)
+            {
+                _releaseRequested = true;
+                while (waitForProcessing && _processing)
+                {
+                    Monitor.Wait(_stateLock);
+                }
+
+                release = TryMarkReleasedLocked();
+            }
+
+            if (release)
+            {
+                job.Release();
+            }
+        }
+
+        private bool TryMarkReleasedLocked()
+        {
+            if (!_releaseRequested || _processing || _released)
+            {
+                return false;
+            }
+
+            _released = true;
+            return true;
+        }
+    }
 
     private interface IQueuedJob
     {

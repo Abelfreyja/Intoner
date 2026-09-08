@@ -11,45 +11,65 @@ internal static class SearchService
             return new SearchQuery([]);
         }
 
-        return new SearchQuery(ObjectSearchTermUtility.BuildSearchTokens(searchText));
+        return new SearchQuery(SearchTermUtility.BuildSearchTokens(searchText));
     }
 
-    public static SearchResult Filter(
+    public static SettingsView BuildView(
         SettingsCatalog catalog,
-        SettingsTab? selectedTab,
+        string? selectedTabId,
         SearchQuery query)
+    {
+        List<SectionResult> allSections = [];
+        List<CategoryResult> categories = [];
+        SearchResult? selectedResult = null;
+        var totalEntryCount = 0;
+
+        foreach (SettingsModule module in catalog.Modules)
+        {
+            SettingsTabDefinition tab = module.Tab;
+            SearchResult tabResult = Filter(module, query);
+            categories.Add(new CategoryResult(tab, tab.Label, tabResult));
+            allSections.AddRange(tabResult.Sections);
+            totalEntryCount += tabResult.EntryCount;
+
+            if (string.Equals(selectedTabId, tab.Id, StringComparison.Ordinal))
+            {
+                selectedResult = tabResult;
+            }
+        }
+
+        SearchResult allResult = new(allSections, totalEntryCount);
+        categories.Insert(0, new CategoryResult(null, "All", allResult));
+
+        return new SettingsView(
+            query,
+            allResult,
+            selectedTabId is null ? allResult : selectedResult ?? allResult,
+            categories);
+    }
+
+    private static SearchResult Filter(SettingsModule module, SearchQuery query)
     {
         List<SectionResult> sections = [];
         var entryCount = 0;
-
-        foreach (SettingsSection section in catalog.Sections)
+        foreach (SettingsSection section in module.Sections)
         {
-            if (selectedTab.HasValue && section.Tab != selectedTab.Value)
-            {
-                continue;
-            }
-
-            SettingsTabDefinition tab = catalog.GetTab(section.Tab);
+            List<ISettingEntry> visibleEntries = section.Entries
+                .Where(static entry => entry.IsVisible)
+                .ToList();
             List<ISettingEntry> entries = [];
-
             if (!query.HasTokens)
             {
-                entries.AddRange(section.Entries);
+                entries.AddRange(visibleEntries);
             }
             else
             {
-                bool sectionMatches = MatchesSection(query, tab, section);
-                foreach (ISettingEntry entry in section.Entries)
-                {
-                    if (MatchesEntry(query, entry))
-                    {
-                        entries.Add(entry);
-                    }
-                }
+                bool sectionMatches = MatchesSection(query, module.Tab, section);
+                entries.AddRange(visibleEntries.Where(entry => MatchesEntry(query, entry)));
 
                 if (entries.Count == 0 && sectionMatches)
                 {
-                    entries.AddRange(section.Entries);
+                    entries.AddRange(visibleEntries);
                 }
             }
 
@@ -58,41 +78,11 @@ internal static class SearchService
                 continue;
             }
 
-            sections.Add(new SectionResult(section, entries));
+            sections.Add(new SectionResult(module.Tab, section, entries));
             entryCount += entries.Count;
         }
 
         return new SearchResult(sections, entryCount);
-    }
-
-    public static SettingsView BuildView(
-        SettingsCatalog catalog,
-        SettingsTab? selectedTab,
-        SearchQuery query)
-    {
-        SearchResult allResult = Filter(catalog, null, query);
-        SearchResult? selectedResult = selectedTab.HasValue ? null : allResult;
-        List<CategoryResult> categories =
-        [
-            new(null, "All", allResult),
-        ];
-
-        foreach (SettingsTabDefinition tab in catalog.Tabs)
-        {
-            SearchResult tabResult = Filter(catalog, tab.Key, query);
-            categories.Add(new CategoryResult(tab.Key, tab.Label, tabResult));
-
-            if (selectedTab == tab.Key)
-            {
-                selectedResult = tabResult;
-            }
-        }
-
-        return new SettingsView(
-            query,
-            allResult,
-            selectedResult ?? allResult,
-            categories);
     }
 
     private static bool MatchesSection(
@@ -117,6 +107,6 @@ internal static class SearchService
             entry.Definition.Keywords);
 
     private static bool MatchesText(SearchQuery query, params string[] values)
-        => ObjectSearchTermUtility.MatchesSearchText(ObjectSearchTermUtility.BuildSearchText(values), query.Tokens);
+        => SearchTermUtility.MatchesSearchText(SearchTermUtility.BuildSearchText(values), query.Tokens);
 }
 

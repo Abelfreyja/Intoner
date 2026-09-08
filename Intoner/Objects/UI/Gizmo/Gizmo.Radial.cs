@@ -3,22 +3,15 @@ using Dalamud.Interface;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using Intoner.Objects.Models;
-using Intoner.Objects.Runtime;
 using Intoner.Objects.Utils;
+using Intoner.Scene;
+using Intoner.UI.Components;
 using System.Numerics;
 
 namespace Intoner.Objects.UI;
 
 internal sealed partial class Gizmo
 {
-    private static Vector2 MeasureToolbarIcon(FontAwesomeIcon icon)
-    {
-        using (ImRaii.PushFont(UiBuilder.IconFont))
-        {
-            return ImGui.CalcTextSize(icon.ToIconString());
-        }
-    }
-
     private void DrawGizmoWheel(in GizmoContext context)
     {
         var scale = ImGuiHelpers.GlobalScale;
@@ -50,10 +43,10 @@ internal sealed partial class Gizmo
             var center = windowPos + new Vector2(radius);
             var mousePos = ImGui.GetIO().MousePos;
 
-            drawList.AddCircleFilled(center, radius, ImGui.GetColorU32(EditorColors.Color(0.11f, 0.11f, 0.11f, 1f)), 96);
-            drawList.AddCircleFilled(center, innerRadius, ImGui.GetColorU32(EditorColors.Color(0.11f, 0.11f, 0.11f, 1f)), 72);
-            drawList.AddCircle(center, radius, ImGui.GetColorU32(EditorColors.Color(0.10f, 0.10f, 0.10f, 1f)), 96, 3.5f * scale);
-            drawList.AddCircle(center, innerRadius, ImGui.GetColorU32(EditorColors.Color(0.10f, 0.10f, 0.10f, 1f)), 72, 3f * scale);
+            drawList.AddCircleFilled(center, radius, ImGui.GetColorU32(ThemeColors.Color(0.11f, 0.11f, 0.11f, 1f)), 96);
+            drawList.AddCircleFilled(center, innerRadius, ImGui.GetColorU32(ThemeColors.Color(0.11f, 0.11f, 0.11f, 1f)), 72);
+            drawList.AddCircle(center, radius, ImGui.GetColorU32(ThemeColors.Color(0.10f, 0.10f, 0.10f, 1f)), 96, 3.5f * scale);
+            drawList.AddCircle(center, innerRadius, ImGui.GetColorU32(ThemeColors.Color(0.10f, 0.10f, 0.10f, 1f)), 72, 3f * scale);
 
             var ringInner = innerRadius * 0.92f;
             var ringOuter = radius * 0.98f;
@@ -88,42 +81,33 @@ internal sealed partial class Gizmo
                 var labelAngle = (startAngle + endAngle) * 0.5f;
                 var labelRadius = (ringInner + ringOuter) * 0.5f;
                 var labelPosition = center + (new Vector2(MathF.Cos(labelAngle), MathF.Sin(labelAngle)) * labelRadius);
-                var iconText = segment.Icon.ToIconString();
-                var iconSize = MeasureToolbarIcon(segment.Icon);
+                EditorIcon.Metrics iconMetrics = EditorIcon.Measure(segment.Icon);
 
-                var iconColor = segment.IsActive
-                    ? EditorColors.Color(0f, 0f, 0f, 0.95f)
-                    : segment.IsEnabled
-                        ? EditorColors.Color(1f, 1f, 1f, 0.95f)
-                        : EditorColors.Color(0.55f, 0.55f, 0.58f, 0.95f);
-                using (ImRaii.PushFont(UiBuilder.IconFont))
-                {
-                    drawList.AddText(
-                        labelPosition - (iconSize * 0.5f),
-                        ImGui.GetColorU32(iconColor),
-                        iconText);
-                }
+                var iconColor = ResolveWheelIconColor(segment);
+                EditorIcon.Draw(
+                    drawList,
+                    segment.Icon,
+                    iconMetrics,
+                    labelPosition - (iconMetrics.Size * 0.5f),
+                    iconColor);
             }
 
             var centerButtonRadius = innerRadius * 0.42f;
             var centerHovered = Vector2.Distance(mousePos, center) <= centerButtonRadius;
             var centerColor = RadialActionsPage
-                ? EditorColors.Color(0.30f, 0.55f, 0.95f, 1f)
-                : EditorColors.Color(0.20f, 0.20f, 0.30f, 1f);
+                ? ThemeColors.Color(0.30f, 0.55f, 0.95f, 1f)
+                : ThemeColors.Color(0.20f, 0.20f, 0.30f, 1f);
             drawList.AddCircleFilled(center, centerButtonRadius, ImGui.GetColorU32(centerColor), 64);
-            drawList.AddCircle(center, centerButtonRadius, ImGui.GetColorU32(EditorColors.Color(0.10f, 0.10f, 0.10f, 1f)), 64, 2f * scale);
+            drawList.AddCircle(center, centerButtonRadius, ImGui.GetColorU32(ThemeColors.Color(0.10f, 0.10f, 0.10f, 1f)), 64, 2f * scale);
 
             var centerIcon = RadialActionsPage ? FontAwesomeIcon.Tools : FontAwesomeIcon.LayerGroup;
-            var centerText = centerIcon.ToIconString();
-            var centerIconSize = MeasureToolbarIcon(centerIcon);
-
-            using (ImRaii.PushFont(UiBuilder.IconFont))
-            {
-                drawList.AddText(
-                    center - (centerIconSize * 0.5f),
-                    ImGui.GetColorU32(RadialActionsPage ? EditorColors.Color(0f, 0f, 0f, 0.95f) : EditorColors.Color(1f, 1f, 1f, 0.95f)),
-                    centerText);
-            }
+            EditorIcon.Metrics centerIconMetrics = EditorIcon.Measure(centerIcon);
+            EditorIcon.Draw(
+                drawList,
+                centerIcon,
+                centerIconMetrics,
+                center - (centerIconMetrics.Size * 0.5f),
+                RadialActionsPage ? ThemeColors.Color(0f, 0f, 0f, 0.95f) : ThemeColors.Color(1f, 1f, 1f, 0.95f));
 
             if (hoveredIndex >= 0 || centerHovered)
             {
@@ -132,7 +116,7 @@ internal sealed partial class Gizmo
 
             if (centerHovered)
             {
-                PendingRadialTooltip = new GizmoRadialTooltipInfo(mousePos, RadialActionsPage ? "Show Primary Actions" : "Show Object Actions");
+                PendingRadialTooltip = new GizmoRadialTooltipInfo(mousePos, RadialActionsPage ? "Show Primary Actions" : "Show Item Actions");
             }
             else if (hoveredIndex >= 0)
             {
@@ -170,6 +154,20 @@ internal sealed partial class Gizmo
     private GizmoWheelSegment[] BuildPrimaryWheelSegments(in GizmoContext context)
     {
         var scaleEnabled = context.ScaleSupported;
+        string scaleLabel;
+        if (scaleEnabled)
+        {
+            scaleLabel = "Scale Gizmo";
+        }
+        else if (context.SelectionCount > 1)
+        {
+            scaleLabel = "Select one scalable item to use the scale gizmo";
+        }
+        else
+        {
+            scaleLabel = "This item does not support scaling";
+        }
+
         return
         [
             new GizmoWheelSegment(
@@ -188,11 +186,7 @@ internal sealed partial class Gizmo
                 () => Mode = GizmoTransformMode.Rotation),
             new GizmoWheelSegment(
                 FontAwesomeIcon.CompressArrowsAlt,
-                scaleEnabled
-                    ? "Scale Gizmo"
-                    : context.SelectionCount > 1
-                        ? "Scale gizmo is only available for one selected bgobject or furniture object"
-                        : "Scale gizmo is not available for lights",
+                scaleLabel,
                 EditorColors.TransformModeAccent(GizmoTransformMode.Scale),
                 Mode == GizmoTransformMode.Scale,
                 scaleEnabled,
@@ -200,14 +194,14 @@ internal sealed partial class Gizmo
             new GizmoWheelSegment(
                 FontAwesomeIcon.Cube,
                 "Local Space",
-                EditorColors.AccentOrange,
+                ThemeColors.AccentOrange,
                 CurrentBoundsOverlaySpace == BoundsOverlaySpace.Local,
                 true,
                 () => CurrentBoundsOverlaySpace = BoundsOverlaySpace.Local),
             new GizmoWheelSegment(
                 FontAwesomeIcon.Globe,
                 "World Space",
-                EditorColors.AccentBlue,
+                ThemeColors.AccentBlue,
                 CurrentBoundsOverlaySpace == BoundsOverlaySpace.World,
                 true,
                 () => CurrentBoundsOverlaySpace = BoundsOverlaySpace.World),
@@ -239,50 +233,48 @@ internal sealed partial class Gizmo
             break;
         }
 
-        var duplicateLabel = selectionCount == 1 ? "Duplicate Selected Object" : "Duplicate Selected Objects";
-        var visibilityLabel = anyVisible
-            ? selectionCount == 1 ? "Hide Selected Object" : "Hide Selected Objects"
-            : selectionCount == 1 ? "Show Selected Object" : "Show Selected Objects";
-        var visibilityHistoryTitle = anyVisible
-            ? selectionCount == 1 ? "Hide Object" : "Hide Objects"
-            : selectionCount == 1 ? "Show Object" : "Show Objects";
-        var resetLabel = selectionCount == 1 ? "Reset Rotation and Scale" : "Reset Rotation and Scale For Selected Objects";
-        var removeLabel = selectionCount == 1 ? "Remove Selected Object" : "Remove Selected Objects";
+        bool singleSelection = selectionCount == 1;
+        string visibilityAction = anyVisible ? "Hide" : "Show";
+        var duplicateLabel = singleSelection ? "Duplicate Selected Item" : "Duplicate Selected Items";
+        var visibilityLabel = $"{visibilityAction} Selected {(singleSelection ? "Item" : "Items")}";
+        var visibilityHistoryTitle = $"{visibilityAction} {(singleSelection ? "Item" : "Items")}";
+        var resetLabel = singleSelection ? "Reset Rotation and Scale" : "Reset Rotation and Scale For Selected Items";
+        var removeLabel = singleSelection ? "Remove Selected Item" : "Remove Selected Items";
         return
         [
             new GizmoWheelSegment(
                 FontAwesomeIcon.Copy,
                 duplicateLabel,
-                EditorColors.Color(0.35f, 0.75f, 0.95f, 1f),
+                ThemeColors.Color(0.35f, 0.75f, 0.95f, 1f),
                 false,
                 true,
-                () => _host.TryDuplicateSelectedObjects(selectedSnapshots)),
+                () => _host.TryDuplicateSelectedItems(selectedSnapshots)),
             new GizmoWheelSegment(
                 FontAwesomeIcon.Running,
-                canMoveToPlayer ? "Move Selected Object To Player" : "Move to player is only available for one selected object",
-                EditorColors.Color(0.50f, 0.90f, 0.60f, 1f),
+                canMoveToPlayer ? "Move Selected Item To Player" : "Move to player is only available for one selected item",
+                ThemeColors.Color(0.50f, 0.90f, 0.60f, 1f),
                 false,
                 canMoveToPlayer,
-                () => _host.TryMoveObjectToPlayerWithHistory(snapshot.Id)),
+                () => _host.TryMoveItemToPlayerWithHistory(snapshot.Id)),
             new GizmoWheelSegment(
                 anyVisible ? FontAwesomeIcon.Eye : FontAwesomeIcon.EyeSlash,
                 visibilityLabel,
-                EditorColors.Color(0.75f, 0.75f, 0.90f, 1f),
+                ThemeColors.Color(0.75f, 0.75f, 0.90f, 1f),
                 anyVisible,
                 true,
                 () => _host.TryApplySelectedSnapshotUpdateWithHistory(
-                    ObjectHistoryKind.Visibility,
+                    SceneHistoryKind.Visibility,
                     visibilityHistoryTitle,
                     selectedSnapshots,
                     entry => entry with { Visible = !anyVisible })),
             new GizmoWheelSegment(
                 FontAwesomeIcon.Recycle,
                 resetLabel,
-                EditorColors.Color(0.50f, 0.70f, 0.95f, 1f),
+                ThemeColors.Color(0.50f, 0.70f, 0.95f, 1f),
                 false,
                 true,
                 () => _host.TryApplySelectedSnapshotUpdateWithHistory(
-                    ObjectHistoryKind.Transform,
+                    SceneHistoryKind.Transform,
                     resetLabel,
                     selectedSnapshots,
                     entry =>
@@ -297,14 +289,14 @@ internal sealed partial class Gizmo
             new GizmoWheelSegment(
                 FontAwesomeIcon.Trash,
                 removeLabel,
-                EditorColors.Color(0.95f, 0.40f, 0.40f, 1f),
+                ThemeColors.Color(0.95f, 0.40f, 0.40f, 1f),
                 false,
                 true,
-                () => _host.TryRemoveSelectedObjects(selectedSnapshots)),
+                () => _host.TryRemoveSelectedItems(selectedSnapshots)),
             new GizmoWheelSegment(
                 FontAwesomeIcon.TimesCircle,
                 "Hide Gizmo",
-                EditorColors.Color(0.65f, 0.55f, 0.95f, 1f),
+                ThemeColors.Color(0.65f, 0.55f, 0.95f, 1f),
                 Mode == GizmoTransformMode.None,
                 true,
                 () => Mode = GizmoTransformMode.None),
@@ -351,44 +343,56 @@ internal sealed partial class Gizmo
         if (!enabled)
         {
             return hovered
-                ? EditorColors.Color(0.20f, 0.20f, 0.22f, 1f)
-                : EditorColors.Color(0.11f, 0.11f, 0.11f, 1f);
+                ? ThemeColors.Color(0.20f, 0.20f, 0.22f, 1f)
+                : ThemeColors.Color(0.11f, 0.11f, 0.11f, 1f);
         }
 
         if (!active)
         {
             if (!hovered)
             {
-                return EditorColors.Color(0.11f, 0.11f, 0.11f, 1f);
+                return ThemeColors.Color(0.11f, 0.11f, 0.11f, 1f);
             }
 
             var dim = 0.25f;
-            return EditorColors.Color(
+            return ThemeColors.Color(
                 MathF.Min(accentColor.X * dim, 0.35f),
                 MathF.Min(accentColor.Y * dim, 0.35f),
                 MathF.Min(accentColor.Z * dim, 0.35f),
                 1f);
         }
 
-        return EditorColors.Color(
+        return ThemeColors.Color(
             MathF.Min(accentColor.X * 1.05f, 1f),
             MathF.Min(accentColor.Y * 1.05f, 1f),
             MathF.Min(accentColor.Z * 1.05f, 1f),
             1f);
     }
 
+    private static Vector4 ResolveWheelIconColor(in GizmoWheelSegment segment)
+    {
+        if (segment.IsActive)
+        {
+            return ThemeColors.Color(0f, 0f, 0f, 0.95f);
+        }
+
+        return segment.IsEnabled
+            ? ThemeColors.Color(1f, 1f, 1f, 0.95f)
+            : ThemeColors.Color(0.55f, 0.55f, 0.58f, 0.95f);
+    }
+
     private static void DrawGizmoRadialTooltip(in GizmoRadialTooltipInfo tooltip)
     {
-        var drawList = ImGui.GetForegroundDrawList();
-        var scale = ImGuiHelpers.GlobalScale;
-        var padding = new Vector2(8f * scale, 5f * scale);
-        var rectMin = tooltip.MousePosition + new Vector2(GizmoConstants.TooltipOffsetX * scale, GizmoConstants.TooltipOffsetY * scale);
-        var textSize = ImGui.CalcTextSize(tooltip.Title);
-        var rectMax = rectMin + textSize + (padding * 2f);
-
-        drawList.AddRectFilled(rectMin, rectMax, ImGui.GetColorU32(EditorColors.Color(0.08f, 0.08f, 0.08f, 0.95f)), 0f);
-        drawList.AddRect(rectMin, rectMax, ImGui.GetColorU32(EditorColors.Color(0.35f, 0.35f, 0.35f, 1f)), 0f, ImDrawFlags.None, 1.4f * scale);
-        drawList.AddText(rectMin + padding, ImGui.GetColorU32(ImGuiCol.Text), tooltip.Title);
+        float scale = ImGuiHelpers.GlobalScale;
+        IntonerTooltip.DrawOverlayText(
+            ImGui.GetForegroundDrawList(),
+            tooltip.MousePosition + new Vector2(GizmoConstants.TooltipOffsetX * scale, GizmoConstants.TooltipOffsetY * scale),
+            tooltip.Title,
+            new IntonerTooltipOptions
+            {
+                Padding = new Vector2(9f, 6f),
+                Rounding = 5f,
+            });
     }
 }
 

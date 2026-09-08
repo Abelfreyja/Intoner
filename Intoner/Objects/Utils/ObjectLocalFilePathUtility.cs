@@ -1,4 +1,4 @@
-using Dalamud.Utility;
+using Intoner.Services.Interop;
 using Penumbra.String.Classes;
 using System.Text;
 
@@ -6,25 +6,23 @@ namespace Intoner.Objects.Utils;
 
 internal static class ObjectLocalFilePathUtility
 {
-    private const string WineRootDrivePrefix = "Z:";
-
     public static bool IsLocalFilePath(string path)
     {
-        string normalizedPath = ObjectStringUtility.TrimOrEmpty(path);
+        string normalizedPath = TextUtility.TrimOrEmpty(path);
         return normalizedPath.Length > 0
-            && (IsWindowsQualifiedPath(normalizedPath)
-             || IsUnixAbsolutePath(normalizedPath));
+            && (Path.IsPathFullyQualified(normalizedPath)
+             || WinePathInterop.IsUnixAbsolutePath(normalizedPath));
     }
 
     public static string NormalizeLocalFilePath(string path)
     {
-        string normalizedPath = ObjectStringUtility.TrimOrEmpty(path);
+        string normalizedPath = TextUtility.TrimOrEmpty(path);
         if (normalizedPath.Length == 0)
         {
             return string.Empty;
         }
 
-        if (IsWindowsQualifiedPath(normalizedPath))
+        if (Path.IsPathFullyQualified(normalizedPath))
         {
             return TryNormalizeWindowsPath(normalizedPath, out string windowsPath)
                 ? windowsPath
@@ -49,7 +47,7 @@ internal static class ObjectLocalFilePathUtility
     }
 
     public static string ToFileSystemPath(string path)
-        => ObjectStringUtility.TrimOrEmpty(path).Replace('/', Path.DirectorySeparatorChar);
+        => TextUtility.TrimOrEmpty(path).Replace('/', Path.DirectorySeparatorChar);
 
     private static bool TryNormalizeWindowsPath(string path, out string normalizedPath)
     {
@@ -74,32 +72,13 @@ internal static class ObjectLocalFilePathUtility
     private static bool TryNormalizeWineUnixPath(string path, out string normalizedPath)
     {
         normalizedPath = string.Empty;
-        if (!Util.IsWine() || !IsUnixAbsolutePath(path))
+        if (!WinePathInterop.TryGetWindowsPath(path, out string winePath))
         {
             return false;
         }
 
-        string winePath = WineRootDrivePrefix + path.Replace('/', '\\');
         return File.Exists(winePath)
             && TryNormalizeWindowsPath(winePath, out normalizedPath);
     }
-
-    private static bool IsWindowsQualifiedPath(string path)
-    {
-        try
-        {
-            return Path.IsPathFullyQualified(path);
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    private static bool IsUnixAbsolutePath(string path)
-        => path.Length > 1
-        && path[0] == '/'
-        && path[1] != '/'
-        && path[1] != '\\';
 }
 

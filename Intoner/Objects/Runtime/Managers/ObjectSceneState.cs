@@ -1,4 +1,6 @@
 using Intoner.Objects.Models;
+using Intoner.Scene;
+using System.Runtime.InteropServices;
 
 namespace Intoner.Objects.Runtime;
 
@@ -24,6 +26,18 @@ internal interface IObjectSceneState
     /// </summary>
     /// <returns>The active scene entries.</returns>
     IReadOnlyList<ObjectSceneEntry> GetEntriesSnapshot();
+
+    /// <summary>
+    /// Gets the revision of the active scene entry set.
+    /// </summary>
+    /// <returns>The current active revision.</returns>
+    long GetActiveRevision();
+
+    /// <summary>
+    /// Gets the revision of the published bounds set.
+    /// </summary>
+    /// <returns>The current bounds revision.</returns>
+    long GetBoundsRevision();
 
     /// <summary>
     /// Tries to resolve one active scene entry.
@@ -122,7 +136,7 @@ internal interface IObjectSceneState
     /// </summary>
     /// <param name="location">The loaded location scope.</param>
     /// <param name="needsRefresh">Whether another refresh is still required.</param>
-    void SetLoadedLocation(ObjectLocationScope location, bool needsRefresh);
+    void SetLoadedLocation(SceneLocationScope location, bool needsRefresh);
 
     /// <summary>
     /// Clears the current loaded-location state.
@@ -150,10 +164,13 @@ internal sealed class ObjectSceneState : IObjectSceneState
 {
     private readonly Lock _stateLock;
     private readonly Dictionary<Guid, ObjectSceneEntry> _entries = [];
-    private readonly List<ObjectBoundsSnapshot> _boundsSnapshots = [];
+    private IReadOnlyList<ObjectSceneEntry> _entrySnapshot = Array.Empty<ObjectSceneEntry>();
+    private IReadOnlyList<ObjectBoundsSnapshot> _boundsSnapshots = Array.Empty<ObjectBoundsSnapshot>();
     private readonly Dictionary<Guid, string> _runtimeFailureCodes = [];
 
-    private ObjectLocationScope _loadedLocation;
+    private SceneLocationScope _loadedLocation;
+    private long _activeRevision = 1;
+    private long _boundsRevision = 1;
     private bool _hasLoadedLocation;
     private bool _needsLocationRefresh;
     private bool _isZoning;
@@ -178,7 +195,7 @@ internal sealed class ObjectSceneState : IObjectSceneState
     {
         lock (_stateLock)
         {
-            return [.. _boundsSnapshots];
+            return _boundsSnapshots;
         }
     }
 
@@ -186,7 +203,23 @@ internal sealed class ObjectSceneState : IObjectSceneState
     {
         lock (_stateLock)
         {
-            return [.. _entries.Values];
+            return _entrySnapshot;
+        }
+    }
+
+    public long GetActiveRevision()
+    {
+        lock (_stateLock)
+        {
+            return _activeRevision;
+        }
+    }
+
+    public long GetBoundsRevision()
+    {
+        lock (_stateLock)
+        {
+            return _boundsRevision;
         }
     }
 
@@ -252,7 +285,9 @@ internal sealed class ObjectSceneState : IObjectSceneState
         lock (_stateLock)
         {
             _entries[entry.Snapshot.Id] = entry;
+            RebuildEntrySnapshotLocked();
             _runtimeFailureCodes.Remove(entry.Snapshot.Id);
+            ++_activeRevision;
         }
     }
 
@@ -266,8 +301,19 @@ internal sealed class ObjectSceneState : IObjectSceneState
                 return false;
             }
 
-            _boundsSnapshots.RemoveAll(snapshot => snapshot.Id == id);
+            ObjectBoundsSnapshot[] retainedBounds = _boundsSnapshots
+                .Where(snapshot => snapshot.Id != id)
+                .ToArray();
+            if (retainedBounds.Length != _boundsSnapshots.Count)
+            {
+                _boundsSnapshots = Array.AsReadOnly(retainedBounds);
+                ++_boundsRevision;
+            }
+
+            RebuildEntrySnapshotLocked();
+
             _runtimeFailureCodes.Remove(id);
+            ++_activeRevision;
             return true;
         }
     }
@@ -277,8 +323,19 @@ internal sealed class ObjectSceneState : IObjectSceneState
         lock (_stateLock)
         {
             var entries = _entries.Values.ToList();
+            if (entries.Count > 0)
+            {
+                ++_activeRevision;
+            }
+
             _entries.Clear();
-            _boundsSnapshots.Clear();
+            _entrySnapshot = Array.Empty<ObjectSceneEntry>();
+            if (_boundsSnapshots.Count > 0)
+            {
+                _boundsSnapshots = Array.Empty<ObjectBoundsSnapshot>();
+                ++_boundsRevision;
+            }
+
             _runtimeFailureCodes.Clear();
             return entries;
         }
@@ -288,10 +345,38 @@ internal sealed class ObjectSceneState : IObjectSceneState
     {
         lock (_stateLock)
         {
-            _boundsSnapshots.Clear();
-            _boundsSnapshots.AddRange(boundsSnapshots);
+            if (BoundsSnapshotsEqual(_boundsSnapshots, boundsSnapshots))
+            {
+                return;
+            }
+
+            _boundsSnapshots = Array.AsReadOnly(boundsSnapshots.ToArray());
+            ++_boundsRevision;
         }
     }
+
+    private static bool BoundsSnapshotsEqual(
+        IReadOnlyList<ObjectBoundsSnapshot> current,
+        IReadOnlyList<ObjectBoundsSnapshot> next)
+    {
+        if (current.Count != next.Count)
+        {
+            return false;
+        }
+
+        for (int index = 0; index < current.Count; ++index)
+        {
+            if (!current[index].HasSameContent(next[index]))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private void RebuildEntrySnapshotLocked()
+        => _entrySnapshot = Array.AsReadOnly(_entries.Values.ToArray());
 
     public void SetRuntimeFailure(Guid id, string code)
     {
@@ -340,7 +425,7 @@ internal sealed class ObjectSceneState : IObjectSceneState
         }
     }
 
-    public void SetLoadedLocation(ObjectLocationScope location, bool needsRefresh)
+    public void SetLoadedLocation(SceneLocationScope location, bool needsRefresh)
     {
         lock (_stateLock)
         {
@@ -391,12 +476,12 @@ internal sealed class ObjectSceneState : IObjectSceneState
 
 internal sealed class ObjectSceneEntry
 {
-    public required ISceneObject SceneObject { get; init; }
+    public required IObjectRuntime Runtime { get; init; }
     public required ObjectSceneSource Source { get; init; }
     public SceneResourceCollectionState ResourceCollection { get; init; }
 
     public ObjectSnapshot Snapshot
-        => SceneObject.Snapshot;
+        => Runtime.Snapshot;
 }
 
 internal enum SceneResourceCollectionStatus
@@ -405,6 +490,7 @@ internal enum SceneResourceCollectionStatus
     Pending,
 }
 
+[StructLayout(LayoutKind.Auto)]
 internal readonly record struct SceneResourceCollectionState(
     SceneResourceCollectionStatus Status,
     long Revision)
@@ -424,8 +510,9 @@ internal readonly record struct SceneResourceCollectionState(
         => revision < 0 ? 0 : revision;
 }
 
+[StructLayout(LayoutKind.Auto)]
 internal readonly record struct ObjectSceneRefreshState(
-    ObjectLocationScope LoadedLocation,
+    SceneLocationScope LoadedLocation,
     bool HasLoadedLocation,
     bool NeedsRefresh,
     bool IsZoning);

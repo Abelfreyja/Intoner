@@ -91,6 +91,13 @@ internal interface IObjectResolvedCollectionStore
         bool forceRefresh = false,
         IReadOnlyList<CollectionResourceView>? resourceViews = null);
 
+    /// <summary>replaces and removes a collection set through one immutable store swap</summary>
+    /// <param name="replacements">complete redirect sets keyed by collection id</param>
+    /// <param name="removedCollectionIds">collection ids to remove</param>
+    void ReplaceCollections(
+        IReadOnlyDictionary<string, IReadOnlyList<ObjectPathRedirection>> replacements,
+        IReadOnlyList<string> removedCollectionIds);
+
     /// <summary>
     /// Gets the current registered object resource collection snapshots.
     /// </summary>
@@ -140,11 +147,14 @@ internal interface IObjectResolvedCollectionStore
 
 internal sealed class ObjectResolvedCollectionStore : IObjectResolvedCollectionStore
 {
+    private sealed record StoreState(
+        ImmutableDictionary<string, ObjectCollectionResolveData> Collections,
+        ImmutableDictionary<long, ObjectCollectionResolveData> CollectionsByResourceScopeId);
+
     private readonly ILogger<ObjectResolvedCollectionStore> _logger;
-    private ImmutableDictionary<string, ObjectCollectionResolveData> _collections
-        = ImmutableDictionary.Create<string, ObjectCollectionResolveData>(StringComparer.OrdinalIgnoreCase);
-    private ImmutableDictionary<long, ObjectCollectionResolveData> _collectionsByResourceScopeId
-        = ImmutableDictionary<long, ObjectCollectionResolveData>.Empty;
+    private readonly Lock _mutationLock = new();
+    private StoreState _state = CreateState(
+        ImmutableDictionary.Create<string, ObjectCollectionResolveData>(StringComparer.OrdinalIgnoreCase));
     private long _nextRuntimeRevision;
 
     public event Action<ObjectResolvedCollectionChangedInfo>? CollectionChanged;
@@ -160,68 +170,100 @@ internal sealed class ObjectResolvedCollectionStore : IObjectResolvedCollectionS
         bool forceRefresh = false,
         IReadOnlyList<CollectionResourceView>? resourceViews = null)
     {
+        ArgumentNullException.ThrowIfNull(redirects);
         string normalizedCollectionId = ObjectCollectionKeyUtility.NormalizeCollectionId(collectionId);
         if (normalizedCollectionId.Length == 0)
         {
             throw new ArgumentException("collection id must not be empty", nameof(collectionId));
         }
 
-        ImmutableDictionary<string, ObjectCollectionResolveData> currentCollections = Volatile.Read(ref _collections);
-        currentCollections.TryGetValue(normalizedCollectionId, out ObjectCollectionResolveData? existingSnapshot);
-        ImmutableDictionary<string, ObjectResolvedPath>.Builder redirectBuilder
-            = ImmutableDictionary.CreateBuilder<string, ObjectResolvedPath>(StringComparer.OrdinalIgnoreCase);
-        foreach (ObjectPathRedirection redirect in redirects)
+        ObjectCollectionResolveData snapshot;
+        bool changed;
+        lock (_mutationLock)
         {
-            if (!ObjectResourcePathUtility.IsSupportedRedirection(redirect.RequestedPath, redirect.ResolvedPath))
+            StoreState current = Volatile.Read(ref _state);
+            current.Collections.TryGetValue(normalizedCollectionId, out ObjectCollectionResolveData? existingSnapshot);
+            snapshot = BuildCollectionSnapshot(
+                normalizedCollectionId,
+                redirects,
+                existingSnapshot,
+                forceRefresh,
+                resourceViews);
+            changed = !ReferenceEquals(snapshot, existingSnapshot);
+            if (changed)
             {
-                continue;
+                Volatile.Write(ref _state, SetCollection(current, snapshot));
             }
-
-            redirectBuilder[redirect.RequestedPath] = redirect.ResolvedPath;
         }
 
-        ImmutableDictionary<string, ObjectResolvedPath> redirectsSnapshot = redirectBuilder.ToImmutable();
-        ImmutableDictionary<string, CollectionResourceRevision> resourceRevisions = BuildResourceRevisions(
-            resourceViews,
-            redirectsSnapshot,
-            existingSnapshot?.ResourceRevisions,
-            forceRefresh);
-        long resourceScopeId = CreateResourceScopeId(normalizedCollectionId, redirectsSnapshot);
-        if (!forceRefresh
-         && existingSnapshot is not null
-         && existingSnapshot.ResourceScopeId == resourceScopeId
-         && RedirectsMatch(existingSnapshot.Redirects, redirectsSnapshot)
-         && ResourceRevisionsMatch(existingSnapshot.ResourceRevisions, resourceRevisions))
+        if (changed)
         {
-            return existingSnapshot;
+            RaiseCollectionChanged(new ObjectResolvedCollectionChangedInfo(snapshot.CollectionId, snapshot.Revision, Removed: false));
         }
 
-        ObjectCollectionResolveData snapshot = new()
-        {
-            CollectionId = normalizedCollectionId,
-            Revision = Interlocked.Increment(ref _nextRuntimeRevision),
-            ResourceScopeId = resourceScopeId,
-            Redirects = redirectsSnapshot,
-            ResourceRevisions = resourceRevisions,
-        };
-
-        ImmutableInterlocked.AddOrUpdate(
-            ref _collections,
-            normalizedCollectionId,
-            snapshot,
-            (_, _) => snapshot);
-        ImmutableInterlocked.Update(
-            ref _collectionsByResourceScopeId,
-            static (collections, state) => RemoveResourceScopesForCollection(collections, state.CollectionId)
-                .SetItem(state.ResourceScopeId, state),
-            snapshot);
-
-        RaiseCollectionChanged(new ObjectResolvedCollectionChangedInfo(snapshot.CollectionId, snapshot.Revision, Removed: false));
         return snapshot;
     }
 
+    public void ReplaceCollections(
+        IReadOnlyDictionary<string, IReadOnlyList<ObjectPathRedirection>> replacements,
+        IReadOnlyList<string> removedCollectionIds)
+    {
+        ArgumentNullException.ThrowIfNull(replacements);
+        ArgumentNullException.ThrowIfNull(removedCollectionIds);
+
+        List<ObjectResolvedCollectionChangedInfo> changes = [];
+        lock (_mutationLock)
+        {
+            ImmutableDictionary<string, ObjectCollectionResolveData>.Builder next = Volatile.Read(ref _state).Collections.ToBuilder();
+            foreach (string collectionId in removedCollectionIds)
+            {
+                string normalizedCollectionId = ObjectCollectionKeyUtility.NormalizeCollectionId(collectionId);
+                if (next.Remove(normalizedCollectionId, out ObjectCollectionResolveData? removed))
+                {
+                    changes.Add(new ObjectResolvedCollectionChangedInfo(normalizedCollectionId, removed.Revision, Removed: true));
+                }
+            }
+
+            foreach ((string collectionId, IReadOnlyList<ObjectPathRedirection> redirects) in replacements)
+            {
+                string normalizedCollectionId = ObjectCollectionKeyUtility.NormalizeCollectionId(collectionId);
+                if (normalizedCollectionId.Length == 0)
+                {
+                    throw new ArgumentException("collection id must not be empty", nameof(replacements));
+                }
+
+                next.TryGetValue(normalizedCollectionId, out ObjectCollectionResolveData? existing);
+                ObjectCollectionResolveData replacement = BuildCollectionSnapshot(
+                    normalizedCollectionId,
+                    redirects,
+                    existing,
+                    forceRefresh: false,
+                    resourceViews: null);
+                if (ReferenceEquals(replacement, existing))
+                {
+                    continue;
+                }
+
+                next[normalizedCollectionId] = replacement;
+                changes.Add(new ObjectResolvedCollectionChangedInfo(normalizedCollectionId, replacement.Revision, Removed: false));
+            }
+
+            if (changes.Count > 0)
+            {
+                Volatile.Write(ref _state, CreateState(next.ToImmutable()));
+            }
+        }
+
+        foreach (ObjectResolvedCollectionChangedInfo change in changes)
+        {
+            RaiseCollectionChanged(change);
+        }
+    }
+
     public IReadOnlyList<ObjectCollectionResolveData> GetCollections()
-        => Volatile.Read(ref _collections).Values.ToList();
+        => Volatile.Read(ref _state).Collections.Values
+            .OrderBy(static collection => collection.CollectionId, StringComparer.OrdinalIgnoreCase)
+            .ToList();
 
     public bool TryGetCollection(string collectionId, out ObjectCollectionResolveData snapshot)
     {
@@ -232,7 +274,7 @@ internal sealed class ObjectResolvedCollectionStore : IObjectResolvedCollectionS
             return false;
         }
 
-        if (Volatile.Read(ref _collections).TryGetValue(normalizedCollectionId, out ObjectCollectionResolveData? resolvedSnapshot))
+        if (Volatile.Read(ref _state).Collections.TryGetValue(normalizedCollectionId, out ObjectCollectionResolveData? resolvedSnapshot))
         {
             snapshot = resolvedSnapshot;
             return true;
@@ -250,7 +292,7 @@ internal sealed class ObjectResolvedCollectionStore : IObjectResolvedCollectionS
             return false;
         }
 
-        if (Volatile.Read(ref _collectionsByResourceScopeId).TryGetValue(resourceScopeId, out ObjectCollectionResolveData? resolvedSnapshot))
+        if (Volatile.Read(ref _state).CollectionsByResourceScopeId.TryGetValue(resourceScopeId, out ObjectCollectionResolveData? resolvedSnapshot))
         {
             snapshot = resolvedSnapshot;
             return true;
@@ -291,24 +333,92 @@ internal sealed class ObjectResolvedCollectionStore : IObjectResolvedCollectionS
             return false;
         }
 
-        if (!ImmutableInterlocked.TryRemove(ref _collections, normalizedCollectionId, out ObjectCollectionResolveData? removedSnapshot)
-            || removedSnapshot == null)
+        ObjectCollectionResolveData? removedSnapshot;
+        lock (_mutationLock)
         {
-            return false;
+            StoreState current = Volatile.Read(ref _state);
+            if (!current.Collections.TryGetValue(normalizedCollectionId, out removedSnapshot))
+            {
+                return false;
+            }
+
+            Volatile.Write(ref _state, RemoveCollection(current, removedSnapshot));
         }
 
-        RemoveCollectionRevisions(normalizedCollectionId);
         RaiseCollectionChanged(new ObjectResolvedCollectionChangedInfo(normalizedCollectionId, removedSnapshot.Revision, Removed: true));
         return true;
     }
 
-    private void RemoveCollectionRevisions(string collectionId)
+    private ObjectCollectionResolveData BuildCollectionSnapshot(
+        string collectionId,
+        IEnumerable<ObjectPathRedirection> redirects,
+        ObjectCollectionResolveData? existingSnapshot,
+        bool forceRefresh,
+        IReadOnlyList<CollectionResourceView>? resourceViews)
     {
-        ImmutableInterlocked.Update(
-            ref _collectionsByResourceScopeId,
-            static (collections, state) => RemoveResourceScopesForCollection(collections, state),
-            collectionId);
+        ImmutableDictionary<string, ObjectResolvedPath>.Builder redirectBuilder
+            = ImmutableDictionary.CreateBuilder<string, ObjectResolvedPath>(StringComparer.OrdinalIgnoreCase);
+        foreach (ObjectPathRedirection redirect in redirects.Where(static redirect
+                     => ObjectResourcePathUtility.IsSupportedRedirection(redirect.RequestedPath, redirect.ResolvedPath)))
+        {
+            redirectBuilder[redirect.RequestedPath] = redirect.ResolvedPath;
+        }
+
+        ImmutableDictionary<string, ObjectResolvedPath> redirectSnapshot = redirectBuilder.ToImmutable();
+        ImmutableDictionary<string, CollectionResourceRevision> resourceRevisions = BuildResourceRevisions(
+            resourceViews,
+            redirectSnapshot,
+            existingSnapshot?.ResourceRevisions,
+            forceRefresh);
+        long resourceScopeId = CreateResourceScopeId(collectionId, redirectSnapshot);
+        if (!forceRefresh
+            && existingSnapshot is not null
+            && existingSnapshot.ResourceScopeId == resourceScopeId
+            && RedirectsMatch(existingSnapshot.Redirects, redirectSnapshot)
+            && ResourceRevisionsMatch(existingSnapshot.ResourceRevisions, resourceRevisions))
+        {
+            return existingSnapshot;
+        }
+
+        return new ObjectCollectionResolveData
+        {
+            CollectionId = collectionId,
+            Revision = Interlocked.Increment(ref _nextRuntimeRevision),
+            ResourceScopeId = resourceScopeId,
+            Redirects = redirectSnapshot,
+            ResourceRevisions = resourceRevisions,
+        };
     }
+
+    private static StoreState CreateState(ImmutableDictionary<string, ObjectCollectionResolveData> collections)
+    {
+        ImmutableDictionary<long, ObjectCollectionResolveData>.Builder byResourceScopeId
+            = ImmutableDictionary.CreateBuilder<long, ObjectCollectionResolveData>();
+        foreach (ObjectCollectionResolveData collection in collections.Values)
+        {
+            byResourceScopeId[collection.ResourceScopeId] = collection;
+        }
+
+        return new StoreState(collections, byResourceScopeId.ToImmutable());
+    }
+
+    private static StoreState SetCollection(StoreState state, ObjectCollectionResolveData collection)
+    {
+        ImmutableDictionary<long, ObjectCollectionResolveData> byResourceScopeId = state.CollectionsByResourceScopeId;
+        if (state.Collections.TryGetValue(collection.CollectionId, out ObjectCollectionResolveData? previous))
+        {
+            byResourceScopeId = byResourceScopeId.Remove(previous.ResourceScopeId);
+        }
+
+        return new StoreState(
+            state.Collections.SetItem(collection.CollectionId, collection),
+            byResourceScopeId.SetItem(collection.ResourceScopeId, collection));
+    }
+
+    private static StoreState RemoveCollection(StoreState state, ObjectCollectionResolveData collection)
+        => new(
+            state.Collections.Remove(collection.CollectionId),
+            state.CollectionsByResourceScopeId.Remove(collection.ResourceScopeId));
 
     private static bool RedirectsMatch(
         IReadOnlyDictionary<string, ObjectResolvedPath> left,
@@ -422,13 +532,6 @@ internal sealed class ObjectResolvedCollectionStore : IObjectResolvedCollectionS
         return true;
     }
 
-    private static ImmutableDictionary<long, ObjectCollectionResolveData> RemoveResourceScopesForCollection(
-        ImmutableDictionary<long, ObjectCollectionResolveData> collections,
-        string collectionId)
-        => collections.RemoveRange(collections
-            .Where(pair => string.Equals(pair.Value.CollectionId, collectionId, StringComparison.OrdinalIgnoreCase))
-            .Select(static pair => pair.Key));
-
     private static long CreateResourceScopeId(string collectionId, IReadOnlyDictionary<string, ObjectResolvedPath> redirects)
         => CreateResourceRedirectHash(collectionId, redirects);
 
@@ -489,13 +592,23 @@ internal sealed class ObjectResolvedCollectionStore : IObjectResolvedCollectionS
 
     private void RaiseCollectionChanged(ObjectResolvedCollectionChangedInfo info)
     {
-        try
+        Action<ObjectResolvedCollectionChangedInfo>? handlers = CollectionChanged;
+        if (handlers is null)
         {
-            CollectionChanged?.Invoke(info);
+            return;
         }
-        catch (Exception ex)
+
+        foreach (Action<ObjectResolvedCollectionChangedInfo> handler in handlers.GetInvocationList()
+                     .Cast<Action<ObjectResolvedCollectionChangedInfo>>())
         {
-            _logger.LogWarning(ex, "object resource collection changed handler failed for {CollectionId}", info.CollectionId);
+            try
+            {
+                handler(info);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "object resource collection changed handler failed for {CollectionId}", info.CollectionId);
+            }
         }
     }
 }

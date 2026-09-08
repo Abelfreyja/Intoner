@@ -11,6 +11,9 @@ using ClientFileHandleManager = FFXIVClientStructs.FFXIV.Client.System.File.File
 using ClientFileInterface = FFXIVClientStructs.FFXIV.Client.System.File.FileInterface;
 using ClientFileMode = FFXIVClientStructs.FFXIV.Client.System.File.FileMode;
 
+using Intoner.Services.Interop;
+using Intoner.Utils;
+
 namespace Intoner.Objects.Resources;
 
 /// <summary>
@@ -34,11 +37,13 @@ internal interface IObjectMemoryResourceService : IDisposable
     void ReleaseOwner(string ownerId);
 
     /// <summary>
-    /// Removes memory resources owned by the owner that are not present in the active path set.
+    /// Retains one existing memory resource under the given owner.
     /// </summary>
     /// <param name="ownerId">the runtime owner id</param>
-    /// <param name="activeMemoryPaths">memory paths still referenced by active runtime data</param>
-    void RetainOwnerResources(string ownerId, IReadOnlySet<string> activeMemoryPaths);
+    /// <param name="memoryResourcePath">the registered memory resource path</param>
+    /// <param name="resource">the retained memory resource when found</param>
+    /// <returns>true when the resource exists and is retained by the owner</returns>
+    bool TryAcquireResource(string ownerId, string memoryResourcePath, out ObjectMemoryResource resource);
 
     /// <summary>
     /// Checks whether one memory path is registered and can be handled by the current native hooks.
@@ -123,7 +128,7 @@ internal sealed unsafe class ObjectMemoryResourceService : IObjectMemoryResource
     private readonly ILogger<ObjectMemoryResourceService> _logger;
     private readonly ObjectTextureLodService _lodService;
     private readonly ObjectMemoryResourceRegistry _registry = new();
-    private readonly ObjectDisposalState _disposeState = new();
+    private readonly DisposalState _disposeState = new();
     private readonly ObjectLockedOnce _enableOnce = new();
     private readonly Hook<FileDescriptorReadDelegate>? _fileDescriptorReadHook;
     private readonly Hook<ModelResourceReadDelegate>? _modelResourceReadHook;
@@ -141,33 +146,33 @@ internal sealed unsafe class ObjectMemoryResourceService : IObjectMemoryResource
         _logger = logger;
         _lodService = lodService;
 
-        _fileDescriptorReadHook = ObjectInteropHookUtility.CreateHookFromAddress<FileDescriptorReadDelegate>(
+        _fileDescriptorReadHook = InteropHookUtility.CreateHookFromAddress<FileDescriptorReadDelegate>(
             _logger,
             gameInteropProvider,
-            ObjectSignatures.ResourceFileDescriptorRead,
+            IntonerSignatures.ResourceFileDescriptorRead,
             FileDescriptorReadDetour);
-        _modelResourceReadHook = ObjectInteropHookUtility.CreateHook<ModelResourceReadDelegate>(
+        _modelResourceReadHook = InteropHookUtility.CreateHook<ModelResourceReadDelegate>(
             _logger,
             gameInteropProvider,
             sigScanner,
-            ObjectSignatures.ResourceMemoryModelRead,
+            IntonerSignatures.ResourceMemoryModelRead,
             ModelResourceReadDetour);
-        _modelResourceReadUnpacked = ObjectInteropHookUtility.CreateDelegate<ModelResourceReadUnpackedDelegate>(
+        _modelResourceReadUnpacked = InteropHookUtility.CreateDelegate<ModelResourceReadUnpackedDelegate>(
             _logger,
             sigScanner,
-            ObjectSignatures.ResourceLoadMdlFileLocal);
-        _textureResourceReadUnpacked = ObjectInteropHookUtility.CreateDelegate<TextureResourceReadUnpackedDelegate>(
+            IntonerSignatures.ResourceLoadMdlFileLocal);
+        _textureResourceReadUnpacked = InteropHookUtility.CreateDelegate<TextureResourceReadUnpackedDelegate>(
             _logger,
             sigScanner,
-            ObjectSignatures.ResourceLoadTexFileLocal);
-        _soundResourceReadUnpacked = ObjectInteropHookUtility.CreateDelegate<SoundResourceReadUnpackedDelegate>(
+            IntonerSignatures.ResourceLoadTexFileLocal);
+        _soundResourceReadUnpacked = InteropHookUtility.CreateDelegate<SoundResourceReadUnpackedDelegate>(
             _logger,
             sigScanner,
-            ObjectSignatures.ResourceLoadScdFileLocal);
-        _updateTextureCategory = ObjectInteropHookUtility.CreateDelegate<UpdateTextureCategoryDelegate>(
+            IntonerSignatures.ResourceLoadScdFileLocal);
+        _updateTextureCategory = InteropHookUtility.CreateDelegate<UpdateTextureCategoryDelegate>(
             _logger,
             sigScanner,
-            ObjectSignatures.ResourceUpdateTextureCategory);
+            IntonerSignatures.ResourceUpdateTextureCategory);
 
     }
 
@@ -177,8 +182,11 @@ internal sealed unsafe class ObjectMemoryResourceService : IObjectMemoryResource
     public void ReleaseOwner(string ownerId)
         => _registry.ReleaseOwner(ownerId);
 
-    public void RetainOwnerResources(string ownerId, IReadOnlySet<string> activeMemoryPaths)
-        => _registry.RetainOwnerResources(ownerId, activeMemoryPaths);
+    public bool TryAcquireResource(string ownerId, string memoryResourcePath, out ObjectMemoryResource resource)
+    {
+        resource = default;
+        return !IsDisposing && _registry.TryAcquireResource(ownerId, memoryResourcePath, out resource);
+    }
 
     public bool CanLoadMemoryResourcePath(string memoryResourcePath)
         => TryGetResource(memoryResourcePath, out ObjectMemoryResource resource)
@@ -282,8 +290,8 @@ internal sealed unsafe class ObjectMemoryResourceService : IObjectMemoryResource
             return;
         }
 
-        ObjectInteropHookUtility.DisposeHook(_modelResourceReadHook);
-        ObjectInteropHookUtility.DisposeHook(_fileDescriptorReadHook);
+        InteropHookUtility.DisposeHook(_modelResourceReadHook);
+        InteropHookUtility.DisposeHook(_fileDescriptorReadHook);
         _registry.Clear();
     }
 

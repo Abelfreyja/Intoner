@@ -1,6 +1,5 @@
 using Dalamud.Game.Command;
 using Dalamud.Interface;
-using Intoner.Objects;
 
 namespace Intoner.Services;
 
@@ -11,7 +10,7 @@ internal sealed class IntonerPluginHost : IAsyncDisposable
     private readonly IntonerDalamudServices _dalamudServices;
     private readonly SemaphoreSlim _lifecycleLock = new(1, 1);
 
-    private ObjectServiceHost? _objectHost;
+    private IntonerSessionHost? _sessionHost;
     private CancellationTokenSource? _lifecycleCts;
     private bool _loaded;
     private bool _commandRegistered;
@@ -52,7 +51,7 @@ internal sealed class IntonerPluginHost : IAsyncDisposable
             _loaded = true;
 
             using CancellationTokenSource loadCts = CancellationTokenSource.CreateLinkedTokenSource(_lifecycleCts.Token, cancellationToken);
-            await UpdateObjectHostAsync(loadCts.Token).ConfigureAwait(false);
+            await UpdateSessionHostAsync(loadCts.Token).ConfigureAwait(false);
         }
         catch
         {
@@ -94,7 +93,7 @@ internal sealed class IntonerPluginHost : IAsyncDisposable
 
         try
         {
-            await UpdateObjectHostAsync(CancellationToken.None).ConfigureAwait(false);
+            await UpdateSessionHostAsync(CancellationToken.None).ConfigureAwait(false);
         }
         finally
         {
@@ -105,30 +104,30 @@ internal sealed class IntonerPluginHost : IAsyncDisposable
     private bool IsGameSessionActive
         => !_disposed && _dalamudServices.ClientState.IsLoggedIn;
 
-    private async Task UpdateObjectHostAsync(CancellationToken cancellationToken)
+    private async Task UpdateSessionHostAsync(CancellationToken cancellationToken)
     {
         await _lifecycleLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             if (!IsGameSessionActive)
             {
-                await DisposeObjectHostAsync().ConfigureAwait(false);
+                await DisposeSessionHostAsync().ConfigureAwait(false);
                 return;
             }
 
-            if (_objectHost is not null)
+            if (_sessionHost is not null)
             {
                 return;
             }
 
-            ObjectServiceHost host = await ObjectServiceHost.CreateAsync(_dalamudServices, cancellationToken).ConfigureAwait(false);
+            IntonerSessionHost host = await IntonerSessionHost.CreateAsync(_dalamudServices, cancellationToken).ConfigureAwait(false);
             if (!IsGameSessionActive)
             {
                 await host.DisposeAsync().ConfigureAwait(false);
                 return;
             }
 
-            _objectHost = host;
+            _sessionHost = host;
         }
         finally
         {
@@ -136,23 +135,23 @@ internal sealed class IntonerPluginHost : IAsyncDisposable
         }
     }
 
-    private async ValueTask DisposeObjectHostAsync()
+    private async ValueTask DisposeSessionHostAsync()
     {
-        if (_objectHost is not null)
+        if (_sessionHost is not null)
         {
-            await _objectHost.DisposeAsync().ConfigureAwait(false);
-            _objectHost = null;
+            await _sessionHost.DisposeAsync().ConfigureAwait(false);
+            _sessionHost = null;
         }
     }
 
     private void HandleClientLogin()
-        => RunLifecycleTask(() => UpdateObjectHostAsync(_lifecycleCts?.Token ?? CancellationToken.None));
+        => RunLifecycleTask(() => UpdateSessionHostAsync(_lifecycleCts?.Token ?? CancellationToken.None));
 
     private void HandleClientLogout(int type, int code)
     {
         _ = type;
         _ = code;
-        RunLifecycleTask(() => UpdateObjectHostAsync(CancellationToken.None));
+        RunLifecycleTask(() => UpdateSessionHostAsync(CancellationToken.None));
     }
 
     private void RunLifecycleTask(Func<Task> taskFactory)
@@ -195,7 +194,7 @@ internal sealed class IntonerPluginHost : IAsyncDisposable
     {
         if (IsGameSessionActive)
         {
-            _objectHost?.RequestConfigWindow();
+            _sessionHost?.RequestConfigWindow();
         }
     }
 
@@ -203,7 +202,7 @@ internal sealed class IntonerPluginHost : IAsyncDisposable
     {
         if (IsGameSessionActive)
         {
-            _objectHost?.RequestMainWindowToggle();
+            _sessionHost?.RequestMainWindowToggle();
         }
     }
 }

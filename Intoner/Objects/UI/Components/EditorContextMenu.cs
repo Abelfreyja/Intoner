@@ -2,7 +2,9 @@ using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
+using Intoner.UI;
 using System.Numerics;
+using System.Runtime.InteropServices;
 
 namespace Intoner.Objects.UI.Components;
 
@@ -15,8 +17,15 @@ internal static class EditorContextMenu
     private const float RowPadding = 8f;
     private const float RowGap = 8f;
     private const float IconColumnWidth = 18f;
+    private const float SeparatorSpacing = 2f;
+    private const float SubMenuOverlap = 1f;
     private const double SubMenuCloseDelaySeconds = 0.15;
     private const ImGuiWindowFlags PopupFlags = ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoSavedSettings;
+    private const ImGuiWindowFlags SubMenuPopupFlags = PopupFlags
+        | ImGuiWindowFlags.ChildMenu
+        | ImGuiWindowFlags.NoMove
+        | ImGuiWindowFlags.NoTitleBar
+        | ImGuiWindowFlags.NoNavFocus;
 
     private static readonly SubMenuState SubMenu = new();
 
@@ -34,15 +43,26 @@ internal static class EditorContextMenu
     {
         Vector2 itemMin = ImGui.GetItemRectMin();
         Vector2 itemMax = ImGui.GetItemRectMax();
+        return BeginDropdown(id, open, new Vector2(itemMin.X, itemMax.Y));
+    }
+
+    /// <summary> begins a menu at the supplied anchor and opens it when requested </summary>
+    public static PopupScope BeginDropdown(string id, bool open, Vector2 anchor, float? minimumWidth = null)
+    {
         if (open)
         {
             ImGui.OpenPopup(id);
         }
 
-        return BeginPopup(id, new Vector2(itemMin.X, itemMax.Y), ImGuiCond.Appearing);
+        return BeginPopup(id, anchor, ImGuiCond.Appearing, minimumWidth);
     }
 
-    private static PopupScope BeginPopup(string id, Vector2? anchor, ImGuiCond positionCondition)
+    private static PopupScope BeginPopup(
+        string id,
+        Vector2? anchor,
+        ImGuiCond positionCondition,
+        float? minimumWidth = null,
+        ImGuiWindowFlags flags = PopupFlags)
     {
         if (ImGui.IsPopupOpen(id))
         {
@@ -51,10 +71,19 @@ internal static class EditorContextMenu
                 ImGui.SetNextWindowPos(anchor.Value, positionCondition);
             }
 
-            ApplyPopupConstraints();
+            ApplyPopupConstraints(minimumWidth);
         }
 
-        return new PopupScope(id);
+        if ((flags & ImGuiWindowFlags.ChildMenu) != ImGuiWindowFlags.None)
+        {
+            Vector2 itemInnerSpacing = ImGui.GetStyle().ItemInnerSpacing;
+            using var placementSpacing = ImRaii.PushStyle(
+                ImGuiStyleVar.ItemInnerSpacing,
+                new Vector2(SubMenuOverlap * ImGuiHelpers.GlobalScale, itemInnerSpacing.Y));
+            return new PopupScope(id, flags);
+        }
+
+        return new PopupScope(id, flags);
     }
 
     public static bool DrawItem(
@@ -62,62 +91,96 @@ internal static class EditorContextMenu
         string label,
         bool selected = false,
         bool enabled = true,
-        string? id = null)
+        string? id = null,
+        Vector4? color = null,
+        string? tooltip = null)
     {
-        RowInteraction interaction = DrawRow(id ?? label, icon, label, selected, enabled, hasSubMenu: false);
+        RowInteraction interaction = DrawRow(id ?? label, icon, label, selected, enabled, hasSubMenu: false, color, tooltip);
         if (!interaction.Activated)
         {
             return false;
         }
 
         ImGui.CloseCurrentPopup();
-        SubMenu.RequestParentClose();
         return true;
     }
 
-    public static SubMenuScope BeginSubMenu(string id, FontAwesomeIcon icon, string label, bool enabled = true)
+    public static SubMenuScope BeginSubMenu(
+        string id,
+        FontAwesomeIcon icon,
+        string label,
+        bool enabled = true,
+        Vector4? color = null,
+        string? tooltip = null)
     {
         string popupId = $"##editorContextSubMenu:{id}";
-        RowInteraction interaction = DrawRow(id, icon, label, selected: false, enabled, hasSubMenu: true);
+        RowInteraction interaction = DrawRow(id, icon, label, selected: false, enabled, hasSubMenu: true, color, tooltip);
         if (enabled && (interaction.Hovered || interaction.Activated) && !ImGui.IsPopupOpen(popupId))
         {
             ImGui.OpenPopup(popupId);
         }
 
         Vector2 popupPosition = new(
-            ImGui.GetWindowPos().X + ImGui.GetWindowSize().X - ImGuiHelpers.GlobalScale,
+            ImGui.GetWindowPos().X + ImGui.GetWindowSize().X - (SubMenuOverlap * ImGuiHelpers.GlobalScale),
             interaction.Min.Y - ImGui.GetStyle().WindowPadding.Y);
-        PopupScope popup = BeginPopup(popupId, popupPosition, ImGuiCond.Always);
-        if (!popup)
+        ImGuiWindowFlags popupFlags = SubMenuPopupFlags;
+        if (SubMenu.Depth > 0)
         {
-            SubMenu.ResetIfTracked(popupId);
+            popupFlags |= ImGuiWindowFlags.ChildWindow;
         }
 
-        return new SubMenuScope(popupId, interaction.Min, interaction.Max, popup);
+        int depth = SubMenu.Depth + 1;
+        PopupScope popup = BeginPopup(popupId, popupPosition, ImGuiCond.Always, flags: popupFlags);
+        if (!popup)
+        {
+            SubMenu.ResetIfTracked(depth, popupId);
+        }
+
+        return new SubMenuScope(popupId, depth, interaction.Min, interaction.Max, popup);
     }
 
+    public static void DrawFirstSectionLabel(string label)
+        => DrawSectionLabel(label, false);
+
     public static void DrawSectionLabel(string label)
+        => DrawSectionLabel(label, true);
+
+    public static void DrawSeparator()
     {
-        ImGui.Separator();
-        float offset = MathF.Max(0f, (ImGui.GetContentRegionAvail().X - ImGui.CalcTextSize(label).X) * 0.5f);
-        ImGui.SetCursorPosX(ImGui.GetCursorPosX() + offset);
+        ImGuiHelpers.ScaledDummy(SeparatorSpacing);
+        using (ImRaii.PushColor(
+                   ImGuiCol.Separator,
+                   ThemeColors.WithAlpha(ThemeColors.Separator, 0.70f)))
+        {
+            ImGui.Separator();
+        }
+
+        ImGuiHelpers.ScaledDummy(SeparatorSpacing);
+    }
+
+    private static void DrawSectionLabel(string label, bool drawSeparator)
+    {
+        if (drawSeparator)
+        {
+            DrawSeparator();
+        }
+
+        ImGui.SetCursorPosX(ImGui.GetCursorPosX() + (RowPadding * ImGuiHelpers.GlobalScale));
         ImGui.TextDisabled(label);
     }
 
     public static void DrawHint(string text)
     {
-        float indent = (RowPadding + IconColumnWidth + RowGap) * ImGuiHelpers.GlobalScale;
-        ImGui.Indent(indent);
+        using var indent = ImRaii.PushIndent(RowPadding + IconColumnWidth + RowGap);
         ImGui.TextDisabled(text);
-        ImGui.Unindent(indent);
     }
 
-    private static void ApplyPopupConstraints()
+    private static void ApplyPopupConstraints(float? minimumWidth)
     {
         float scale = ImGuiHelpers.GlobalScale;
         ImGuiViewportPtr viewport = ImGui.GetWindowViewport();
         float maxWidth = MathF.Max(1f, MathF.Min(MaximumPopupWidth * scale, viewport.WorkSize.X - (24f * scale)));
-        float minWidth = MathF.Min(MinimumPopupWidth * scale, maxWidth);
+        float minWidth = MathF.Min(MathF.Max(MinimumPopupWidth, minimumWidth ?? 0f) * scale, maxWidth);
         float maxHeight = MathF.Max(1f, MathF.Min(420f * scale, viewport.WorkSize.Y * 0.70f));
         ImGui.SetNextWindowSizeConstraints(
             new Vector2(minWidth, 0f),
@@ -130,25 +193,23 @@ internal static class EditorContextMenu
         string label,
         bool selected,
         bool enabled,
-        bool hasSubMenu)
+        bool hasSubMenu,
+        Vector4? color,
+        string? tooltip)
     {
         float scale = ImGuiHelpers.GlobalScale;
         float padding = RowPadding * scale;
         float gap = RowGap * scale;
-        string iconText = icon.ToIconString();
-        string trailingText = ResolveTrailingIcon(selected, hasSubMenu);
-        Vector2 iconSize;
-        Vector2 trailingSize;
-        using (ImRaii.PushFont(UiBuilder.IconFont))
-        {
-            iconSize = ImGui.CalcTextSize(iconText);
-            trailingSize = string.IsNullOrEmpty(trailingText) ? Vector2.Zero : ImGui.CalcTextSize(trailingText);
-        }
+        EditorIcon.Metrics iconMetrics = EditorIcon.Measure(icon);
+        FontAwesomeIcon? trailingIcon = ResolveTrailingIcon(selected, hasSubMenu);
+        EditorIcon.Metrics trailingMetrics = trailingIcon is { } value
+            ? EditorIcon.Measure(value)
+            : default;
 
         Vector2 labelSize = ImGui.CalcTextSize(label);
         float rowHeight = MathF.Max(
             RowHeight * scale,
-            MathF.Max(labelSize.Y, MathF.Max(iconSize.Y, trailingSize.Y)) + (10f * scale));
+            MathF.Max(labelSize.Y, MathF.Max(iconMetrics.Size.Y, trailingMetrics.Size.Y)) + (10f * scale));
         float naturalWidth = padding
             + (IconColumnWidth * scale)
             + gap
@@ -162,43 +223,87 @@ internal static class EditorContextMenu
 
         bool activated;
         bool hovered;
+        bool childPopupOpen = HasOpenChildPopup();
         using (ImRaii.Disabled(!enabled))
         {
             activated = ImGui.InvisibleButton($"##editorContextMenuItem:{id}", new Vector2(rowWidth, rowHeight));
-            hovered = ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled);
+            ImGuiHoveredFlags hoverFlags = ImGuiHoveredFlags.AllowWhenDisabled;
+            if (hasSubMenu || childPopupOpen)
+            {
+                hoverFlags |= ImGuiHoveredFlags.AllowWhenBlockedByPopup;
+            }
+
+            hovered = ImGui.IsItemHovered(hoverFlags);
         }
 
         Vector2 min = ImGui.GetItemRectMin();
         Vector2 max = ImGui.GetItemRectMax();
         bool active = ImGui.IsItemActive();
         ImDrawListPtr drawList = ImGui.GetWindowDrawList();
-        DrawRowBackground(drawList, min, max, selected, hovered, active, enabled);
+        DrawRowBackground(drawList, min, max, selected, hovered, active, enabled, color);
 
         float contentHeight = max.Y - min.Y;
         Vector2 iconPosition = new(
-            min.X + padding + (((IconColumnWidth * scale) - iconSize.X) * 0.5f),
-            min.Y + ((contentHeight - iconSize.Y) * 0.5f));
+            min.X + padding + (((IconColumnWidth * scale) - iconMetrics.Size.X) * 0.5f),
+            min.Y + ((contentHeight - iconMetrics.Size.Y) * 0.5f));
         Vector2 labelPosition = new(
             min.X + padding + (IconColumnWidth * scale) + gap,
             min.Y + ((contentHeight - labelSize.Y) * 0.5f));
         float trailingRight = max.X - padding;
         Vector2 trailingPosition = new(
-            trailingRight - trailingSize.X - (((IconColumnWidth * scale) - trailingSize.X) * 0.5f),
-            min.Y + ((contentHeight - trailingSize.Y) * 0.5f));
+            trailingRight - trailingMetrics.Size.X - (((IconColumnWidth * scale) - trailingMetrics.Size.X) * 0.5f),
+            min.Y + ((contentHeight - trailingMetrics.Size.Y) * 0.5f));
         float labelWidth = MathF.Max(1f, trailingRight - (IconColumnWidth * scale) - gap - labelPosition.X);
         EditorTextUtility.ClippedText visibleLabel = EditorTextUtility.ClipTextToWidthResult(label, labelWidth);
-        Vector4 textColor = enabled ? EditorColors.Text : EditorColors.TextDisabled;
-        Vector4 iconColor = enabled && (hovered || selected) ? EditorColors.AccentBlue : textColor;
-
-        DrawIcon(drawList, iconPosition, iconText, iconColor);
-        drawList.AddText(labelPosition, ImGui.GetColorU32(textColor), visibleLabel.Text);
-        if (!string.IsNullOrEmpty(trailingText))
+        Vector4 textColor = ResolveRowColor(color, enabled);
+        Vector4 iconColor = textColor;
+        if (!color.HasValue && enabled && (hovered || selected))
         {
-            DrawIcon(drawList, trailingPosition, trailingText, enabled ? EditorColors.TextDisabled : textColor);
+            iconColor = ThemeColors.AccentBlue;
         }
 
-        EditorTextUtility.AttachTooltipIfClipped(min, max - min, label, visibleLabel.IsClipped);
+        EditorIcon.Draw(drawList, icon, iconMetrics, iconPosition, iconColor);
+        drawList.AddText(labelPosition, ImGui.GetColorU32(textColor), visibleLabel.Text);
+        if (trailingIcon is { } resolvedTrailingIcon)
+        {
+            Vector4 trailingColor = textColor;
+            if (color.HasValue)
+            {
+                trailingColor = ThemeColors.WithAlpha(textColor, textColor.W * 0.72f);
+            }
+            else if (enabled)
+            {
+                trailingColor = ThemeColors.TextDisabled;
+            }
+
+            EditorIcon.Draw(
+                drawList,
+                resolvedTrailingIcon,
+                trailingMetrics,
+                trailingPosition,
+                trailingColor);
+        }
+
+        if (hovered && !string.IsNullOrEmpty(tooltip))
+        {
+            IntonerTooltip.DrawDescription(
+                icon,
+                label,
+                tooltip,
+                new IntonerTooltipOptions { Accent = color ?? ThemeColors.AccentPrimary });
+        }
+        else
+        {
+            EditorTextUtility.AttachTooltipIfClipped(min, max - min, label, visibleLabel.IsClipped);
+        }
+
         return new RowInteraction(activated && enabled, hovered, min, max);
+    }
+
+    private static bool HasOpenChildPopup()
+    {
+        ImGuiContextPtr context = ImGui.GetCurrentContext();
+        return context.OpenPopupStack.Size > context.BeginPopupStack.Size;
     }
 
     private static void DrawRowBackground(
@@ -208,14 +313,16 @@ internal static class EditorContextMenu
         bool selected,
         bool hovered,
         bool active,
-        bool enabled)
+        bool enabled,
+        Vector4? color)
     {
+        Vector4 highlight = color ?? ThemeColors.AccentPrimary;
         Vector4 fill = selected
-            ? EditorColors.WithAlpha(EditorColors.AccentPurple, 0.14f)
+            ? ThemeColors.WithAlpha(highlight, 0.14f)
             : Vector4.Zero;
         if (enabled && hovered)
         {
-            fill = EditorColors.WithAlpha(EditorColors.AccentPurple, active ? 0.34f : 0.24f);
+            fill = ThemeColors.WithAlpha(highlight, active ? 0.34f : 0.24f);
         }
 
         if (fill.W > 0f)
@@ -224,33 +331,43 @@ internal static class EditorContextMenu
         }
     }
 
-    private static string ResolveTrailingIcon(bool selected, bool hasSubMenu)
+    private static Vector4 ResolveRowColor(Vector4? color, bool enabled)
+    {
+        if (!enabled)
+        {
+            return color.HasValue
+                ? ThemeColors.WithAlpha(color.Value, color.Value.W * 0.46f)
+                : ThemeColors.TextDisabled;
+        }
+
+        return color ?? ThemeColors.Text;
+    }
+
+    private static FontAwesomeIcon? ResolveTrailingIcon(bool selected, bool hasSubMenu)
     {
         if (hasSubMenu)
         {
-            return FontAwesomeIcon.ChevronRight.ToIconString();
+            return FontAwesomeIcon.ChevronRight;
         }
 
-        return selected ? FontAwesomeIcon.Check.ToIconString() : string.Empty;
+        return selected ? FontAwesomeIcon.Check : null;
     }
-
-    private static void DrawIcon(ImDrawListPtr drawList, Vector2 position, string text, Vector4 color)
-        => drawList.AddText(UiBuilder.IconFont, ImGui.GetFontSize(), position, ImGui.GetColorU32(color), text);
 
     public ref struct PopupScope
     {
         private readonly ImRaii.StyleDisposable _style;
+        private ImRaii.PopupDisposable _popup;
         private bool _disposed;
 
-        internal PopupScope(string id)
+        internal PopupScope(string id, ImGuiWindowFlags flags)
         {
             float scale = ImGuiHelpers.GlobalScale;
             _style = ImRaii.PushStyle(ImGuiStyleVar.WindowPadding, new Vector2(PopupPadding * scale, PopupPadding * scale))
                 .Push(ImGuiStyleVar.ItemSpacing, new Vector2(0f, 2f * scale));
-            Success = ImGui.BeginPopup(id, PopupFlags);
+            _popup = ImRaii.Popup(id, flags);
         }
 
-        public bool Success { get; }
+        public bool Success => _popup.Success;
 
         public void Dispose()
         {
@@ -259,11 +376,7 @@ internal static class EditorContextMenu
                 return;
             }
 
-            if (Success)
-            {
-                ImGui.EndPopup();
-            }
-
+            _popup.Dispose();
             _style.Dispose();
             _disposed = true;
         }
@@ -275,14 +388,16 @@ internal static class EditorContextMenu
     public ref struct SubMenuScope
     {
         private readonly string _id;
+        private readonly int _depth;
         private readonly Vector2 _parentMin;
         private readonly Vector2 _parentMax;
         private PopupScope _popup;
         private bool _disposed;
 
-        internal SubMenuScope(string id, Vector2 parentMin, Vector2 parentMax, PopupScope popup)
+        internal SubMenuScope(string id, int depth, Vector2 parentMin, Vector2 parentMax, PopupScope popup)
         {
             _id = id;
+            _depth = depth;
             _parentMin = parentMin;
             _parentMax = parentMax;
             _popup = popup;
@@ -301,10 +416,10 @@ internal static class EditorContextMenu
                 return;
             }
 
-            if (Success && SubMenu.ShouldClose(_id, _parentMin, _parentMax))
+            if (Success && SubMenu.ShouldClose(_depth, _id, _parentMin, _parentMax))
             {
-                ImGui.CloseCurrentPopup();
-                SubMenu.Reset();
+                CloseCurrentSubMenu();
+                SubMenu.Reset(_depth);
             }
 
             _popup.Dispose();
@@ -318,68 +433,81 @@ internal static class EditorContextMenu
 
         public static implicit operator bool(SubMenuScope value)
             => value.Success;
+
+        private static void CloseCurrentSubMenu()
+        {
+            ImGuiContextPtr context = ImGui.GetCurrentContext();
+            int remaining = context.BeginPopupStack.Size - 1;
+            if (remaining >= 0 && remaining < context.OpenPopupStack.Size)
+            {
+                ImGuiP.ClosePopupToLevel(remaining, true);
+            }
+        }
     }
 
     private sealed class SubMenuState
     {
-        private string? _trackedId;
-        private double _leaveStartedAt = double.NaN;
+        private readonly SubMenuLeaveTracker _leaveTracker = new();
         private int _depth;
-        private bool _closeStack;
 
-        public void RequestParentClose()
-            => _closeStack = _depth > 0;
+        public int Depth => _depth;
 
         public void Enter()
             => _depth++;
 
         public void Exit()
+            => _depth--;
+
+        public void Reset(int depth)
+            => _leaveTracker.Reset(depth);
+
+        public void ResetIfTracked(int depth, string id)
+            => _leaveTracker.ResetIfTracked(depth, id);
+
+        public bool ShouldClose(int depth, string id, Vector2 parentMin, Vector2 parentMax)
         {
-            _depth--;
-            if (!_closeStack)
-            {
-                return;
-            }
-
-            ImGui.CloseCurrentPopup();
-            if (_depth == 0)
-            {
-                _closeStack = false;
-            }
-        }
-
-        public void Reset()
-        {
-            _trackedId = null;
-            _leaveStartedAt = double.NaN;
-        }
-
-        public void ResetIfTracked(string id)
-        {
-            if (string.Equals(_trackedId, id, StringComparison.Ordinal))
-            {
-                Reset();
-            }
-        }
-
-        public bool ShouldClose(string id, Vector2 parentMin, Vector2 parentMax)
-        {
-            if (ImGui.IsWindowHovered() || EditorInputUtility.IsMouseInside(parentMin, parentMax))
-            {
-                _trackedId = id;
-                _leaveStartedAt = double.NaN;
-                return false;
-            }
-
-            double now = ImGui.GetTime();
-            if (!string.Equals(_trackedId, id, StringComparison.Ordinal) || double.IsNaN(_leaveStartedAt))
-            {
-                _trackedId = id;
-                _leaveStartedAt = now;
-                return false;
-            }
-
-            return now - _leaveStartedAt >= SubMenuCloseDelaySeconds;
+            ImGuiHoveredFlags hoverFlags = ImGuiHoveredFlags.ChildWindows | ImGuiHoveredFlags.AllowWhenBlockedByPopup;
+            bool hovered = ImGui.IsWindowHovered(hoverFlags)
+                || EditorInputUtility.IsMouseInside(parentMin, parentMax);
+            return _leaveTracker.ShouldClose(depth, id, hovered, ImGui.GetTime(), SubMenuCloseDelaySeconds);
         }
     }
+}
+
+internal sealed class SubMenuLeaveTracker
+{
+    private readonly Dictionary<int, LeaveState> _states = [];
+
+    public bool ShouldClose(int depth, string id, bool hovered, double now, double delay)
+    {
+        if (hovered)
+        {
+            Reset(depth);
+            return false;
+        }
+
+        if (!_states.TryGetValue(depth, out LeaveState state)
+         || !string.Equals(state.Id, id, StringComparison.Ordinal))
+        {
+            _states[depth] = new LeaveState(id, now);
+            return false;
+        }
+
+        return now - state.StartedAt >= delay;
+    }
+
+    public void Reset(int depth)
+        => _states.Remove(depth);
+
+    public void ResetIfTracked(int depth, string id)
+    {
+        if (_states.TryGetValue(depth, out LeaveState state)
+         && string.Equals(state.Id, id, StringComparison.Ordinal))
+        {
+            Reset(depth);
+        }
+    }
+
+    [StructLayout(LayoutKind.Auto)]
+    private readonly record struct LeaveState(string Id, double StartedAt);
 }

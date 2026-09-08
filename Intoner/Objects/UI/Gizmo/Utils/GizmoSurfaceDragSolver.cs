@@ -1,12 +1,14 @@
-using Intoner.Objects.Models;
-using Intoner.Objects.Runtime;
+using Intoner.Scene;
 using Intoner.Objects.Utils;
 using System.Numerics;
+using System.Runtime.InteropServices;
 
 namespace Intoner.Objects.UI;
 
-internal readonly record struct GizmoSurfaceDragSingleResult(ObjectTransform Transform, Quaternion RotationQuaternion);
+[StructLayout(LayoutKind.Auto)]
+internal readonly record struct GizmoSurfaceDragSingleResult(SceneTransform Transform, Quaternion RotationQuaternion);
 
+[StructLayout(LayoutKind.Auto)]
 internal readonly record struct GizmoSurfaceDragSelectionResult(Vector3 PivotPosition, Quaternion GroupRotation);
 
 internal static class GizmoSurfaceDragSolver
@@ -19,33 +21,37 @@ internal static class GizmoSurfaceDragSolver
         => ResolveRotationSequence(startRotation, rotationSteps, surfaceNormal, cameraRight);
 
     public static GizmoSurfaceDragSingleResult ResolveSingle(
-        ObjectSurfaceHit hit,
-        ObjectSnapshot startSnapshot,
+        SceneSurfaceHit hit,
+        SceneItemSnapshot startSnapshot,
         Quaternion startRotationQuaternion,
         IReadOnlyList<GizmoSurfaceDragRotationStep> rotationSteps,
         Vector3? cameraRight,
         in GizmoSelectionEntry primaryEntry,
+        Vector3 surfaceAlignmentAxis,
         bool usePlacementOrigin,
-        bool alignWallSurface,
+        bool forceSurfaceAlignment,
         bool alignToSurfaceNormal)
     {
-        var rotationQuaternion = ObjectTransformMath.NormalizeQuaternion(startRotationQuaternion);
+        var rotationQuaternion = SceneTransformMath.NormalizeQuaternion(startRotationQuaternion);
         var position = hit.Point;
 
         if (TryResolveSurfaceNormal(hit, out var surfaceNormal))
         {
-            Vector3? rotationSurfaceNormal = alignToSurfaceNormal || alignWallSurface ? surfaceNormal : null;
-            if (alignWallSurface)
+            bool shouldAlignToSurface = alignToSurfaceNormal || forceSurfaceAlignment;
+            Vector3? rotationSurfaceNormal = shouldAlignToSurface ? surfaceNormal : null;
+            if (shouldAlignToSurface)
             {
-                rotationQuaternion = ObjectTransformMath.AlignLocalAxisToDirection(rotationQuaternion, -Vector3.UnitZ, -surfaceNormal);
-            }
-            else if (alignToSurfaceNormal)
-            {
-                rotationQuaternion = ObjectTransformMath.AlignUpToNormal(rotationQuaternion, surfaceNormal);
+                Vector3 alignmentAxis = NumericsUtility.TryNormalize(surfaceAlignmentAxis, out Vector3 normalizedAxis)
+                    ? normalizedAxis
+                    : Vector3.UnitY;
+                rotationQuaternion = SceneTransformMath.AlignLocalAxisToDirection(
+                    rotationQuaternion,
+                    alignmentAxis,
+                    surfaceNormal);
             }
 
             rotationQuaternion = ResolveRotationSequence(rotationQuaternion, rotationSteps, rotationSurfaceNormal, cameraRight);
-            if (!alignWallSurface && !usePlacementOrigin)
+            if (!forceSurfaceAlignment && !usePlacementOrigin)
             {
                 var minimumSupport = ResolveEntrySurfaceSupport(primaryEntry, rotationQuaternion, surfaceNormal);
                 position = hit.Point - (surfaceNormal * minimumSupport);
@@ -65,9 +71,11 @@ internal static class GizmoSurfaceDragSolver
     }
 
     public static bool TryResolveSelection(
-        ObjectSurfaceHit hit,
+        SceneSurfaceHit hit,
         Quaternion startRotationQuaternion,
         IReadOnlyList<GizmoSelectionEntry> selectionEntries,
+        Vector3 surfaceAlignmentAxis,
+        bool forceSurfaceAlignment,
         bool alignToSurfaceNormal,
         IReadOnlyList<GizmoSurfaceDragRotationStep> rotationSteps,
         Vector3? cameraRight,
@@ -80,13 +88,20 @@ internal static class GizmoSurfaceDragSolver
         }
 
         var pivotPosition = hit.Point;
-        var groupRotation = ObjectTransformMath.NormalizeQuaternion(startRotationQuaternion);
+        var groupRotation = SceneTransformMath.NormalizeQuaternion(startRotationQuaternion);
         if (TryResolveSurfaceNormal(hit, out var surfaceNormal))
         {
-            Vector3? rotationSurfaceNormal = alignToSurfaceNormal ? surfaceNormal : null;
-            if (alignToSurfaceNormal)
+            bool shouldAlignToSurface = alignToSurfaceNormal || forceSurfaceAlignment;
+            Vector3? rotationSurfaceNormal = shouldAlignToSurface ? surfaceNormal : null;
+            if (shouldAlignToSurface)
             {
-                groupRotation = ObjectTransformMath.AlignUpToNormal(groupRotation, surfaceNormal);
+                Vector3 alignmentAxis = NumericsUtility.TryNormalize(surfaceAlignmentAxis, out Vector3 normalizedAxis)
+                    ? normalizedAxis
+                    : Vector3.UnitY;
+                groupRotation = SceneTransformMath.AlignLocalAxisToDirection(
+                    groupRotation,
+                    alignmentAxis,
+                    surfaceNormal);
             }
 
             groupRotation = ResolveRotationSequence(
@@ -118,7 +133,7 @@ internal static class GizmoSurfaceDragSolver
         Vector3? surfaceNormal,
         Vector3? cameraRight)
     {
-        var rotation = ObjectTransformMath.NormalizeQuaternion(startRotation);
+        var rotation = SceneTransformMath.NormalizeQuaternion(startRotation);
 
         foreach (var step in rotationSteps)
         {
@@ -136,20 +151,20 @@ internal static class GizmoSurfaceDragSolver
     {
         if (step.StepCount == 0)
         {
-            return ObjectTransformMath.NormalizeQuaternion(rotation);
+            return SceneTransformMath.NormalizeQuaternion(rotation);
         }
 
-        var currentRotation = ObjectTransformMath.NormalizeQuaternion(rotation);
+        var currentRotation = SceneTransformMath.NormalizeQuaternion(rotation);
         var stepDirection = Math.Sign(step.StepCount);
         var stepCount = Math.Abs(step.StepCount);
         for (var index = 0; index < stepCount; ++index)
         {
-            if (!ObjectSelectionTransformMath.TryResolveSurfaceDragRotationAxes(currentRotation, surfaceNormal, cameraRight, out var yawAxis, out var pitchAxis))
+            if (!SceneSelectionTransformMath.TryResolveSurfaceDragRotationAxes(currentRotation, surfaceNormal, cameraRight, out var yawAxis, out var pitchAxis))
             {
                 break;
             }
 
-            currentRotation = ObjectSelectionTransformMath.ApplySurfaceDragRotationStep(
+            currentRotation = SceneSelectionTransformMath.ApplySurfaceDragRotationStep(
                 currentRotation,
                 step.Axis == GizmoSurfaceDragRotationAxis.Yaw,
                 stepDirection,
@@ -161,11 +176,11 @@ internal static class GizmoSurfaceDragSolver
         return currentRotation;
     }
 
-    private static bool TryResolveSurfaceNormal(ObjectSurfaceHit hit, out Vector3 surfaceNormal)
+    private static bool TryResolveSurfaceNormal(SceneSurfaceHit hit, out Vector3 surfaceNormal)
     {
         surfaceNormal = Vector3.UnitY;
-        return ObjectMathUtility.HasLength(hit.Normal)
-               && ObjectMathUtility.TryNormalize(hit.Normal, out surfaceNormal);
+        return NumericsUtility.HasLength(hit.Normal)
+               && NumericsUtility.TryNormalize(hit.Normal, out surfaceNormal);
     }
 
     private static float ResolveSelectionSurfaceSupportOffset(
@@ -177,7 +192,7 @@ internal static class GizmoSurfaceDragSolver
         foreach (var entry in selectionEntries)
         {
             var rotatedPivotOffset = Vector3.Transform(entry.PivotOffset, groupDelta);
-            var entryRotation = ObjectTransformMath.NormalizeQuaternion(groupDelta * entry.StartRotationQuaternion);
+            var entryRotation = SceneTransformMath.NormalizeQuaternion(groupDelta * entry.StartRotationQuaternion);
             var support = Vector3.Dot(rotatedPivotOffset, surfaceNormal) + ResolveEntrySurfaceSupport(entry, entryRotation, surfaceNormal);
             minimumSupport = MathF.Min(minimumSupport, support);
         }

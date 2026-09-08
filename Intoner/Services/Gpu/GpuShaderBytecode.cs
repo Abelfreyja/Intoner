@@ -6,15 +6,28 @@ namespace Intoner.Services.Gpu;
 
 internal sealed class GpuShaderBytecode
 {
-    private readonly Lazy<byte[]> _bytecode;
+    private static readonly ConcurrentExclusiveSchedulerPair CompilationScheduler = new(
+        TaskScheduler.Default,
+        maxConcurrencyLevel: 1);
+    private static readonly TaskFactory CompilationTasks = new(
+        CancellationToken.None,
+        TaskCreationOptions.DenyChildAttach,
+        TaskContinuationOptions.None,
+        CompilationScheduler.ExclusiveScheduler);
 
-    public GpuShaderBytecode(Lazy<byte[]> bytecode)
+    private readonly Task<byte[]> _bytecode;
+
+    public GpuShaderBytecode(Func<byte[]> compile)
     {
-        _bytecode = bytecode;
+        ArgumentNullException.ThrowIfNull(compile);
+        _bytecode = CompilationTasks.StartNew(compile);
     }
 
     public byte[] Value
-        => _bytecode.Value;
+        => _bytecode.GetAwaiter().GetResult();
+
+    public bool IsCompilationComplete
+        => _bytecode.IsCompleted;
 
     public VertexShader CreateVertexShader(Device device)
         => new(device, Value);

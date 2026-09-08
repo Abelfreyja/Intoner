@@ -4,6 +4,7 @@ using Intoner.Objects.Interop;
 using Intoner.Objects.Models;
 using Intoner.Objects.UI;
 using Intoner.Objects.Utils;
+using Intoner.Scene;
 using System.Numerics;
 
 namespace Intoner.Objects.Runtime;
@@ -40,7 +41,7 @@ internal interface IObjectKindService
     /// <param name="transform">The initial object transform.</param>
     /// <param name="name">The initial object name.</param>
     /// <returns>The default snapshot for the requested kind.</returns>
-    ObjectSnapshot CreateDefaultSnapshot(ObjectKind kind, ObjectTransform transform, string name);
+    ObjectSnapshot CreateDefaultSnapshot(ObjectKind kind, SceneTransform transform, string name);
 
     /// <summary>
     /// Sanitizes one snapshot according to its object kind.
@@ -91,7 +92,7 @@ internal sealed class ObjectKindService : IObjectKindService
             _ => false,
         };
 
-    public ObjectSnapshot CreateDefaultSnapshot(ObjectKind kind, ObjectTransform transform, string name)
+    public ObjectSnapshot CreateDefaultSnapshot(ObjectKind kind, SceneTransform transform, string name)
         => kind switch
         {
             ObjectKind.BgObject => CreateSnapshot(kind, transform, name, new BgObjectModel()),
@@ -103,6 +104,12 @@ internal sealed class ObjectKindService : IObjectKindService
 
     public bool TrySanitizeSnapshot(ObjectSnapshot snapshot, out ObjectSnapshot sanitizedSnapshot)
     {
+        if (!IsValidSnapshot(snapshot))
+        {
+            sanitizedSnapshot = null!;
+            return false;
+        }
+
         sanitizedSnapshot = snapshot.Kind switch
         {
             ObjectKind.BgObject => SanitizeBgObjectSnapshot(snapshot),
@@ -112,11 +119,6 @@ internal sealed class ObjectKindService : IObjectKindService
             _ => default!,
         };
 
-        if (snapshot.Kind is not (ObjectKind.BgObject or ObjectKind.Furniture or ObjectKind.Vfx or ObjectKind.Light))
-        {
-            return false;
-        }
-
         sanitizedSnapshot = sanitizedSnapshot with
         {
             CollectionId = SanitizeCollectionId(snapshot.CollectionId),
@@ -124,7 +126,40 @@ internal sealed class ObjectKindService : IObjectKindService
         return true;
     }
 
-    private static ObjectSnapshot CreateSnapshot(ObjectKind kind, ObjectTransform transform, string name, ObjectData model)
+    private static bool IsValidSnapshot(ObjectSnapshot snapshot)
+        => snapshot.Transform is not null
+        && NumericsUtility.IsFinite(snapshot.Transform.Position)
+        && NumericsUtility.IsFinite(snapshot.Transform.RotationDegrees)
+        && NumericsUtility.IsFinite(snapshot.Transform.Scale)
+        && snapshot.Kind switch
+        {
+            ObjectKind.BgObject => snapshot.Model is BgObjectModel model
+                && float.IsFinite(model.Transparency)
+                && NumericsUtility.IsFinite(model.DyeColor),
+            ObjectKind.Furniture => snapshot.Model is FurnitureModel { Color: not null } model
+                && float.IsFinite(model.Transparency)
+                && NumericsUtility.IsFinite(model.Color.CustomColor),
+            ObjectKind.Vfx => snapshot.Model is VfxModel model
+                && NumericsUtility.IsFinite(model.Color)
+                && float.IsFinite(model.Speed)
+                && float.IsFinite(model.FadeInSeconds),
+            ObjectKind.Light => snapshot.Model is LightModel { Flags: not null, Shape: not null, Shadow: not null } model
+                && Enum.IsDefined(model.LightType)
+                && Enum.IsDefined(model.FalloffType)
+                && NumericsUtility.IsFinite(model.Color)
+                && float.IsFinite(model.Intensity)
+                && float.IsFinite(model.Shape.Range)
+                && float.IsFinite(model.Shape.Falloff)
+                && float.IsFinite(model.Shape.LightAngle)
+                && float.IsFinite(model.Shape.FalloffAngle)
+                && NumericsUtility.IsFinite(model.Shape.AngleDegrees)
+                && float.IsFinite(model.Shadow.CharacterShadowRange)
+                && float.IsFinite(model.Shadow.ShadowPlaneNear)
+                && float.IsFinite(model.Shadow.ShadowPlaneFar),
+            _ => false,
+        };
+
+    private static ObjectSnapshot CreateSnapshot(ObjectKind kind, SceneTransform transform, string name, ObjectData model)
         => new()
         {
             Id = Guid.NewGuid(),
@@ -136,7 +171,7 @@ internal sealed class ObjectKindService : IObjectKindService
         };
 
     private static string SanitizeName(string name, string fallbackName)
-        => ObjectStringUtility.TrimOrFallback(name, fallbackName);
+        => TextUtility.TrimOrFallback(name, fallbackName);
 
     private static string SanitizeCollectionId(string collectionId)
         => ObjectCollectionKeyUtility.NormalizeCollectionId(collectionId);
@@ -178,7 +213,7 @@ internal sealed class ObjectKindService : IObjectKindService
             {
                 ModelPath = GameAssetPathRules.NormalizeGamePath(bgObjectModel.ModelPath),
                 Transparency = Math.Clamp(bgObjectModel.Transparency, 0f, 1f),
-                DyeColor = ObjectColorUtility.ClampNormalizedColor(bgObjectModel.DyeColor),
+                DyeColor = ColorUtility.ClampNormalizedColor(bgObjectModel.DyeColor),
             },
         };
     }
@@ -200,7 +235,7 @@ internal sealed class ObjectKindService : IObjectKindService
                 Color = furnitureModel.Color with
                 {
                     StainId = Math.Min(furnitureModel.Color.StainId, (byte)(SharedGroupLayoutInstance.ObjectStainCount - 1)),
-                    CustomColor = ObjectColorUtility.ClampOpaqueNormalizedColor(furnitureModel.Color.CustomColor),
+                    CustomColor = ColorUtility.ClampOpaqueNormalizedColor(furnitureModel.Color.CustomColor),
                 },
                 Transparency = Math.Clamp(furnitureModel.Transparency, 0f, 1f),
                 OutlineColor = Enum.IsDefined(furnitureModel.OutlineColor)
@@ -224,7 +259,7 @@ internal sealed class ObjectKindService : IObjectKindService
             Model = vfxModel with
             {
                 VfxPath = GameAssetPathRules.NormalizeGamePath(vfxModel.VfxPath),
-                Color = ObjectColorUtility.ClampNormalizedColor(vfxModel.Color),
+                Color = ColorUtility.ClampNormalizedColor(vfxModel.Color),
                 Speed = VfxModel.ClampSpeed(vfxModel.Speed),
                 FadeInSeconds = VfxModel.ClampFadeInSeconds(vfxModel.FadeInSeconds),
                 LoopIntervalSeconds = VfxModel.ClampLoopIntervalSeconds(vfxModel.LoopIntervalSeconds),
@@ -270,4 +305,3 @@ internal sealed class ObjectKindService : IObjectKindService
     }
 
 }
-

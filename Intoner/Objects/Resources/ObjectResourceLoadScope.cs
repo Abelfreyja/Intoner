@@ -1,12 +1,14 @@
 using Intoner.Objects.Utils;
 
+using Intoner.Utils;
+
 namespace Intoner.Objects.Resources;
 
 /// <summary> shared object resource load collection scope </summary>
 internal sealed class ObjectResourceLoadScope : IDisposable
 {
     private readonly ThreadLocal<string> _activeCollectionId = new(static () => string.Empty);
-    private readonly ObjectDisposalState _disposeState = new();
+    private readonly DisposalState _disposeState = new();
 
     public ObjectResourceLoadScopeToken EnterCollectionScope(string collectionId)
     {

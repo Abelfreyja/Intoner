@@ -61,17 +61,11 @@ internal static class ShapeBuilder
         batch.AddLine(apex, basePoints[(basePoints.Length * 3) / 4], color, thickness);
     }
 
-    public static void AddSquarePyramid(DrawBatch batch, Matrix4x4 transform, float length, float angleDegrees, Vector4 color, float thickness)
+    public static void AddBox(DrawBatch batch, Matrix4x4 transform, Vector4 color, float thickness)
     {
-        Span<Vector3> baseCorners = stackalloc Vector3[4];
-        ObjectShapeMath.CopySquarePyramidBaseCorners(transform, length, angleDegrees, baseCorners);
-        batch.AddPolyline(baseCorners, closed: true, color, thickness);
-
-        var apex = transform.Translation;
-        foreach (var baseCorner in baseCorners)
-        {
-            batch.AddLine(apex, baseCorner, color, thickness);
-        }
+        Span<Vector3> corners = stackalloc Vector3[8];
+        ObjectShapeMath.CopyUnitBoxCorners(transform, corners);
+        AddBox(batch, corners, color, thickness);
     }
 }
 

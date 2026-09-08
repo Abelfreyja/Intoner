@@ -1,4 +1,5 @@
 using Intoner.Objects.Models;
+using Intoner.Scene;
 using System.Numerics;
 
 namespace Intoner.Objects.Runtime;
@@ -9,7 +10,7 @@ internal sealed class PlacementSurfaceRaycaster(NativePlacementQuery nativeQuery
         Vector3 origin,
         Vector3 direction,
         float maxDistance,
-        out ObjectSurfaceHit hit)
+        out SceneSurfaceHit hit)
         => nativeQuery.TryRaycast(origin, direction, maxDistance, out hit);
 
     public bool TryRaycastNativeMaterial(
@@ -17,32 +18,32 @@ internal sealed class PlacementSurfaceRaycaster(NativePlacementQuery nativeQuery
         Vector3 direction,
         float maxDistance,
         ulong materialMask,
-        out ObjectSurfaceHit hit)
+        out SceneSurfaceHit hit)
         => nativeQuery.TryRaycastMaterialMask(origin, direction, maxDistance, materialMask, out hit);
 
     public static bool TryRaycastObjectBounds(
         PlacementValidationContext context,
         PlacementSurfaceRaycastRequest request,
-        out ObjectSurfaceHit hit)
+        out SceneSurfaceHit hit)
         => TryRaycastObjectBounds(context, request, requirePlacementSurface: true, out hit);
 
     public bool TryRaycastAny(
         PlacementValidationContext context,
         PlacementSurfaceRaycastRequest request,
-        out ObjectSurfaceHit hit)
+        out SceneSurfaceHit hit)
     {
-        hit = ObjectSurfaceHit.Empty;
-        float closestDistance = ObjectRaycastMath.ResolveMaxDistance(request.MaxDistance);
+        hit = SceneSurfaceHit.Empty;
+        float closestDistance = SceneRaycastMath.ResolveMaxDistance(request.MaxDistance);
         bool hasHit = false;
 
         if (request.NativeMaterialMask != 0
-            && TryRaycastNativeMaterial(request.Origin, request.Direction, closestDistance, request.NativeMaterialMask, out ObjectSurfaceHit filteredHit))
+            && TryRaycastNativeMaterial(request.Origin, request.Direction, closestDistance, request.NativeMaterialMask, out SceneSurfaceHit filteredHit))
         {
             closestDistance = filteredHit.Distance;
             hit = filteredHit;
             hasHit = true;
         }
-        else if (nativeQuery.TryRaycast(request.Origin, request.Direction, closestDistance, out ObjectSurfaceHit nativeHit))
+        else if (nativeQuery.TryRaycast(request.Origin, request.Direction, closestDistance, out SceneSurfaceHit nativeHit))
         {
             closestDistance = nativeHit.Distance;
             hit = nativeHit;
@@ -53,7 +54,7 @@ internal sealed class PlacementSurfaceRaycaster(NativePlacementQuery nativeQuery
                 context,
                 request with { MaxDistance = closestDistance },
                 request.NativeMaterialMask != 0,
-                out ObjectSurfaceHit objectHit))
+                out SceneSurfaceHit objectHit))
         {
             hit = objectHit;
             hasHit = true;
@@ -66,12 +67,12 @@ internal sealed class PlacementSurfaceRaycaster(NativePlacementQuery nativeQuery
         PlacementValidationContext context,
         PlacementSurfaceRaycastRequest request,
         bool requirePlacementSurface,
-        out ObjectSurfaceHit hit)
+        out SceneSurfaceHit hit)
     {
-        Func<ObjectBoundsSnapshot, ObjectSurfaceHit, bool> acceptsHit = requirePlacementSurface
+        Func<ObjectBoundsSnapshot, SceneSurfaceHit, bool> acceptsHit = requirePlacementSurface
             ? HasSupportedObjectSurface
             : static (_, _) => true;
-        if (!ObjectBoundsRaycaster.TryRaycastNearest(
+        if (!SceneBoundsRaycaster.TryRaycastNearest(
                 context.BoundsById.Values,
                 targetObjectId => !CanUseObjectBoundsTarget(context, request.ObjectId, targetObjectId),
                 acceptsHit,
@@ -97,16 +98,16 @@ internal sealed class PlacementSurfaceRaycaster(NativePlacementQuery nativeQuery
         return true;
     }
 
-    private static bool HasSupportedObjectSurface(ObjectBoundsSnapshot boundsSnapshot, ObjectSurfaceHit hit)
+    private static bool HasSupportedObjectSurface(ObjectBoundsSnapshot boundsSnapshot, SceneSurfaceHit hit)
         => PlacementSurfacePolicy.ResolveObjectSurfaceMaterial(hit.Normal, boundsSnapshot.PlacementSurfaceSupport) != 0;
 
     private static bool TryResolveObjectSurfaceMaterial(
         PlacementValidationContext context,
-        ObjectSurfaceHit hit,
+        SceneSurfaceHit hit,
         out ulong material)
     {
         material = 0;
-        if (!context.BoundsById.TryGetValue(hit.TargetObjectId, out ObjectBoundsSnapshot? targetBounds))
+        if (!context.BoundsById.TryGetValue(hit.TargetItemId, out ObjectBoundsSnapshot? targetBounds))
         {
             return false;
         }

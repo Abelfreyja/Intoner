@@ -1,7 +1,7 @@
-using Intoner.Objects.Models;
-using Intoner.Objects.Runtime;
 using Intoner.Objects.Utils;
+using Intoner.Scene;
 using System.Numerics;
+using System.Runtime.InteropServices;
 
 namespace Intoner.Objects.UI;
 
@@ -11,35 +11,41 @@ internal enum GizmoSurfaceDragRotationAxis
     Pitch,
 }
 
+[StructLayout(LayoutKind.Auto)]
 internal readonly record struct GizmoSurfaceDragRotationStep(GizmoSurfaceDragRotationAxis Axis, int StepCount);
 
 /// <summary> runtime session for one active surface drag </summary>
 internal sealed class GizmoSurfaceDragSession
 {
-    private GizmoSelectionEntry[] _selectionEntries = [];
-    private ObjectSnapshot? _lastAppliedSnapshot;
-    private IReadOnlyList<ObjectSnapshot> _lastAppliedSnapshots = [];
+    private readonly GizmoDragSnapshotState _snapshots = new();
     private readonly List<GizmoSurfaceDragRotationStep> _rotationSteps = [];
+    private readonly HashSet<Guid> _selectedItemIds = [];
 
     public bool IsDragging { get; private set; }
 
-    public Guid ObjectId { get; private set; }
+    public Guid ItemId { get; private set; }
 
     public IReadOnlyList<GizmoSelectionEntry> SelectionEntries
-        => _selectionEntries;
+        => _snapshots.SelectionEntries;
 
-    public ObjectSnapshot StartSnapshot { get; private set; } = null!;
+    public IReadOnlySet<Guid> SelectedItemIds
+        => _selectedItemIds;
 
-    public ObjectSnapshot CurrentSingleSnapshot
-        => _lastAppliedSnapshot ?? StartSnapshot;
+    public SceneItemSnapshot StartSnapshot
+        => _snapshots.PrimarySnapshot;
+
+    public SceneItemSnapshot CurrentSingleSnapshot
+        => _snapshots.TryGetAppliedSnapshot(ItemId, out SceneItemSnapshot appliedSnapshot)
+            ? appliedSnapshot
+            : StartSnapshot;
 
     public Quaternion StartRotationQuaternion { get; private set; } = Quaternion.Identity;
 
-    public ObjectSurfaceTargetSnapshot SurfaceTargets { get; private set; } = ObjectSurfaceTargetSnapshot.Empty;
+    public SceneSurfaceTargetSnapshot SurfaceTargets { get; private set; } = SceneSurfaceTargetSnapshot.Empty;
 
-    public bool ObjectTargetsEnabled { get; private set; }
+    public bool ItemTargetsEnabled { get; private set; }
 
-    public SurfaceObjectTargetShape ObjectTargetShape { get; private set; } = SurfaceObjectTargetShape.Bounds;
+    public SceneSurfaceTargetShape TargetShape { get; private set; } = SceneSurfaceTargetShape.Bounds;
 
     public IReadOnlyList<GizmoSurfaceDragRotationStep> RotationSteps
         => _rotationSteps;
@@ -48,38 +54,39 @@ internal sealed class GizmoSurfaceDragSession
 
     public Vector3 LastResolvedRotationDegrees { get; private set; }
 
-    public bool Matches(Guid objectId)
-        => IsDragging && ObjectId == objectId;
+    public bool Matches(Guid itemId)
+        => IsDragging && ItemId == itemId;
 
     public bool IsSingleSelection
-        => _selectionEntries.Length == 1;
+        => SelectionEntries.Count == 1;
 
     public bool IsMultiSelection
-        => _selectionEntries.Length > 1;
+        => SelectionEntries.Count > 1;
 
     public GizmoSelectionEntry PrimaryEntry
-        => _selectionEntries[0];
+        => SelectionEntries[0];
 
     public void Begin(
-        IReadOnlyList<ObjectSnapshot> selectedSnapshots,
-        IReadOnlyList<ObjectBoundsSnapshot> boundsSnapshots,
-        ObjectSnapshot snapshot,
+        IReadOnlyList<SceneItemSnapshot> selectedSnapshots,
+        SceneItemBoundsLookup boundsLookup,
+        SceneItemSnapshot snapshot,
         Vector3 pivotPosition,
-        ObjectSurfaceTargetSnapshot surfaceTargets,
-        bool objectTargetsEnabled,
-        SurfaceObjectTargetShape objectTargetShape)
+        IReadOnlySet<Guid> selectedItemIds,
+        SceneSurfaceTargetSnapshot surfaceTargets,
+        bool itemTargetsEnabled,
+        SceneSurfaceTargetShape targetShape)
     {
         Reset();
         IsDragging = true;
-        ObjectId = snapshot.Id;
-        _selectionEntries = GizmoSelectionTransformUtility.CreateSelectionEntries(selectedSnapshots, boundsSnapshots, pivotPosition);
-        _lastAppliedSnapshot = null;
-        _lastAppliedSnapshots = [];
-        StartSnapshot = snapshot;
-        StartRotationQuaternion = ObjectTransformMath.CreateRotationQuaternion(snapshot.Transform.RotationDegrees);
+        ItemId = snapshot.Id;
+        _snapshots.Begin(
+            GizmoSelectionTransformUtility.CreateSelectionEntries(selectedSnapshots, boundsLookup, pivotPosition),
+            snapshot);
+        _selectedItemIds.UnionWith(selectedItemIds);
+        StartRotationQuaternion = SceneTransformMath.CreateRotationQuaternion(snapshot.Transform.RotationDegrees);
         SurfaceTargets = surfaceTargets;
-        ObjectTargetsEnabled = objectTargetsEnabled;
-        ObjectTargetShape = objectTargetShape;
+        ItemTargetsEnabled = itemTargetsEnabled;
+        TargetShape = targetShape;
         LastResolvedPosition = pivotPosition;
         LastResolvedRotationDegrees = snapshot.Transform.RotationDegrees;
     }
@@ -90,23 +97,21 @@ internal sealed class GizmoSurfaceDragSession
         AppendRotationStep(GizmoSurfaceDragRotationAxis.Pitch, pitchSteps);
     }
 
-    public void RecordSingleApply(Vector3 resolvedPosition, Vector3 resolvedRotationDegrees, ObjectSnapshot appliedSnapshot)
+    public void RecordSingleApply(Vector3 resolvedPosition, Vector3 resolvedRotationDegrees, SceneItemSnapshot appliedSnapshot)
     {
-        _lastAppliedSnapshot = appliedSnapshot;
-        _lastAppliedSnapshots = [];
+        _snapshots.Record(appliedSnapshot);
         LastResolvedPosition = resolvedPosition;
         LastResolvedRotationDegrees = resolvedRotationDegrees;
     }
 
-    public void RecordSelectionApply(Vector3 resolvedPivotPosition, Vector3 resolvedRotationDegrees, IReadOnlyList<ObjectSnapshot> appliedSnapshots)
+    public void RecordSelectionApply(Vector3 resolvedPivotPosition, Vector3 resolvedRotationDegrees, IReadOnlyList<SceneItemSnapshot> appliedSnapshots)
     {
-        _lastAppliedSnapshot = null;
-        _lastAppliedSnapshots = appliedSnapshots;
+        _snapshots.Record(appliedSnapshots);
         LastResolvedPosition = resolvedPivotPosition;
         LastResolvedRotationDegrees = resolvedRotationDegrees;
     }
 
-    public bool TryGetHistorySnapshots(out ObjectSnapshot[] beforeSnapshots, out ObjectSnapshot[] afterSnapshots)
+    public bool TryGetHistorySnapshots(out SceneItemSnapshot[] beforeSnapshots, out SceneItemSnapshot[] afterSnapshots)
     {
         if (!IsDragging)
         {
@@ -115,25 +120,23 @@ internal sealed class GizmoSurfaceDragSession
             return false;
         }
 
-        return GizmoSessionSnapshotUtility.TryGetHistorySnapshots(_selectionEntries, _lastAppliedSnapshot, _lastAppliedSnapshots, out beforeSnapshots, out afterSnapshots);
+        return _snapshots.TryGetHistorySnapshots(out beforeSnapshots, out afterSnapshots);
     }
 
-    public Vector3 ResolveReferenceRotationDegrees(Guid objectId)
-        => GizmoSessionSnapshotUtility.ResolveReferenceRotationDegrees(objectId, _selectionEntries, _lastAppliedSnapshot, _lastAppliedSnapshots, StartSnapshot);
+    public Vector3 ResolveReferenceRotationDegrees(Guid itemId)
+        => _snapshots.ResolveReferenceRotationDegrees(itemId);
 
     public void Reset()
     {
         IsDragging = false;
-        ObjectId = Guid.Empty;
-        _selectionEntries = [];
-        _lastAppliedSnapshot = null;
-        _lastAppliedSnapshots = [];
+        ItemId = Guid.Empty;
+        _snapshots.Reset();
+        _selectedItemIds.Clear();
         _rotationSteps.Clear();
-        StartSnapshot = null!;
         StartRotationQuaternion = Quaternion.Identity;
-        SurfaceTargets = ObjectSurfaceTargetSnapshot.Empty;
-        ObjectTargetsEnabled = false;
-        ObjectTargetShape = SurfaceObjectTargetShape.Bounds;
+        SurfaceTargets = SceneSurfaceTargetSnapshot.Empty;
+        ItemTargetsEnabled = false;
+        TargetShape = SceneSurfaceTargetShape.Bounds;
         LastResolvedPosition = default;
         LastResolvedRotationDegrees = default;
     }

@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Text;
+using Intoner.Services.Interop;
 using static Intoner.Utils.PtrGuardMemory;
 
 namespace Intoner.Utils
@@ -28,9 +29,9 @@ namespace Intoner.Utils
         /// fall back to the system minimum (likely 0x10000) in that case. This is much less
         /// effective at finding bad pointers, obviously, but it does keep the plugin working.
         /// </summary>
-        public static void CalibrateFromPlayerAddress(nint playerAddress, bool isWine)
+        public static void CalibrateFromPlayerAddress(nint playerAddress)
         {
-            if (isWine || _lowAddressDetected)
+            if (RuntimePlatform.IsWine || _lowAddressDetected)
                 return;
 
             if (playerAddress != 0 && (nuint)playerAddress < _hardMinWindows)
@@ -39,39 +40,39 @@ namespace Intoner.Utils
             }
         }
 
-        private static nuint GetMinAppAddr(bool isWine) =>
-            isWine || _lowAddressDetected ? _sysRange.min : _hardMinWindows;
-        private static nuint GetMaxAppAddr(bool isWine) =>
-            isWine || _lowAddressDetected ? _sysRange.max : _hardMaxWindows;
+        private static nuint GetMinAppAddr() =>
+            RuntimePlatform.IsWine || _lowAddressDetected ? _sysRange.min : _hardMinWindows;
+        private static nuint GetMaxAppAddr() =>
+            RuntimePlatform.IsWine || _lowAddressDetected ? _sysRange.max : _hardMaxWindows;
 
-        public static Dictionary<string, object> GetDiagnosticInfo(bool isWine)
+        public static Dictionary<string, object> GetDiagnosticInfo()
         {
             return new Dictionary<string, object>(StringComparer.Ordinal)
             {
-                ["effectiveMinAddress"] = $"0x{GetMinAppAddr(isWine):X}",
-                ["effectiveMaxAddress"] = $"0x{GetMaxAppAddr(isWine):X}",
+                ["effectiveMinAddress"] = $"0x{GetMinAppAddr():X}",
+                ["effectiveMaxAddress"] = $"0x{GetMaxAppAddr():X}",
                 ["lowAddressDetected"] = _lowAddressDetected,
             };
         }
 
-        public static bool LooksLikePtr(nint p, bool isWine = false)
+        public static bool LooksLikePtr(nint p)
         {
             if (p == 0) return false;
             nuint u = (nuint)p;
 
-            if (u < GetMinAppAddr(isWine)) return false;
-            if (u > GetMaxAppAddr(isWine)) return false;
+            if (u < GetMinAppAddr()) return false;
+            if (u > GetMaxAppAddr()) return false;
             if ((u & _alignmentPtr) != 0) return false;
             if ((uint)u == 0x12345679u) return false;
 
             return true;
         }
 
-        public static bool TryReadIntPtr(nint addr, bool isWine, out nint value)
+        public static bool TryReadIntPtr(nint addr, out nint value)
         {
             value = 0;
 
-            if (!LooksLikePtr(addr, isWine))
+            if (!LooksLikePtr(addr))
                 return false;
 
             return ReadProcessMemory(GetCurrentProcess(), addr, out value, (nuint)IntPtr.Size, out nuint bytesRead)
@@ -115,10 +116,10 @@ namespace Intoner.Utils
             return readableSize > 0;
         }
 
-        public static bool TryReadBytes(nint addr, bool isWine, Span<byte> destination)
+        public static bool TryReadBytes(nint addr, Span<byte> destination)
         {
             if (destination.Length == 0) return false;
-            if (!LooksLikePtr(addr, isWine)) return false;
+            if (!LooksLikePtr(addr)) return false;
 
             return TryReadProcessBytes(addr, destination);
         }
@@ -156,10 +157,10 @@ namespace Intoner.Utils
             }
         }
 
-        public static bool TryRead<T>(nint addr, bool isWine, out T value) where T : unmanaged
+        public static bool TryRead<T>(nint addr, out T value) where T : unmanaged
         {
             value = default;
-            if (!LooksLikePtr(addr, isWine)) return false;
+            if (!LooksLikePtr(addr)) return false;
 
             return TryReadUnaligned(addr, out value);
         }

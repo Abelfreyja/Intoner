@@ -1,5 +1,4 @@
 using FFXIVClientStructs.FFXIV.Client.Graphics;
-using ObjectHighlightColor = FFXIVClientStructs.FFXIV.Client.Game.Object.ObjectHighlightColor;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine.Group;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine.Node;
@@ -7,15 +6,17 @@ using InteropGenerator.Runtime;
 using Intoner.Objects.Interop;
 using Intoner.Objects.Models;
 using Intoner.Objects.Utils;
+using Intoner.Scene;
 using Microsoft.Extensions.Logging;
 using System.Numerics;
 using GraphicsSceneObject = FFXIVClientStructs.FFXIV.Client.Graphics.Scene.Object;
+using ObjectHighlightColor = FFXIVClientStructs.FFXIV.Client.Game.Object.ObjectHighlightColor;
 
 namespace Intoner.Objects.Runtime;
 
 internal static unsafe class FurnitureSceneInterop
 {
-    public static void AppendSelectionDraws(SharedGroupLayoutInstance* instance, ObjectSnapshot snapshot, ObjectSelectionCollector collector)
+    public static void AppendSelectionDraws(SharedGroupLayoutInstance* instance, ObjectSnapshot snapshot, SceneSelectionCollector collector)
     {
         if (instance == null)
         {
@@ -90,7 +91,7 @@ internal static unsafe class FurnitureSceneInterop
 
     private static void ApplyCustomStainColor(SharedGroupLayoutInstance* instance, Vector4 customColor)
     {
-        var stainColor = ObjectColorUtility.ToOpaqueByteColor(customColor);
+        var stainColor = ColorUtility.ToOpaqueByteColor(customColor);
         ApplyCustomStainColor(&instance->Instances, &stainColor);
     }
 
@@ -213,7 +214,7 @@ internal static unsafe class FurnitureSceneInterop
         }
     }
 
-    private static void AppendSelectionDraws(ChildNodeContainer* container, ObjectSnapshot snapshot, ObjectSelectionCollector collector)
+    private static void AppendSelectionDraws(ChildNodeContainer* container, ObjectSnapshot snapshot, SceneSelectionCollector collector)
     {
         foreach (var child in container->Instances)
         {

@@ -1,17 +1,20 @@
 using Dalamud.Bindings.ImGui;
 using Intoner.Objects.Models;
 using Intoner.Objects.Utils;
+using Intoner.Scene;
 using System.Numerics;
 
 namespace Intoner.Objects.UI;
 
 internal abstract class GizmoTransformDragSession
 {
+    private readonly GizmoDragSnapshotState _snapshots = new();
+
     public abstract GizmoTransformMode Mode { get; }
 
     public bool IsDragging { get; protected set; }
 
-    public Guid ObjectId { get; protected set; }
+    public Guid ItemId { get; protected set; }
 
     public GizmoAxis ActiveAxis { get; protected set; }
 
@@ -25,32 +28,24 @@ internal abstract class GizmoTransformDragSession
 
     public float AxisWorldLength { get; protected set; }
 
-    public GizmoSelectionEntry[] SelectionEntries { get; protected set; } = [];
+    public IReadOnlyList<GizmoSelectionEntry> SelectionEntries
+        => _snapshots.SelectionEntries;
 
-    private IReadOnlyList<ObjectSnapshot> _lastAppliedSnapshots = [];
-
-    private ObjectSnapshot? _lastAppliedSnapshot;
-
-    public ObjectSnapshot StartSnapshot { get; protected set; } = null!;
+    public SceneItemSnapshot StartSnapshot
+        => _snapshots.PrimarySnapshot;
 
     public Vector3 StartPosition { get; protected set; }
 
-    public bool Matches(Guid objectId, GizmoTransformMode mode)
-        => IsDragging && ObjectId == objectId && Mode == mode;
+    public bool Matches(Guid itemId, GizmoTransformMode mode)
+        => IsDragging && ItemId == itemId && Mode == mode;
 
-    public void RecordAppliedSnapshot(ObjectSnapshot appliedSnapshot)
-    {
-        _lastAppliedSnapshot = appliedSnapshot;
-        _lastAppliedSnapshots = [];
-    }
+    public void RecordAppliedSnapshot(SceneItemSnapshot appliedSnapshot)
+        => _snapshots.Record(appliedSnapshot);
 
-    public void RecordAppliedSnapshots(IReadOnlyList<ObjectSnapshot> appliedSnapshots)
-    {
-        _lastAppliedSnapshot = null;
-        _lastAppliedSnapshots = appliedSnapshots;
-    }
+    public void RecordAppliedSnapshots(IReadOnlyList<SceneItemSnapshot> appliedSnapshots)
+        => _snapshots.Record(appliedSnapshots);
 
-    public bool TryGetHistorySnapshots(out ObjectSnapshot[] beforeSnapshots, out ObjectSnapshot[] afterSnapshots)
+    public bool TryGetHistorySnapshots(out SceneItemSnapshot[] beforeSnapshots, out SceneItemSnapshot[] afterSnapshots)
     {
         if (!IsDragging)
         {
@@ -59,20 +54,20 @@ internal abstract class GizmoTransformDragSession
             return false;
         }
 
-        return GizmoSessionSnapshotUtility.TryGetHistorySnapshots(SelectionEntries, _lastAppliedSnapshot, _lastAppliedSnapshots, out beforeSnapshots, out afterSnapshots);
+        return _snapshots.TryGetHistorySnapshots(out beforeSnapshots, out afterSnapshots);
     }
 
-    public bool TryResolveAppliedSnapshot(out ObjectSnapshot snapshot)
-        => GizmoSessionSnapshotUtility.TryResolveAppliedSnapshot(ObjectId, _lastAppliedSnapshot, _lastAppliedSnapshots, out snapshot);
+    public bool TryResolveAppliedSnapshot(out SceneItemSnapshot snapshot)
+        => _snapshots.TryGetAppliedSnapshot(ItemId, out snapshot);
 
-    public Vector3 ResolveReferenceRotationDegrees(Guid objectId)
-        => GizmoSessionSnapshotUtility.ResolveReferenceRotationDegrees(objectId, SelectionEntries, _lastAppliedSnapshot, _lastAppliedSnapshots, StartSnapshot);
+    public Vector3 ResolveReferenceRotationDegrees(Guid itemId)
+        => _snapshots.ResolveReferenceRotationDegrees(itemId);
 
     public abstract void Reset();
 
     protected void BeginCore(
-        IReadOnlyList<ObjectSnapshot> selectedSnapshots,
-        ObjectSnapshot primarySnapshot,
+        IReadOnlyList<SceneItemSnapshot> selectedSnapshots,
+        SceneItemSnapshot primarySnapshot,
         Vector3 pivotPosition,
         GizmoAxis axis,
         Vector2 axisScreenDirection,
@@ -81,38 +76,34 @@ internal abstract class GizmoTransformDragSession
         float axisWorldLength)
     {
         IsDragging = true;
-        ObjectId = primarySnapshot.Id;
+        ItemId = primarySnapshot.Id;
         ActiveAxis = axis;
         StartMouse = ImGui.GetIO().MousePos;
-        AxisScreenDirection = ObjectMathUtility.TryNormalize(axisScreenDirection, out var normalizedAxisScreenDirection)
+        AxisScreenDirection = NumericsUtility.TryNormalize(axisScreenDirection, out var normalizedAxisScreenDirection)
             ? normalizedAxisScreenDirection
             : Vector2.UnitX;
         AxisScreenLength = axisScreenLength;
-        AxisWorldDirection = ObjectMathUtility.TryNormalize(axisWorldDirection, out var normalizedAxisWorldDirection)
+        AxisWorldDirection = NumericsUtility.TryNormalize(axisWorldDirection, out var normalizedAxisWorldDirection)
             ? normalizedAxisWorldDirection
             : axisWorldDirection;
         AxisWorldLength = axisWorldLength;
-        SelectionEntries = GizmoSelectionTransformUtility.CreateSelectionEntries(selectedSnapshots, pivotPosition);
-        _lastAppliedSnapshot = null;
-        _lastAppliedSnapshots = [];
-        StartSnapshot = primarySnapshot;
+        _snapshots.Begin(
+            GizmoSelectionTransformUtility.CreateSelectionEntries(selectedSnapshots, pivotPosition),
+            primarySnapshot);
         StartPosition = pivotPosition;
     }
 
     protected void ResetCore()
     {
         IsDragging = false;
-        ObjectId = Guid.Empty;
+        ItemId = Guid.Empty;
         ActiveAxis = GizmoAxis.None;
         StartMouse = default;
         AxisScreenDirection = default;
         AxisScreenLength = 0f;
         AxisWorldDirection = default;
         AxisWorldLength = 0f;
-        SelectionEntries = [];
-        _lastAppliedSnapshot = null;
-        _lastAppliedSnapshots = [];
-        StartSnapshot = null!;
+        _snapshots.Reset();
         StartPosition = default;
     }
 }
@@ -131,8 +122,8 @@ internal sealed class GizmoTranslationDragSession : GizmoTransformDragSession
     public TranslationDragPlaneContext? TranslationPlane { get; private set; }
 
     public void Begin(
-        IReadOnlyList<ObjectSnapshot> selectedSnapshots,
-        ObjectSnapshot primarySnapshot,
+        IReadOnlyList<SceneItemSnapshot> selectedSnapshots,
+        SceneItemSnapshot primarySnapshot,
         Vector3 pivotPosition,
         Quaternion pivotRotation,
         GizmoAxis axis,
@@ -195,8 +186,8 @@ internal sealed class GizmoRotationDragSession : GizmoTransformDragSession
     public Vector2 RotationDragLastMouse { get; private set; }
 
     public void Begin(
-        IReadOnlyList<ObjectSnapshot> selectedSnapshots,
-        ObjectSnapshot primarySnapshot,
+        IReadOnlyList<SceneItemSnapshot> selectedSnapshots,
+        SceneItemSnapshot primarySnapshot,
         Vector3 pivotPosition,
         Quaternion pivotRotation,
         GizmoAxis axis,
@@ -259,8 +250,8 @@ internal sealed class GizmoScaleDragSession : GizmoTransformDragSession
     public Vector3 LastScale { get; private set; }
 
     public void Begin(
-        IReadOnlyList<ObjectSnapshot> selectedSnapshots,
-        ObjectSnapshot primarySnapshot,
+        IReadOnlyList<SceneItemSnapshot> selectedSnapshots,
+        SceneItemSnapshot primarySnapshot,
         Vector3 pivotPosition,
         GizmoAxis axis,
         Vector2 axisScreenDirection,

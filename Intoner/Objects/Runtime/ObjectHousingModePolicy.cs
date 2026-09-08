@@ -1,6 +1,6 @@
 using Intoner.Objects.Assets;
-using Intoner.Objects.Filesystem.Configuration;
 using Intoner.Objects.Models;
+using Intoner.Services.Configuration;
 
 namespace Intoner.Objects.Runtime;
 
@@ -71,7 +71,7 @@ internal interface IObjectHousingModePolicy
     bool TryValidateLayout(IReadOnlyList<ObjectSnapshot> snapshots, out string errorMessage);
 }
 
-internal sealed class ObjectHousingModePolicy(IObjectConfigurationService configurationService) : IObjectHousingModePolicy
+internal sealed class ObjectHousingModePolicy(IIntonerConfigurationService configurationService) : IObjectHousingModePolicy
 {
     private const string IndoorFurniturePrefix = "bgcommon/hou/indoor/";
     private const string OutdoorFurniturePrefix = "bgcommon/hou/outdoor/";

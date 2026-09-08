@@ -208,7 +208,7 @@ internal abstract class ShaderBackdropEffectBase<TStyle, TRequest, TEffectConsta
     where TEffectConstants : unmanaged
 {
     private PixelShader? _shader;
-    private BackdropRenderer.BackdropFramebuffer? _framebuffer;
+    private GpuColorTarget? _framebuffer;
     private Buffer? _effectConstantBuffer;
     private int _clearedFrame = -1;
 

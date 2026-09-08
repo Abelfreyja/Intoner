@@ -1,12 +1,13 @@
 using Dalamud.Plugin.Services;
 using Dalamud.Utility.Signatures;
 using FFXIVClientStructs.FFXIV.Client.System.Resource.Handle;
+using Intoner.Services.Interop;
 
 namespace Intoner.Objects.Resources;
 
 internal sealed unsafe class ObjectTextureLodService
 {
-    [Signature(ObjectSignatures.LodConfig)]
+    [Signature(IntonerSignatures.LodConfig)]
     private readonly nint _lodConfig = nint.Zero;
 
     public ObjectTextureLodService(IGameInteropProvider gameInteropProvider)

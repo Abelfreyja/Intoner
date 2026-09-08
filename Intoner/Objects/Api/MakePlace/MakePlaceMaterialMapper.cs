@@ -35,7 +35,7 @@ internal static class MakePlaceMaterialMapper
 
         material = new FurnitureMaterialItemModel
         {
-            Name = ObjectStringUtility.TrimOrEmpty(materialItem.Name),
+            Name = TextUtility.TrimOrEmpty(materialItem.Name),
             ItemId = materialItem.ItemId,
         };
         return true;
@@ -51,7 +51,7 @@ internal static class MakePlaceMaterialMapper
         properties[MaterialPropertyName] = JsonSerializer.SerializeToElement(
             new MakePlaceBasicItemDocument
             {
-                Name = ObjectStringUtility.TrimOrEmpty(material.Name),
+                Name = TextUtility.TrimOrEmpty(material.Name),
                 ItemId = material.ItemId,
             },
             MakePlaceJsonSerializer.JsonOptions);

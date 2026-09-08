@@ -56,7 +56,7 @@ internal sealed class WindowBuilder
             Icon = icon,
             IconOffset = iconOffset ?? new Vector2(2, 1),
             Click = _ => onClick(),
-            ShowTooltip = () => UiSharedService.AttachToolTip(tooltip),
+            ShowTooltip = () => IntonerTooltip.Attach(icon, tooltip),
         });
         return this;
     }

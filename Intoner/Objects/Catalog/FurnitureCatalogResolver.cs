@@ -7,6 +7,7 @@ namespace Intoner.Objects.Catalog;
 internal sealed class FurnitureCatalogResolver(IObjectCatalogService catalogService)
 {
     private readonly Dictionary<HousingFurnitureArea, FurnitureLookup> _lookups = [];
+    private readonly Lock _lookupLock = new();
 
     public bool TryFind(
         uint itemId,
@@ -22,8 +23,9 @@ internal sealed class FurnitureCatalogResolver(IObjectCatalogService catalogServ
             return true;
         }
 
-        return !string.IsNullOrWhiteSpace(name)
-            && lookup.ByName.TryGetValue(ObjectStringUtility.TrimOrEmpty(name), out match);
+        return itemId == 0
+            && !string.IsNullOrWhiteSpace(name)
+            && lookup.ByName.TryGetValue(TextUtility.TrimOrEmpty(name), out match);
     }
 
     public bool TryResolve(
@@ -35,15 +37,16 @@ internal sealed class FurnitureCatalogResolver(IObjectCatalogService catalogServ
         furnitureModel = null;
         match = null;
         if (snapshot.Model is not FurnitureModel model
-            || !catalogService.TryResolveEntry(ObjectCatalogKind.Furniture, model.SharedGroupPath, out ObjectCatalogEntry? entry)
-            || entry.FurnitureInfo is not { } furnitureInfo)
+            || !catalogService.TryResolveFurnitureVariant(
+                model.SharedGroupPath,
+                model.HousingRowId,
+                model.ItemRowId,
+                out ObjectCatalogEntry? entry,
+                out ObjectCatalogFurnitureVariant? variant))
         {
             return false;
         }
 
-        ObjectCatalogFurnitureVariant variant = furnitureInfo.TryResolveVariant(model.HousingRowId, model.ItemRowId, out ObjectCatalogFurnitureVariant? resolvedVariant)
-            ? resolvedVariant
-            : furnitureInfo.PrimaryVariant;
         if (variant.HousingMetadata.Area != area)
         {
             return false;
@@ -56,14 +59,17 @@ internal sealed class FurnitureCatalogResolver(IObjectCatalogService catalogServ
 
     private FurnitureLookup GetLookup(HousingFurnitureArea area)
     {
-        if (_lookups.TryGetValue(area, out FurnitureLookup? lookup))
+        lock (_lookupLock)
         {
+            if (_lookups.TryGetValue(area, out FurnitureLookup? lookup))
+            {
+                return lookup;
+            }
+
+            lookup = BuildLookup(area);
+            _lookups[area] = lookup;
             return lookup;
         }
-
-        lookup = BuildLookup(area);
-        _lookups[area] = lookup;
-        return lookup;
     }
 
     private FurnitureLookup BuildLookup(HousingFurnitureArea area)
@@ -92,11 +98,6 @@ internal sealed class FurnitureCatalogResolver(IObjectCatalogService catalogServ
 
                 AddNameMatch(byName, variant.Name, match);
             }
-
-            if (furnitureInfo.PrimaryVariant.HousingMetadata.Area == area)
-            {
-                AddNameMatch(byName, entry.Name, new FurnitureCatalogMatch(entry, furnitureInfo.PrimaryVariant));
-            }
         }
 
         return new FurnitureLookup(byItemId, byName);
@@ -104,7 +105,7 @@ internal sealed class FurnitureCatalogResolver(IObjectCatalogService catalogServ
 
     private static void AddNameMatch(Dictionary<string, FurnitureCatalogMatch> byName, string name, FurnitureCatalogMatch match)
     {
-        string normalizedName = ObjectStringUtility.TrimOrEmpty(name);
+        string normalizedName = TextUtility.TrimOrEmpty(name);
         if (normalizedName.Length > 0)
         {
             byName.TryAdd(normalizedName, match);

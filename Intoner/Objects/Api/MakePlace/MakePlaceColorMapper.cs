@@ -24,7 +24,7 @@ internal sealed class MakePlaceColorMapper(IFurnitureStainService stainService)
         colorHex = string.Empty;
         if (color.UseCustomColor)
         {
-            colorHex = FormatColor(ObjectColorUtility.ToByteColor(color.CustomColor));
+            colorHex = FormatColor(ColorUtility.ToByteColor(color.CustomColor));
             return true;
         }
 
@@ -50,7 +50,7 @@ internal sealed class MakePlaceColorMapper(IFurnitureStainService stainService)
         return furniture.Properties is not null
                && furniture.Properties.TryGetValue("color", out JsonElement colorElement)
                && colorElement.ValueKind == JsonValueKind.String
-               && ObjectColorUtility.TryParseHexBytes(colorElement.GetString(), out red, out green, out blue, out _);
+               && ColorUtility.TryParseHexBytes(colorElement.GetString(), out red, out green, out blue, out _);
     }
 
     private static string FormatColor(ByteColor color)

@@ -12,18 +12,18 @@ namespace Intoner.Objects.UI.Settings.Components;
 
 internal static class SectionPanel
 {
-    public static void DrawResults(SettingsView view, DrawContext drawContext, float height)
+    public static void DrawResults(SettingsView view, IUiOverlayTarget? overlayTarget, float height)
     {
-        var background = EditorColors.ButtonDefault with { W = 0.18f };
+        var background = ThemeColors.ButtonDefault with { W = 0.18f };
         using var childBg = ImRaii.PushColor(ImGuiCol.ChildBg, Vector4.Zero);
         using var childPadding = ImRaii.PushStyle(ImGuiStyleVar.WindowPadding, Vector2.Zero);
-        using var child = ObjectScrollList.Begin(
+        using var child = EditorScrollList.Begin(
             "##objectSettingsResults",
             new Vector2(0f, height),
-            ObjectScrollListOptions.Panel(background, PanelRounding, EditorColors.AccentPurple) with
+            EditorScrollListOptions.Panel(background, PanelRounding, ThemeColors.AccentPrimary) with
             {
                 CornerFlags = ImDrawFlags.RoundCornersRight,
-                OverlayTarget = drawContext.OverlayTarget,
+                OverlayTarget = overlayTarget,
             });
         if (!child)
         {
@@ -38,17 +38,17 @@ internal static class SectionPanel
 
         for (var index = 0; index < view.SelectedResult.Sections.Count; ++index)
         {
-            DrawSection(view.SelectedResult.Sections[index], drawContext);
+            DrawSection(view.SelectedResult.Sections[index]);
         }
     }
 
-    private static void DrawSection(SectionResult result, DrawContext drawContext)
+    private static void DrawSection(SectionResult result)
     {
-        Vector4 accent = ResolveTabAccent(result.Section.Tab);
+        Vector4 accent = result.Tab.Accent;
 
         DrawPanelCard(
             $"objectSettingsSection{result.Section.Id}",
-            EditorColors.ButtonDefault with { W = 0.22f },
+            ThemeColors.ButtonDefault with { W = 0.22f },
             accent with { W = 0.20f },
             PanelRounding,
             PanelPadding,
@@ -58,23 +58,34 @@ internal static class SectionPanel
                 ImGuiHelpers.ScaledDummy(6f);
                 DrawSectionDivider(accent);
                 ImGuiHelpers.ScaledDummy(6f);
-                DrawSectionBody(result, drawContext, accent);
+                DrawSectionBody(result, accent);
             });
     }
 
     private static void DrawSectionTitle(SettingsSection section, int entryCount, Vector4 accent)
     {
-        DrawSectionIcon(section.Icon, accent);
+        EditorIcon.DrawInline(section.Icon, accent);
         ImGui.SameLine(0f, Scaled(8f));
         using var group = ImRaii.Group();
         ImGui.TextUnformatted(section.Title);
         if (ImGui.IsItemHovered())
         {
-            UiSharedService.AttachToolTip(section.Description);
+            IntonerTooltip.Attach(
+                section.Icon,
+                section.Title,
+                section.Description,
+                new IntonerTooltipOptions { Accent = accent });
         }
 
-        ImGui.SameLine(0f, Scaled(8f));
-        DrawTextBadge(entryCount == 1 ? "1 setting" : $"{entryCount} settings", accent);
+        if (section.ShowEntryCount)
+        {
+            ImGui.SameLine(0f, Scaled(8f));
+            EditorBadgeRenderer.Draw(EditorBadge.Label(
+                entryCount == 1
+                    ? $"1 {section.EntryLabel}"
+                    : $"{entryCount} {section.EntryPluralLabel}",
+                color: accent));
+        }
 
         ImGui.TextDisabled(section.Description);
     }
@@ -88,22 +99,97 @@ internal static class SectionPanel
         ImGui.Dummy(new Vector2(0f, scale));
     }
 
-    private static void DrawSectionBody(SectionResult result, DrawContext drawContext, Vector4 accent)
+    private static void DrawSectionBody(SectionResult result, Vector4 accent)
     {
-        var prominentControl = result.Section.Entries.Count == 1;
+        bool prominentControl = result.Entries.Count == 1;
+        int entryIndex = 0;
+        int blockIndex = 0;
+        while (entryIndex < result.Entries.Count)
+        {
+            if (blockIndex > 0)
+            {
+                DrawEntryDivider(accent);
+            }
+
+            ISettingEntry entry = result.Entries[entryIndex];
+            if (entry.Layout.FullWidth)
+            {
+                DrawFullWidthEntry(result.Section.Id, entry, entryIndex, accent, prominentControl);
+                ++entryIndex;
+            }
+            else
+            {
+                int blockStart = entryIndex;
+                while (entryIndex < result.Entries.Count && !result.Entries[entryIndex].Layout.FullWidth)
+                {
+                    ++entryIndex;
+                }
+
+                DrawSettingBlock(
+                    result.Section.Id,
+                    result.Entries,
+                    blockStart,
+                    entryIndex,
+                    blockIndex,
+                    accent,
+                    prominentControl);
+            }
+
+            ++blockIndex;
+        }
+    }
+
+    private static void DrawSettingBlock(
+        string sectionId,
+        IReadOnlyList<ISettingEntry> entries,
+        int startIndex,
+        int endIndex,
+        int blockIndex,
+        Vector4 accent,
+        bool prominentControl)
+    {
         var tableFlags = prominentControl ? SingleSettingTableFlags : SettingsTableFlags;
-        using var table = ImRaii.Table($"##objectSettingsTable{result.Section.Id}", 2, tableFlags);
+        using var table = ImRaii.Table($"##objectSettingsTable{sectionId}:{blockIndex}", 2, tableFlags);
         if (!table)
         {
             return;
         }
 
         ImGui.TableSetupColumn("Setting", ImGuiTableColumnFlags.WidthStretch);
-        ImGui.TableSetupColumn("Control", ImGuiTableColumnFlags.WidthFixed, Scaled(ResolveControlColumnWidth(result.Entries)));
-        foreach (ISettingEntry entry in result.Entries)
+        ImGui.TableSetupColumn("Control", ImGuiTableColumnFlags.WidthFixed, Scaled(ResolveControlColumnWidth(entries)));
+        for (int index = startIndex; index < endIndex; ++index)
         {
-            entry.DrawRow(drawContext, accent, prominentControl);
+            entries[index].DrawRow(accent, prominentControl);
         }
+    }
+
+    private static void DrawFullWidthEntry(
+        string sectionId,
+        ISettingEntry entry,
+        int entryIndex,
+        Vector4 accent,
+        bool prominentControl)
+    {
+        using var table = ImRaii.Table(
+            $"##objectSettingsFullWidth{sectionId}:{entryIndex}",
+            1,
+            SingleSettingTableFlags);
+        if (!table)
+        {
+            return;
+        }
+
+        ImGui.TableSetupColumn("Setting", ImGuiTableColumnFlags.WidthStretch);
+        entry.DrawRow(accent, prominentControl);
+    }
+
+    private static void DrawEntryDivider(Vector4 accent)
+    {
+        Vector2 min = ImGui.GetCursorScreenPos();
+        Vector2 max = new(min.X + Positive(ImGui.GetContentRegionAvail().X), min.Y);
+        float scale = ImGuiHelpers.GlobalScale;
+        ImGui.GetWindowDrawList().AddLine(min, max, ImGui.GetColorU32(accent with { W = 0.16f }), MathF.Max(1f, scale));
+        ImGui.Dummy(new Vector2(0f, 5f * scale));
     }
 
     private static float ResolveControlColumnWidth(IReadOnlyList<ISettingEntry> entries)
@@ -124,15 +210,15 @@ internal static class SectionPanel
     {
         DrawPanelCard(
             "objectSettingsEmptyResults",
-            EditorColors.ButtonDefault with { W = 0.18f },
-            EditorColors.Border with { W = 0.20f },
+            ThemeColors.ButtonDefault with { W = 0.18f },
+            ThemeColors.Border with { W = 0.20f },
             PanelRounding,
             PanelPadding,
             () =>
             {
-                DrawIcon(FontAwesomeIcon.Search, EditorColors.TextDisabled);
+                EditorIcon.DrawInline(FontAwesomeIcon.Search, ThemeColors.TextDisabled);
                 ImGui.SameLine(0f, Scaled(8f));
-                ImGui.TextDisabled("No object settings match the current search.");
+                ImGui.TextDisabled("No settings match the current search.");
             });
     }
 

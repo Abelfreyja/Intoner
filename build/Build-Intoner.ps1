@@ -20,6 +20,7 @@ $dotnetPath             = "C:\Program Files\dotnet\dotnet.exe"
 $projectPath            = Join-Path $repoRoot "Intoner\Intoner.csproj"
 $apiProjectPath         = Join-Path $repoRoot "Intoner.Api\Intoner.Api.csproj"
 $dependencyProjectPath  = Join-Path $repoRoot "Submodules\Penumbra.GameData\Penumbra.GameData.csproj"
+$verifyOutputPath       = Join-Path ([System.IO.Path]::GetTempPath()) "Intoner\verify\$Configuration"
 $mutexName              = "Local\Intoner.Build"
 $mutex                  = $null
 $lockTaken              = $false
@@ -76,7 +77,8 @@ function Get-CommonDotNetArguments([string] $TargetPath)
 function Get-BuildArguments(
     [string] $TargetPath,
     [bool] $BuildProjectReferences,
-    [bool] $RunAnalyzers)
+    [bool] $RunAnalyzers,
+    [string[]] $AdditionalArguments = @())
 {
     $arguments = @(
         "build"
@@ -88,6 +90,8 @@ function Get-BuildArguments(
         "-p:RunAnalyzers=$RunAnalyzers"
         "-p:RunAnalyzersDuringBuild=$RunAnalyzers"
     )
+
+    $arguments += $AdditionalArguments
 
     if (-not $Restore)
     {
@@ -135,9 +139,10 @@ function Invoke-DotNetBuild(
     [string] $Label,
     [string] $TargetPath,
     [bool] $BuildProjectReferences,
-    [bool] $RunAnalyzers)
+    [bool] $RunAnalyzers,
+    [string[]] $AdditionalArguments = @())
 {
-    $arguments = Get-BuildArguments $TargetPath $BuildProjectReferences $RunAnalyzers
+    $arguments = Get-BuildArguments $TargetPath $BuildProjectReferences $RunAnalyzers $AdditionalArguments
     $process = [System.Diagnostics.Process]::GetCurrentProcess()
     $previousPriority = $process.PriorityClass
     $priorityChanged = $false
@@ -204,7 +209,10 @@ try
         {
             Assert-DependencyOutputs
             Invoke-DotNetBuild "Intoner API" $apiProjectPath $false $true
-            Invoke-DotNetBuild "Intoner verify" $projectPath $false $true
+            Invoke-DotNetBuild "Intoner verify" $projectPath $false $true @(
+                "-p:IntonerVerifyOutputPath=$verifyOutputPath"
+                "-p:NotifyDalamudAfterBuild=false"
+            )
             break
         }
         default

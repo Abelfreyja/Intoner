@@ -15,7 +15,7 @@ internal static class ObjectIdentityUtility
 
     public static string CreateTemporaryCollectionId(string sourceKey, string collectionId)
     {
-        string normalizedSourceKey = ObjectTemporarySourceUtility.NormalizeSourceKey(sourceKey);
+        string normalizedSourceKey = TemporarySourceUtility.NormalizeKey(sourceKey);
         string normalizedCollectionId = ObjectCollectionKeyUtility.NormalizeCollectionId(collectionId);
         if (normalizedSourceKey.Length == 0 || normalizedCollectionId.Length == 0)
         {

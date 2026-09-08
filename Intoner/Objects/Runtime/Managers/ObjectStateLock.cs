@@ -1,7 +1,7 @@
 namespace Intoner.Objects.Runtime;
 
 /// <summary>
-/// Shares one synchronization lock across the object runtime state users in the current scope.
+/// Shares one synchronization lock across scene state owners in the current scope.
 /// </summary>
 internal sealed class ObjectStateLock
 {

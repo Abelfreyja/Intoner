@@ -4,6 +4,8 @@ using System.Runtime.InteropServices;
 using SceneVfxObject = FFXIVClientStructs.FFXIV.Client.Graphics.Scene.VfxObject;
 using VfxResourceInstance = FFXIVClientStructs.FFXIV.Client.Graphics.Vfx.VfxResourceInstance;
 
+using Intoner.Services.Interop;
+
 namespace Intoner.Objects.Interop;
 
 internal sealed unsafe class ObjectNativeBindings
@@ -73,9 +75,6 @@ internal sealed unsafe class ObjectNativeBindings
     public ObjectNativeBindings(ILogger<ObjectNativeBindings> logger, ISigScanner sigScanner)
     {
         _logger = logger;
-#if DEBUG
-        ObjectSignatures.TestSignatures(sigScanner, _logger);
-#endif
         Furniture = CreateFurnitureBinding(sigScanner);
         Vfx = CreateVfxBinding(sigScanner);
     }
@@ -85,19 +84,19 @@ internal sealed unsafe class ObjectNativeBindings
 
     private VfxBinding CreateVfxBinding(ISigScanner sigScanner)
     {
-        nint pauseToggleAddress = ObjectNativeAddressResolver.TryResolveJmpCallTarget(
+        nint pauseToggleAddress = NativeAddressResolver.TryResolveJmpCallTarget(
             _logger,
             sigScanner,
-            ObjectSignatures.NativeVfxPauseToggle);
-        nint isPausedAddress = ObjectNativeAddressResolver.TryResolveJmpCallTarget(
+            IntonerSignatures.NativeVfxPauseToggle);
+        nint isPausedAddress = NativeAddressResolver.TryResolveJmpCallTarget(
             _logger,
             sigScanner,
-            ObjectSignatures.NativeVfxIsPaused);
-        nint setSpeedAddress = ObjectNativeAddressResolver.TryScanSingleTextMatch(
+            IntonerSignatures.NativeVfxIsPaused);
+        nint setSpeedAddress = NativeAddressResolver.TryScanSingleTextMatch(
             _logger,
             sigScanner,
-            ObjectSignatures.NativeVfxSetSpeed.Signature,
-            ObjectSignatures.NativeVfxSetSpeed.Label);
+            IntonerSignatures.NativeVfxSetSpeed.Signature,
+            IntonerSignatures.NativeVfxSetSpeed.Label);
 
         return new VfxBinding(pauseToggleAddress, isPausedAddress, setSpeedAddress);
     }
@@ -105,22 +104,22 @@ internal sealed unsafe class ObjectNativeBindings
     private FurnitureBinding CreateFurnitureBinding(ISigScanner sigScanner)
     {
         // builds the descriptor, allocates SharedGroupLayoutInstance, initializes it, then enters native create
-        nint createAddress = ObjectNativeAddressResolver.TryResolveJmpCallTarget(
+        nint createAddress = NativeAddressResolver.TryResolveJmpCallTarget(
             _logger,
             sigScanner,
-            ObjectSignatures.NativeFurnitureCreate);
+            IntonerSignatures.NativeFurnitureCreate);
 
         // handles helper unregister work, then calls cleanup, destructor, and free
-        nint destroyAddress = ObjectNativeAddressResolver.TryResolveJmpCallTarget(
+        nint destroyAddress = NativeAddressResolver.TryResolveJmpCallTarget(
             _logger,
             sigScanner,
-            ObjectSignatures.NativeFurnitureDestroy);
+            IntonerSignatures.NativeFurnitureDestroy);
 
         // writes shared group housing state, updates layout world state, and invokes the collider state callback
-        nint applyStateAddress = ObjectNativeAddressResolver.TryResolveJmpCallTarget(
+        nint applyStateAddress = NativeAddressResolver.TryResolveJmpCallTarget(
             _logger,
             sigScanner,
-            ObjectSignatures.NativeFurnitureApplyState);
+            IntonerSignatures.NativeFurnitureApplyState);
 
         if (createAddress == nint.Zero || destroyAddress == nint.Zero || applyStateAddress == nint.Zero)
         {

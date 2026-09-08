@@ -6,6 +6,8 @@ using System.Runtime.InteropServices;
 using System.Text;
 using Intoner.Utils;
 
+using Intoner.Services.Interop;
+
 namespace Intoner.Objects.Resources;
 
 internal sealed unsafe class ObjectResourceCreateFileHook : IDisposable
@@ -22,7 +24,7 @@ internal sealed unsafe class ObjectResourceCreateFileHook : IDisposable
 
     private readonly Hook<CreateFileWDelegate> _createFileHook;
     private readonly ThreadLocal<nint> _fileNameStorage = new(SetupStorage, true);
-    private readonly ObjectDisposalState _disposeState = new();
+    private readonly DisposalState _disposeState = new();
     private readonly ObjectLockedOnce _enableOnce = new();
 
     public ObjectResourceCreateFileHook(IGameInteropProvider gameInteropProvider)
@@ -51,7 +53,7 @@ internal sealed unsafe class ObjectResourceCreateFileHook : IDisposable
             return;
         }
 
-        ObjectInteropHookUtility.DisposeHook(_createFileHook);
+        InteropHookUtility.DisposeHook(_createFileHook);
         foreach (var pointer in _fileNameStorage.Values)
         {
             Marshal.FreeHGlobal(pointer);

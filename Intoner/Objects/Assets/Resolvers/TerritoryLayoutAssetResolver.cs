@@ -223,7 +223,7 @@ internal static class TerritoryLayoutAssetResolver
                 RuntimeVfxEvidence.LayoutInstance,
                 AssetPathSource.GameData,
                 AssetPathContract.ParsedFileReference,
-                ObjectSearchTermUtility.BuildStableTerms("layout vfx", ReadCString(vfx->Base.Name)));
+                SearchTermUtility.BuildStableTerms("layout vfx", ReadCString(vfx->Base.Name)));
         }
 
         private void CollectSharedGroup(FileLayerGroupInstanceSharedGroup* sharedGroupInstance)
@@ -249,7 +249,7 @@ internal static class TerritoryLayoutAssetResolver
                 _referencedSharedGroupPaths.Add(nestedSharedGroupPath);
             }
 
-            IReadOnlyList<string> searchTerms = ObjectSearchTermUtility.BuildStableTerms("shared group autoplay", sharedGroupPath);
+            IReadOnlyList<string> searchTerms = SearchTermUtility.BuildStableTerms("shared group autoplay", sharedGroupPath);
             foreach (string vfxPath in sharedGroupAssets.ReferencedVfxPaths)
             {
                 _ = TryMergeResolvedVfxPath(
@@ -257,7 +257,7 @@ internal static class TerritoryLayoutAssetResolver
                     RuntimeVfxEvidence.LayoutInstance,
                     AssetPathSource.SharedGroup,
                     AssetPathContract.ParsedFileReference,
-                    ObjectSearchTermUtility.BuildStableTerms("shared group vfx", "shared group", sharedGroupPath));
+                    SearchTermUtility.BuildStableTerms("shared group vfx", "shared group", sharedGroupPath));
             }
 
             foreach (string vfxPath in sharedGroupAssets.StandaloneVfxPaths)
@@ -294,7 +294,7 @@ internal static class TerritoryLayoutAssetResolver
                 CollectTimelineReferences(
                     actionTimelinePath,
                     RuntimeVfxEvidence.LayoutTimeline,
-                    ObjectSearchTermUtility.BuildStableTerms("layout timeline", territoryLayoutPath, actionTimelinePath));
+                    SearchTermUtility.BuildStableTerms("layout timeline", territoryLayoutPath, actionTimelinePath));
             }
 
             if (timeline->OffsetTmlb == 0)
@@ -311,7 +311,7 @@ internal static class TerritoryLayoutAssetResolver
             }
 
             byte[] tmlbData = new ReadOnlySpan<byte>(timelineDescription, timelineDescription->Size).ToArray();
-            IReadOnlyList<string> searchTerms = ObjectSearchTermUtility.BuildStableTerms("layout timeline", territoryLayoutPath, "embedded tmlb");
+            IReadOnlyList<string> searchTerms = SearchTermUtility.BuildStableTerms("layout timeline", territoryLayoutPath, "embedded tmlb");
             foreach (TmbVfxReference reference in VfxAssetAnalyzer.CollectTmbVfxReferences(_gameData, tmlbData))
             {
                 _ = TryMergeResolvedVfxPath(
@@ -319,7 +319,7 @@ internal static class TerritoryLayoutAssetResolver
                     RuntimeVfxEvidence.LayoutTimeline | reference.Evidence,
                     AssetPathSource.GameData,
                     AssetPathContract.ParsedFileReference,
-                    ObjectSearchTermUtility.MergeTerms(searchTerms, reference.SearchTerms));
+                    SearchTermUtility.MergeTerms(searchTerms, reference.SearchTerms));
             }
         }
 
@@ -343,7 +343,7 @@ internal static class TerritoryLayoutAssetResolver
                     sourceEvidence | reference.Evidence,
                     AssetPathSource.GameData,
                     AssetPathContract.ParsedFileReference,
-                    ObjectSearchTermUtility.MergeTerms([.. searchTerms, normalizedTimelinePath], reference.SearchTerms));
+                    SearchTermUtility.MergeTerms([.. searchTerms, normalizedTimelinePath], reference.SearchTerms));
             }
         }
 
@@ -367,7 +367,7 @@ internal static class TerritoryLayoutAssetResolver
         private static string ReadCString(byte* pointer)
             => pointer is null
                 ? string.Empty
-                : ObjectStringUtility.TrimOrEmpty(Marshal.PtrToStringUTF8((nint)pointer));
+                : TextUtility.TrimOrEmpty(Marshal.PtrToStringUTF8((nint)pointer));
     }
 }
 

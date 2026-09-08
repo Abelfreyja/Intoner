@@ -155,6 +155,9 @@ internal sealed unsafe partial class EdgeGlowRenderer : GpuUiDeviceResourceHost
 
     private readonly ILogger<EdgeGlowRenderer> _logger;
     private readonly ImGuiDrawCallbackQueue<EdgeGlowRenderJob> _renderJobs = new(ProcessRenderJob, static job => job.Dispose());
+    private readonly D3D11DrawStateSnapshot _drawState = new(
+        pixelConstantBufferCount: 2,
+        pixelShaderResourceViewCount: 1);
 
     private PixelShader? _linePixelShader;
     private PixelShader? _lineBloomPixelShader;
@@ -272,7 +275,10 @@ internal sealed unsafe partial class EdgeGlowRenderer : GpuUiDeviceResourceHost
     }
 
     protected override void DisposeManagedResources()
-        => _renderJobs.Dispose();
+    {
+        _renderJobs.Dispose();
+        _drawState.Dispose();
+    }
 
     private static void DrawFramebufferSet(
         ImDrawListPtr drawList,
@@ -540,10 +546,7 @@ internal sealed unsafe partial class EdgeGlowRenderer : GpuUiDeviceResourceHost
 
         try
         {
-            using var state = D3D11DrawStateScope.Capture(
-                ActiveContext,
-                pixelConstantBufferCount: 2,
-                pixelShaderResourceViewCount: 1);
+            using D3D11DrawStateSnapshot.Scope state = _drawState.Capture(ActiveContext);
             ConfigureFullscreenPipeline();
             RenderEffectPass(request, sharpShader, framebufferSet.SharpFramebuffer);
 
@@ -573,7 +576,7 @@ internal sealed unsafe partial class EdgeGlowRenderer : GpuUiDeviceResourceHost
         return sharpShader is not null && bloomShader is not null;
     }
 
-    private void RenderEffectPass(in EdgeGlowRenderRequest request, PixelShader shader, EdgeGlowFramebuffer framebuffer)
+    private void RenderEffectPass(in EdgeGlowRenderRequest request, PixelShader shader, GpuColorTarget framebuffer)
     {
         if (ActiveContext is null || _constantBuffer is null)
         {
@@ -618,7 +621,7 @@ internal sealed unsafe partial class EdgeGlowRenderer : GpuUiDeviceResourceHost
         ActiveContext.Rasterizer.State = _rasterizerState;
     }
 
-    private void RenderBlurPass(EdgeGlowFramebuffer framebuffer, ShaderResourceView inputView, PixelShader shader, float blurOffset)
+    private void RenderBlurPass(GpuColorTarget framebuffer, ShaderResourceView inputView, PixelShader shader, float blurOffset)
     {
         if (ActiveContext is null
             || _blurConstantBuffer is null
@@ -655,7 +658,14 @@ internal sealed unsafe partial class EdgeGlowRenderer : GpuUiDeviceResourceHost
     }
 
     private bool TryEnsureDeviceResources()
-        => TryEnsureDevice(out _);
+        => VertexShader.IsCompilationComplete
+           && LinePixelShader.IsCompilationComplete
+           && LineBloomPixelShader.IsCompilationComplete
+           && FullBorderPixelShader.IsCompilationComplete
+           && FullBorderBloomPixelShader.IsCompilationComplete
+           && DownsampleShader.IsCompilationComplete
+           && UpsampleShader.IsCompilationComplete
+           && TryEnsureDevice(out _);
 
     protected override void CreateDeviceResources(Device device, DeviceContext context)
     {

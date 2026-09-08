@@ -130,4 +130,3 @@ internal sealed record LightModelPatch : ObjectDataPatch
            || Shape?.HasChanges == true
            || Shadow?.HasChanges == true;
 }
-

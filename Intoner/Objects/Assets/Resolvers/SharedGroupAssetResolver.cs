@@ -1,5 +1,5 @@
-using Intoner.Objects.Resources;
 using Intoner.Objects.Utils;
+using Intoner.Scene;
 using Lumina.Data.Files;
 using Lumina.Data.Parsing.Layer;
 using System.Numerics;
@@ -259,7 +259,7 @@ internal static class SharedGroupAssetResolver
                 NormalizeScaleComponent(scale.Z));
 
             return Matrix4x4.CreateScale(scale)
-                 * Matrix4x4.CreateFromQuaternion(ObjectTransformMath.CreateRotationQuaternion(rotation))
+                 * Matrix4x4.CreateFromQuaternion(SceneTransformMath.CreateRotationQuaternion(rotation))
                  * Matrix4x4.CreateTranslation(translation);
         }
 
@@ -267,7 +267,7 @@ internal static class SharedGroupAssetResolver
             => new(vector.X, vector.Y, vector.Z);
 
         private static float NormalizeScaleComponent(float value)
-            => !float.IsFinite(value) || ObjectMathUtility.IsNearlyZero(value, 0.0001f)
+            => !float.IsFinite(value) || NumericsUtility.IsNearlyZero(value, 0.0001f)
                 ? 1f
                 : value;
     }

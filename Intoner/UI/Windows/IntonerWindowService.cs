@@ -2,7 +2,6 @@ using Dalamud.Interface;
 using Dalamud.Interface.ImGuiFileDialog;
 using Dalamud.Interface.Windowing;
 using Intoner.UI.Performance;
-using Intoner.UI.Theme;
 using Microsoft.Extensions.Logging;
 
 namespace Intoner.UI.Windows;

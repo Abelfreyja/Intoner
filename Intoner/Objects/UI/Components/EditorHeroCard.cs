@@ -30,7 +30,7 @@ internal static class EditorHeroCard
 
         EditorCard.DrawPanelCard(
             id,
-            EditorColors.ButtonDefault with { W = 0.30f },
+            ThemeColors.ButtonDefault with { W = 0.30f },
             content.Accent with { W = 0.24f },
             Scaled(8f),
             ScaledVector(10f, 8f),
@@ -83,7 +83,7 @@ internal static class EditorHeroCard
         Vector2 start = ImGui.GetCursorScreenPos();
         using (ImRaii.Group())
         {
-            EditorCard.DrawIconTitleBlock(content.Icon, content.Title, content.Subtitle, content.Accent);
+            EditorIconText.Draw(content.Icon, content.Title, content.Subtitle, content.Accent);
 
             if (actions.HasValue)
             {
@@ -113,13 +113,13 @@ internal static class EditorHeroCard
         const ImDrawFlags roundingFlags = ImDrawFlags.RoundCornersRight;
         ImDrawListPtr drawList = ImGui.GetWindowDrawList();
 
-        drawList.AddRectFilled(min, max, ImGui.GetColorU32(EditorColors.WithAlpha(EditorColors.ButtonDefault, 0.22f)), rounding, roundingFlags);
-        drawList.AddRectFilled(min, max, ImGui.GetColorU32(EditorColors.WithAlpha(status.Accent, 0.035f)), rounding, roundingFlags);
+        drawList.AddRectFilled(min, max, ImGui.GetColorU32(ThemeColors.WithAlpha(ThemeColors.ButtonDefault, 0.22f)), rounding, roundingFlags);
+        drawList.AddRectFilled(min, max, ImGui.GetColorU32(ThemeColors.WithAlpha(status.Accent, 0.035f)), rounding, roundingFlags);
         drawList.AddRectFilled(
             min,
             new Vector2(min.X + Scaled(2f), max.Y),
-            ImGui.GetColorU32(EditorColors.WithAlpha(status.Accent, 0.78f)));
-        drawList.AddRect(min, max, ImGui.GetColorU32(EditorColors.WithAlpha(EditorColors.Border, 0.32f)), rounding, roundingFlags);
+            ImGui.GetColorU32(ThemeColors.WithAlpha(status.Accent, 0.78f)));
+        drawList.AddRect(min, max, ImGui.GetColorU32(ThemeColors.WithAlpha(ThemeColors.Border, 0.32f)), rounding, roundingFlags);
     }
 
     private static void DrawStatusPanelContent(Status status, Vector2 min, Vector2 size)
@@ -129,13 +129,13 @@ internal static class EditorHeroCard
         Vector2 contentMax = new(max.X - padding.X, max.Y - padding.Y);
         ImDrawListPtr drawList = ImGui.GetWindowDrawList();
 
-        string icon = status.Icon.ToIconString();
         Vector2 iconPos = min + padding;
-        Vector2 titlePos = new(iconPos.X + Scaled(20f), iconPos.Y);
+        EditorIcon.Metrics iconMetrics = EditorIcon.Measure(status.Icon);
+        Vector2 titlePos = new(iconPos.X + iconMetrics.Size.X + Scaled(6f), iconPos.Y);
         float titleWidth = MathF.Max(1f, contentMax.X - titlePos.X);
 
-        drawList.AddText(UiBuilder.IconFont, ImGui.GetFontSize(), iconPos, ImGui.GetColorU32(status.Accent), icon);
-        DrawClippedText(drawList, titlePos, ImGui.GetColorU32(EditorColors.Text), status.Title, titleWidth);
+        EditorIcon.Draw(drawList, status.Icon, iconMetrics, iconPos, status.Accent);
+        DrawClippedText(drawList, titlePos, ImGui.GetColorU32(ThemeColors.Text), status.Title, titleWidth);
 
         float detailTop = min.Y + padding.Y + ImGui.GetTextLineHeight() + Scaled(5f);
         float detailBottom = status.InlineAction.HasValue
@@ -186,30 +186,25 @@ internal static class EditorHeroCard
         drawList.AddRectFilled(min, max, ImGui.GetColorU32(fill), rounding);
         drawList.AddRect(min, max, ImGui.GetColorU32(border), rounding);
 
-        string icon = action.Icon.ToIconString();
-        EditorTextUtility.ClippedText label = EditorTextUtility.ClipTextToWidthResult(action.Label, MathF.Max(1f, max.X - min.X - Scaled(28f)));
-        Vector2 iconSize;
-        using (ImRaii.PushFont(UiBuilder.IconFont))
-        {
-            iconSize = ImGui.CalcTextSize(icon);
-        }
-
+        EditorIcon.Metrics iconMetrics = EditorIcon.Measure(action.Icon);
         float gap = Scaled(6f);
+        float labelWidth = MathF.Max(1f, max.X - min.X - iconMetrics.Size.X - gap - Scaled(16f));
+        EditorTextUtility.ClippedText label = EditorTextUtility.ClipTextToWidthResult(action.Label, labelWidth);
         Vector2 labelSize = ImGui.CalcTextSize(label.Text);
-        float contentWidth = iconSize.X + gap + labelSize.X;
+        float contentWidth = iconMetrics.Size.X + gap + labelSize.X;
         float contentX = min.X + MathF.Max(Scaled(8f), ((max.X - min.X) - contentWidth) * 0.5f);
         float centerY = min.Y + ((max.Y - min.Y) * 0.5f);
         Vector2 iconPos = new(
-            MathF.Round(contentX),
-            MathF.Round(centerY - (iconSize.Y * 0.5f)));
+            contentX,
+            centerY - (iconMetrics.Size.Y * 0.5f));
         Vector2 labelPos = new(
-            MathF.Round(iconPos.X + iconSize.X + gap),
-            MathF.Round(centerY - (labelSize.Y * 0.5f)));
-        uint textColor = ImGui.GetColorU32(hovered || active
-            ? EditorColors.Text
-            : EditorColors.WithAlpha(EditorColors.TextDisabled, 0.88f));
-        drawList.AddText(UiBuilder.IconFont, ImGui.GetFontSize(), iconPos, textColor, icon);
-        drawList.AddText(labelPos, textColor, label.Text);
+            contentX + iconMetrics.Size.X + gap,
+            centerY - (labelSize.Y * 0.5f));
+        Vector4 textColor = hovered || active
+            ? ThemeColors.Text
+            : ThemeColors.WithAlpha(ThemeColors.TextDisabled, 0.88f);
+        EditorIcon.Draw(drawList, action.Icon, iconMetrics, iconPos, textColor);
+        drawList.AddText(labelPos, ImGui.GetColorU32(textColor), label.Text);
         return label;
     }
 
@@ -217,17 +212,17 @@ internal static class EditorHeroCard
     {
         if (active)
         {
-            return (EditorColors.WithAlpha(accent, 0.16f), EditorColors.WithAlpha(accent, 0.46f));
+            return (ThemeColors.WithAlpha(accent, 0.16f), ThemeColors.WithAlpha(accent, 0.46f));
         }
 
         if (hovered)
         {
-            return (EditorColors.WithAlpha(accent, 0.10f), EditorColors.WithAlpha(accent, 0.34f));
+            return (ThemeColors.WithAlpha(accent, 0.10f), ThemeColors.WithAlpha(accent, 0.34f));
         }
 
         return (
-            EditorColors.WithAlpha(EditorColors.ButtonDefault, 0.38f),
-            EditorColors.WithAlpha(EditorColors.Border, 0.34f));
+            ThemeColors.WithAlpha(ThemeColors.ButtonDefault, 0.38f),
+            ThemeColors.WithAlpha(ThemeColors.Border, 0.34f));
     }
 
     private static float ResolveStatusActionButtonHeight(float panelHeight)
@@ -243,14 +238,9 @@ internal static class EditorHeroCard
 
     private static float ResolveIdentityTitleWidth(Content content)
     {
-        Vector2 iconSize;
-        using (ImRaii.PushFont(UiBuilder.IconFont))
-        {
-            iconSize = ImGui.CalcTextSize(content.Icon.ToIconString());
-        }
-
+        EditorIcon.Metrics iconMetrics = EditorIcon.Measure(content.Icon);
         float textWidth = MathF.Max(ImGui.CalcTextSize(content.Title).X, ImGui.CalcTextSize(content.Subtitle).X);
-        return iconSize.X + ImGui.GetStyle().ItemSpacing.X + textWidth;
+        return iconMetrics.Size.X + ImGui.GetStyle().ItemSpacing.X + textWidth;
     }
 
     private static MessageLines SplitMessage(string message, float width, float availableHeight)
@@ -319,7 +309,11 @@ internal static class EditorHeroCard
             : action.Tooltip;
         if (!string.IsNullOrWhiteSpace(tooltip))
         {
-            ImGui.SetTooltip(tooltip);
+            IntonerTooltip.DrawDescription(
+                action.Icon,
+                action.Label,
+                tooltip,
+                new IntonerTooltipOptions { Accent = action.Accent });
         }
     }
 

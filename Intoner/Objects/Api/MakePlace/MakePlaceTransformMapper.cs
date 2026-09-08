@@ -1,3 +1,4 @@
+using Intoner.Scene;
 using Intoner.Objects.Models;
 using Intoner.Objects.Runtime;
 using Intoner.Objects.Utils;
@@ -7,20 +8,20 @@ namespace Intoner.Objects.Api;
 
 internal static class MakePlaceTransformMapper
 {
-    public static bool TryToObjectTransform(
+    public static bool TryToSceneTransform(
         MakePlaceTransformDocument? document,
         float layoutScale,
         ObjectHousingPlotBasis? plotBasis,
-        out ObjectTransform transform)
+        out SceneTransform transform)
     {
-        transform = new ObjectTransform();
+        transform = new SceneTransform();
         if (!TryReadMakePlaceLocalTransform(document, layoutScale, out Vector3 localPosition, out float localYawRadians))
         {
             return false;
         }
 
         transform = HousingPlotTransformMapper.ToWorldTransform(new HousingPlotLocalTransform(localPosition, localYawRadians), plotBasis);
-        if (!ObjectMathUtility.IsFinite(transform.Position))
+        if (!NumericsUtility.IsFinite(transform.Position))
         {
             return false;
         }
@@ -29,7 +30,7 @@ internal static class MakePlaceTransformMapper
     }
 
     public static MakePlaceTransformDocument ToMakePlaceTransform(
-        ObjectTransform transform,
+        SceneTransform transform,
         float layoutScale,
         ObjectHousingPlotBasis? plotBasis)
     {
@@ -74,7 +75,7 @@ internal static class MakePlaceTransformMapper
 
         List<float> location = document.Location;
         List<float> rotation = document.Rotation;
-        if (!ObjectTransformMath.TryNormalizeQuaternion(new Quaternion(rotation[0], rotation[1], rotation[2], rotation[3]), out Quaternion quaternion))
+        if (!SceneTransformMath.TryNormalizeQuaternion(new Quaternion(rotation[0], rotation[1], rotation[2], rotation[3]), out Quaternion quaternion))
         {
             return false;
         }
@@ -84,7 +85,7 @@ internal static class MakePlaceTransformMapper
             location[0] / safeScale,
             location[2] / safeScale,
             location[1] / safeScale);
-        if (!ObjectMathUtility.IsFinite(localPosition))
+        if (!NumericsUtility.IsFinite(localPosition))
         {
             return false;
         }

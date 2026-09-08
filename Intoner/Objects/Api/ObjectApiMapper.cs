@@ -1,4 +1,6 @@
+using Intoner.Scene;
 using Intoner.Objects.Models;
+using Intoner.Objects.Utils;
 using System.Numerics;
 using ObjectOutlineColorApi = Intoner.Objects.Api.ObjectOutlineColor;
 using ObjectOutlineColorModel = Intoner.Objects.Models.ObjectOutlineColor;
@@ -9,27 +11,51 @@ namespace Intoner.Objects.Api;
 
 internal static class ObjectApiMapper
 {
-    public static WorldObject ToDto(ObjectSnapshot snapshot)
+    public static WorldObject ToWorldObject(ObjectSnapshot snapshot)
         => new(
             snapshot.Id,
             snapshot.Name,
-            ToDto(snapshot.Kind),
+            ToWorldObjectKind(snapshot.Kind),
             snapshot.Visible,
-            ToDto(snapshot.Transform),
+            ToWorldTransform(snapshot.Transform),
             snapshot.CreatedAtUtc,
-            ToCreationDataDto(snapshot.CreatedIn),
+            ToLocation(snapshot.CreatedIn),
             snapshot.CollectionId,
-            ToDto(snapshot.Kind, snapshot.Model));
+            ToWorldModel(snapshot.Kind, snapshot.Model));
 
-    public static SavedObjectLayout ToDto(ObjectLayoutSnapshot layout)
+    public static PersistentObject ToPersistentObject(ObjectSnapshot snapshot)
+        => new(
+            ToWorldObject(snapshot),
+            snapshot.FolderPath,
+            snapshot.Locked);
+
+    public static SavedObjectLayoutInfo ToSavedLayoutInfo(ObjectLayoutSnapshot layout)
         => new(
             layout.Id,
             layout.Name,
+            layout.Revision,
+            layout.CreatedAtUtc,
+            layout.UpdatedAtUtc);
+
+    public static SavedObjectLayout ToSavedLayout(ObjectLayoutSnapshot layout)
+        => new(
+            layout.Id,
+            layout.Name,
+            layout.Revision,
             layout.CreatedAtUtc,
             layout.UpdatedAtUtc,
-            layout.Objects.Select(ToDto).ToList());
+            ToPersistentSet(layout.Objects, layout.Folders, layout.FolderColors));
 
-    public static LoadedObjectLayout ToDto(ObjectLoadedLayoutSnapshot layout)
+    public static PersistentObjectSet ToPersistentSet(
+        IReadOnlyList<ObjectSnapshot> objects,
+        IReadOnlyList<string> folders,
+        IReadOnlyDictionary<string, string> folderColors)
+        => new(
+            objects.Select(ToPersistentObject).ToList(),
+            folders.ToList(),
+            new Dictionary<string, string>(folderColors, StringComparer.OrdinalIgnoreCase));
+
+    public static LoadedObjectLayout ToLoadedLayout(ObjectLoadedLayoutSnapshot layout)
         => new(
             layout.Kind == ObjectLoadedLayoutKind.Default
                 ? LoadedObjectLayoutType.Default
@@ -40,35 +66,40 @@ internal static class ObjectApiMapper
             layout.Name,
             layout.Revision,
             layout.UpdatedAtUtc,
-            layout.Objects.Select(ToDto).ToList());
+            layout.Objects.Select(ToWorldObject).ToList());
 
-    public static ObjectLocationData ToLocationDto(ObjectCreationContext context)
+    public static ObjectLocationData ToLocation(SceneCreationContext context)
         => new(
             context.WorldId,
-            context.TerritoryId,
             context.WorldName,
+            context.TerritoryId,
             context.TerritoryName,
             context.DivisionId,
             context.WardId,
             context.HouseId,
             context.RoomId);
 
-    public static RuntimeObjectState ToDto(ObjectRuntimeStateSnapshot snapshot)
+    public static RuntimeObjectState ToRuntimeState(ObjectRuntimeStateSnapshot snapshot)
         => new(
             snapshot.Id,
-            ToDto(snapshot.State),
+            ToRuntimeStateKind(snapshot.State),
             snapshot.FailureCode);
 
-    public static TemporarySourceMutationResult ToDto(ObjectTemporaryMutationResult result)
+    public static TemporarySourceInfo ToTemporarySource(ObjectTemporarySourceSnapshot source, string sourceId)
         => new(
-            ToDto(result.Status),
-            result.SourceRevision);
+            sourceId,
+            source.SessionId,
+            source.Name,
+            source.Revision,
+            source.UpdatedAtUtc,
+            source.Objects.Select(ToWorldObject).ToList(),
+            source.Collections.Select(ToTemporaryCollection).ToList());
 
-    public static TemporaryObjectCollection ToDto(ObjectTemporaryCollectionData collection)
+    public static TemporaryObjectCollection ToTemporaryCollection(ObjectTemporaryCollectionData collection)
         => new(
             collection.CollectionId,
             collection.Name,
-            collection.Redirects.Select(ToDto).ToList());
+            collection.Redirects.Select(ToTemporaryRedirect).ToList());
 
     public static bool TryToTemporaryCollection(
         TemporaryObjectCollection? dto,
@@ -129,8 +160,10 @@ internal static class ObjectApiMapper
     public static bool TryToSnapshot(WorldObject? dto, out ObjectSnapshot snapshot)
     {
         if (dto is null
-            || !TryToObjectKind(dto.Kind, out var kind)
-            || !TryToObjectData(kind, dto.Model, out var model))
+            || dto.Transform is null
+            || dto.CreatedIn is null
+            || !TryToObjectKind(dto.Kind, out ObjectKind kind)
+            || !TryToObjectData(kind, dto.Model, out ObjectData model))
         {
             snapshot = null!;
             return false;
@@ -138,24 +171,97 @@ internal static class ObjectApiMapper
 
         snapshot = new ObjectSnapshot
         {
-            Id = dto.Id == Guid.Empty ? Guid.NewGuid() : dto.Id,
-            Name = dto.Name,
+            Id = dto.Id,
+            Name = dto.Name ?? string.Empty,
             Kind = kind,
             Visible = dto.Visible,
             Transform = ToTransform(dto.Transform),
-            CreatedAtUtc = dto.CreatedAtUtc == default ? DateTime.UtcNow : dto.CreatedAtUtc,
+            CreatedAtUtc = dto.CreatedAtUtc,
             CreatedIn = ToCreationContext(dto.CreatedIn),
-            CollectionId = dto.CollectionId,
+            CollectionId = dto.CollectionId ?? string.Empty,
             LayoutId = null,
             Model = model,
         };
         return true;
     }
 
+    public static bool TryToPersistentSnapshot(PersistentObject? dto, out ObjectSnapshot snapshot)
+    {
+        if (dto is null || !TryToSnapshot(dto.Object, out snapshot))
+        {
+            snapshot = null!;
+            return false;
+        }
+
+        snapshot = snapshot with
+        {
+            FolderPath = ObjectFolderUtility.SanitizeFolderPath(dto.FolderPath),
+            Locked = dto.Locked,
+        };
+        return true;
+    }
+
+    public static bool TryToPersistentSceneUpdate(
+        PersistentObjectSceneApplyRequest? dto,
+        out ObjectPersistentSceneUpdate update)
+    {
+        if (dto is null
+            || dto.ExpectedRevision <= 0
+            || !TryToPersistentSet(dto.Standalone, null, out List<ObjectSnapshot> standaloneObjects, out IReadOnlyList<string> standaloneFolders, out IReadOnlyDictionary<string, string> standaloneFolderColors))
+        {
+            update = null!;
+            return false;
+        }
+
+        Guid? defaultLayoutId = null;
+        List<ObjectSnapshot> defaultLayoutObjects = [];
+        IReadOnlyList<string> defaultLayoutFolders = [];
+        IReadOnlyDictionary<string, string> defaultLayoutFolderColors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (dto.DefaultLayout is not null)
+        {
+            defaultLayoutId = dto.DefaultLayout.LayoutId;
+            if (defaultLayoutId == Guid.Empty
+                || !TryToPersistentSet(
+                    dto.DefaultLayout.Content,
+                    defaultLayoutId,
+                    out defaultLayoutObjects,
+                    out defaultLayoutFolders,
+                    out defaultLayoutFolderColors))
+            {
+                update = null!;
+                return false;
+            }
+        }
+
+        HashSet<Guid> objectIds = new(standaloneObjects.Select(static snapshot => snapshot.Id));
+        if (objectIds.Count != standaloneObjects.Count
+            || defaultLayoutObjects.Any(snapshot => !objectIds.Add(snapshot.Id)))
+        {
+            update = null!;
+            return false;
+        }
+
+        update = new ObjectPersistentSceneUpdate
+        {
+            ExpectedRevision = dto.ExpectedRevision,
+            StandaloneObjects = standaloneObjects,
+            StandaloneFolders = standaloneFolders,
+            StandaloneFolderColors = standaloneFolderColors,
+            DefaultLayoutId = defaultLayoutId,
+            DefaultLayoutObjects = defaultLayoutObjects,
+            DefaultLayoutFolders = defaultLayoutFolders,
+            DefaultLayoutFolderColors = defaultLayoutFolderColors,
+        };
+        return true;
+    }
+
     public static bool TryToDetachedSnapshot(WorldObject? dto, out ObjectSnapshot snapshot)
     {
-        if (!TryToSnapshot(dto, out snapshot))
+        if (!TryToSnapshot(dto, out snapshot)
+            || snapshot.Id == Guid.Empty
+            || snapshot.CreatedAtUtc == default)
         {
+            snapshot = null!;
             return false;
         }
 
@@ -186,14 +292,30 @@ internal static class ObjectApiMapper
         return true;
     }
 
-    public static bool TryToPatch(WorldObjectPatch dto, ObjectKind kind, out ObjectSnapshotPatch patch)
+    public static bool TryToPatch(WorldObjectPatch? dto, ObjectKind kind, out ObjectSnapshotPatch patch)
+        => TryToPatch(dto, out patch)
+            && (!patch.ModelKind.HasValue || patch.ModelKind.Value == kind);
+
+    public static bool TryToPatch(WorldObjectPatch? dto, out ObjectSnapshotPatch patch)
     {
-        ObjectDataPatch? model = null;
-        if (dto.Model is not null
-            && !TryToObjectDataPatch(kind, dto.Model, out model))
+        if (dto is null)
         {
             patch = null!;
             return false;
+        }
+
+        ObjectDataPatch? model = null;
+        ObjectKind? modelKind = null;
+        if (dto.Model is not null)
+        {
+            if (!TryGetModelPatchKind(dto.Model, out ObjectKind resolvedKind)
+                || !TryToObjectDataPatch(resolvedKind, dto.Model, out model))
+            {
+                patch = null!;
+                return false;
+            }
+
+            modelKind = resolvedKind;
         }
 
         patch = new ObjectSnapshotPatch
@@ -203,12 +325,13 @@ internal static class ObjectApiMapper
             Transform = dto.Transform is not null
                 ? ToTransform(dto.Transform)
                 : null,
+            ModelKind = modelKind,
             Model = model,
         };
         return true;
     }
 
-    private static WorldObjectKind ToDto(ObjectKind kind)
+    public static WorldObjectKind ToWorldObjectKind(ObjectKind kind)
         => kind switch
         {
             ObjectKind.Light => WorldObjectKind.Light,
@@ -218,7 +341,7 @@ internal static class ObjectApiMapper
             _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null),
         };
 
-    private static bool TryToObjectKind(WorldObjectKind kind, out ObjectKind objectKind)
+    public static bool TryToObjectKind(WorldObjectKind kind, out ObjectKind objectKind)
     {
         switch (kind)
         {
@@ -262,13 +385,123 @@ internal static class ObjectApiMapper
         }
     }
 
-    private static WorldObjectTransform ToDto(ObjectTransform transform)
-        => new(
-            ToDto(transform.Position),
-            ToDto(transform.RotationDegrees),
-            ToDto(transform.Scale));
+    private static bool HasSingleModel(WorldObjectModelData model, ObjectKind expectedKind)
+        => TryGetSingleModelKind(
+            model.BgObject is not null,
+            model.Furniture is not null,
+            model.Vfx is not null,
+            model.Light is not null,
+            out ObjectKind kind)
+        && kind == expectedKind;
 
-    private static ObjectTransform ToTransform(WorldObjectTransform transform)
+    private static bool TryGetModelPatchKind(WorldObjectModelPatch model, out ObjectKind kind)
+        => TryGetSingleModelKind(
+            model.BgObject is not null,
+            model.Furniture is not null,
+            model.Vfx is not null,
+            model.Light is not null,
+            out kind);
+
+    private static bool TryGetSingleModelKind(
+        bool hasBgObject,
+        bool hasFurniture,
+        bool hasVfx,
+        bool hasLight,
+        out ObjectKind kind)
+    {
+        if ((hasBgObject ? 1 : 0)
+            + (hasFurniture ? 1 : 0)
+            + (hasVfx ? 1 : 0)
+            + (hasLight ? 1 : 0) != 1)
+        {
+            kind = default;
+            return false;
+        }
+
+        kind = (hasBgObject, hasFurniture, hasVfx, hasLight) switch
+        {
+            (true, false, false, false) => ObjectKind.BgObject,
+            (false, true, false, false) => ObjectKind.Furniture,
+            (false, false, true, false) => ObjectKind.Vfx,
+            (false, false, false, true) => ObjectKind.Light,
+            _ => default,
+        };
+        return true;
+    }
+
+    private static bool TryToPersistentSet(
+        PersistentObjectSet? dto,
+        Guid? layoutId,
+        out List<ObjectSnapshot> objects,
+        out IReadOnlyList<string> folders,
+        out IReadOnlyDictionary<string, string> folderColors)
+    {
+        if (dto?.Objects is null || dto.Folders is null || dto.FolderColors is null)
+        {
+            objects = [];
+            folders = [];
+            folderColors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            return false;
+        }
+
+        objects = new List<ObjectSnapshot>(dto.Objects.Count);
+        foreach (PersistentObject? objectDto in dto.Objects)
+        {
+            if (!TryToPersistentSnapshot(objectDto, out ObjectSnapshot snapshot)
+                || snapshot.Id == Guid.Empty
+                || snapshot.CreatedAtUtc == default)
+            {
+                objects = [];
+                folders = [];
+                folderColors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                return false;
+            }
+
+            objects.Add(snapshot with { LayoutId = layoutId });
+        }
+
+        folders = ObjectFolderUtility.OrderFolders(dto.Folders);
+        folderColors = ObjectFolderUtility.OrderFolderColorMap(dto.FolderColors, folders);
+        return true;
+    }
+
+    public static bool TryToPersistentPatch(
+        PersistentObjectPatch? dto,
+        ObjectKind kind,
+        out ObjectSnapshotPatch patch)
+    {
+        if (dto is null)
+        {
+            patch = null!;
+            return false;
+        }
+
+        if (dto.Object is null)
+        {
+            patch = new ObjectSnapshotPatch();
+        }
+        else if (!TryToPatch(dto.Object, kind, out patch))
+        {
+            return false;
+        }
+
+        patch = patch with
+        {
+            FolderPath = dto.FolderPath is not null
+                ? ObjectFolderUtility.SanitizeFolderPath(dto.FolderPath)
+                : null,
+            Locked = dto.Locked,
+        };
+        return true;
+    }
+
+    public static WorldObjectTransform ToWorldTransform(SceneTransform transform)
+        => new(
+            ToObjectVector3(transform.Position),
+            ToObjectVector3(transform.RotationDegrees),
+            ToObjectVector3(transform.Scale));
+
+    public static SceneTransform ToTransform(WorldObjectTransform transform)
         => new()
         {
             Position = ToVector3(transform.Position),
@@ -276,43 +509,32 @@ internal static class ObjectApiMapper
             Scale = ToVector3(transform.Scale),
         };
 
-    private static ObjectCreationData ToCreationDataDto(ObjectCreationContext context)
-        => new(
-            context.WorldId,
-            context.WorldName,
-            context.TerritoryId,
-            context.TerritoryName,
-            context.DivisionId,
-            context.WardId,
-            context.HouseId,
-            context.RoomId);
-
-    private static ObjectCreationContext ToCreationContext(ObjectCreationData context)
+    public static SceneCreationContext ToCreationContext(ObjectLocationData context)
         => new()
         {
             WorldId = context.WorldId,
-            WorldName = context.WorldName,
+            WorldName = context.WorldName ?? string.Empty,
             TerritoryId = context.TerritoryId,
-            TerritoryName = context.TerritoryName,
+            TerritoryName = context.TerritoryName ?? string.Empty,
             DivisionId = context.DivisionId,
             WardId = context.WardId,
             HouseId = context.HouseId,
             RoomId = context.RoomId,
         };
 
-    private static WorldObjectModelData ToDto(ObjectKind kind, ObjectData model)
+    public static WorldObjectModelData ToWorldModel(ObjectKind kind, ObjectData model)
         => kind switch
         {
-            ObjectKind.BgObject when model is BgObjectModel bgObject => ToDto(bgObject),
-            ObjectKind.Furniture when model is FurnitureModel furniture => ToDto(furniture),
-            ObjectKind.Vfx when model is VfxModel vfx => ToDto(vfx),
-            ObjectKind.Light when model is LightModel light => ToDto(light),
+            ObjectKind.BgObject when model is BgObjectModel bgObject => ToBgObjectData(bgObject),
+            ObjectKind.Furniture when model is FurnitureModel furniture => ToFurnitureData(furniture),
+            ObjectKind.Vfx when model is VfxModel vfx => ToVfxData(vfx),
+            ObjectKind.Light when model is LightModel light => ToLightData(light),
             _ => throw new InvalidOperationException($"unsupported object model mapping for {kind}"),
         };
 
-    private static bool TryToObjectData(ObjectKind kind, WorldObjectModelData? model, out ObjectData objectData)
+    public static bool TryToObjectData(ObjectKind kind, WorldObjectModelData? model, out ObjectData objectData)
     {
-        if (model is null)
+        if (model is null || !HasSingleModel(model, kind))
         {
             objectData = null!;
             return false;
@@ -321,16 +543,16 @@ internal static class ObjectApiMapper
         switch (kind)
         {
             case ObjectKind.BgObject when model.BgObject is not null:
-                objectData = ToModel(model.BgObject);
+                objectData = ToBgObjectModel(model.BgObject);
                 return true;
-            case ObjectKind.Furniture when model.Furniture is not null:
-                objectData = ToModel(model.Furniture);
+            case ObjectKind.Furniture when model.Furniture is { Color: not null }:
+                objectData = ToFurnitureModel(model.Furniture);
                 return true;
             case ObjectKind.Vfx when model.Vfx is not null:
-                objectData = ToModel(model.Vfx);
+                objectData = ToVfxModel(model.Vfx);
                 return true;
-            case ObjectKind.Light when model.Light is not null:
-                objectData = ToModel(model.Light);
+            case ObjectKind.Light when model.Light is { Flags: not null, Shape: not null, Shadow: not null }:
+                objectData = ToLightModel(model.Light);
                 return true;
             default:
                 objectData = null!;
@@ -356,12 +578,12 @@ internal static class ObjectApiMapper
         return true;
     }
 
-    private static TemporaryObjectCollectionRedirect ToDto(ObjectTemporaryCollectionRedirectData redirect)
+    private static TemporaryObjectCollectionRedirect ToTemporaryRedirect(ObjectTemporaryCollectionRedirectData redirect)
         => new(
             redirect.RequestedPath,
-            ToDto(redirect.Replacement));
+            ToTemporaryReplacement(redirect.Replacement));
 
-    private static TemporaryCollectionReplacement ToDto(ObjectTemporaryCollectionReplacementData replacement)
+    private static TemporaryCollectionReplacement ToTemporaryReplacement(ObjectTemporaryCollectionReplacementData replacement)
         => new()
         {
             Kind = replacement.Kind switch
@@ -372,7 +594,7 @@ internal static class ObjectApiMapper
                 _ => throw new ArgumentOutOfRangeException(nameof(replacement), replacement.Kind, null),
             },
             Path = replacement.Path,
-            Data = replacement.Data,
+            Data = [.. replacement.Data],
         };
 
     private static bool TryToTemporaryCollectionReplacement(
@@ -412,7 +634,7 @@ internal static class ObjectApiMapper
                 {
                     Kind = ObjectTemporaryCollectionReplacementKind.Memory,
                     Path = dto.Path,
-                    Data = dto.Data,
+                    Data = [.. dto.Data],
                 };
                 return true;
             default:
@@ -421,7 +643,7 @@ internal static class ObjectApiMapper
         }
     }
 
-    private static RuntimeObjectStateKindDto ToDto(RuntimeObjectStateKindModel state)
+    private static RuntimeObjectStateKindDto ToRuntimeStateKind(RuntimeObjectStateKindModel state)
         => state switch
         {
             RuntimeObjectStateKindModel.Active => RuntimeObjectStateKindDto.Active,
@@ -431,7 +653,7 @@ internal static class ObjectApiMapper
             _ => throw new ArgumentOutOfRangeException(nameof(state), state, null),
         };
 
-    private static TemporarySourceMutationStatus ToDto(ObjectTemporaryMutationStatus status)
+    public static TemporarySourceMutationStatus ToTemporaryMutationStatus(ObjectTemporaryMutationStatus status)
         => status switch
         {
             ObjectTemporaryMutationStatus.Success => TemporarySourceMutationStatus.Success,
@@ -441,6 +663,9 @@ internal static class ObjectApiMapper
             ObjectTemporaryMutationStatus.ObjectNotFound => TemporarySourceMutationStatus.ObjectNotFound,
             ObjectTemporaryMutationStatus.SourceMismatch => TemporarySourceMutationStatus.SourceMismatch,
             ObjectTemporaryMutationStatus.RuntimeApplyFailed => TemporarySourceMutationStatus.RuntimeApplyFailed,
+            ObjectTemporaryMutationStatus.AlreadyApplied => TemporarySourceMutationStatus.AlreadyApplied,
+            ObjectTemporaryMutationStatus.InvalidCollection => TemporarySourceMutationStatus.InvalidCollection,
+            ObjectTemporaryMutationStatus.IdentityConflict => TemporarySourceMutationStatus.IdentityConflict,
             _ => throw new ArgumentOutOfRangeException(nameof(status), status, null),
         };
 
@@ -534,28 +759,28 @@ internal static class ObjectApiMapper
                 ShadowPlaneFar = shadow.ShadowPlaneFar,
             };
 
-    private static WorldObjectModelData ToDto(BgObjectModel model)
+    private static WorldObjectModelData ToBgObjectData(BgObjectModel model)
         => new(BgObject: new BgObjectModelData(
             model.ModelPath,
             model.Transparency,
-            ToDto(model.DyeColor),
+            ToObjectVector4(model.DyeColor),
             model.IsCoveredFromRain));
 
-    private static WorldObjectModelData ToDto(FurnitureModel model)
+    private static WorldObjectModelData ToFurnitureData(FurnitureModel model)
         => new(Furniture: new FurnitureModelData(
             model.SharedGroupPath,
-            ToDto(model.Color),
+            ToFurnitureColorData(model.Color),
             model.Transparency,
-            ToDto(model.OutlineColor),
+            ToApiOutlineColor(model.OutlineColor),
             model.HousingRowId,
             model.ItemRowId,
             model.AttachmentParentId,
             ToFurnitureMaterialItemDto(model.MaterialItem)));
 
-    private static WorldObjectModelData ToDto(VfxModel model)
+    private static WorldObjectModelData ToVfxData(VfxModel model)
         => new(Vfx: new VfxModelData(
             model.VfxPath,
-            ToDto(model.Color),
+            ToObjectVector4(model.Color),
             model.Speed,
             model.Paused,
             model.FadeInSeconds,
@@ -563,57 +788,57 @@ internal static class ObjectApiMapper
             model.Loop,
             model.LoopIntervalSeconds));
 
-    private static WorldObjectModelData ToDto(LightModel model)
+    private static WorldObjectModelData ToLightData(LightModel model)
         => new(Light: new LightModelData(
-            ToDto(model.Color),
+            ToObjectVector3(model.Color),
             (ObjectLightType)model.LightType,
             (ObjectLightFalloffType)model.FalloffType,
-            ToDto(model.Flags),
+            ToLightFlagsData(model.Flags),
             model.Intensity,
-            ToDto(model.Shape),
-            ToDto(model.Shadow)));
+            ToLightShapeData(model.Shape),
+            ToLightShadowData(model.Shadow)));
 
-    private static FurnitureColorData ToDto(FurnitureColorModel color)
+    private static FurnitureColorData ToFurnitureColorData(FurnitureColorModel color)
         => new(
             color.StainId,
             color.UseCustomColor,
-            ToDto(color.CustomColor));
+            ToObjectVector4(color.CustomColor));
 
-    private static LightFlagsData ToDto(LightFlags flags)
+    private static LightFlagsData ToLightFlagsData(LightFlags flags)
         => new(
             flags.EnableMaterialReflection,
             flags.EnableDynamicLighting,
             flags.EnableCharacterShadow,
             flags.EnableObjectShadow);
 
-    private static LightShapeData ToDto(LightShape shape)
+    private static LightShapeData ToLightShapeData(LightShape shape)
         => new(
             shape.Range,
             shape.Falloff,
             shape.LightAngle,
             shape.FalloffAngle,
-            ToDto(shape.AngleDegrees));
+            ToObjectVector2(shape.AngleDegrees));
 
-    private static LightShadowData ToDto(LightShadow shadow)
+    private static LightShadowData ToLightShadowData(LightShadow shadow)
         => new(
             shadow.CharacterShadowRange,
             shadow.ShadowPlaneNear,
             shadow.ShadowPlaneFar);
 
-    private static BgObjectModel ToModel(BgObjectModelData model)
+    private static BgObjectModel ToBgObjectModel(BgObjectModelData model)
         => new()
         {
-            ModelPath = model.ModelPath,
+            ModelPath = model.ModelPath ?? string.Empty,
             Transparency = model.Transparency,
             DyeColor = ToVector4(model.DyeColor),
             IsCoveredFromRain = model.IsCoveredFromRain,
         };
 
-    private static FurnitureModel ToModel(FurnitureModelData model)
+    private static FurnitureModel ToFurnitureModel(FurnitureModelData model)
         => new()
         {
-            SharedGroupPath = model.SharedGroupPath,
-            Color = ToModel(model.Color),
+            SharedGroupPath = model.SharedGroupPath ?? string.Empty,
+            Color = ToFurnitureColorModel(model.Color),
             Transparency = model.Transparency,
             OutlineColor = ToOutlineColor(model.OutlineColor),
             HousingRowId = model.HousingRowId,
@@ -622,7 +847,7 @@ internal static class ObjectApiMapper
             MaterialItem = ToFurnitureMaterialItemModel(model.MaterialItem),
         };
 
-    private static FurnitureColorModel ToModel(FurnitureColorData color)
+    private static FurnitureColorModel ToFurnitureColorModel(FurnitureColorData color)
         => new()
         {
             StainId = color.StainId,
@@ -640,14 +865,14 @@ internal static class ObjectApiMapper
             ? null
             : new FurnitureMaterialItemModel
             {
-                Name = material.Name,
+                Name = material.Name ?? string.Empty,
                 ItemId = material.ItemId,
             };
 
-    private static VfxModel ToModel(VfxModelData model)
+    private static VfxModel ToVfxModel(VfxModelData model)
         => new()
         {
-            VfxPath = model.VfxPath,
+            VfxPath = model.VfxPath ?? string.Empty,
             Color = ToVector4(model.Color),
             Speed = model.Speed,
             Paused = model.Paused,
@@ -657,19 +882,19 @@ internal static class ObjectApiMapper
             LoopIntervalSeconds = model.LoopIntervalSeconds,
         };
 
-    private static LightModel ToModel(LightModelData model)
+    private static LightModel ToLightModel(LightModelData model)
         => new()
         {
             Color = ToVector3(model.Color),
             LightType = (LightType)model.LightType,
             FalloffType = (LightFalloffType)model.FalloffType,
-            Flags = ToModel(model.Flags),
+            Flags = ToLightFlagsModel(model.Flags),
             Intensity = model.Intensity,
-            Shape = ToModel(model.Shape),
-            Shadow = ToModel(model.Shadow),
+            Shape = ToLightShapeModel(model.Shape),
+            Shadow = ToLightShadowModel(model.Shadow),
         };
 
-    private static LightFlags ToModel(LightFlagsData flags)
+    private static LightFlags ToLightFlagsModel(LightFlagsData flags)
         => new()
         {
             EnableMaterialReflection = flags.EnableMaterialReflection,
@@ -678,7 +903,7 @@ internal static class ObjectApiMapper
             EnableObjectShadow = flags.EnableObjectShadow,
         };
 
-    private static LightShape ToModel(LightShapeData shape)
+    private static LightShape ToLightShapeModel(LightShapeData shape)
         => new()
         {
             Range = shape.Range,
@@ -688,7 +913,7 @@ internal static class ObjectApiMapper
             AngleDegrees = ToVector2(shape.AngleDegrees),
         };
 
-    private static LightShadow ToModel(LightShadowData shadow)
+    private static LightShadow ToLightShadowModel(LightShadowData shadow)
         => new()
         {
             CharacterShadowRange = shadow.CharacterShadowRange,
@@ -696,16 +921,16 @@ internal static class ObjectApiMapper
             ShadowPlaneFar = shadow.ShadowPlaneFar,
         };
 
-    private static ObjectVector2 ToDto(Vector2 value)
+    private static ObjectVector2 ToObjectVector2(Vector2 value)
         => new(value.X, value.Y);
 
-    private static ObjectVector3 ToDto(Vector3 value)
+    public static ObjectVector3 ToObjectVector3(Vector3 value)
         => new(value.X, value.Y, value.Z);
 
-    private static ObjectVector4 ToDto(Vector4 value)
+    private static ObjectVector4 ToObjectVector4(Vector4 value)
         => new(value.X, value.Y, value.Z, value.W);
 
-    private static ObjectOutlineColorApi ToDto(ObjectOutlineColorModel value)
+    private static ObjectOutlineColorApi ToApiOutlineColor(ObjectOutlineColorModel value)
         => (ObjectOutlineColorApi)value;
 
     private static Vector2 ToVector2(ObjectVector2 value)
@@ -716,7 +941,7 @@ internal static class ObjectApiMapper
             ? ToVector2(value.Value)
             : null;
 
-    private static Vector3 ToVector3(ObjectVector3 value)
+    public static Vector3 ToVector3(ObjectVector3 value)
         => new(value.X, value.Y, value.Z);
 
     private static Vector3? ToVector3(ObjectVector3? value)
@@ -740,4 +965,3 @@ internal static class ObjectApiMapper
             ? ToOutlineColor(value.Value)
             : null;
 }
-

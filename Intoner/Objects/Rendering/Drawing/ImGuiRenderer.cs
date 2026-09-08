@@ -1,6 +1,8 @@
 using Dalamud.Bindings.ImGui;
 using Intoner.Objects.Utils;
 
+using Intoner.Scene;
+
 namespace Intoner.Objects.Rendering.Drawing;
 
 internal sealed class ImGuiRenderer : IRenderer
@@ -19,7 +21,7 @@ internal sealed class ImGuiRenderer : IRenderer
         var drawList = ResolveDrawList(context.Layer);
         foreach (var line in batch.Lines)
         {
-            if (!ObjectViewportProjectionUtility.TryProjectWorldLineToViewport(
+            if (!SceneViewportProjection.TryProjectWorldLineToViewport(
                     context.ViewProjection,
                     context.ViewMatrix,
                     context.NearPlane,
@@ -38,7 +40,7 @@ internal sealed class ImGuiRenderer : IRenderer
 
         foreach (var point in batch.Points)
         {
-            if (!ObjectViewportProjectionUtility.TryProjectWorldPointToViewport(
+            if (!SceneViewportProjection.TryProjectWorldPointToViewport(
                     context.ViewProjection,
                     point.Position,
                     context.ViewportPos,

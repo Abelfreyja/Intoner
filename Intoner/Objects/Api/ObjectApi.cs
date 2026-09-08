@@ -1,419 +1,641 @@
+using Dalamud.Plugin.Services;
+using Intoner.Objects.Interop.Ipc;
 using Intoner.Objects.Models;
 using Intoner.Objects.Runtime;
 using Intoner.Objects.Utils;
+using Intoner.Services;
+using Intoner.Utils;
 using TemporaryObjectChangeKindDto = Intoner.Objects.Api.TemporaryObjectChangeKind;
 using TemporaryObjectChangeKindModel = Intoner.Objects.Models.ObjectTemporaryChangeKind;
 
 namespace Intoner.Objects.Api;
 
 internal sealed class ObjectApi(
-    ObjectPluginStateApi pluginState,
-    ObjectLayoutApi layout,
-    ObjectTemporaryLayoutApi temporaryLayouts,
-    ObjectTemporaryObjectApi temporaryObjects,
-    ObjectTemporaryCollectionApi temporaryCollections,
-    ObjectTemporarySourceBuildApi temporarySourceBuild,
-    ObjectQueryApi query,
-    ObjectMutationApi mutation,
-    ObjectRuntimeApi runtime)
+    ApiState pluginState,
+    LayoutApi layouts,
+    TemporarySourceApi temporarySources,
+    SourceBuilderApi sharing,
+    SceneApi scene,
+    PersistentSceneApi persistentScene,
+    ObjectMutationApi objects,
+    RuntimeApi runtime)
 {
-    public readonly ObjectPluginStateApi          PluginState          = pluginState;
-    public readonly ObjectLayoutApi               Layout               = layout;
-    public readonly ObjectTemporaryLayoutApi      TemporaryLayouts     = temporaryLayouts;
-    public readonly ObjectTemporaryObjectApi      TemporaryObjects     = temporaryObjects;
-    public readonly ObjectTemporaryCollectionApi  TemporaryCollections = temporaryCollections;
-    public readonly ObjectTemporarySourceBuildApi TemporarySourceBuild = temporarySourceBuild;
-    public readonly ObjectQueryApi                Query                = query;
-    public readonly ObjectMutationApi             Mutation             = mutation;
-    public readonly ObjectRuntimeApi              Runtime              = runtime;
+    public readonly ApiState PluginState = pluginState;
+    public readonly LayoutApi Layouts = layouts;
+    public readonly TemporarySourceApi TemporarySources = temporarySources;
+    public readonly SourceBuilderApi Sharing = sharing;
+    public readonly SceneApi Scene = scene;
+    public readonly PersistentSceneApi PersistentScene = persistentScene;
+    public readonly ObjectMutationApi Objects = objects;
+    public readonly RuntimeApi Runtime = runtime;
 }
 
-internal sealed class ObjectPluginStateApi
+internal sealed class ApiState(IntonerBuildInfoService buildInfo)
 {
-    public ObjectApiVersion GetApiVersion()
-        => ObjectApiVersions.Current;
+    private const ObjectApiCapabilities Capabilities =
+        ObjectApiCapabilities.SceneQueries
+        | ObjectApiCapabilities.PersistentObjects
+        | ObjectApiCapabilities.Layouts
+        | ObjectApiCapabilities.TemporarySources
+        | ObjectApiCapabilities.TemporaryObjectChanges
+        | ObjectApiCapabilities.SourceBuilder
+        | ObjectApiCapabilities.RuntimeState
+        | ObjectApiCapabilities.RevisionEvents
+        | ObjectApiCapabilities.PersistentSceneApply
+        | ObjectApiCapabilities.SavedLayoutEvents;
+
+    private readonly Guid _instanceId = Guid.NewGuid();
+    private int _state = (int)ObjectApiHostState.Ready;
+
+    public ObjectApiInfo GetInfo()
+        => CreateInfo((ObjectApiHostState)Volatile.Read(ref _state));
+
+    public ObjectApiInfo BeginDisposing()
+    {
+        Interlocked.Exchange(ref _state, (int)ObjectApiHostState.Disposing);
+        return GetInfo();
+    }
+
+    private ObjectApiInfo CreateInfo(ObjectApiHostState state)
+        => new(ObjectApiVersions.Current, buildInfo.DisplayVersion, _instanceId, state, Capabilities);
 }
 
-internal sealed class ObjectLayoutApi(IObjectLayoutManager layoutManager, IObjectManager objectManager)
+internal sealed class LayoutApi(
+    ApiState apiState,
+    IObjectLayoutManager layoutManager,
+    IObjectManager objectManager,
+    IObjectRevisionTracker revisionTracker,
+    IFramework framework,
+    ObjectStateLock stateLock)
 {
-    public IReadOnlyList<SavedObjectLayout> GetLayouts()
-        => layoutManager.GetLayouts().Select(ObjectApiMapper.ToDto).ToList();
+    public SavedObjectLayoutsSnapshot GetAll()
+        => FrameworkThreadUtility.Run(framework, () =>
+        {
+            lock (stateLock.Value)
+            {
+                return new SavedObjectLayoutsSnapshot(
+                    apiState.GetInfo().InstanceId,
+                    revisionTracker.GetSavedLayoutsRevision(),
+                    layoutManager.GetLayouts().Select(ObjectApiMapper.ToSavedLayoutInfo).ToList());
+            }
+        });
 
-    public IReadOnlyList<LoadedObjectLayout> GetLoadedLayouts()
-        => layoutManager.GetLoadedLayouts().Select(ObjectApiMapper.ToDto).ToList();
+    public SavedObjectLayout? Get(Guid id)
+        => FrameworkThreadUtility.Run(framework, () =>
+        {
+            lock (stateLock.Value)
+            {
+                return id != Guid.Empty && layoutManager.TryGetLayout(id, out ObjectLayoutSnapshot layout)
+                    ? ObjectApiMapper.ToSavedLayout(layout)
+                    : null;
+            }
+        });
 
-    public Guid? GetDefaultLayoutId()
+    public Guid? GetDefault()
         => layoutManager.GetDefaultLayoutId();
 
-    public Guid CreateLayout(string name)
-        => objectManager.CreateEmptyLayout(name);
+    public SavedObjectLayoutMutationResult Create(string name)
+        => ToMutationResult(objectManager.CreateEmptyLayout(name));
 
-    public Guid? SaveCurrentAsLayout(string name)
-        => objectManager.TrySaveCurrentObjectsAsLayout(name, out var layoutId)
-            ? layoutId
-            : null;
+    public SavedObjectLayoutMutationResult SaveCurrent(SavedObjectLayoutSaveRequest? request)
+        => request is null
+            ? InvalidRequest("layout save request is invalid")
+            : ToMutationResult(objectManager.SaveCurrentObjectsAsLayout(request.Name, request.ExpectedPersistentRevision));
 
-    public bool SetDefaultLayout(Guid layoutId)
-        => objectManager.TrySelectLayout(layoutId);
+    public SavedObjectLayoutMutationResult SetDefault(SavedObjectLayoutSetDefaultRequest? request)
+        => request is null || request.LayoutId == Guid.Empty
+            ? InvalidRequest("set default layout request is invalid")
+            : ToMutationResult(objectManager.SelectLayout(
+                request.LayoutId,
+                request.ExpectedPersistentRevision,
+                request.ExpectedLayoutRevision));
 
-    public bool ClearDefaultLayout()
-        => objectManager.TrySelectLayout(null);
+    public SavedObjectLayoutMutationResult ClearDefault(long expectedPersistentRevision)
+        => ToMutationResult(objectManager.SelectLayout(
+            null,
+            expectedPersistentRevision,
+            expectedLayoutRevision: null));
 
-    public bool DeleteLayout(Guid layoutId)
-        => objectManager.TryDeleteLayout(layoutId);
+    public SavedObjectLayoutMutationResult Delete(SavedObjectLayoutDeleteRequest? request)
+        => request is null || request.LayoutId == Guid.Empty
+            ? InvalidRequest("layout deletion request is invalid")
+            : ToMutationResult(objectManager.DeleteLayout(
+                request.LayoutId,
+                request.ExpectedLayoutRevision,
+                request.ExpectedPersistentRevision));
+
+    private SavedObjectLayoutMutationResult ToMutationResult(PersistentMutationResult result)
+    {
+        ObjectRevisionSnapshot revisions = result.SceneRevision > 0
+            ? new ObjectRevisionSnapshot(
+                result.SceneRevision,
+                result.PersistentRevision,
+                result.SavedLayoutsRevision)
+            : revisionTracker.GetSnapshot();
+        return new SavedObjectLayoutMutationResult(
+            ApiResultMapper.ToDto(result.Status),
+            result.IsAccepted,
+            result.EntityId,
+            revisions.SavedLayoutsRevision,
+            revisions.SceneRevision,
+            revisions.PersistentSceneRevision,
+            result.Message);
+    }
+
+    private SavedObjectLayoutMutationResult InvalidRequest(string message)
+        => ToMutationResult(PersistentMutationResult.Failed(PersistentMutationStatus.InvalidRequest, message));
 }
 
-internal sealed class ObjectTemporaryLayoutApi(IObjectLayoutManager layoutManager, IObjectTemporaryScene temporaryScene)
+internal sealed class TemporarySourceApi(
+    ITemporarySourceStore sourceStore,
+    ITemporarySourceService temporarySourceService,
+    IObjectSceneView sceneView)
 {
-    private static readonly TemporarySourceMutationResult InvalidObjectResult = new(TemporarySourceMutationStatus.InvalidObject, 0);
-
-    public IReadOnlyList<LoadedObjectLayout> GetLoadedLayouts()
-        => layoutManager.GetLoadedLayouts()
-            .Where(static layout => layout.Kind == ObjectLoadedLayoutKind.Temporary)
-            .Select(ObjectApiMapper.ToDto)
-            .ToList();
-
-    public TemporarySourceMutationResult ApplyLayout(TemporaryLayoutApplyRequest? dto)
+    public IReadOnlyList<TemporarySourceInfo> GetSources(string ownerPrefix)
     {
-        if (dto?.Objects is null || !ObjectApiMapper.TryToDetachedSnapshots(dto.Objects, out var snapshots))
+        List<TemporarySourceInfo> sources = [];
+        foreach (ObjectTemporarySourceSnapshot source in sourceStore.GetSources())
         {
-            return InvalidObjectResult;
+            if (IpcSourceOwnership.TryGetSourceId(ownerPrefix, source.SourceKey, out string sourceId))
+            {
+                sources.Add(ObjectApiMapper.ToTemporarySource(source, sourceId));
+            }
         }
 
-        return ObjectApiMapper.ToDto(temporaryScene.TryApplyTemporaryLayout(
-            dto.SourceKey,
-            dto.SourceSessionId,
+        return sources;
+    }
+
+    public TemporarySourceMutationResult OwnershipFailure()
+        => new(
+            TemporarySourceMutationStatus.OwnershipMismatch,
+            0,
+            false,
+            sceneView.GetSceneRevision(),
+            "temporary source caller identity is unavailable");
+
+    public TemporarySourceMutationResult InvalidRequest(string message)
+        => new(
+            TemporarySourceMutationStatus.InvalidSource,
+            0,
+            false,
+            sceneView.GetSceneRevision(),
+            message);
+
+    public TemporarySourceMutationResult ApplySource(string sourceKey, TemporarySourceApplyRequest dto)
+    {
+        if (dto.Objects is null || !ObjectApiMapper.TryToDetachedSnapshots(dto.Objects, out List<ObjectSnapshot> snapshots))
+        {
+            return Failure(
+                TemporarySourceMutationStatus.InvalidObject,
+                sourceKey,
+                "temporary source contains invalid object data");
+        }
+
+        if (!ObjectApiMapper.TryToTemporaryCollections(dto.Collections, out List<ObjectTemporaryCollectionData> collections))
+        {
+            return Failure(
+                TemporarySourceMutationStatus.InvalidCollection,
+                sourceKey,
+                "temporary source contains invalid collection data");
+        }
+
+        return ToDto(temporarySourceService.TryApply(
+            sourceKey,
+            dto.SessionId,
             dto.Name,
             snapshots,
+            collections,
             dto.Revision));
     }
 
-    public TemporarySourceMutationResult RemoveLayout(TemporaryLayoutRemoval? dto)
-        => dto is null
-            ? InvalidObjectResult
-            : ObjectApiMapper.ToDto(temporaryScene.TryRemoveTemporaryLayout(dto.SourceKey, dto.SourceSessionId, dto.Revision));
-}
-
-internal sealed class ObjectTemporaryObjectApi(IObjectLayoutManager layoutManager, IObjectTemporaryScene temporaryScene)
-{
-    private static readonly TemporarySourceMutationResult InvalidObjectResult = new(TemporarySourceMutationStatus.InvalidObject, 0);
-    private static readonly TemporarySourceMutationResult InvalidSourceResult = new(TemporarySourceMutationStatus.InvalidSource, 0);
-
-    public TemporarySourceMutationResult ApplyChanges(TemporaryObjectChangeSet? dto)
+    public TemporarySourceMutationResult ApplyObjectChanges(string sourceKey, TemporaryObjectChangeSet dto)
     {
-        if (dto?.Changes is null)
+        if (dto.Changes is null)
         {
-            return InvalidObjectResult;
+            return Failure(
+                TemporarySourceMutationStatus.InvalidObject,
+                sourceKey,
+                "temporary source contains invalid object changes");
         }
 
-        if (!TryToChanges(dto.SourceKey, dto.SourceSessionId, dto.Changes, out var changes, out var error))
+        if (!TryToChanges(dto.Changes, out List<ObjectTemporaryChange> changes))
         {
-            return error;
+            return Failure(
+                TemporarySourceMutationStatus.InvalidObject,
+                sourceKey,
+                "temporary source contains invalid object changes");
         }
 
-        return ObjectApiMapper.ToDto(temporaryScene.TryApplyTemporaryChanges(
-            dto.SourceKey,
-            dto.SourceSessionId,
+        return ToDto(temporarySourceService.TryApplyObjectChanges(
+            sourceKey,
+            dto.SessionId,
             dto.Name,
             changes,
             dto.Revision));
     }
 
-    public TemporarySourceMutationResult UpsertObject(TemporaryObjectUpsert? dto)
+    public TemporarySourceMutationResult RemoveSource(string sourceKey, TemporarySourceRemoveRequest dto)
+        => ToDto(temporarySourceService.TryRemove(sourceKey, dto.SessionId, dto.Revision));
+
+    private static bool TryToChanges(
+        IReadOnlyList<TemporaryObjectChange> dtos,
+        out List<ObjectTemporaryChange> changes)
     {
-        if (dto?.Object is null || !ObjectApiMapper.TryToDetachedSnapshot(dto.Object, out var snapshot))
-        {
-            return InvalidObjectResult;
-        }
-
-        return ObjectApiMapper.ToDto(temporaryScene.TryUpsertTemporaryObject(
-            dto.SourceKey,
-            dto.SourceSessionId,
-            dto.Name,
-            snapshot,
-            dto.Revision));
-    }
-
-    public TemporarySourceMutationResult PatchObject(TemporaryObjectPatch? dto)
-    {
-        if (dto?.Patch is null)
-        {
-            return InvalidObjectResult;
-        }
-
-        if (string.IsNullOrWhiteSpace(dto.SourceKey))
-        {
-            return InvalidSourceResult;
-        }
-
-        var sourceRevision = layoutManager.GetTemporarySourceRevision(dto.SourceKey);
-        if (!layoutManager.TryGetTemporaryObjectSnapshot(dto.SourceKey, dto.ObjectId, out var snapshot))
-        {
-            return new TemporarySourceMutationResult(TemporarySourceMutationStatus.ObjectNotFound, sourceRevision);
-        }
-
-        if (!ObjectApiMapper.TryToPatch(dto.Patch, snapshot.Kind, out var patch))
-        {
-            return new TemporarySourceMutationResult(TemporarySourceMutationStatus.InvalidObject, sourceRevision);
-        }
-
-        return ObjectApiMapper.ToDto(temporaryScene.TryPatchTemporaryObject(
-            dto.SourceKey,
-            dto.SourceSessionId,
-            dto.Name,
-            dto.ObjectId,
-            patch,
-            dto.Revision));
-    }
-
-    public TemporarySourceMutationResult RemoveObject(TemporaryObjectRemoval? dto)
-    {
-        if (dto is null)
-        {
-            return InvalidObjectResult;
-        }
-
-        return ObjectApiMapper.ToDto(temporaryScene.TryRemoveTemporaryObject(
-            dto.SourceKey,
-            dto.SourceSessionId,
-            dto.ObjectId,
-            dto.Revision));
-    }
-
-    private bool TryToChanges(
-        string sourceKey,
-        Guid sessionId,
-        IReadOnlyList<TemporaryObjectChange>? dtos,
-        out List<ObjectTemporaryChange> changes,
-        out TemporarySourceMutationResult error)
-    {
-        if (string.IsNullOrWhiteSpace(sourceKey))
-        {
-            changes = [];
-            error = InvalidSourceResult;
-            return false;
-        }
-
-        if (dtos is null)
-        {
-            changes = [];
-            error = InvalidObjectResult;
-            return false;
-        }
-
-        var sanitizedSourceKey = ObjectTemporarySourceUtility.NormalizeSourceKey(sourceKey);
-        var existingSourceLayout = layoutManager.TryGetTemporaryLayout(sanitizedSourceKey, out var resolvedLayout)
-            ? resolvedLayout
-            : null;
-        var isNewSession = existingSourceLayout is not null
-                           && sessionId != Guid.Empty
-                           && sessionId != existingSourceLayout.SourceSessionId;
-        var sourceLayout = isNewSession
-            ? null
-            : existingSourceLayout;
-        var sourceRevision = isNewSession
-            ? 0
-            : sourceLayout?.Revision ?? layoutManager.GetTemporarySourceRevision(sanitizedSourceKey);
-        var resolvedSnapshots = sourceLayout?.Objects.ToDictionary(static snapshot => snapshot.Id)
-                             ?? new Dictionary<Guid, ObjectSnapshot>();
         changes = new List<ObjectTemporaryChange>(dtos.Count);
         foreach (TemporaryObjectChange? dto in dtos)
         {
             if (dto is null)
             {
                 changes = [];
-                error = new TemporarySourceMutationResult(TemporarySourceMutationStatus.InvalidObject, sourceRevision);
                 return false;
             }
 
             switch (dto.Kind)
             {
                 case TemporaryObjectChangeKindDto.Upsert when dto.Object is not null:
-                    if (!ObjectApiMapper.TryToDetachedSnapshot(dto.Object, out var snapshot))
+                    if (!ObjectApiMapper.TryToDetachedSnapshot(dto.Object, out ObjectSnapshot snapshot))
                     {
                         changes = [];
-                        error = new TemporarySourceMutationResult(TemporarySourceMutationStatus.InvalidObject, sourceRevision);
                         return false;
                     }
 
-                    var remappedSnapshot = snapshot with
-                    {
-                        Id = ObjectIdentityUtility.CreateTemporaryObjectId(sanitizedSourceKey, snapshot.Id),
-                        LayoutId = null,
-                    };
-                    resolvedSnapshots[remappedSnapshot.Id] = remappedSnapshot;
-                    changes.Add(new ObjectTemporaryChange(
-                        TemporaryObjectChangeKindModel.Upsert,
-                        snapshot,
-                        Guid.Empty));
+                    changes.Add(new ObjectTemporaryChange(TemporaryObjectChangeKindModel.Upsert, snapshot, Guid.Empty));
                     break;
-                case TemporaryObjectChangeKindDto.Patch when dto.Patch is not null:
-                    var mappedObjectId = ObjectIdentityUtility.CreateTemporaryObjectId(sanitizedSourceKey, dto.ObjectId);
-                    if (!resolvedSnapshots.TryGetValue(mappedObjectId, out var existingSnapshot))
+                case TemporaryObjectChangeKindDto.Patch when dto.Patch is not null && dto.ObjectId != Guid.Empty:
+                    if (!ObjectApiMapper.TryToPatch(dto.Patch, out ObjectSnapshotPatch patch))
                     {
                         changes = [];
-                        error = new TemporarySourceMutationResult(TemporarySourceMutationStatus.ObjectNotFound, sourceRevision);
                         return false;
                     }
 
-                    if (!ObjectApiMapper.TryToPatch(dto.Patch, existingSnapshot.Kind, out var patch))
-                    {
-                        changes = [];
-                        error = new TemporarySourceMutationResult(TemporarySourceMutationStatus.InvalidObject, sourceRevision);
-                        return false;
-                    }
-
-                    changes.Add(new ObjectTemporaryChange(
-                        TemporaryObjectChangeKindModel.Patch,
-                        null,
-                        dto.ObjectId,
-                        patch));
-                    resolvedSnapshots[mappedObjectId] = ObjectSnapshotUtility.ApplyPatch(existingSnapshot, patch);
+                    changes.Add(new ObjectTemporaryChange(TemporaryObjectChangeKindModel.Patch, null, dto.ObjectId, patch));
                     break;
-                case TemporaryObjectChangeKindDto.Remove:
-                    resolvedSnapshots.Remove(ObjectIdentityUtility.CreateTemporaryObjectId(sanitizedSourceKey, dto.ObjectId));
-                    changes.Add(new ObjectTemporaryChange(
-                        TemporaryObjectChangeKindModel.Remove,
-                        null,
-                        dto.ObjectId));
+                case TemporaryObjectChangeKindDto.Remove when dto.ObjectId != Guid.Empty:
+                    changes.Add(new ObjectTemporaryChange(TemporaryObjectChangeKindModel.Remove, null, dto.ObjectId));
                     break;
                 default:
                     changes = [];
-                    error = new TemporarySourceMutationResult(TemporarySourceMutationStatus.InvalidObject, sourceRevision);
                     return false;
             }
         }
 
-        error = null!;
         return true;
     }
-}
 
-internal sealed class ObjectTemporaryCollectionApi(Func<IObjectTemporaryCollectionService> temporaryCollectionServiceFactory)
-{
-    private static readonly TemporarySourceMutationResult InvalidObjectResult = new(TemporarySourceMutationStatus.InvalidObject, 0);
-
-    public TemporarySourceMutationResult ApplyCollections(TemporaryCollectionsApplyRequest? dto)
+    private TemporarySourceMutationResult ToDto(ObjectTemporaryMutationResult result)
     {
-        if (dto is null || !ObjectApiMapper.TryToTemporaryCollections(dto.Collections, out List<ObjectTemporaryCollectionData> collections))
-        {
-            return InvalidObjectResult;
-        }
-
-        return ObjectApiMapper.ToDto(temporaryCollectionServiceFactory().TryApplyTemporaryCollections(
-            dto.SourceKey,
-            dto.SourceSessionId,
-            dto.Name,
-            collections,
-            dto.Revision));
+        TemporarySourceMutationStatus status = ObjectApiMapper.ToTemporaryMutationStatus(result.Status);
+        return new(
+            status,
+            result.SourceRevision,
+            result.IsAccepted,
+            sceneView.GetSceneRevision(),
+            GetStatusMessage(status, result.IsAccepted));
     }
 
-    public TemporarySourceMutationResult UpsertCollection(TemporaryCollectionUpsert? dto)
-    {
-        if (dto is null || !ObjectApiMapper.TryToTemporaryCollection(dto.Collection, out ObjectTemporaryCollectionData collection))
+    private TemporarySourceMutationResult Failure(
+        TemporarySourceMutationStatus status,
+        string sourceKey,
+        string message)
+        => new(status, sourceStore.GetRevision(sourceKey), false, sceneView.GetSceneRevision(), message);
+
+    private static string GetStatusMessage(TemporarySourceMutationStatus status, bool accepted)
+        => status switch
         {
-            return InvalidObjectResult;
-        }
+            TemporarySourceMutationStatus.Success => string.Empty,
+            TemporarySourceMutationStatus.AlreadyApplied => string.Empty,
+            TemporarySourceMutationStatus.InvalidSource => "source id, session id, and a positive revision are required",
+            TemporarySourceMutationStatus.InvalidObject => "temporary source contains invalid object data",
+            TemporarySourceMutationStatus.InvalidCollection => "temporary source contains invalid collection data",
+            TemporarySourceMutationStatus.StaleRevision => "source revision is older than the authoritative revision",
+            TemporarySourceMutationStatus.ObjectNotFound => "temporary source or object was not found",
+            TemporarySourceMutationStatus.SourceMismatch => "source session does not match the authoritative session",
+            TemporarySourceMutationStatus.RuntimeApplyFailed when accepted => "source state was accepted but runtime reconciliation failed",
+            TemporarySourceMutationStatus.RuntimeApplyFailed => "source runtime recovery must complete before another mutation",
+            TemporarySourceMutationStatus.OwnershipMismatch => "temporary source is not owned by the calling plugin",
+            TemporarySourceMutationStatus.IdentityConflict => "one or more runtime object ids belong to another scene source",
+            _ => "temporary source mutation failed",
+        };
 
-        return ObjectApiMapper.ToDto(temporaryCollectionServiceFactory().TryUpsertTemporaryCollection(
-            dto.SourceKey,
-            dto.SourceSessionId,
-            dto.Name,
-            collection,
-            dto.Revision));
-    }
-
-    public TemporarySourceMutationResult RemoveCollections(TemporaryCollectionsRemoveRequest? dto)
-        => dto?.CollectionIds is null
-            ? InvalidObjectResult
-            : ObjectApiMapper.ToDto(temporaryCollectionServiceFactory().TryRemoveTemporaryCollections(
-                dto.SourceKey,
-                dto.SourceSessionId,
-                dto.CollectionIds,
-                dto.Revision));
 }
 
-internal sealed class ObjectTemporarySourceBuildApi(IObjectTemporarySourceBuilder sourceBuilder)
+internal sealed class SourceBuilderApi(ITemporarySourceBuilder sourceBuilder)
 {
-    public Task<TemporarySourceBuildResult> BuildTemporarySource(TemporarySourceBuildRequest? dto)
-        => sourceBuilder.BuildTemporarySourceAsync(dto, CancellationToken.None);
+    public async Task<byte[]> BuildTemporarySource(TemporarySourceBuildRequest? dto, CancellationToken cancellationToken)
+    {
+        TemporarySourceBuildResult result = await sourceBuilder
+            .BuildTemporarySourceAsync(dto, cancellationToken)
+            .ConfigureAwait(false);
+        return TemporarySourceBuildResultWire.Serialize(result);
+    }
 }
 
-internal sealed class ObjectQueryApi(IObjectLayoutManager layoutManager, IObjectSceneView sceneView)
+internal sealed class SceneApi(
+    IObjectLayoutManager layoutManager,
+    IObjectSceneView sceneView,
+    IFramework framework,
+    ObjectStateLock stateLock)
 {
     public ObjectSceneSnapshot GetSceneSnapshot()
+        => FrameworkThreadUtility.Run(framework, () =>
+        {
+            lock (stateLock.Value)
+            {
+                return CreateSceneSnapshot();
+            }
+        });
+
+    public WorldObject? GetObject(Guid id)
+        => sceneView.TryGetSceneObjectSnapshot(id, out ObjectSnapshot snapshot)
+            ? ObjectApiMapper.ToWorldObject(snapshot)
+            : null;
+
+    public IReadOnlyList<LoadedObjectLayout> GetLoadedLayouts()
+        => layoutManager.GetLoadedLayouts().Select(ObjectApiMapper.ToLoadedLayout).ToList();
+
+    private ObjectSceneSnapshot CreateSceneSnapshot()
         => new(
             sceneView.GetSceneRevision(),
             sceneView.GetPersistentSceneRevision(),
             layoutManager.GetDefaultLayoutId(),
-            sceneView.GetStandaloneObjectSnapshots().Select(ObjectApiMapper.ToDto).ToList(),
-            layoutManager.GetLoadedLayouts().Select(ObjectApiMapper.ToDto).ToList(),
-            sceneView.GetRuntimeStateSnapshots().Select(ObjectApiMapper.ToDto).ToList(),
-            ObjectApiMapper.ToLocationDto(sceneView.GetCurrentLocationContext()));
-
-    public WorldObject? GetObject(Guid id)
-        => sceneView.TryGetSceneObjectSnapshot(id, out var snapshot)
-            ? ObjectApiMapper.ToDto(snapshot)
-            : null;
+            sceneView.GetStandaloneObjectSnapshots().Select(ObjectApiMapper.ToWorldObject).ToList(),
+            layoutManager.GetLoadedLayouts().Select(ObjectApiMapper.ToLoadedLayout).ToList(),
+            sceneView.GetRuntimeStateSnapshots().Select(ObjectApiMapper.ToRuntimeState).ToList(),
+            ObjectApiMapper.ToLocation(sceneView.GetCurrentLocationContext()));
 }
 
-internal sealed class ObjectMutationApi(IObjectMutationService mutationService, IObjectSceneView sceneView)
+internal sealed class PersistentSceneApi(
+    IObjectLayoutManager layoutManager,
+    IObjectFolderService folderService,
+    IObjectSceneView sceneView,
+    IObjectManager objectManager,
+    IObjectKindService objectKindService,
+    IObjectRevisionTracker revisionTracker,
+    IFramework framework,
+    ObjectStateLock stateLock)
 {
-    public Guid? Create(WorldObject dto)
-        => WithDetachedSnapshotOrNull(dto, snapshot => mutationService.CreateObjectSnapshot(snapshot with
+    public PersistentObjectSceneSnapshot GetSnapshot()
+        => FrameworkThreadUtility.Run(framework, () =>
+        {
+            lock (stateLock.Value)
+            {
+                return CreateSnapshot();
+            }
+        });
+
+    public PersistentObject? GetObject(Guid id)
+        => sceneView.TryGetPersistentSceneObjectSnapshot(id, out ObjectSnapshot snapshot)
+            ? ObjectApiMapper.ToPersistentObject(snapshot)
+            : null;
+
+    public PersistentObjectSceneMutationResult Apply(PersistentObjectSceneApplyRequest? dto)
+    {
+        if (!ObjectApiMapper.TryToPersistentSceneUpdate(dto, out ObjectPersistentSceneUpdate update)
+            || !TrySanitizeObjects(update.StandaloneObjects, out List<ObjectSnapshot> standaloneObjects)
+            || !TrySanitizeObjects(update.DefaultLayoutObjects, out List<ObjectSnapshot> defaultLayoutObjects))
+        {
+            return Failure(ObjectApiResultStatus.InvalidRequest, "persistent scene payload is invalid");
+        }
+
+        PersistentMutationResult result = objectManager.TryApplyPersistentScene(update with
+        {
+            StandaloneObjects = standaloneObjects,
+            DefaultLayoutObjects = defaultLayoutObjects,
+        });
+        ObjectRevisionSnapshot revisions = result.SceneRevision > 0
+            ? new ObjectRevisionSnapshot(
+                result.SceneRevision,
+                result.PersistentRevision,
+                result.SavedLayoutsRevision)
+            : revisionTracker.GetSnapshot();
+        return new PersistentObjectSceneMutationResult(
+            ApiResultMapper.ToDto(result.Status),
+            result.IsAccepted,
+            revisions.SceneRevision,
+            revisions.PersistentSceneRevision,
+            result.Message);
+    }
+
+    private PersistentObjectSceneSnapshot CreateSnapshot()
+    {
+        SavedObjectLayout? defaultLayout = null;
+        ObjectFolderSceneState folderState = folderService.CaptureSceneState();
+        Guid? defaultLayoutId = layoutManager.GetDefaultLayoutId();
+        if (defaultLayoutId.HasValue && layoutManager.TryGetLayout(defaultLayoutId.Value, out ObjectLayoutSnapshot layout))
+        {
+            defaultLayout = ObjectApiMapper.ToSavedLayout(layout);
+        }
+
+        return new PersistentObjectSceneSnapshot(
+            sceneView.GetPersistentSceneRevision(),
+            defaultLayout,
+            ObjectApiMapper.ToPersistentSet(
+                sceneView.GetStandaloneObjectSnapshots(),
+                folderState.StandaloneFolders,
+                folderState.StandaloneFolderColors),
+            ObjectApiMapper.ToLocation(sceneView.GetCurrentLocationContext()));
+    }
+
+    private bool TrySanitizeObjects(
+        IReadOnlyList<ObjectSnapshot> objects,
+        out List<ObjectSnapshot> sanitizedObjects)
+    {
+        sanitizedObjects = new List<ObjectSnapshot>(objects.Count);
+        foreach (ObjectSnapshot snapshot in objects)
+        {
+            if (!objectKindService.TrySanitizeSnapshot(snapshot, out ObjectSnapshot sanitizedSnapshot))
+            {
+                sanitizedObjects = [];
+                return false;
+            }
+
+            sanitizedObjects.Add(sanitizedSnapshot);
+        }
+
+        return true;
+    }
+
+    private PersistentObjectSceneMutationResult Failure(ObjectApiResultStatus status, string message)
+    {
+        ObjectRevisionSnapshot revisions = revisionTracker.GetSnapshot();
+        return new PersistentObjectSceneMutationResult(
+            status,
+            false,
+            revisions.SceneRevision,
+            revisions.PersistentSceneRevision,
+            message);
+    }
+}
+
+internal sealed class ObjectMutationApi(
+    IObjectMutationService mutationService,
+    IObjectSceneView sceneView,
+    IObjectKindService objectKindService)
+{
+    public ObjectMutationResult Create(PersistentObjectWriteRequest? dto)
+    {
+        if (dto is null
+            || !ObjectApiMapper.TryToPersistentSnapshot(dto.Object, out ObjectSnapshot snapshot))
+        {
+            return Failure(ObjectApiResultStatus.InvalidRequest, "object payload is invalid");
+        }
+
+        snapshot = snapshot with
         {
             Id = Guid.NewGuid(),
             CreatedAtUtc = DateTime.UtcNow,
-        }));
-
-    public Guid? Import(WorldObject dto)
-        => WithSnapshotOrNull(dto, mutationService.ImportObjectSnapshot);
-
-    public bool Update(WorldObject dto)
-        => WithSnapshotOrFalse(dto, mutationService.TryUpdate);
-
-    public bool Patch(ObjectPatchUpdate dto)
-    {
-        if (!sceneView.TryGetPersistedObjectSnapshot(dto.ObjectId, out var snapshot)
-            || !ObjectApiMapper.TryToPatch(dto.Patch, snapshot.Kind, out var patch))
+        };
+        if (!objectKindService.TrySanitizeSnapshot(snapshot, out snapshot))
         {
-            return false;
+            return Failure(ObjectApiResultStatus.InvalidRequest, "object payload is invalid");
         }
 
-        return mutationService.TryPatch(dto.ObjectId, patch);
+        return ToDto(mutationService.CreateObjectSnapshot(snapshot, dto.ExpectedRevision));
     }
 
-    public bool Remove(Guid id)
-        => mutationService.Remove(id);
+    public ObjectMutationResult Import(PersistentObjectWriteRequest? dto)
+    {
+        if (dto is null
+            || !ObjectApiMapper.TryToPersistentSnapshot(dto.Object, out ObjectSnapshot snapshot))
+        {
+            return Failure(ObjectApiResultStatus.InvalidRequest, "object payload is invalid");
+        }
 
-    public Guid? Duplicate(Guid id)
-        => mutationService.TryDuplicate(id, out var duplicateId)
-            ? duplicateId
+        snapshot = snapshot with
+        {
+            Id = snapshot.Id == Guid.Empty ? Guid.NewGuid() : snapshot.Id,
+            CreatedAtUtc = snapshot.CreatedAtUtc == default ? DateTime.UtcNow : snapshot.CreatedAtUtc,
+        };
+        if (!objectKindService.TrySanitizeSnapshot(snapshot, out snapshot))
+        {
+            return Failure(ObjectApiResultStatus.InvalidRequest, "object payload is invalid");
+        }
+
+        return ToDto(mutationService.RestoreObjectSnapshot(snapshot, dto.ExpectedRevision));
+    }
+
+    public ObjectMutationResult Update(PersistentObjectWriteRequest? dto)
+    {
+        if (dto is null
+            || !ObjectApiMapper.TryToPersistentSnapshot(dto.Object, out ObjectSnapshot snapshot)
+            || snapshot.Id == Guid.Empty)
+        {
+            return Failure(ObjectApiResultStatus.InvalidRequest, "object payload is invalid");
+        }
+
+        if (!objectKindService.TrySanitizeSnapshot(snapshot, out snapshot))
+        {
+            return Failure(ObjectApiResultStatus.InvalidRequest, "object payload is invalid");
+        }
+
+        return ToDto(mutationService.UpdateObjectSnapshot(snapshot, dto.ExpectedRevision));
+    }
+
+    public ObjectMutationResult Patch(PersistentObjectPatchRequest? dto)
+    {
+        if (dto is null
+            || dto.ObjectId == Guid.Empty
+            || dto.Patch is null)
+        {
+            return Failure(ObjectApiResultStatus.InvalidRequest, "object patch is invalid");
+        }
+
+        if (!sceneView.TryGetPersistentSceneObjectSnapshot(dto.ObjectId, out ObjectSnapshot snapshot))
+        {
+            return Failure(ObjectApiResultStatus.NotFound, "object was not found");
+        }
+
+        if (!ObjectApiMapper.TryToPersistentPatch(dto.Patch, snapshot.Kind, out ObjectSnapshotPatch patch))
+        {
+            return Failure(ObjectApiResultStatus.InvalidRequest, "object patch is invalid");
+        }
+
+        if (!objectKindService.TrySanitizeSnapshot(ObjectSnapshotUtility.ApplyPatch(snapshot, patch), out _))
+        {
+            return Failure(ObjectApiResultStatus.InvalidRequest, "object patch is invalid");
+        }
+
+        return ToDto(mutationService.PatchObjectSnapshot(dto.ObjectId, patch, dto.ExpectedRevision));
+    }
+
+    public ObjectMutationResult Remove(PersistentObjectTargetRequest? dto)
+    {
+        if (!TryValidateTarget(dto, out Guid id, out ObjectMutationResult? failure))
+        {
+            return failure!;
+        }
+
+        return ToDto(mutationService.RemoveObjectSnapshot(id, dto!.ExpectedRevision));
+    }
+
+    public ObjectMutationResult Duplicate(PersistentObjectTargetRequest? dto)
+    {
+        if (!TryValidateTarget(dto, out Guid id, out ObjectMutationResult? failure))
+        {
+            return failure!;
+        }
+
+        return ToDto(mutationService.DuplicateObjectSnapshot(id, dto!.ExpectedRevision));
+    }
+
+    private ObjectMutationResult ToDto(PersistentMutationResult result)
+    {
+        ObjectMutationReceipt? receipt = result.IsAccepted
+            ? new ObjectMutationReceipt(
+                result.EntityId,
+                result.SceneRevision,
+                result.PersistentRevision)
             : null;
+        return new ObjectMutationResult(
+            ApiResultMapper.ToDto(result.Status),
+            result.IsAccepted,
+            receipt,
+            result.Message);
+    }
 
-    private static Guid? WithSnapshotOrNull(WorldObject dto, Func<ObjectSnapshot, Guid?> apply)
-        => ObjectApiMapper.TryToSnapshot(dto, out var snapshot)
-            ? apply(snapshot)
-            : null;
+    private bool TryValidateTarget(
+        PersistentObjectTargetRequest? dto,
+        out Guid id,
+        out ObjectMutationResult? failure)
+    {
+        id = dto?.ObjectId ?? Guid.Empty;
+        if (id != Guid.Empty)
+        {
+            failure = null;
+            return true;
+        }
 
-    private static Guid? WithDetachedSnapshotOrNull(WorldObject dto, Func<ObjectSnapshot, Guid?> apply)
-        => ObjectApiMapper.TryToDetachedSnapshot(dto, out var snapshot)
-            ? apply(snapshot)
-            : null;
+        failure = Failure(ObjectApiResultStatus.InvalidRequest, "object id is invalid");
+        return false;
+    }
 
-    private static bool WithSnapshotOrFalse(WorldObject dto, Func<ObjectSnapshot, bool> apply)
-        => ObjectApiMapper.TryToSnapshot(dto, out var snapshot)
-            && apply(snapshot);
+    private static ObjectMutationResult Failure(ObjectApiResultStatus status, string message)
+        => new(status, false, null, message);
 }
 
-internal sealed class ObjectRuntimeApi(IObjectSceneView sceneView)
+internal static class ApiResultMapper
+{
+    public static ObjectApiResultStatus ToDto(PersistentMutationStatus status)
+        => status switch
+        {
+            PersistentMutationStatus.Success => ObjectApiResultStatus.Success,
+            PersistentMutationStatus.InvalidRequest => ObjectApiResultStatus.InvalidRequest,
+            PersistentMutationStatus.NotFound => ObjectApiResultStatus.NotFound,
+            PersistentMutationStatus.Conflict => ObjectApiResultStatus.Conflict,
+            PersistentMutationStatus.StorageFailed => ObjectApiResultStatus.StorageFailed,
+            PersistentMutationStatus.RecoveryRequired => ObjectApiResultStatus.RecoveryRequired,
+            PersistentMutationStatus.RuntimeApplyFailed => ObjectApiResultStatus.RuntimeApplyFailed,
+            _ => ObjectApiResultStatus.RuntimeApplyFailed,
+        };
+}
+
+internal sealed class RuntimeApi(IObjectSceneView sceneView)
 {
     public IReadOnlyList<RuntimeObjectState> GetStates()
-        => sceneView.GetRuntimeStateSnapshots().Select(ObjectApiMapper.ToDto).ToList();
+        => sceneView.GetRuntimeStateSnapshots().Select(ObjectApiMapper.ToRuntimeState).ToList();
 
     public RuntimeObjectState? GetState(Guid id)
-        => sceneView.TryGetRuntimeStateSnapshot(id, out var snapshot)
-            ? ObjectApiMapper.ToDto(snapshot)
+        => sceneView.TryGetRuntimeStateSnapshot(id, out ObjectRuntimeStateSnapshot snapshot)
+            ? ObjectApiMapper.ToRuntimeState(snapshot)
             : null;
 }
-

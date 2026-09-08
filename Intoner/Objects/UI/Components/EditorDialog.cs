@@ -19,6 +19,7 @@ internal sealed class EditorDialog
     private string _submissionError = string.Empty;
     private bool _focusInput;
     private bool _suppressSubmitShortcut;
+    private bool _fieldPopupOpen;
 
     internal sealed record Request
     {
@@ -44,7 +45,7 @@ internal sealed class EditorDialog
         public bool HasTextInput { get; }
         public FontAwesomeIcon Icon { get; init; } = FontAwesomeIcon.Pen;
         public FontAwesomeIcon ConfirmIcon { get; init; } = FontAwesomeIcon.Check;
-        public Vector4 Accent { get; init; } = EditorColors.AccentPurple;
+        public Vector4 Accent { get; init; } = ThemeColors.AccentPrimary;
         public string InitialValue { get; init; } = string.Empty;
         public string Placeholder { get; init; } = string.Empty;
         public string Detail { get; init; } = string.Empty;
@@ -53,6 +54,7 @@ internal sealed class EditorDialog
         public int MaxLength { get; init; } = 256;
         public Func<string, string?>? Validate { get; init; }
         public SecondaryAction? Secondary { get; init; }
+        public FormContent? Fields { get; private init; }
 
         public static Request TextInput(string key, string title, string confirmLabel, Func<string, bool> submit)
         {
@@ -76,9 +78,22 @@ internal sealed class EditorDialog
             return new Request(key, title, confirmLabel, hasTextInput: false, _ => confirm());
         }
 
+        public static Request Form(string key, string title, string confirmLabel, FormContent fields, Func<bool> submit)
+        {
+            ArgumentNullException.ThrowIfNull(fields);
+            ArgumentNullException.ThrowIfNull(submit);
+            return new Request(key, title, confirmLabel, hasTextInput: false, _ => submit()) { Fields = fields };
+        }
+
         public bool TrySubmit(string input)
             => _submit(input);
     }
+
+    /// <summary> custom fields hosted by the shared dialog header, validation, and actions </summary>
+    /// <param name="Draw"> draws the fields and returns whether their values changed </param>
+    /// <param name="MeasureHeight"> measures the fields at the available content width, excluding trailing item spacing </param>
+    /// <param name="CanSubmit"> gets whether the current field values can be submitted </param>
+    internal sealed record FormContent(Func<bool> Draw, Func<float, float> MeasureHeight, Func<bool> CanSubmit);
 
     internal sealed record SecondaryAction(
         string Label,
@@ -97,6 +112,7 @@ internal sealed class EditorDialog
         _submissionError = string.Empty;
         _focusInput = request.HasTextInput;
         _suppressSubmitShortcut = true;
+        _fieldPopupOpen = false;
     }
 
     public void DismissIfCurrent(string key)
@@ -114,6 +130,7 @@ internal sealed class EditorDialog
         _submissionError = string.Empty;
         _focusInput = false;
         _suppressSubmitShortcut = false;
+        _fieldPopupOpen = false;
     }
 
     public void Draw(EditorOverlayLayer overlayLayer, EditorOverlayArea area)
@@ -140,7 +157,7 @@ internal sealed class EditorDialog
             drawList.AddRectFilled(
                 area.Min,
                 area.Max,
-                ImGui.GetColorU32(EditorColors.Color(0f, 0f, 0f, 0.58f)),
+                ImGui.GetColorU32(ThemeColors.Color(0f, 0f, 0f, 0.58f)),
                 area.Rounding,
                 area.RoundingFlags));
         DrawDialog(request, dialogPosition, dialogSize, scale, validationError, !_suppressSubmitShortcut);
@@ -164,7 +181,7 @@ internal sealed class EditorDialog
             using (ImRaii.PushStyle(ImGuiStyleVar.ChildBorderSize, scale))
             using (ImRaii.PushStyle(ImGuiStyleVar.ItemSpacing, new Vector2(8f, 8f) * scale))
             using (ImRaii.PushColor(ImGuiCol.Border, request.Accent with { W = 0.55f }))
-            using (ImRaii.PushColor(ImGuiCol.ChildBg, EditorColors.WindowBg with { W = 0.98f }))
+            using (ImRaii.PushColor(ImGuiCol.ChildBg, ThemeColors.WindowBg with { W = 0.98f }))
             using (ImRaii.PushId(request.Key))
             using (var dialog = ImRaii.Child(DialogId, size, true, ImGuiWindowFlags.AlwaysUseWindowPadding))
             {
@@ -216,6 +233,9 @@ internal sealed class EditorDialog
         }
 
         bool submitted = false;
+        // imgui can close a combo before this draw receives its enter or escape key
+        bool fieldPopupWasOpen = _fieldPopupOpen
+                              || (request.Fields is not null && ImGui.IsPopupOpen(string.Empty, ImGuiPopupFlags.AnyPopupId));
         if (request.HasTextInput)
         {
             if (_focusInput)
@@ -239,6 +259,20 @@ internal sealed class EditorDialog
                 validationError = request.Validate?.Invoke(_input);
             }
         }
+        else if (request.Fields is { } fields)
+        {
+            if (fields.Draw())
+            {
+                _submissionError = string.Empty;
+            }
+
+            _fieldPopupOpen = ImGui.IsPopupOpen(string.Empty, ImGuiPopupFlags.AnyPopupId);
+            submitted = allowSubmitShortcut
+                     && !fieldPopupWasOpen
+                     && !ImGui.IsAnyItemActive()
+                     && !_fieldPopupOpen
+                     && ImGui.IsKeyPressed(ImGuiKey.Enter);
+        }
         else
         {
             submitted = allowSubmitShortcut && ImGui.IsKeyPressed(ImGuiKey.Enter);
@@ -248,21 +282,22 @@ internal sealed class EditorDialog
         if (!string.IsNullOrEmpty(visibleError))
         {
             using var wrap = ImRaiiScope.TextWrapPos();
-            ImGui.TextColored(EditorColors.DimRed, visibleError);
+            ImGui.TextColored(ThemeColors.DimRed, visibleError);
         }
 
-        if (submitted && validationError is null && TrySubmit(request))
+        bool canSubmit = validationError is null && (request.Fields?.CanSubmit() ?? true);
+        if (submitted && canSubmit && TrySubmit(request))
         {
             return;
         }
 
-        if (ImGui.IsKeyPressed(ImGuiKey.Escape))
+        if (!fieldPopupWasOpen && ImGui.IsKeyPressed(ImGuiKey.Escape))
         {
             Dismiss();
             return;
         }
 
-        DrawActions(request, !request.HasTextInput || validationError is null);
+        DrawActions(request, canSubmit);
     }
 
     private void DrawActions(Request request, bool canSubmit)
@@ -272,14 +307,14 @@ internal sealed class EditorDialog
         float scale = ImGuiHelpers.GlobalScale;
         float height = ButtonHeight * scale;
         float spacing = ImGui.GetStyle().ItemSpacing.X;
-        float cancelWidth = ResolveButtonWidth("Cancel", 80f * scale);
-        float confirmWidth = ResolveButtonWidth(request.ConfirmLabel, 110f * scale);
+        float cancelWidth = EditorButton.MeasureWidth(FontAwesomeIcon.Times, "Cancel", 80f);
+        float confirmWidth = EditorButton.MeasureWidth(request.ConfirmIcon, request.ConfirmLabel, 110f);
         float rightWidth = cancelWidth + spacing + confirmWidth;
 
         if (request.Secondary is { } secondary)
         {
-            float secondaryWidth = ResolveButtonWidth(secondary.Label, 90f * scale);
-            if (DrawActionButton("secondary", secondary.Icon, secondary.Label, secondary.Accent, new Vector2(secondaryWidth, height)))
+            float secondaryWidth = EditorButton.MeasureWidth(secondary.Icon, secondary.Label, 90f);
+            if (EditorButton.Draw("dialogSecondary", secondary.Icon, secondary.Label, secondary.Accent, new Vector2(secondaryWidth, height)))
             {
                 if (secondary.Execute())
                 {
@@ -295,15 +330,15 @@ internal sealed class EditorDialog
 
         float rightStart = ImGui.GetCursorPosX() + MathF.Max(0f, ImGui.GetContentRegionAvail().X - rightWidth);
         ImGui.SetCursorPosX(rightStart);
-        if (DrawActionButton("cancel", FontAwesomeIcon.Times, "Cancel", EditorColors.AccentGrey, new Vector2(cancelWidth, height)))
+        if (EditorButton.Draw("dialogCancel", FontAwesomeIcon.Times, "Cancel", ThemeColors.AccentGrey, new Vector2(cancelWidth, height)))
         {
             Dismiss();
             return;
         }
 
         ImGui.SameLine();
-        if (DrawActionButton(
-                "confirm",
+        if (EditorButton.Draw(
+                "dialogConfirm",
                 request.ConfirmIcon,
                 request.ConfirmLabel,
                 request.Accent,
@@ -364,6 +399,11 @@ internal sealed class EditorDialog
         {
             height += ImGui.GetFrameHeight() + spacing;
         }
+        else if (request.Fields is { } fields)
+        {
+            height += fields.MeasureHeight(innerWidth) + spacing;
+        }
+
         if (!string.IsNullOrEmpty(visibleError))
         {
             height += ImGui.CalcTextSize(visibleError, false, innerWidth).Y + spacing;
@@ -374,54 +414,4 @@ internal sealed class EditorDialog
         return new Vector2(width, MathF.Min(height, maximumHeight));
     }
 
-    private static float ResolveButtonWidth(string label, float minimumWidth)
-        => MathF.Max(minimumWidth, ImGui.CalcTextSize(label).X + (34f * ImGuiHelpers.GlobalScale));
-
-    private static bool DrawActionButton(
-        string id,
-        FontAwesomeIcon icon,
-        string label,
-        Vector4 accent,
-        Vector2 size,
-        bool enabled = true)
-    {
-        Vector4 fill = EditorColors.ButtonDefault with { W = 0.88f };
-        using var disabled = ImRaii.Disabled(!enabled);
-        using var button = ImRaii.PushColor(ImGuiCol.Button, fill);
-        using var hovered = ImRaii.PushColor(ImGuiCol.ButtonHovered, accent with { W = 0.22f });
-        using var active = ImRaii.PushColor(ImGuiCol.ButtonActive, accent with { W = 0.32f });
-        using var border = ImRaii.PushColor(ImGuiCol.Border, accent with { W = 0.72f });
-        using var borderSize = ImRaii.PushStyle(ImGuiStyleVar.FrameBorderSize, ImGuiHelpers.GlobalScale);
-        using var rounding = ImRaii.PushStyle(ImGuiStyleVar.FrameRounding, 6f * ImGuiHelpers.GlobalScale);
-
-        bool clicked = ImGui.Button($"##editorDialog:{id}", size);
-        Vector2 min = ImGui.GetItemRectMin();
-        Vector2 max = ImGui.GetItemRectMax();
-        string iconText = icon.ToIconString();
-        Vector2 iconSize;
-        using (ImRaii.PushFont(UiBuilder.IconFont))
-        {
-            iconSize = ImGui.CalcTextSize(iconText);
-        }
-
-        Vector2 labelSize = ImGui.CalcTextSize(label);
-        float spacing = 6f * ImGuiHelpers.GlobalScale;
-        float contentWidth = iconSize.X + spacing + labelSize.X;
-        float startX = min.X + MathF.Max(0f, ((max.X - min.X) - contentWidth) * 0.5f);
-        var drawList = ImGui.GetWindowDrawList();
-        uint textColor = ImGui.GetColorU32(enabled ? ImGuiCol.Text : ImGuiCol.TextDisabled);
-        using (ImRaii.PushFont(UiBuilder.IconFont))
-        {
-            drawList.AddText(
-                new Vector2(startX, min.Y + ((max.Y - min.Y - iconSize.Y) * 0.5f)),
-                textColor,
-                iconText);
-        }
-
-        drawList.AddText(
-            new Vector2(startX + iconSize.X + spacing, min.Y + ((max.Y - min.Y - labelSize.Y) * 0.5f)),
-            textColor,
-            label);
-        return clicked;
-    }
 }

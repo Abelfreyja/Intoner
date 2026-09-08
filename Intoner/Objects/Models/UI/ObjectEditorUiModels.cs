@@ -1,5 +1,4 @@
 using Dalamud.Interface;
-using System.Numerics;
 
 namespace Intoner.Objects.Models;
 
@@ -20,14 +19,6 @@ internal enum WorkspaceMode
     History,
     Settings,
     Debug,
-}
-
-internal enum ToolbarDockPosition
-{
-    Top,
-    Right,
-    Bottom,
-    Left,
 }
 
 internal enum BoundsOverlaySpace
@@ -52,7 +43,8 @@ internal enum GizmoAxis
     Z,
 }
 
-internal readonly record struct LightCatalogEntry(LightType Type, string Name, FontAwesomeIcon BadgeIcon, string BadgeTooltip, string Description);
-
-internal readonly record struct PlacedObjectColorBadge(Vector4 PreviewColor, string Label, string Tooltip);
-
+internal readonly record struct LightCatalogEntry(
+    LightType Type,
+    string Name,
+    string Description,
+    FontAwesomeIcon Icon);

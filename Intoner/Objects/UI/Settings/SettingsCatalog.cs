@@ -1,152 +1,73 @@
-using Dalamud.Interface;
-
 namespace Intoner.Objects.UI.Settings;
 
 internal sealed class SettingsCatalog
 {
-    private readonly Dictionary<SettingsTab, SettingsTabDefinition> _tabsByKey = [];
-
-    public SettingsCatalog(
-        IReadOnlyList<SettingsTabDefinition> tabs,
-        IReadOnlyList<SettingsSection> sections)
+    public SettingsCatalog(IEnumerable<ISettingsProvider> providers)
     {
-        Tabs = tabs;
-        Sections = sections;
-        IndexTabs(tabs);
-        ValidateSections(sections);
+        Modules = providers
+            .SelectMany(static provider => provider.Modules)
+            .OrderBy(static module => module.Order)
+            .ThenBy(static module => module.Tab.Id, StringComparer.Ordinal)
+            .ToList();
+        Entries = Modules
+            .SelectMany(static module => module.Sections)
+            .SelectMany(static section => section.Entries)
+            .ToList();
+        ValidateModules(Modules);
     }
 
-    public IReadOnlyList<SettingsTabDefinition> Tabs { get; }
+    public IReadOnlyList<SettingsModule> Modules { get; }
 
-    public IReadOnlyList<SettingsSection> Sections { get; }
+    public IReadOnlyList<ISettingEntry> Entries { get; }
 
-    public SettingsTabDefinition GetTab(SettingsTab key)
-        => _tabsByKey.TryGetValue(key, out SettingsTabDefinition? tab)
-            ? tab
-            : throw new InvalidOperationException($"missing object settings tab {key}");
+    public int EntryCount
+        => Entries.Count;
 
-    public static SettingsCatalog CreateDefault()
-        => new(
-            [
-                new(SettingsTab.Assets, "Assets", "asset capture catalog runtime observer cache"),
-                new(SettingsTab.Housing, "Housing", "housing house furniture furnishing culling display visibility mode limit"),
-                new(SettingsTab.Layouts, "Layouts", "layout layouts save autosave recovery draft workspace"),
-                new(SettingsTab.Ui, "UI", "ui interface splash screen startup window"),
-                new(SettingsTab.Drawing, "Rendering", "viewport rendering drawing bounds gizmo native imgui depth occlusion"),
-                new(SettingsTab.Diagnostics, "Diagnostics", "diagnostics logging logs xllog debug"),
-            ],
-            [
-                new(
-                    SettingsTab.Assets,
-                    "assetCapture",
-                    FontAwesomeIcon.Cube,
-                    "Asset Capture",
-                    "Runtime asset caching.",
-                    "asset capture catalog runtime observer cache discovery startup",
-                    [
-                        SettingEntries.CreateRuntimeAssetCapture(),
-                    ]),
-                new(
-                    SettingsTab.Housing,
-                    "housingMode",
-                    FontAwesomeIcon.Home,
-                    "Housing Mode",
-                    "Set housing limits for designing in-game housing.",
-                    "housing house mode strict furniture limit apartment small medium large indoor outdoor tabletop floating",
-                    [
-                        SettingEntries.CreateWorkspaceMode(),
-                        SettingEntries.CreateHousingSize(),
-                        SettingEntries.CreateHousingArea(),
-                    ]),
-                new(
-                    SettingsTab.Housing,
-                    "housingCulling",
-                    FontAwesomeIcon.Eye,
-                    "Furniture Culling",
-                    "Fix for housing furniture render culling.",
-                    "fix housing furniture culling render",
-                    [
-                        SettingEntries.CreateHousingCulling(),
-                    ]),
-                new(
-                    SettingsTab.Layouts,
-                    "layoutAutosave",
-                    FontAwesomeIcon.Clock,
-                    "Autosave",
-                    "Temporary workspace recovery layouts.",
-                    "layout autosave auto save recovery interval",
-                    [
-                        SettingEntries.CreateLayoutAutosaveEnabled(),
-                        SettingEntries.CreateLayoutAutosaveInterval(),
-                    ]),
-                new(
-                    SettingsTab.Ui,
-                    "splashScreen",
-                    FontAwesomeIcon.Book,
-                    "Splash Screen",
-                    "Controls the splash screen behaviour.",
-                    "ui interface splash screen startup start open",
-                    [
-                        SettingEntries.CreateSplashScreenOnStartup(),
-                    ]),
-                new(
-                    SettingsTab.Ui,
-                    "windowVisibility",
-                    FontAwesomeIcon.Eye,
-                    "Window Visibility",
-                    "Choose when Intoner hides its window automatically.",
-                    "ui interface window visibility hide hidden game hud cutscene gpose group pose",
-                    [
-                        SettingEntries.CreateHideWithGameUi(),
-                        SettingEntries.CreateHideInCutscenes(),
-                        SettingEntries.CreateHideInGpose(),
-                    ]),
-                new(
-                    SettingsTab.Drawing,
-                    "sceneDrawing",
-                    FontAwesomeIcon.ProjectDiagram,
-                    "Editor Rendering",
-                    "Handles how various widgets are rendered based on settings.",
-                    "viewport rendering drawing bounds gizmo native imgui depth occlusion ui hud anti aliasing smoothing",
-                    [
-                        SettingEntries.CreateDrawMode(),
-                        SettingEntries.CreateDrawDepthMode(),
-                        SettingEntries.CreateAntiAliasing(),
-                        SettingEntries.CreateDrawOverGameUi(),
-                    ]),
-                new(
-                    SettingsTab.Diagnostics,
-                    "logging",
-                    FontAwesomeIcon.Bug,
-                    "Logging",
-                    "Controls Intoner logging behavior.",
-                    "diagnostics logging logs xllog trace debug information warning error critical",
-                    [
-                        SettingEntries.CreateDalamudLogLevel(),
-                    ]),
-            ]);
-
-    private void IndexTabs(IReadOnlyList<SettingsTabDefinition> tabs)
+    private static void ValidateModules(IReadOnlyList<SettingsModule> modules)
     {
-        foreach (SettingsTabDefinition tab in tabs)
+        HashSet<string> tabIds = new(StringComparer.Ordinal);
+        HashSet<string> sectionIds = new(StringComparer.Ordinal);
+        HashSet<string> settingIds = new(StringComparer.Ordinal);
+        foreach (SettingsModule module in modules)
         {
-            if (!_tabsByKey.TryAdd(tab.Key, tab))
+            if (string.IsNullOrWhiteSpace(module.Tab.Id))
             {
-                throw new InvalidOperationException($"duplicate object settings tab {tab.Key}");
+                throw new InvalidOperationException("settings tab id cannot be empty");
             }
-        }
-    }
 
-    private void ValidateSections(IReadOnlyList<SettingsSection> sections)
-    {
-        foreach (SettingsSection section in sections)
-        {
-            if (!_tabsByKey.ContainsKey(section.Tab))
+            if (!tabIds.Add(module.Tab.Id))
             {
-                throw new InvalidOperationException(
-                    $"object settings section {section.Id} references missing tab {section.Tab}");
+                throw new InvalidOperationException($"duplicate settings tab {module.Tab.Id}");
+            }
+
+            SettingsSection? invalidSection = module.Sections.FirstOrDefault(
+                static section => string.IsNullOrWhiteSpace(section.Id));
+            if (invalidSection is not null)
+            {
+                throw new InvalidOperationException($"settings section id cannot be empty in tab {module.Tab.Id}");
+            }
+
+            SettingsSection? duplicateSection = module.Sections.FirstOrDefault(
+                section => !sectionIds.Add(section.Id));
+            if (duplicateSection is not null)
+            {
+                throw new InvalidOperationException($"duplicate settings section {duplicateSection.Id}");
+            }
+
+            IEnumerable<ISettingEntry> entries = module.Sections.SelectMany(static section => section.Entries);
+            ISettingEntry? invalidEntry = entries.FirstOrDefault(
+                static entry => string.IsNullOrWhiteSpace(entry.Definition.Id));
+            if (invalidEntry is not null)
+            {
+                throw new InvalidOperationException($"setting id cannot be empty in tab {module.Tab.Id}");
+            }
+
+            ISettingEntry? duplicateEntry = entries.FirstOrDefault(
+                entry => !settingIds.Add(entry.Definition.Id));
+            if (duplicateEntry is not null)
+            {
+                throw new InvalidOperationException($"duplicate setting {duplicateEntry.Definition.Id}");
             }
         }
     }
 }
-

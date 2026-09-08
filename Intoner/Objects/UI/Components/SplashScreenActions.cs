@@ -1,8 +1,8 @@
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
-using Dalamud.Interface.Utility.Raii;
 using Intoner.UI;
 using System.Numerics;
+using System.Runtime.InteropServices;
 
 namespace Intoner.Objects.UI.Components;
 
@@ -15,8 +15,10 @@ internal enum SplashScreenActionKind
     Redirect,
 }
 
+[StructLayout(LayoutKind.Auto)]
 internal readonly record struct SplashScreenActionRequest(SplashScreenActionKind Kind, Guid? LayoutId = null);
 
+[StructLayout(LayoutKind.Auto)]
 internal readonly record struct SplashScreenActionItem(
     SplashScreenActionKind Kind,
     FontAwesomeIcon Icon,
@@ -27,6 +29,7 @@ internal readonly record struct SplashScreenActionItem(
     bool Enabled = true,
     string Tooltip = "");
 
+[StructLayout(LayoutKind.Auto)]
 internal readonly record struct SplashScreenActionSection(string Title, IReadOnlyList<SplashScreenActionItem> Items);
 
 internal static class SplashScreenActionList
@@ -99,7 +102,7 @@ internal static class SplashScreenActionList
         string text = EditorTextUtility.ClipTextToWidth(title, MathF.Max(1f, maxX - pos.X));
         drawList.AddText(
             pos,
-            ImGui.GetColorU32(EditorColors.WithAlpha(EditorColors.TextDisabled, 0.74f)),
+            ImGui.GetColorU32(ThemeColors.WithAlpha(ThemeColors.TextDisabled, 0.74f)),
             text);
         return pos.Y + ImGui.GetTextLineHeight() + (3f * scale);
     }
@@ -116,34 +119,38 @@ internal static class SplashScreenActionList
         hoveredAny |= hovered;
         var rounding = RowRounding * scale;
         Vector4 textColor = item.Enabled
-            ? EditorColors.Text
-            : EditorColors.WithAlpha(EditorColors.TextDisabled, 0.56f);
+            ? ThemeColors.Text
+            : ThemeColors.WithAlpha(ThemeColors.TextDisabled, 0.56f);
         Vector4 detailColor = item.Enabled
-            ? EditorColors.WithAlpha(EditorColors.TextDisabled, 0.84f)
-            : EditorColors.WithAlpha(EditorColors.TextDisabled, 0.48f);
+            ? ThemeColors.WithAlpha(ThemeColors.TextDisabled, 0.84f)
+            : ThemeColors.WithAlpha(ThemeColors.TextDisabled, 0.48f);
         Vector4 iconColor = item.Enabled
             ? item.Accent
-            : EditorColors.WithAlpha(EditorColors.TextDisabled, 0.46f);
+            : ThemeColors.WithAlpha(ThemeColors.TextDisabled, 0.46f);
 
         if (hovered && item.Enabled)
         {
             drawList.AddRectFilled(
                 min,
                 max,
-                ImGui.GetColorU32(EditorColors.WithAlpha(item.Accent, 0.11f)),
+                ImGui.GetColorU32(ThemeColors.WithAlpha(item.Accent, 0.11f)),
                 rounding);
         }
 
         DrawRowContent(drawList, min, max, item, textColor, detailColor, iconColor, scale);
         if (hovered && !string.IsNullOrWhiteSpace(item.Tooltip))
         {
-            UiSharedService.DrawAccentTooltipText(item.Tooltip, item.Accent, wrapEms: 35f);
+            IntonerTooltip.DrawDescription(
+                item.Icon,
+                item.Label,
+                item.Tooltip,
+                new IntonerTooltipOptions { Accent = item.Accent });
         }
 
         drawList.AddLine(
             new Vector2(min.X + (RowPadX * scale), max.Y),
             new Vector2(max.X - (RowPadX * scale), max.Y),
-            ImGui.GetColorU32(EditorColors.WithAlpha(EditorColors.Separator, 0.20f)));
+            ImGui.GetColorU32(ThemeColors.WithAlpha(ThemeColors.Separator, 0.20f)));
 
         return item.Enabled && EditorInputUtility.IsMouseClickedInside(min, max)
             ? new SplashScreenActionRequest(item.Kind, item.LayoutId)
@@ -160,23 +167,14 @@ internal static class SplashScreenActionList
         Vector4 iconColor,
         float scale)
     {
-        string iconText = item.Icon.ToIconString();
-        Vector2 iconSize;
-        using (ImRaii.PushFont(UiBuilder.IconFont))
-        {
-            iconSize = ImGui.CalcTextSize(iconText);
-        }
-
+        EditorIcon.Metrics iconMetrics = EditorIcon.Measure(item.Icon);
         float padX = RowPadX * scale;
         float iconColumnWidth = IconColumnWidth * scale;
         float contentHeight = max.Y - min.Y;
         Vector2 iconPos = new(
-            min.X + padX + ((iconColumnWidth - iconSize.X) * 0.5f),
-            min.Y + ((contentHeight - iconSize.Y) * 0.5f));
-        using (ImRaii.PushFont(UiBuilder.IconFont))
-        {
-            drawList.AddText(iconPos, ImGui.GetColorU32(iconColor), iconText);
-        }
+            min.X + padX + ((iconColumnWidth - iconMetrics.Size.X) * 0.5f),
+            min.Y + ((contentHeight - iconMetrics.Size.Y) * 0.5f));
+        EditorIcon.Draw(drawList, item.Icon, iconMetrics, iconPos, iconColor);
 
         float labelX = min.X + padX + iconColumnWidth + (5f * scale);
         float detailWidth = string.IsNullOrWhiteSpace(item.Detail)

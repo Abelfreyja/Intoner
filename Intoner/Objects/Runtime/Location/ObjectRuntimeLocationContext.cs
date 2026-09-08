@@ -1,12 +1,12 @@
-using Intoner.Objects.Filesystem.Configuration;
-using Intoner.Objects.Models;
 using Intoner.Objects.Utils;
+using Intoner.Scene;
+using Intoner.Services.Configuration;
 
 namespace Intoner.Objects.Runtime;
 
 internal readonly record struct ObjectRuntimeLocationContext(
-    ObjectLocationScope Scope,
-    ObjectCreationContext CreationContext,
+    SceneLocationScope Scope,
+    SceneCreationContext CreationContext,
     ObjectTerritoryMetadata Territory,
     ObjectHousingRuntimeContext Housing)
 {

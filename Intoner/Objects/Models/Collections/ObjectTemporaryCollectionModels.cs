@@ -27,12 +27,18 @@ internal sealed record ObjectTemporaryCollectionData
     public IReadOnlyList<ObjectTemporaryCollectionRedirectData> Redirects { get; init; } = [];
 }
 
-internal sealed record ObjectTemporaryCollectionSourceSnapshot
+/// <summary> desired state for one caller owned temporary source </summary>
+internal sealed record ObjectTemporarySourceSnapshot
 {
     public string SourceKey { get; init; } = string.Empty;
-    public Guid SourceSessionId { get; init; }
+    public Guid SessionId { get; init; }
     public string Name { get; init; } = string.Empty;
     public long Revision { get; init; }
+    public DateTime UpdatedAtUtc { get; init; } = DateTime.UtcNow;
+    public IReadOnlyList<ObjectSnapshot> Objects { get; init; } = [];
     public IReadOnlyList<ObjectTemporaryCollectionData> Collections { get; init; } = [];
+    public IReadOnlyList<ObjectSnapshot> RuntimeObjects { get; init; } = [];
+    public IReadOnlyList<ObjectTemporaryCollectionData> RuntimeCollections { get; init; } = [];
+    public string MemoryOwnerId { get; init; } = string.Empty;
 }
 

@@ -1,8 +1,9 @@
 using Intoner.Objects.Catalog;
-using Intoner.Objects.Filesystem.Configuration;
 using Intoner.Objects.Interop;
 using Intoner.Objects.Models;
 using Intoner.Objects.Utils;
+using Intoner.Scene;
+using Intoner.Services.Configuration;
 using System.Numerics;
 using OrientedBounds = FFXIVClientStructs.FFXIV.Common.Math.OrientedBounds;
 
@@ -11,18 +12,18 @@ namespace Intoner.Objects.Runtime;
 internal sealed class PlacementSurfaceResolver(PlacementSurfaceRaycaster surfaceRaycaster)
 {
     private const int MaxProbeCount = 10;
-    private const float ProbeDuplicateDistanceSquared = ObjectMathUtility.ScalarEpsilon * ObjectMathUtility.ScalarEpsilon;
+    private const float ProbeDuplicateDistanceSquared = NumericsUtility.ScalarEpsilon * NumericsUtility.ScalarEpsilon;
 
     public bool TryResolveSurface(
         PlacementValidationContext context,
         ObjectSnapshot snapshot,
         ObjectBoundsSnapshot? boundsSnapshot,
         HousingFurnitureMetadata metadata,
-        out ObjectSurfaceHit hit,
+        out SceneSurfaceHit hit,
         out PlacementIssueCode issueCode,
         out string errorMessage)
     {
-        hit = ObjectSurfaceHit.Empty;
+        hit = SceneSurfaceHit.Empty;
         issueCode = PlacementIssueCode.None;
         errorMessage = string.Empty;
 
@@ -44,17 +45,17 @@ internal sealed class PlacementSurfaceResolver(PlacementSurfaceRaycaster surface
                 -Vector3.UnitY,
                 PlacementValidationConstants.NativeRayMaxDistance,
                 materialMask);
-            if (surfaceRaycaster.TryRaycastNative(request.Origin, request.Direction, request.MaxDistance, out ObjectSurfaceHit nativeCandidate))
+            if (surfaceRaycaster.TryRaycastNative(request.Origin, request.Direction, request.MaxDistance, out SceneSurfaceHit nativeCandidate))
             {
                 selector.TryUse(nativeCandidate, index);
             }
 
-            if (surfaceRaycaster.TryRaycastNativeMaterial(request.Origin, request.Direction, request.MaxDistance, materialMask, out ObjectSurfaceHit filteredCandidate))
+            if (surfaceRaycaster.TryRaycastNativeMaterial(request.Origin, request.Direction, request.MaxDistance, materialMask, out SceneSurfaceHit filteredCandidate))
             {
                 selector.TryUse(filteredCandidate, index);
             }
 
-            if (PlacementSurfaceRaycaster.TryRaycastObjectBounds(context, request, out ObjectSurfaceHit objectCandidate))
+            if (PlacementSurfaceRaycaster.TryRaycastObjectBounds(context, request, out SceneSurfaceHit objectCandidate))
             {
                 selector.TryUse(objectCandidate, index);
             }
@@ -98,11 +99,6 @@ internal sealed class PlacementSurfaceResolver(PlacementSurfaceRaycaster surface
         return PlacementValidationConstants.NativeRayLift + clearance.Radius;
     }
 
-    private static bool IsCurrentObjectNativeSurface(ObjectBoundsSnapshot? boundsSnapshot, ObjectSurfaceHit candidate)
-        => candidate.Source == ObjectSurfaceHitSource.Native
-           && boundsSnapshot is { Kind: ObjectKind.Furniture, NativeAddress: not 0 }
-           && ObjectLayoutInterop.SharedGroupContainsCollider(boundsSnapshot.NativeAddress, candidate.ColliderAddress);
-
     private ref struct SurfaceCandidateSelector
     {
         private readonly ObjectSnapshot _snapshot;
@@ -110,7 +106,7 @@ internal sealed class PlacementSurfaceResolver(PlacementSurfaceRaycaster surface
         private readonly HousingFurnitureMetadata _metadata;
         private readonly bool _allowSurfaceAboveObject;
         private float _selectedDistance;
-        private ObjectSurfaceHit _hit;
+        private SceneSurfaceHit _hit;
 
         public SurfaceCandidateSelector(
             ObjectSnapshot snapshot,
@@ -123,7 +119,7 @@ internal sealed class PlacementSurfaceResolver(PlacementSurfaceRaycaster surface
             _metadata = metadata;
             _allowSurfaceAboveObject = allowSurfaceAboveObject;
             _selectedDistance = float.PositiveInfinity;
-            _hit = ObjectSurfaceHit.Empty;
+            _hit = SceneSurfaceHit.Empty;
             HasPrimarySurfaceError = false;
             PrimarySurfaceError = string.Empty;
         }
@@ -132,13 +128,13 @@ internal sealed class PlacementSurfaceResolver(PlacementSurfaceRaycaster surface
 
         public string PrimarySurfaceError { get; private set; }
 
-        public bool TryGetSelected(out ObjectSurfaceHit hit)
+        public bool TryGetSelected(out SceneSurfaceHit hit)
         {
             hit = _hit;
             return float.IsFinite(_selectedDistance);
         }
 
-        public void TryUse(ObjectSurfaceHit candidate, int probeIndex)
+        public void TryUse(SceneSurfaceHit candidate, int probeIndex)
         {
             if (IsCurrentObjectNativeSurface(_boundsSnapshot, candidate))
             {
@@ -173,6 +169,13 @@ internal sealed class PlacementSurfaceResolver(PlacementSurfaceRaycaster surface
             _selectedDistance = surfaceDistance;
             _hit = candidate;
         }
+
+        private static bool IsCurrentObjectNativeSurface(
+            ObjectBoundsSnapshot? boundsSnapshot,
+            SceneSurfaceHit candidate)
+            => candidate.Source == SceneSurfaceHitSource.Native
+               && boundsSnapshot is { Kind: ObjectKind.Furniture, NativeAddress: not 0 }
+               && ObjectLayoutInterop.SharedGroupContainsCollider(boundsSnapshot.NativeAddress, candidate.ColliderAddress);
     }
 
     public static bool TryResolveNativePlacementClearance(
@@ -208,7 +211,7 @@ internal sealed class PlacementSurfaceResolver(PlacementSurfaceRaycaster surface
             radius = MathF.Min(MathF.Abs(halfExtents.X), MathF.Abs(halfExtents.Z));
         }
 
-        return radius > ObjectMathUtility.ScalarEpsilon;
+        return radius > NumericsUtility.ScalarEpsilon;
     }
 
     private static int BuildProbePoints(Vector3 position, ObjectBoundsSnapshot? boundsSnapshot, Span<Vector3> probePoints)
@@ -225,7 +228,7 @@ internal sealed class PlacementSurfaceResolver(PlacementSurfaceRaycaster surface
         }
 
         return !TryResolveSurfaceProbeRadius(boundsSnapshot, out float radius)
-            || radius <= ObjectMathUtility.ScalarEpsilon
+            || radius <= NumericsUtility.ScalarEpsilon
             ? count
             : BuildRadiusProbePoints(position, radius, probePoints, count);
     }
@@ -236,9 +239,9 @@ internal sealed class PlacementSurfaceResolver(PlacementSurfaceRaycaster surface
         Span<Vector3> probePoints,
         int count)
     {
-        Vector3 halfExtents = ObjectMathUtility.Abs(bounds.HalfExtents);
-        if (halfExtents.X <= ObjectMathUtility.ScalarEpsilon
-            || halfExtents.Z <= ObjectMathUtility.ScalarEpsilon)
+        Vector3 halfExtents = NumericsUtility.Abs(bounds.HalfExtents);
+        if (halfExtents.X <= NumericsUtility.ScalarEpsilon
+            || halfExtents.Z <= NumericsUtility.ScalarEpsilon)
         {
             return count;
         }

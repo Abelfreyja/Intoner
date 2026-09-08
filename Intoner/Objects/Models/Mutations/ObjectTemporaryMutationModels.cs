@@ -1,3 +1,5 @@
+using System.Runtime.InteropServices;
+
 namespace Intoner.Objects.Models;
 
 internal enum ObjectTemporaryMutationStatus
@@ -9,16 +11,25 @@ internal enum ObjectTemporaryMutationStatus
     ObjectNotFound = 4,
     SourceMismatch = 5,
     RuntimeApplyFailed = 6,
+    AlreadyApplied = 7,
+    InvalidCollection = 8,
+    IdentityConflict = 9,
 }
 
 internal readonly record struct ObjectTemporaryMutationResult(
     ObjectTemporaryMutationStatus Status,
-    long SourceRevision)
+    long SourceRevision,
+    bool AcceptedAfterRuntimeFailure = false)
 {
     public bool IsSuccess
         => Status == ObjectTemporaryMutationStatus.Success;
+
+    public bool IsAccepted
+        => Status is ObjectTemporaryMutationStatus.Success or ObjectTemporaryMutationStatus.AlreadyApplied
+        || Status == ObjectTemporaryMutationStatus.RuntimeApplyFailed && AcceptedAfterRuntimeFailure;
 }
 
+[StructLayout(LayoutKind.Auto)]
 internal readonly record struct ObjectTemporarySourceState(
     Guid SessionId,
     long Revision);

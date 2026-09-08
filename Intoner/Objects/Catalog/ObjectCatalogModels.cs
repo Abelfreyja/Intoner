@@ -1,8 +1,10 @@
 using Intoner.Objects.Assets;
 using Intoner.Objects.Utils;
+using Intoner.Services.Loading;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Numerics;
+using System.Runtime.InteropServices;
 
 namespace Intoner.Objects.Catalog;
 
@@ -27,7 +29,6 @@ internal sealed record ObjectCatalogFurnitureVariant(
     byte DyeCount,
     HousingFurnitureMetadata HousingMetadata,
     string Category,
-    string Placement,
     bool DestroyOnRemoval)
 {
     private string? _searchText;
@@ -40,10 +41,10 @@ internal sealed record ObjectCatalogFurnitureVariant(
         => NormalizedSearchText.Contains(normalizedToken, StringComparison.Ordinal);
 
     private string NormalizedSearchText
-        => _normalizedSearchText ??= ObjectSearchTermUtility.NormalizeSearchText(SearchText);
+        => _normalizedSearchText ??= SearchTermUtility.NormalizeSearchText(SearchText);
 
     private string BuildSearchText()
-        => ObjectSearchTermUtility.BuildSearchText(
+        => SearchTermUtility.BuildSearchText(
         [
             HousingRowId.ToString(CultureInfo.InvariantCulture),
             ItemRowId.ToString(CultureInfo.InvariantCulture),
@@ -52,7 +53,6 @@ internal sealed record ObjectCatalogFurnitureVariant(
             DyeCount.ToString(CultureInfo.InvariantCulture),
             HousingMetadata.SearchText,
             Category,
-            Placement,
             DestroyOnRemoval ? "destroy on removal" : "persistent",
         ]);
 }
@@ -85,9 +85,6 @@ internal sealed class ObjectCatalogFurnitureInfo
 
     public IReadOnlyList<ObjectCatalogFurnitureVariant> Variants
         => _variants;
-
-    public HousingFurnitureMetadata HousingMetadata
-        => PrimaryVariant.HousingMetadata;
 
     public string SearchText
         => _searchText ??= BuildSearchText();
@@ -177,11 +174,28 @@ internal sealed class ObjectCatalogFurnitureInfo
         uint housingRowId,
         uint itemRowId,
         [NotNullWhen(true)] out ObjectCatalogFurnitureVariant? variant)
-        => TryResolveVariantByHousingRowId(housingRowId, out variant)
-        || TryResolveVariantByItemRowId(itemRowId, out variant);
+    {
+        if (housingRowId != 0)
+        {
+            if (!TryResolveVariantByHousingRowId(housingRowId, out variant))
+            {
+                return false;
+            }
+
+            if (itemRowId == 0 || variant.ItemRowId == itemRowId)
+            {
+                return true;
+            }
+
+            variant = null;
+            return false;
+        }
+
+        return TryResolveVariantByItemRowId(itemRowId, out variant);
+    }
 
     private string BuildSearchText()
-        => ObjectSearchTermUtility.BuildSearchText(BuildSearchTerms());
+        => SearchTermUtility.BuildSearchText(BuildSearchTerms());
 
     private bool HasHousingRowId(uint housingRowId)
     {
@@ -219,6 +233,7 @@ internal enum HousingPlacementSurface
     Wall,
 }
 
+[StructLayout(LayoutKind.Auto)]
 internal readonly record struct HousingPileFootprint(ushort Width, ushort Depth, ushort Height, byte AllowedOverlapTierMask)
 {
     public bool HasArea
@@ -269,7 +284,7 @@ internal sealed record HousingFurnitureMetadata(
                 : HousingPlacementSurface.Floor;
 
     public string SearchText
-        => _searchText ??= ObjectSearchTermUtility.BuildSearchText(BuildSearchTerms());
+        => _searchText ??= SearchTermUtility.BuildSearchText(BuildSearchTerms());
 
     private IEnumerable<string> BuildSearchTerms()
     {
@@ -304,7 +319,7 @@ internal sealed record ObjectCatalogBgObjectInfo(
         => _searchText ??= BuildSearchText();
 
     private string BuildSearchText()
-        => ObjectSearchTermUtility.BuildSearchText(BuildSearchTerms());
+        => SearchTermUtility.BuildSearchText(BuildSearchTerms());
 
     private IEnumerable<string> BuildSearchTerms()
     {
@@ -335,10 +350,16 @@ internal enum ObjectCatalogSearchProfile
     Vfx,
 }
 
-internal sealed record ObjectCatalogEntry
+internal sealed class ObjectCatalogEntry
 {
-    private readonly string _normalizedSearchText;
-    private readonly string _normalizedFurnitureSharedSearchText;
+    private readonly IReadOnlyList<string>? _additionalSearchTerms;
+    private readonly ObjectCatalogSearchProfile _searchProfile;
+    private readonly IReadOnlyList<PreviewModelInfo>? _configuredPreviewModels;
+    private readonly IReadOnlyList<string>? _configuredPreviewModelPaths;
+    private IReadOnlyList<PreviewModelInfo>? _resolvedPreviewModels;
+    private IReadOnlyList<string>? _resolvedPreviewModelPaths;
+    private string? _normalizedSearchText;
+    private string? _normalizedFurnitureSharedSearchText;
 
     public ObjectCatalogEntry(
         ObjectCatalogKind kind,
@@ -364,31 +385,10 @@ internal sealed record ObjectCatalogEntry
         FurnitureInfo     = furnitureInfo;
         BgObjectInfo      = bgObjectInfo;
         VfxInfo           = vfxInfo;
-        PreviewModels     = ResolvePreviewModels(kind, placementPath, previewModels, previewModelPaths);
-        PreviewModelPaths = ResolvePreviewModelPaths(PreviewModels, previewModelPaths);
-        string baseSearchText = BuildSearchText(
-            source,
-            rowId,
-            name,
-            placementPath,
-            assetPath,
-            bgObjectInfo,
-            PreviewModelPaths,
-            additionalSearchTerms,
-            searchProfile);
-        string furnitureSharedSearchText = furnitureInfo is not null
-            ? BuildFurnitureSharedSearchText(
-                source,
-                placementPath,
-                assetPath,
-                PreviewModelPaths,
-                additionalSearchTerms)
-            : baseSearchText;
-        string searchText = furnitureInfo is not null
-            ? ObjectSearchTermUtility.BuildSearchText([baseSearchText, furnitureInfo.SearchText])
-            : baseSearchText;
-        _normalizedSearchText = ObjectSearchTermUtility.NormalizeSearchText(searchText);
-        _normalizedFurnitureSharedSearchText = ObjectSearchTermUtility.NormalizeSearchText(furnitureSharedSearchText);
+        _configuredPreviewModels = previewModels;
+        _configuredPreviewModelPaths = previewModelPaths;
+        _additionalSearchTerms = additionalSearchTerms;
+        _searchProfile = searchProfile;
     }
 
     public ObjectCatalogKind Kind { get; }
@@ -400,22 +400,70 @@ internal sealed record ObjectCatalogEntry
     public ObjectCatalogFurnitureInfo? FurnitureInfo { get; }
     public ObjectCatalogBgObjectInfo? BgObjectInfo { get; }
     public ObjectCatalogVfxInfo? VfxInfo { get; }
-    public IReadOnlyList<PreviewModelInfo> PreviewModels { get; }
-    public IReadOnlyList<string> PreviewModelPaths { get; }
+    public IReadOnlyList<PreviewModelInfo> PreviewModels
+        => _resolvedPreviewModels ??= ResolvePreviewModels(
+            Kind,
+            PlacementPath,
+            _configuredPreviewModels,
+            _configuredPreviewModelPaths);
+
+    public IReadOnlyList<string> PreviewModelPaths
+        => _resolvedPreviewModelPaths ??= ResolvePreviewModelPaths(PreviewModels, _configuredPreviewModelPaths);
 
     public string DisplayPath
         => string.IsNullOrWhiteSpace(AssetPath)
             ? PlacementPath
             : AssetPath;
 
+    internal void PrepareSearch()
+    {
+        if (Volatile.Read(ref _normalizedSearchText) is not null)
+        {
+            return;
+        }
+
+        IReadOnlyList<string> searchPreviewModelPaths = Kind == ObjectCatalogKind.BgObject
+            && _configuredPreviewModels is null
+            && _configuredPreviewModelPaths is null
+                ? []
+                : PreviewModelPaths;
+        string normalizedBaseSearchText = BuildNormalizedSearchText(
+            Source,
+            RowId,
+            Name,
+            PlacementPath,
+            AssetPath,
+            BgObjectInfo,
+            searchPreviewModelPaths,
+            _additionalSearchTerms,
+            _searchProfile);
+        string normalizedFurnitureSharedSearchText = FurnitureInfo is not null
+            ? BuildNormalizedFurnitureSharedSearchText(
+                Source,
+                PlacementPath,
+                AssetPath,
+                searchPreviewModelPaths,
+                _additionalSearchTerms)
+            : normalizedBaseSearchText;
+        string normalizedSearchText = FurnitureInfo is not null
+            ? string.Concat(normalizedBaseSearchText, SearchTermUtility.NormalizeSearchText(FurnitureInfo.SearchText))
+            : normalizedBaseSearchText;
+        Volatile.Write(ref _normalizedFurnitureSharedSearchText, normalizedFurnitureSharedSearchText);
+        Volatile.Write(ref _normalizedSearchText, normalizedSearchText);
+    }
+
     public bool Matches(IReadOnlyList<string> searchTokens)
-        => ObjectSearchTermUtility.MatchesNormalizedSearchText(_normalizedSearchText, searchTokens);
+    {
+        PrepareSearch();
+        return SearchTermUtility.MatchesNormalizedSearchText(_normalizedSearchText!, searchTokens);
+    }
 
     public bool TryResolveFurnitureFilterVariant(
         IReadOnlyList<string> searchTokens,
         string category,
         [NotNullWhen(true)] out ObjectCatalogFurnitureVariant? variant)
     {
+        PrepareSearch();
         if (FurnitureInfo is not { } furnitureInfo)
         {
             variant = null;
@@ -456,7 +504,7 @@ internal sealed record ObjectCatalogEntry
 
         foreach (string token in searchTokens)
         {
-            if (!_normalizedFurnitureSharedSearchText.Contains(token, StringComparison.Ordinal)
+            if (!_normalizedFurnitureSharedSearchText!.Contains(token, StringComparison.Ordinal)
              && !variant.MatchesToken(token))
             {
                 return false;
@@ -466,7 +514,7 @@ internal sealed record ObjectCatalogEntry
         return true;
     }
 
-    private static string BuildSearchText(
+    private static string BuildNormalizedSearchText(
         string source,
         uint rowId,
         string name,
@@ -477,41 +525,41 @@ internal sealed record ObjectCatalogEntry
         IReadOnlyList<string>? additionalSearchTerms,
         ObjectCatalogSearchProfile searchProfile)
     {
-        HashSet<string> searchTerms = ObjectSearchTermUtility.CreateSet(name, placementPath, assetPath);
+        HashSet<string> searchTerms = SearchTermUtility.CreateSet(name, placementPath, assetPath);
         if (searchProfile != ObjectCatalogSearchProfile.Vfx)
         {
-            _ = ObjectSearchTermUtility.AddTerm(searchTerms, source);
-            _ = ObjectSearchTermUtility.AddTerm(searchTerms, rowId.ToString(CultureInfo.InvariantCulture));
+            _ = SearchTermUtility.AddTerm(searchTerms, source);
+            _ = SearchTermUtility.AddTerm(searchTerms, rowId.ToString(CultureInfo.InvariantCulture));
         }
 
-        _ = ObjectSearchTermUtility.AddTerms(searchTerms, previewModelPaths);
+        _ = SearchTermUtility.AddTerms(searchTerms, previewModelPaths);
         AddOptionalSearchTerms(searchTerms, additionalSearchTerms);
         if (bgObjectInfo is not null)
         {
-            _ = ObjectSearchTermUtility.AddTerm(searchTerms, bgObjectInfo.SearchText);
+            _ = SearchTermUtility.AddTerm(searchTerms, bgObjectInfo.SearchText);
         }
 
-        return ObjectSearchTermUtility.BuildSearchText(ObjectSearchTermUtility.BuildStableTerms(searchTerms));
+        return SearchTermUtility.BuildNormalizedSearchTextFromSet(searchTerms);
     }
 
-    private static string BuildFurnitureSharedSearchText(
+    private static string BuildNormalizedFurnitureSharedSearchText(
         string source,
         string placementPath,
         string assetPath,
         IReadOnlyList<string> previewModelPaths,
         IReadOnlyList<string>? additionalSearchTerms)
     {
-        HashSet<string> searchTerms = ObjectSearchTermUtility.CreateSet(source, placementPath, assetPath);
-        _ = ObjectSearchTermUtility.AddTerms(searchTerms, previewModelPaths);
+        HashSet<string> searchTerms = SearchTermUtility.CreateSet(source, placementPath, assetPath);
+        _ = SearchTermUtility.AddTerms(searchTerms, previewModelPaths);
         AddOptionalSearchTerms(searchTerms, additionalSearchTerms);
-        return ObjectSearchTermUtility.BuildSearchText(ObjectSearchTermUtility.BuildStableTerms(searchTerms));
+        return SearchTermUtility.BuildNormalizedSearchTextFromSet(searchTerms);
     }
 
     private static void AddOptionalSearchTerms(HashSet<string> searchTerms, IReadOnlyList<string>? additionalSearchTerms)
     {
         if (additionalSearchTerms is not null)
         {
-            _ = ObjectSearchTermUtility.AddTerms(searchTerms, additionalSearchTerms);
+            _ = SearchTermUtility.AddTerms(searchTerms, additionalSearchTerms);
         }
     }
 
@@ -573,9 +621,13 @@ internal sealed class ObjectCatalogSection
         Kind = kind;
         DisplayName = displayName;
         _entries = entries as ObjectCatalogEntry[] ?? entries.ToArray();
-        _defaultFurnitureResults = BuildDefaultFurnitureResults(_entries);
+        _defaultFurnitureResults = kind == ObjectCatalogKind.Furniture
+            ? BuildDefaultFurnitureResults(_entries)
+            : [];
         _sourceFilters = BuildFilterCounts(_entries, static entry => entry.Source);
-        _categoryFilters = BuildCategoryFilterCounts(_entries);
+        _categoryFilters = kind == ObjectCatalogKind.Furniture
+            ? BuildCategoryFilterCounts(_entries)
+            : [];
     }
 
     public ObjectCatalogKind Kind { get; }
@@ -585,10 +637,26 @@ internal sealed class ObjectCatalogSection
     public IReadOnlyList<ObjectCatalogFilterCount> CategoryFilters => _categoryFilters;
     public int Count => _entries.Length;
 
+    internal void PrepareSearchIndex(LoadProgress progress)
+    {
+        ParallelOptions options = new()
+        {
+            CancellationToken = progress.CancellationToken,
+            MaxDegreeOfParallelism = Math.Min(2, Environment.ProcessorCount),
+        };
+        var completedCount = 0;
+        Parallel.For(0, _entries.Length, options, index =>
+        {
+            _entries[index].PrepareSearch();
+            int completed = Interlocked.Increment(ref completedCount);
+            progress.ReportItems(completed, _entries.Length, 1024);
+        });
+    }
+
     public IReadOnlyList<ObjectCatalogEntry> FilterBySource(string filter, string source)
     {
-        string normalizedFilter = ObjectStringUtility.TrimOrEmpty(filter);
-        string normalizedSource = ObjectStringUtility.TrimOrEmpty(source);
+        string normalizedFilter = TextUtility.TrimOrEmpty(filter);
+        string normalizedSource = TextUtility.TrimOrEmpty(source);
         if (normalizedFilter.Length == 0 && normalizedSource.Length == 0)
         {
             return _entries;
@@ -616,9 +684,9 @@ internal sealed class ObjectCatalogSection
 
     public IReadOnlyList<ObjectCatalogFurnitureResult> FilterFurniture(string filter, string category)
     {
-        string normalizedFilter = ObjectStringUtility.TrimOrEmpty(filter);
-        string normalizedCategory = ObjectStringUtility.TrimOrEmpty(category);
-        string[] searchTokens = ObjectSearchTermUtility.BuildSearchTokens(normalizedFilter);
+        string normalizedFilter = TextUtility.TrimOrEmpty(filter);
+        string normalizedCategory = TextUtility.TrimOrEmpty(category);
+        string[] searchTokens = SearchTermUtility.BuildSearchTokens(normalizedFilter);
         if (searchTokens.Length == 0 && normalizedCategory.Length == 0)
         {
             return _defaultFurnitureResults;
@@ -649,7 +717,7 @@ internal sealed class ObjectCatalogSection
         string filter,
         string? source)
     {
-        string[] searchTokens = ObjectSearchTermUtility.BuildSearchTokens(filter);
+        string[] searchTokens = SearchTermUtility.BuildSearchTokens(filter);
         List<ObjectCatalogEntry> filteredEntries = [];
         foreach (ObjectCatalogEntry entry in entries)
         {
@@ -821,10 +889,28 @@ internal sealed class ObjectCatalogData
     public ObjectCatalogSection Vfx => Volatile.Read(ref _state).Vfx;
     public int EntryCount => Volatile.Read(ref _state).EntryCount;
 
+    public void PrepareSearchIndexes(LoadProgress progress)
+    {
+        CatalogState state = Volatile.Read(ref _state);
+        int totalCount = state.EntryCount;
+        if (totalCount == 0)
+        {
+            progress.Report(1d);
+            return;
+        }
+
+        int completedCount = 0;
+        progress.Report(0d);
+        PrepareSectionSearchIndex(state.BgObjects, ref completedCount, totalCount, progress);
+        PrepareSectionSearchIndex(state.Furniture, ref completedCount, totalCount, progress);
+        PrepareSectionSearchIndex(state.Vfx, ref completedCount, totalCount, progress);
+    }
+
     public void ReplaceSections(
         IReadOnlyList<ObjectCatalogEntry>? bgObjectEntries = null,
         IReadOnlyList<ObjectCatalogEntry>? furnitureEntries = null,
-        IReadOnlyList<ObjectCatalogEntry>? vfxEntries = null)
+        IReadOnlyList<ObjectCatalogEntry>? vfxEntries = null,
+        CancellationToken cancellationToken = default)
     {
         CatalogState currentState = Volatile.Read(ref _state);
         ObjectCatalogSection nextBgObjects = bgObjectEntries is not null
@@ -836,6 +922,21 @@ internal sealed class ObjectCatalogData
         ObjectCatalogSection nextVfx = vfxEntries is not null
             ? new ObjectCatalogSection(ObjectCatalogKind.Vfx, currentState.Vfx.DisplayName, vfxEntries)
             : currentState.Vfx;
+
+        if (bgObjectEntries is not null)
+        {
+            nextBgObjects.PrepareSearchIndex(LoadProgress.Unreported(cancellationToken));
+        }
+
+        if (furnitureEntries is not null)
+        {
+            nextFurniture.PrepareSearchIndex(LoadProgress.Unreported(cancellationToken));
+        }
+
+        if (vfxEntries is not null)
+        {
+            nextVfx.PrepareSearchIndex(LoadProgress.Unreported(cancellationToken));
+        }
 
         CatalogState nextState = BuildState(nextBgObjects, nextFurniture, nextVfx);
         Volatile.Write(ref _state, nextState);
@@ -860,26 +961,22 @@ internal sealed class ObjectCatalogData
         return state.EntriesByPlacementPath.TryGetValue(new ObjectCatalogEntryKey(kind, placementPath), out entry);
     }
 
-    public bool TryResolveFurnitureMetadata(
+    public bool TryResolveFurnitureVariant(
         string sharedGroupPath,
         uint housingRowId,
         uint itemRowId,
-        [NotNullWhen(true)] out HousingFurnitureMetadata? metadata)
+        [NotNullWhen(true)] out ObjectCatalogEntry? entry,
+        [NotNullWhen(true)] out ObjectCatalogFurnitureVariant? variant)
     {
-        if (!TryResolveEntry(ObjectCatalogKind.Furniture, sharedGroupPath, out ObjectCatalogEntry? entry)
-            || entry.FurnitureInfo is not { } furnitureInfo)
+        if (!TryResolveEntry(ObjectCatalogKind.Furniture, sharedGroupPath, out entry)
+            || entry.FurnitureInfo is not { } furnitureInfo
+            || !furnitureInfo.TryResolveVariant(housingRowId, itemRowId, out variant))
         {
-            metadata = null;
+            entry = null;
+            variant = null;
             return false;
         }
 
-        if (furnitureInfo.TryResolveVariant(housingRowId, itemRowId, out ObjectCatalogFurnitureVariant? housingVariant))
-        {
-            metadata = housingVariant.HousingMetadata;
-            return true;
-        }
-
-        metadata = furnitureInfo.HousingMetadata;
         return true;
     }
 
@@ -899,6 +996,18 @@ internal sealed class ObjectCatalogData
     {
         Dictionary<ObjectCatalogEntryKey, ObjectCatalogEntry> entriesByPlacementPath = BuildEntryIndex(bgObjects, furniture, vfx);
         return new CatalogState(bgObjects, furniture, vfx, entriesByPlacementPath);
+    }
+
+    private static void PrepareSectionSearchIndex(
+        ObjectCatalogSection section,
+        ref int completedCount,
+        int totalCount,
+        LoadProgress progress)
+    {
+        double start = completedCount / (double)totalCount;
+        completedCount += section.Count;
+        double end = completedCount / (double)totalCount;
+        section.PrepareSearchIndex(progress.Slice(start, end));
     }
 
     private static Dictionary<ObjectCatalogEntryKey, ObjectCatalogEntry> BuildEntryIndex(

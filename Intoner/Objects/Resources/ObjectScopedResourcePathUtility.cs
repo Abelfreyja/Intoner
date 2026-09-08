@@ -17,7 +17,7 @@ internal static class ObjectScopedResourcePathUtility
     {
         scopedPath = default;
 
-        string normalizedPath = ObjectStringUtility.TrimOrEmpty(path);
+        string normalizedPath = TextUtility.TrimOrEmpty(path);
         if (!normalizedPath.StartsWith(Prefix, StringComparison.Ordinal))
         {
             return false;
@@ -48,7 +48,7 @@ internal static class ObjectScopedResourcePathUtility
 
     public static bool IsForeignScopedPath(string path)
     {
-        string normalizedPath = ObjectStringUtility.TrimOrEmpty(path);
+        string normalizedPath = TextUtility.TrimOrEmpty(path);
         return normalizedPath.Length > 0
             && !normalizedPath.StartsWith(Prefix, StringComparison.Ordinal)
             && !ObjectMemoryResourcePathUtility.IsMemoryResourcePath(normalizedPath)
@@ -57,7 +57,7 @@ internal static class ObjectScopedResourcePathUtility
     }
 
     public static bool IsObjectScopedPath(string path)
-        => ObjectStringUtility.TrimOrEmpty(path).StartsWith(Prefix, StringComparison.Ordinal);
+        => TextUtility.TrimOrEmpty(path).StartsWith(Prefix, StringComparison.Ordinal);
 
     public static string Create(long resourceScopeId, string path)
     {

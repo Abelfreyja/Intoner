@@ -1,5 +1,6 @@
 using Intoner.Objects.Models;
 using Intoner.Objects.Runtime;
+using Intoner.Scene;
 using Intoner.Objects.UI.Services;
 
 namespace Intoner.Objects.UI;
@@ -24,13 +25,13 @@ internal sealed class PlacementFixExecutor(
             _ => fixedSnapshot);
     }
 
-    private static ObjectHistoryKind ResolveHistoryKind(PlacementFixKind kind)
+    private static SceneHistoryKind ResolveHistoryKind(PlacementFixKind kind)
         => kind switch
         {
-            PlacementFixKind.SnapToSurface         => ObjectHistoryKind.Move,
-            PlacementFixKind.MoveToPlayerPlacement => ObjectHistoryKind.Move,
-            PlacementFixKind.ClearAttachmentParent => ObjectHistoryKind.Organization,
-            _                                      => ObjectHistoryKind.Organization,
+            PlacementFixKind.SnapToSurface         => SceneHistoryKind.Move,
+            PlacementFixKind.MoveToPlayerPlacement => SceneHistoryKind.Move,
+            PlacementFixKind.ClearAttachmentParent => SceneHistoryKind.Organization,
+            _                                      => SceneHistoryKind.Organization,
         };
 }
 

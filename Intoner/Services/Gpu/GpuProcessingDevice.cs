@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using Dalamud.Interface;
+using Intoner.Services.Interop;
 using Microsoft.Extensions.Logging;
 using SharpDX.Direct3D11;
 using DxgiDevice = SharpDX.DXGI.Device;
@@ -28,7 +29,7 @@ internal sealed partial class GpuProcessingDevice : IDisposable
     public bool TryGetDevice(out nint device)
     {
         device = nint.Zero;
-        if (!OperatingSystem.IsWindows())
+        if (!RuntimePlatform.IsWindowsRuntime)
         {
             return false;
         }
@@ -54,7 +55,7 @@ internal sealed partial class GpuProcessingDevice : IDisposable
     public bool TryCreateOperationDeviceClone(out nint device)
     {
         device = nint.Zero;
-        if (!OperatingSystem.IsWindows())
+        if (!RuntimePlatform.IsWindowsRuntime)
         {
             return false;
         }
@@ -76,7 +77,31 @@ internal sealed partial class GpuProcessingDevice : IDisposable
             _available = true;
         }
 
-        ReleaseComObject(ref context);
+        D3D11ComReference.Release(ref context);
+        return true;
+    }
+
+    public bool TryCreateCompatibleDeviceClone(out nint device)
+    {
+        device = nint.Zero;
+        if (!RuntimePlatform.IsWindowsRuntime)
+        {
+            return false;
+        }
+
+        nint context = nint.Zero;
+        lock (_sync)
+        {
+            if (!TryCreateDeviceFromGameAdapter(
+                    out device,
+                    out context,
+                    DeviceCreationFlags.BgraSupport))
+            {
+                return false;
+            }
+        }
+
+        D3D11ComReference.Release(ref context);
         return true;
     }
 
@@ -170,13 +195,16 @@ internal sealed partial class GpuProcessingDevice : IDisposable
             return true;
         }
 
-        ReleaseComObject(ref context);
-        ReleaseComObject(ref device);
+        D3D11ComReference.Release(ref context);
+        D3D11ComReference.Release(ref device);
         _logger.LogDebug("GPU processing disabled: fallback D3D11CreateDevice failed (hr=0x{Hr:X8}).", unchecked((uint)hr));
         return false;
     }
 
-    private bool TryCreateDeviceFromGameAdapter(out nint device, out nint context)
+    private bool TryCreateDeviceFromGameAdapter(
+        out nint device,
+        out nint context,
+        DeviceCreationFlags? creationFlags = null)
     {
         device = nint.Zero;
         context = nint.Zero;
@@ -187,14 +215,9 @@ internal sealed partial class GpuProcessingDevice : IDisposable
             return false;
         }
 
-        var uiDeviceRefAdded = false;
-        Device? uiDevice = null;
         try
         {
-            Marshal.AddRef(uiDeviceHandle);
-            uiDeviceRefAdded = true;
-            uiDevice = new Device(uiDeviceHandle);
-            using (uiDevice)
+            using (Device uiDevice = D3D11ComReference.RetainDevice(uiDeviceHandle, this))
             using (var dxgiDevice = uiDevice.QueryInterface<DxgiDevice>())
             using (var adapter = dxgiDevice.Adapter)
             {
@@ -207,7 +230,7 @@ internal sealed partial class GpuProcessingDevice : IDisposable
                         adapter.NativePointer,
                         D3DDriverType.Unknown,
                         nint.Zero,
-                        (uint)uiDevice.CreationFlags,
+                        (uint)(creationFlags ?? uiDevice.CreationFlags),
                         requestedFeatureLevelMemory,
                         1,
                         D3D11SdkVersion,
@@ -225,8 +248,8 @@ internal sealed partial class GpuProcessingDevice : IDisposable
                         unchecked((uint)hr),
                         requestedFeatureLevel,
                         createdFeatureLevel);
-                    ReleaseComObject(ref context);
-                    ReleaseComObject(ref device);
+                    D3D11ComReference.Release(ref context);
+                    D3D11ComReference.Release(ref device);
                     return false;
                 }
                 finally
@@ -238,44 +261,16 @@ internal sealed partial class GpuProcessingDevice : IDisposable
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "GPU processing game-adapter initialization failed.");
-            ReleaseComObject(ref context);
-            ReleaseComObject(ref device);
+            D3D11ComReference.Release(ref context);
+            D3D11ComReference.Release(ref device);
             return false;
-        }
-        finally
-        {
-            if (uiDeviceRefAdded && uiDevice is null)
-            {
-                Marshal.Release(uiDeviceHandle);
-            }
         }
     }
 
     private void ReleaseDeviceUnsafe()
     {
-        ReleaseComObject(ref _deviceContext);
-        ReleaseComObject(ref _device);
-    }
-
-    private static void ReleaseComObject(ref nint ptr)
-    {
-        if (ptr == nint.Zero)
-        {
-            return;
-        }
-
-        try
-        {
-            Marshal.Release(ptr);
-        }
-        catch
-        {
-            // ignore release errors
-        }
-        finally
-        {
-            ptr = nint.Zero;
-        }
+        D3D11ComReference.Release(ref _deviceContext);
+        D3D11ComReference.Release(ref _device);
     }
 
     private enum D3DDriverType : uint

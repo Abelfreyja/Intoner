@@ -1,5 +1,6 @@
 using Intoner.Objects.Catalog;
 using Intoner.Objects.Models;
+using Intoner.Scene;
 
 namespace Intoner.Objects.Runtime;
 
@@ -10,7 +11,7 @@ internal static class PlacementSurfaceContactValidator
         ObjectSnapshot snapshot,
         ObjectBoundsSnapshot boundsSnapshot,
         HousingFurnitureMetadata metadata,
-        ObjectSurfaceHit hit,
+        SceneSurfaceHit hit,
         out PlacementIssueCode issueCode,
         out string errorMessage)
     {

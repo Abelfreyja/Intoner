@@ -1,8 +1,10 @@
 using Dalamud.Plugin.Services;
 using Intoner.Objects.Assets;
 using Intoner.Objects.Utils;
+using Intoner.Services.Loading;
 using Lumina.Excel.Sheets;
-using System.Numerics;
+using Microsoft.Extensions.Logging;
+using System.Diagnostics;
 
 namespace Intoner.Objects.Catalog;
 
@@ -46,24 +48,69 @@ internal sealed class ObjectCatalogBuilder
 
     private readonly IDataManager _gameData;
     private readonly IObjectAssetIndex _assetIndex;
+    private readonly ILogger<ObjectCatalogBuilder> _logger;
 
-    public ObjectCatalogBuilder(IDataManager gameData, IObjectAssetIndex assetIndex)
+    public ObjectCatalogBuilder(
+        ILogger<ObjectCatalogBuilder> logger,
+        IDataManager gameData,
+        IObjectAssetIndex assetIndex)
     {
+        _logger = logger;
         _gameData = gameData;
         _assetIndex = assetIndex;
     }
 
-    public ObjectCatalogData Build(CancellationToken cancellationToken)
-        => new(
-            BuildBgObjectEntries(cancellationToken),
-            BuildFurnitureEntries(cancellationToken),
-            BuildVfxEntries(cancellationToken));
-
-    public IReadOnlyList<ObjectCatalogEntry> BuildBgObjectEntries(CancellationToken cancellationToken = default)
+    public ObjectCatalogData Build(LoadProgress progress)
     {
+        LoadProgressPlan progressPlan = progress.CreatePlan();
+        LoadProgress bgObjectProgress = progressPlan.Next(38d);
+        LoadProgress furnitureProgress = progressPlan.Next(6d);
+        LoadProgress vfxProgress = progressPlan.Next(7d);
+        LoadProgress indexProgress = progressPlan.Next(4d);
+        LoadProgress searchProgress = progressPlan.Next(45d);
+        long startedAt = Stopwatch.GetTimestamp();
+        long phaseStartedAt = startedAt;
+        IReadOnlyList<ObjectCatalogEntry> bgObjectEntries = BuildBgObjectEntries(bgObjectProgress);
+        TimeSpan bgObjectTime = Stopwatch.GetElapsedTime(phaseStartedAt);
+
+        phaseStartedAt = Stopwatch.GetTimestamp();
+        IReadOnlyList<ObjectCatalogEntry> furnitureEntries = BuildFurnitureEntries(furnitureProgress);
+        TimeSpan furnitureTime = Stopwatch.GetElapsedTime(phaseStartedAt);
+
+        phaseStartedAt = Stopwatch.GetTimestamp();
+        IReadOnlyList<ObjectCatalogEntry> vfxEntries = BuildVfxEntries(vfxProgress);
+        TimeSpan vfxTime = Stopwatch.GetElapsedTime(phaseStartedAt);
+
+        phaseStartedAt = Stopwatch.GetTimestamp();
+        ObjectCatalogData catalog = new(bgObjectEntries, furnitureEntries, vfxEntries);
+        indexProgress.Report(1d);
+        TimeSpan indexTime = Stopwatch.GetElapsedTime(phaseStartedAt);
+
+        phaseStartedAt = Stopwatch.GetTimestamp();
+        catalog.PrepareSearchIndexes(searchProgress);
+        TimeSpan searchTime = Stopwatch.GetElapsedTime(phaseStartedAt);
+        TimeSpan totalTime = Stopwatch.GetElapsedTime(startedAt);
+
+        _logger.LogInformation(
+            "built object catalog data in {ElapsedMilliseconds:F0} ms (bgobjects {BgObjectMilliseconds:F0} ms, furniture {FurnitureMilliseconds:F0} ms, vfx {VfxMilliseconds:F0} ms, indexes {IndexMilliseconds:F0} ms, search {SearchMilliseconds:F0} ms)",
+            totalTime.TotalMilliseconds,
+            bgObjectTime.TotalMilliseconds,
+            furnitureTime.TotalMilliseconds,
+            vfxTime.TotalMilliseconds,
+            indexTime.TotalMilliseconds,
+            searchTime.TotalMilliseconds);
+        return catalog;
+    }
+
+    public IReadOnlyList<ObjectCatalogEntry> BuildBgObjectEntries(LoadProgress progress)
+    {
+        CancellationToken cancellationToken = progress.CancellationToken;
         IReadOnlyList<GameDataBgObjectAsset> gameDataAssets = _assetIndex.GetGameDataBgObjectAssets(cancellationToken);
         IReadOnlyList<ObservedBgAsset> observedAssets = _assetIndex.GetObservedBgObjectAssets(cancellationToken);
         Dictionary<string, CatalogCandidate> entries = new(gameDataAssets.Count + observedAssets.Count, StringComparer.OrdinalIgnoreCase);
+        int completedAssetCount = 0;
+        int totalAssetCount = gameDataAssets.Count + observedAssets.Count;
+        progress.ReportItems(completedAssetCount, totalAssetCount);
 
         foreach (GameDataBgObjectAsset asset in gameDataAssets)
         {
@@ -77,6 +124,7 @@ internal sealed class ObjectCatalogBuilder
                 asset.ModelPath,
                 BuildBgObjectInfo(asset),
                 asset.SearchTerms);
+            progress.ReportItems(++completedAssetCount, totalAssetCount);
         }
 
         foreach (ObservedBgAsset observedAsset in observedAssets)
@@ -91,17 +139,20 @@ internal sealed class ObjectCatalogBuilder
                 observedAsset.Path,
                 BuildBgObjectInfo(observedAsset.TerritoryIds, observedAsset.TerritoryNames),
                 observedAsset.SearchTerms);
+            progress.ReportItems(++completedAssetCount, totalAssetCount);
         }
 
         return MaterializeEntries(entries, NameSourcePathComparer);
     }
 
-    public IReadOnlyList<ObjectCatalogEntry> BuildFurnitureEntries(CancellationToken cancellationToken = default)
+    public IReadOnlyList<ObjectCatalogEntry> BuildFurnitureEntries(LoadProgress progress)
     {
+        CancellationToken cancellationToken = progress.CancellationToken;
         var housingFurniture = _gameData.GetExcelSheet<HousingFurniture>()!;
         var housingYardObjects = _gameData.GetExcelSheet<HousingYardObject>()!;
         Dictionary<uint, HousingPileFootprint> pileFootprints = BuildPileFootprints(_gameData.GetExcelSheet<HousingPileLimit>()!);
         Dictionary<string, CatalogCandidate> entries = new(StringComparer.OrdinalIgnoreCase);
+        progress.Report(0d);
 
         foreach (HousingFurniture row in housingFurniture)
         {
@@ -119,6 +170,7 @@ internal sealed class ObjectCatalogBuilder
                 GameDataAssetPathUtility.BuildIndoorHousingSharedGroupPath(row.ModelKey),
                 pileFootprints);
         }
+        progress.Report(0.5d);
 
         foreach (HousingYardObject row in housingYardObjects)
         {
@@ -135,16 +187,20 @@ internal sealed class ObjectCatalogBuilder
                 row,
                 GameDataAssetPathUtility.BuildOutdoorHousingSharedGroupPath(row.ModelKey));
         }
+        progress.Report(1d);
 
         return MaterializeEntries(entries, NameSourcePathComparer);
     }
 
-    public IReadOnlyList<ObjectCatalogEntry> BuildVfxEntries(CancellationToken cancellationToken = default)
+    public IReadOnlyList<ObjectCatalogEntry> BuildVfxEntries(LoadProgress progress)
     {
+        CancellationToken cancellationToken = progress.CancellationToken;
         IReadOnlyList<RuntimeVfxAsset> standaloneVfxAssets = _assetIndex.GetStandaloneVfxAssets(cancellationToken);
         Dictionary<string, ObjectCatalogEntry> entries = new(standaloneVfxAssets.Count, StringComparer.OrdinalIgnoreCase);
-        foreach (RuntimeVfxAsset vfxAsset in standaloneVfxAssets)
+        progress.ReportItems(0, standaloneVfxAssets.Count);
+        for (var index = 0; index < standaloneVfxAssets.Count; ++index)
         {
+            RuntimeVfxAsset vfxAsset = standaloneVfxAssets[index];
             cancellationToken.ThrowIfCancellationRequested();
             entries[vfxAsset.Path] = new ObjectCatalogEntry(
                 ObjectCatalogKind.Vfx,
@@ -156,6 +212,7 @@ internal sealed class ObjectCatalogBuilder
                 vfxInfo: new ObjectCatalogVfxInfo(vfxAsset.LoopFacts),
                 additionalSearchTerms: vfxAsset.SearchTerms,
                 searchProfile: ObjectCatalogSearchProfile.Vfx);
+            progress.ReportItems(index + 1, standaloneVfxAssets.Count);
         }
 
         return MaterializeEntries(entries.Values, SourceNamePathComparer);
@@ -250,7 +307,6 @@ internal sealed class ObjectCatalogBuilder
                 modelPath,
                 modelPath,
                 bgObjectInfo: bgObjectInfo,
-                previewModels: [new PreviewModelInfo(modelPath, Matrix4x4.Identity)],
                 additionalSearchTerms: searchTerms),
             sourcePriority);
     }
@@ -361,8 +417,7 @@ internal sealed class ObjectCatalogBuilder
                 row.PlaceLimitType,
                 row.AquariumTier,
                 row.Placement.RowId,
-                TryResolvePileFootprint(row.AquariumTier, pileFootprints)),
-            GetHousingPlacementLabel(row.Placement.ValueNullable));
+                TryResolvePileFootprint(row.AquariumTier, pileFootprints)));
 
     private static ObjectCatalogFurnitureInfo BuildFurnitureInfo(HousingYardObject row, Item? item, string name)
         => BuildFurnitureInfo(
@@ -378,8 +433,7 @@ internal sealed class ObjectCatalogBuilder
                 row.PlaceLimitType,
                 0,
                 row.Placement.RowId,
-                null),
-            GetHousingPlacementLabel(row.Placement.ValueNullable));
+                null));
 
     private static ObjectCatalogFurnitureInfo BuildFurnitureInfo(
         Item? item,
@@ -387,8 +441,7 @@ internal sealed class ObjectCatalogBuilder
         string name,
         ushort modelKey,
         bool destroyOnRemoval,
-        HousingFurnitureMetadata housingMetadata,
-        string? placement)
+        HousingFurnitureMetadata housingMetadata)
     {
         uint itemRowId = 0;
         uint iconId = 0;
@@ -410,7 +463,6 @@ internal sealed class ObjectCatalogBuilder
             dyeCount,
             housingMetadata,
             category ?? string.Empty,
-            placement ?? string.Empty,
             destroyOnRemoval);
 
         return new ObjectCatalogFurnitureInfo(modelKey, variant);
@@ -480,7 +532,7 @@ internal sealed class ObjectCatalogBuilder
     }
 
     private static IReadOnlyList<string> BuildFurnitureSearchTerms(SharedGroupAssetInfo sharedGroupAssets)
-        => ObjectSearchTermUtility.BuildStableTerms(
+        => SearchTermUtility.BuildStableTerms(
             sharedGroupAssets.BgObjectModelPaths,
             sharedGroupAssets.NestedSharedGroupPaths,
             sharedGroupAssets.ReferencedVfxPaths);
@@ -535,11 +587,6 @@ internal sealed class ObjectCatalogBuilder
     private static string? GetItemUiCategoryLabel(ItemUICategory? category)
         => category is { } resolvedCategory
             ? GetNonEmptyLabel(resolvedCategory.Name.ExtractText())
-            : null;
-
-    private static string? GetHousingPlacementLabel(HousingPlacement? placement)
-        => placement is { } resolvedPlacement
-            ? GetNonEmptyLabel(resolvedPlacement.Text.ExtractText())
             : null;
 
     private static string? GetNonEmptyLabel(string text)

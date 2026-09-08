@@ -1,8 +1,7 @@
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
-using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
-using Intoner.UI;
+using Intoner.UI.Components;
 using System.Numerics;
 
 namespace Intoner.Objects.UI.Components;
@@ -10,9 +9,23 @@ namespace Intoner.Objects.UI.Components;
 internal static class EditorCard
 {
     public static void DrawPanelCard(string id, Vector4 background, Vector4 border, float rounding, Vector2 padding, Action content)
-        => DrawPanelCard(id, background, border, rounding, padding, null, content);
+        => DrawPanelCard(id, background, border, rounding, padding, null, ImDrawFlags.RoundCornersAll, null, 0f, content, false);
 
     public static void DrawPanelCard(string id, Vector4 background, Vector4 border, float rounding, Vector2 padding, float? minHeight, Action content)
+        => DrawPanelCard(id, background, border, rounding, padding, minHeight, ImDrawFlags.RoundCornersAll, null, 0f, content, false);
+
+    public static void DrawPanelCard(
+        string id,
+        Vector4 background,
+        Vector4 border,
+        float rounding,
+        Vector2 padding,
+        float? minHeight,
+        ImDrawFlags cornerFlags,
+        Vector4? rail,
+        float railWidth,
+        Action content,
+        bool fixedHeight = false)
     {
         using (ImRaii.PushId(id))
         {
@@ -43,25 +56,60 @@ internal static class EditorCard
                 ImGui.Dummy(new Vector2(0f, padding.Y));
             }
 
+            float contentHeight = ImGui.GetItemRectMax().Y - startPos.Y;
+            float cardHeight = contentHeight;
             if (minHeight.HasValue)
             {
-                var currentHeight = ImGui.GetItemRectMax().Y - startPos.Y;
-                if (currentHeight < minHeight.Value)
-                {
-                    ImGui.Dummy(new Vector2(0f, minHeight.Value - currentHeight));
-                }
+                cardHeight = fixedHeight
+                    ? minHeight.Value
+                    : MathF.Max(contentHeight, minHeight.Value);
+            }
+
+            if (fixedHeight || cardHeight > contentHeight)
+            {
+                ImGui.SetCursorScreenPos(new Vector2(startPos.X, startPos.Y + cardHeight));
+                ImGui.Dummy(Vector2.Zero);
             }
 
             var rectMin = startPos;
-            var rectMax = new Vector2(startPos.X + availableWidth, ImGui.GetItemRectMax().Y);
+            var rectMax = new Vector2(startPos.X + availableWidth, startPos.Y + cardHeight);
             var borderThickness = MathF.Max(1f, ImGui.GetStyle().ChildBorderSize);
 
             drawList.ChannelsSetCurrent(0);
-            drawList.AddRectFilled(rectMin, rectMax, ImGui.GetColorU32(background), rounding);
-            drawList.AddRect(rectMin, rectMax, ImGui.GetColorU32(border), rounding, ImDrawFlags.None, borderThickness);
+            drawList.AddRectFilled(rectMin, rectMax, ImGui.GetColorU32(background), rounding, cornerFlags);
+            drawList.AddRect(rectMin, rectMax, ImGui.GetColorU32(border), rounding, cornerFlags, borderThickness);
+            if (rail is { } railColor && railWidth > 0f)
+            {
+                drawList.AddRectFilled(
+                    rectMin,
+                    new Vector2(rectMin.X + railWidth, rectMax.Y),
+                    ImGui.GetColorU32(railColor));
+            }
+
             drawList.ChannelsMerge();
         }
     }
+
+    public static void DrawFixedPanelCard(
+        string id,
+        Vector4 background,
+        Vector4 border,
+        float rounding,
+        Vector2 padding,
+        float height,
+        Action content)
+        => DrawPanelCard(
+            id,
+            background,
+            border,
+            rounding,
+            padding,
+            height,
+            ImDrawFlags.RoundCornersAll,
+            null,
+            0f,
+            content,
+            true);
 
     public static void DrawCardHeader(
         string id,
@@ -74,7 +122,8 @@ internal static class EditorCard
         bool alignTitleToFramePadding = false,
         bool wrapSubtitle = false,
         Action? drawAfterTitle = null,
-        Action? drawAfterSubtitle = null)
+        Action? drawAfterSubtitle = null,
+        bool wrapTitle = false)
     {
         var columnCount = drawActions is null ? 1 : 2;
         var tableFlags = drawActions is null
@@ -94,15 +143,19 @@ internal static class EditorCard
 
         ImGui.TableNextRow();
         ImGui.TableNextColumn();
-        DrawIconTitleBlock(
+        EditorIconText.Draw(
             icon,
             title,
             subtitle,
             accent,
-            alignTitleToFramePadding,
-            wrapSubtitle,
-            drawAfterTitle,
-            drawAfterSubtitle);
+            new EditorIconTextOptions
+            {
+                AlignTitleToFramePadding = alignTitleToFramePadding,
+                WrapTitle = wrapTitle,
+                WrapSubtitle = wrapSubtitle,
+                DrawAfterTitle = drawAfterTitle,
+                DrawAfterSubtitle = drawAfterSubtitle,
+            });
 
         if (drawActions is not null)
         {
@@ -111,48 +164,28 @@ internal static class EditorCard
         }
     }
 
-    public static void DrawIconTitleBlock(
+    public static void DrawCardHeader(
+        string id,
         FontAwesomeIcon icon,
         string title,
-        string subtitle,
+        IReadOnlyList<EditorBadge> badges,
         Vector4 accent,
+        Action? drawActions = null,
+        float actionWidth = 0f,
         bool alignTitleToFramePadding = false,
-        bool wrapSubtitle = false,
-        Action? drawAfterTitle = null,
-        Action? drawAfterSubtitle = null)
-    {
-        using (ImRaii.PushFont(UiBuilder.IconFont))
-        using (ImRaii.PushColor(ImGuiCol.Text, accent))
-        {
-            ImGui.TextUnformatted(icon.ToIconString());
-        }
-
-        ImGui.SameLine();
-        using (ImRaii.Group())
-        {
-            if (alignTitleToFramePadding)
-            {
-                ImGui.AlignTextToFramePadding();
-            }
-
-            ImGui.TextUnformatted(title);
-            drawAfterTitle?.Invoke();
-
-            if (!string.IsNullOrWhiteSpace(subtitle))
-            {
-                if (wrapSubtitle)
-                {
-                    using var wrap = ImRaiiScope.TextWrapPos();
-                    ImGui.TextDisabled(subtitle);
-                }
-                else
-                {
-                    ImGui.TextDisabled(subtitle);
-                }
-            }
-
-            drawAfterSubtitle?.Invoke();
-        }
-    }
+        Action? drawAfterBadges = null,
+        bool wrapTitle = false)
+        => DrawCardHeader(
+            id,
+            icon,
+            title,
+            string.Empty,
+            accent,
+            drawActions,
+            actionWidth,
+            alignTitleToFramePadding,
+            drawAfterTitle: () => EditorBadgeRenderer.DrawInline(badges),
+            drawAfterSubtitle: drawAfterBadges,
+            wrapTitle: wrapTitle);
 }
 

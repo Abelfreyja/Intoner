@@ -7,9 +7,25 @@ namespace Intoner.Services.Gpu;
 
 internal sealed class GpuTextureView(Texture2D texture, ShaderResourceView view) : IDisposable
 {
-    private readonly Texture2D _texture = texture;
-
+    public Texture2D Texture { get; } = texture;
     public ShaderResourceView View { get; } = view;
+
+    public static GpuTextureView Create(Device device, Texture2DDescription description)
+    {
+        Texture2D? texture = null;
+        try
+        {
+            texture = new Texture2D(device, description);
+            var view = new ShaderResourceView(device, texture);
+            var result = new GpuTextureView(texture, view);
+            texture = null;
+            return result;
+        }
+        finally
+        {
+            texture?.Dispose();
+        }
+    }
 
     public static GpuTextureView CreateRgba(Device device, int width, int height, byte[] rgbaPixels)
     {
@@ -17,11 +33,22 @@ internal sealed class GpuTextureView(Texture2D texture, ShaderResourceView view)
         {
             fixed (byte* pixelData = rgbaPixels)
             {
-                Texture2D texture = new(
-                    device,
-                    CreateTextureDescription(width, height),
-                    new DataRectangle((IntPtr)pixelData, width * 4));
-                return new GpuTextureView(texture, new ShaderResourceView(device, texture));
+                Texture2D? texture = null;
+                try
+                {
+                    texture = new Texture2D(
+                        device,
+                        CreateTextureDescription(width, height),
+                        new DataRectangle((IntPtr)pixelData, width * 4));
+                    ShaderResourceView view = new(device, texture);
+                    GpuTextureView result = new(texture, view);
+                    texture = null;
+                    return result;
+                }
+                finally
+                {
+                    texture?.Dispose();
+                }
             }
         }
     }
@@ -31,8 +58,14 @@ internal sealed class GpuTextureView(Texture2D texture, ShaderResourceView view)
 
     public void Dispose()
     {
-        View.Dispose();
-        _texture.Dispose();
+        try
+        {
+            View.Dispose();
+        }
+        finally
+        {
+            Texture.Dispose();
+        }
     }
 
     private static Texture2DDescription CreateTextureDescription(int width, int height)

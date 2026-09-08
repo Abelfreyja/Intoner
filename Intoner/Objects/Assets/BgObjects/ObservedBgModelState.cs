@@ -90,7 +90,7 @@ internal sealed class ObservedBgModelState(string path)
             GetPrimarySource(),
             BuildStableTerritoryIds(),
             BuildStableTerritoryNames(),
-            ObjectSearchTermUtility.MergeTerms(BuildSearchTerms(), knowledgeBase.GetSearchTerms(Path)));
+            SearchTermUtility.MergeTerms(BuildSearchTerms(), knowledgeBase.GetSearchTerms(Path)));
 
     private string GetPrimarySource()
     {
@@ -105,12 +105,12 @@ internal sealed class ObservedBgModelState(string path)
             return _searchTerms;
         }
 
-        HashSet<string> searchTerms = ObjectSearchTermUtility.CreateSet(Path);
-        _ = ObjectSearchTermUtility.AddTerms(searchTerms, Sources);
-        _ = ObjectSearchTermUtility.AddPathSegments(searchTerms, Path);
+        HashSet<string> searchTerms = SearchTermUtility.CreateSet(Path);
+        _ = SearchTermUtility.AddTerms(searchTerms, Sources);
+        _ = SearchTermUtility.AddPathSegments(searchTerms, Path);
         _territoryMetadata.AddSearchTerms(searchTerms);
 
-        _searchTerms = ObjectSearchTermUtility.BuildStableTerms(searchTerms);
+        _searchTerms = SearchTermUtility.BuildStableTerms(searchTerms);
         return _searchTerms;
     }
 

@@ -3,7 +3,8 @@ using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game.Control;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine.Group;
-using Intoner.Objects.Utils;
+using Intoner.Services.Interop;
+using Intoner.Utils;
 using Microsoft.Extensions.Logging;
 using System.Numerics;
 using System.Runtime.InteropServices;
@@ -42,7 +43,7 @@ internal sealed unsafe class FurnitureEmoteGuard : IDisposable
     private ExecuteEmoteDelegate?        _executeEmoteOriginal;
     private ResolveSnapDelegate?         _snapVariantZeroOriginal;
     private ResolveSnapDelegate?         _snapVariantOneOriginal;
-    private readonly ObjectDisposalState _disposeState = new();
+    private readonly DisposalState _disposeState = new();
     private Task?                        _hookInitializationTask;
     private bool                         _hooksDisposed;
 
@@ -80,8 +81,8 @@ internal sealed unsafe class FurnitureEmoteGuard : IDisposable
     {
         try
         {
-            _snapVariantZeroHook = CreateSnapHook(ObjectSignatures.FurnitureSnapZero, ResolveSnapVariantZeroDetour);
-            _snapVariantOneHook = CreateSnapHook(ObjectSignatures.FurnitureSnapOne, ResolveSnapVariantOneDetour);
+            _snapVariantZeroHook = CreateSnapHook(IntonerSignatures.FurnitureSnapZero, ResolveSnapVariantZeroDetour);
+            _snapVariantOneHook = CreateSnapHook(IntonerSignatures.FurnitureSnapOne, ResolveSnapVariantOneDetour);
             _executeEmoteHook = CreateExecuteEmoteHook();
             _executeEmoteOriginal = _executeEmoteHook?.Original;
             _snapVariantZeroOriginal = _snapVariantZeroHook?.Original;
@@ -111,24 +112,24 @@ internal sealed unsafe class FurnitureEmoteGuard : IDisposable
 
     private Hook<ExecuteEmoteDelegate>? CreateExecuteEmoteHook()
     {
-        if (ObjectSignatures.FurnitureExecuteEmote.Address == nint.Zero)
+        if (IntonerSignatures.FurnitureExecuteEmote.Address == nint.Zero)
         {
             _logger.LogWarning("furniture emote guard could not resolve EmoteManager.ExecuteEmote from FFXIVClientStructs");
             return null;
         }
 
         // explicit layout targets bypass the wrapper snap helpers, so clear helper layouts here too
-        return ObjectInteropHookUtility.CreateHookFromAddress<ExecuteEmoteDelegate>(
+        return InteropHookUtility.CreateHookFromAddress<ExecuteEmoteDelegate>(
             _logger,
             _gameInteropProvider,
-            ObjectSignatures.FurnitureExecuteEmote,
+            IntonerSignatures.FurnitureExecuteEmote,
             ExecuteEmoteDetour);
     }
 
-    private Hook<ResolveSnapDelegate>? CreateSnapHook(ObjectSignatures.JmpCallHookTarget target, ResolveSnapDelegate detour)
+    private Hook<ResolveSnapDelegate>? CreateSnapHook(NativeRelativeBranchTarget target, ResolveSnapDelegate detour)
     {
-        nint functionAddress = ObjectNativeAddressResolver.TryResolveJmpCallTarget(_logger, _sigScanner, target);
-        return ObjectInteropHookUtility.CreateHookFromAddress(_logger, _gameInteropProvider, functionAddress, detour, target);
+        nint functionAddress = NativeAddressResolver.TryResolveJmpCallTarget(_logger, _sigScanner, target);
+        return InteropHookUtility.CreateHookFromAddress(_logger, _gameInteropProvider, functionAddress, detour, target);
     }
 
     public void RegisterInstanceTree(SharedGroupLayoutInstance* instance)
@@ -332,9 +333,9 @@ internal sealed unsafe class FurnitureEmoteGuard : IDisposable
             snapVariantOneHook  = _snapVariantOneHook;
         }
 
-        ObjectInteropHookUtility.DisposeHook(executeEmoteHook);
-        ObjectInteropHookUtility.DisposeHook(snapVariantZeroHook);
-        ObjectInteropHookUtility.DisposeHook(snapVariantOneHook);
+        InteropHookUtility.DisposeHook(executeEmoteHook);
+        InteropHookUtility.DisposeHook(snapVariantZeroHook);
+        InteropHookUtility.DisposeHook(snapVariantOneHook);
 
         lock (_trackedInstancesLock)
         {

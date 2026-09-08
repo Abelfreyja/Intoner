@@ -11,6 +11,9 @@ internal sealed class ViewportRenderer : IDisposable
     private readonly ViewportResources         _resources;
     private readonly ViewportMeshCache         _meshCache;
     private readonly GpuRenderTarget.Cache     _renderTargetCache = new();
+    private readonly D3D11DrawStateSnapshot    _drawState = new(
+        pixelConstantBufferCount: 2,
+        pixelShaderResourceViewCount: 1);
 
     private bool _disposed;
 
@@ -111,13 +114,7 @@ internal sealed class ViewportRenderer : IDisposable
 
         try
         {
-            using var state = D3D11DrawStateScope.Capture(
-                drawContext.Context,
-                pixelConstantBufferCount: 2,
-                pixelShaderResourceViewCount: 1,
-                vertexConstantBufferCount: 1,
-                vertexBufferCount: 1,
-                captureScissorRectangles: true);
+            using D3D11DrawStateSnapshot.Scope state = _drawState.Capture(drawContext.Context);
 
             ViewportDrawPass.Render(drawContext, frame);
         }
@@ -136,7 +133,9 @@ internal sealed class ViewportRenderer : IDisposable
         }
 
         _disposed = true;
-        ClearRuntimeResources();
+        ClearDeviceCaches();
+        _drawState.Dispose();
+        _resources.Dispose();
     }
 
     private bool TryGetOrUploadMesh(

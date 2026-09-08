@@ -1,8 +1,7 @@
 using Intoner.Objects.Api;
-using Intoner.Objects.Filesystem;
-using Intoner.Objects.Filesystem.Storage;
 using Intoner.Objects.Filesystem.Watching;
 using Intoner.Objects.Models;
+using Intoner.Services.Storage;
 using Microsoft.Extensions.Logging;
 
 namespace Intoner.Objects.Filesystem.Layouts;
@@ -19,11 +18,13 @@ internal interface IObjectLayoutStore : IDisposable
 
     /// <summary> writes one saved layout json file </summary>
     /// <param name="layout">the layout snapshot to write</param>
-    void SaveLayout(ObjectLayoutSnapshot layout);
+    /// <returns>true when the file was written</returns>
+    bool TrySaveLayout(ObjectLayoutSnapshot layout);
 
     /// <summary> deletes all saved layout files matching one layout id </summary>
     /// <param name="layoutId">the layout id to delete</param>
-    void DeleteLayout(Guid layoutId);
+    /// <returns>true when every matching file was deleted</returns>
+    bool TryDeleteLayout(Guid layoutId);
 }
 
 internal sealed class ObjectLayoutStore : IObjectLayoutStore
@@ -31,27 +32,26 @@ internal sealed class ObjectLayoutStore : IObjectLayoutStore
     private const string LayoutFileSearchPattern = "*.json";
 
     private static readonly TimeSpan WatchDebounceDelay = TimeSpan.FromMilliseconds(650);
-    private static readonly TimeSpan LocalChangeIgnoreWindow = TimeSpan.FromSeconds(2);
 
     private readonly ILogger<ObjectLayoutStore> _logger;
-    private readonly IObjectStoragePathService _pathService;
-    private readonly IObjectFileSystem _fileSystem;
+    private readonly IPluginStoragePaths _pathService;
+    private readonly IPluginFileSystem _fileSystem;
     private readonly IObjectFileWatchSubscription _watchSubscription;
-    private readonly Lock _localChangesLock = new();
-    private readonly Dictionary<string, DateTime> _localChangePaths = new(StringComparer.OrdinalIgnoreCase);
+    private readonly LocalObjectFileChangeTracker _localChanges;
 
     private Action? _layoutFilesChanged;
     private bool _disposed;
 
     public ObjectLayoutStore(
         ILogger<ObjectLayoutStore> logger,
-        IObjectStoragePathService pathService,
-        IObjectFileSystem fileSystem,
+        IPluginStoragePaths pathService,
+        IPluginFileSystem fileSystem,
         IObjectFileWatcherService fileWatcherService)
     {
         _logger = logger;
         _pathService = pathService;
         _fileSystem = fileSystem;
+        _localChanges = new LocalObjectFileChangeTracker(fileSystem, IsJsonPath);
 
         _fileSystem.EnsureDirectory(_pathService.ObjectLayoutsPath);
         _watchSubscription = fileWatcherService.Watch(
@@ -80,7 +80,8 @@ internal sealed class ObjectLayoutStore : IObjectLayoutStore
             }
 
             if (!layoutsById.TryGetValue(layout.Id, out ObjectLayoutSnapshot? existingLayout)
-                || layout.UpdatedAtUtc >= existingLayout.UpdatedAtUtc)
+                || layout.Revision > existingLayout.Revision
+                || layout.Revision == existingLayout.Revision && layout.UpdatedAtUtc >= existingLayout.UpdatedAtUtc)
             {
                 layoutsById[layout.Id] = layout;
             }
@@ -92,36 +93,47 @@ internal sealed class ObjectLayoutStore : IObjectLayoutStore
             .ToList();
     }
 
-    public void SaveLayout(ObjectLayoutSnapshot layout)
+    public bool TrySaveLayout(ObjectLayoutSnapshot layout)
     {
         string path = BuildLayoutPath(layout.Id);
+        string contents = ObjectLayoutJsonSerializer.SerializeLayout(layout);
         try
         {
-            MarkLocalChange(path);
-            _fileSystem.WriteAllTextAtomic(path, ObjectLayoutJsonSerializer.SerializeLayout(layout));
+            _localChanges.TrackWrite(path, contents);
+            _fileSystem.WriteAllTextAtomic(path, contents);
+            return true;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "failed to save object layout file {Path}", path);
+            _localChanges.Forget(path);
+            return false;
         }
     }
 
-    public void DeleteLayout(Guid layoutId)
+    public bool TryDeleteLayout(Guid layoutId)
     {
         string canonicalPath = BuildLayoutPath(layoutId);
-        DeleteLayoutFile(canonicalPath, duplicate: false);
-
+        List<string> duplicatePaths = [];
         foreach (string path in EnumerateLayoutFiles())
         {
-            if (ObjectFilePathUtility.PathsMatch(path, canonicalPath)
-                || !TryLoadLayout(path, out ObjectLayoutSnapshot layout)
-                || layout.Id != layoutId)
+            if (!ObjectFilePathUtility.PathsMatch(path, canonicalPath)
+                && TryLoadLayout(path, out ObjectLayoutSnapshot layout)
+                && layout.Id == layoutId)
             {
-                continue;
+                duplicatePaths.Add(path);
             }
-
-            DeleteLayoutFile(path, duplicate: true);
         }
+
+        foreach (string path in duplicatePaths.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (!TryDeleteLayoutFile(path))
+            {
+                return false;
+            }
+        }
+
+        return TryDeleteLayoutFile(canonicalPath);
     }
 
     public void Dispose()
@@ -173,33 +185,30 @@ internal sealed class ObjectLayoutStore : IObjectLayoutStore
         }
     }
 
-    private void DeleteLayoutFile(string path, bool duplicate)
+    private bool TryDeleteLayoutFile(string path)
     {
         if (!_fileSystem.FileExists(path))
         {
-            return;
+            return true;
         }
 
-        MarkLocalChange(path);
+        _localChanges.TrackDelete(path);
         try
         {
             _fileSystem.DeleteFile(path);
+            return true;
         }
         catch (Exception ex)
         {
-            if (duplicate)
-            {
-                _logger.LogWarning(ex, "failed to delete duplicate object layout file {Path}", path);
-                return;
-            }
-
             _logger.LogWarning(ex, "failed to delete object layout file {Path}", path);
+            _localChanges.Forget(path);
+            return false;
         }
     }
 
     private void HandleLayoutFileChanges(IReadOnlyList<ObjectFileChange> changes)
     {
-        if (_disposed || changes.Count == 0 || ShouldIgnoreChanges(changes))
+        if (_disposed || changes.Count == 0 || !_localChanges.HasExternalChanges(changes))
         {
             return;
         }
@@ -207,69 +216,11 @@ internal sealed class ObjectLayoutStore : IObjectLayoutStore
         _layoutFilesChanged?.Invoke();
     }
 
-    private bool ShouldIgnoreChanges(IReadOnlyList<ObjectFileChange> changes)
-    {
-        DateTime now = DateTime.UtcNow;
-        lock (_localChangesLock)
-        {
-            RemoveExpiredLocalChanges(now);
-            foreach (ObjectFileChange change in changes)
-            {
-                if (IsExternalChange(change))
-                {
-                    return false;
-                }
-            }
-
-            return true;
-        }
-    }
-
-    private bool IsExternalChange(ObjectFileChange change)
-    {
-        if (!IsLocalChange(change.Path))
-        {
-            return true;
-        }
-
-        return HasExternalOldPath(change);
-    }
-
-    private bool HasExternalOldPath(ObjectFileChange change)
-    {
-        if (string.IsNullOrWhiteSpace(change.OldPath) || !IsJsonPath(change.OldPath))
-        {
-            return false;
-        }
-
-        return !IsLocalChange(change.OldPath);
-    }
-
-    private bool IsLocalChange(string path)
-        => _localChangePaths.ContainsKey(ObjectFilePathUtility.NormalizeFullPath(path));
-
     private static bool IsJsonPath(string path)
         => string.Equals(Path.GetExtension(path), ".json", StringComparison.OrdinalIgnoreCase);
 
-    private void MarkLocalChange(string path)
-    {
-        DateTime now = DateTime.UtcNow;
-        lock (_localChangesLock)
-        {
-            RemoveExpiredLocalChanges(now);
-            _localChangePaths[ObjectFilePathUtility.NormalizeFullPath(path)] = now + LocalChangeIgnoreWindow;
-        }
-    }
-
-    private void RemoveExpiredLocalChanges(DateTime now)
-    {
-        foreach (string path in _localChangePaths.Where(entry => entry.Value <= now).Select(static entry => entry.Key).ToArray())
-        {
-            _localChangePaths.Remove(path);
-        }
-    }
-
     private string BuildLayoutPath(Guid layoutId)
         => Path.Combine(_pathService.ObjectLayoutsPath, $"{layoutId:D}.json");
+
 }
 

@@ -1,4 +1,3 @@
-using System.Runtime.InteropServices;
 using Dalamud.Interface;
 using Microsoft.Extensions.Logging;
 using SharpDX.Direct3D11;
@@ -41,7 +40,7 @@ internal abstract class GpuUiDeviceResourceHost : IDisposable
     protected bool TryEnsureDevice(out bool resetDeviceResources)
     {
         resetDeviceResources = false;
-        if (_disposed || !OperatingSystem.IsWindows())
+        if (_disposed || !Interop.RuntimePlatform.IsWindowsRuntime)
         {
             return false;
         }
@@ -68,8 +67,7 @@ internal abstract class GpuUiDeviceResourceHost : IDisposable
 
         try
         {
-            Marshal.AddRef(deviceHandle);
-            _device       = new Device(deviceHandle);
+            _device       = D3D11ComReference.RetainDevice(deviceHandle, _uiBuilder);
             _context      = _device.ImmediateContext;
             _deviceHandle = deviceHandle;
 
@@ -96,12 +94,27 @@ internal abstract class GpuUiDeviceResourceHost : IDisposable
     protected void ClearDeviceResources()
     {
         _resetRequested = false;
-        DisposeDeviceResources();
-        _context?.Dispose();
+        DeviceContext? context = _context;
+        Device? device = _device;
         _context = null;
-        _device?.Dispose();
         _device = null;
         _deviceHandle = nint.Zero;
+
+        try
+        {
+            DisposeDeviceResources();
+        }
+        finally
+        {
+            try
+            {
+                context?.Dispose();
+            }
+            finally
+            {
+                device?.Dispose();
+            }
+        }
     }
 
     public void Dispose()

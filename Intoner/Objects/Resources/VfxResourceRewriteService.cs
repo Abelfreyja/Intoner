@@ -3,6 +3,8 @@ using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.System.Resource.Handle;
 using Intoner.Objects.Assets;
 using Intoner.Objects.Utils;
+using Intoner.Services.Interop;
+using Intoner.Utils;
 using Microsoft.Extensions.Logging;
 
 namespace Intoner.Objects.Resources;
@@ -36,7 +38,7 @@ internal sealed unsafe class VfxResourceRewriteService : IVfxResourceRewriteServ
     private readonly ActiveRewritePathRegistry _activePaths = new();
     private readonly Hook<VfxResourceBufferLoadDelegate>? _vfxResourceBufferLoadHook;
     private readonly ObjectLockedOnce _enableOnce = new();
-    private readonly ObjectDisposalState _disposeState = new();
+    private readonly DisposalState _disposeState = new();
 
     public VfxResourceRewriteService(
         ILogger<VfxResourceRewriteService> logger,
@@ -44,11 +46,11 @@ internal sealed unsafe class VfxResourceRewriteService : IVfxResourceRewriteServ
         ISigScanner sigScanner)
     {
         _logger = logger;
-        _vfxResourceBufferLoadHook = ObjectInteropHookUtility.CreateHook<VfxResourceBufferLoadDelegate>(
+        _vfxResourceBufferLoadHook = InteropHookUtility.CreateHook<VfxResourceBufferLoadDelegate>(
             _logger,
             gameInteropProvider,
             sigScanner,
-            ObjectSignatures.AvfxResourceBufferLoadHook,
+            IntonerSignatures.AvfxResourceBufferLoadHook,
             VfxResourceBufferLoadDetour);
     }
 
@@ -59,7 +61,7 @@ internal sealed unsafe class VfxResourceRewriteService : IVfxResourceRewriteServ
             return;
         }
 
-        ObjectInteropHookUtility.DisposeHook(_vfxResourceBufferLoadHook);
+        InteropHookUtility.DisposeHook(_vfxResourceBufferLoadHook);
         _activePaths.Clear();
     }
 
@@ -191,7 +193,7 @@ internal sealed unsafe class VfxResourceRewriteService : IVfxResourceRewriteServ
 
     private bool IsActiveAvfxPath(string path, out string activePath)
     {
-        activePath = ObjectStringUtility.TrimOrEmpty(path);
+        activePath = TextUtility.TrimOrEmpty(path);
         return activePath.Length > 0
             && GameAssetPathRules.IsFileKind(activePath, GameAssetFileKind.Avfx)
             && IsActivePath(activePath);
@@ -258,7 +260,7 @@ internal sealed unsafe class VfxResourceRewriteService : IVfxResourceRewriteServ
 
     private static void AddAvfxPath(HashSet<string> paths, string path)
     {
-        string normalizedPath = ObjectStringUtility.TrimOrEmpty(path);
+        string normalizedPath = TextUtility.TrimOrEmpty(path);
         if (normalizedPath.Length == 0
          || !GameAssetPathRules.IsFileKind(normalizedPath, GameAssetFileKind.Avfx))
         {

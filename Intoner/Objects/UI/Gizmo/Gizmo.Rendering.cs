@@ -31,12 +31,21 @@ internal sealed partial class Gizmo
         var index = GizmoAxisUtility.ToIndex(axis);
         if (index < 0)
         {
-            return EditorColors.Text;
+            return ThemeColors.Text;
         }
 
         var baseColor = EditorColors.GizmoAxisBase(axis);
-        var intensity = isActive ? 1.35f : isHovered ? 1.15f : 0.95f;
-        return EditorColors.Color(
+        float intensity = 0.95f;
+        if (isActive)
+        {
+            intensity = 1.35f;
+        }
+        else if (isHovered)
+        {
+            intensity = 1.15f;
+        }
+
+        return ThemeColors.Color(
             MathF.Min(baseColor.X * intensity, 1f),
             MathF.Min(baseColor.Y * intensity, 1f),
             MathF.Min(baseColor.Z * intensity, 1f),
@@ -48,11 +57,11 @@ internal sealed partial class Gizmo
         var index = GizmoAxisUtility.ToIndex(axis);
         if (index < 0)
         {
-            return EditorColors.Color(0f, 0f, 0f, 0.2f);
+            return ThemeColors.Color(0f, 0f, 0f, 0.2f);
         }
 
         var baseColor = EditorColors.GizmoAxisBase(axis);
-        return EditorColors.Color(baseColor.X, baseColor.Y, baseColor.Z, isActive ? 0.45f : 0.25f);
+        return ThemeColors.Color(baseColor.X, baseColor.Y, baseColor.Z, isActive ? 0.45f : 0.25f);
     }
 
     private static Vector4 GetAxisBackgroundColorVector(GizmoAxis axis, bool isActive)
@@ -60,11 +69,11 @@ internal sealed partial class Gizmo
         var index = GizmoAxisUtility.ToIndex(axis);
         if (index < 0)
         {
-            return EditorColors.TextDisabled;
+            return ThemeColors.TextDisabled;
         }
 
         var baseColor = EditorColors.GizmoAxisBase(axis);
-        return EditorColors.Color(baseColor.X, baseColor.Y, baseColor.Z, isActive ? 0.45f : 0.20f);
+        return ThemeColors.Color(baseColor.X, baseColor.Y, baseColor.Z, isActive ? 0.45f : 0.20f);
     }
 
     private static float ResolveGizmoAlpha(bool isFocused)
@@ -105,7 +114,7 @@ internal sealed partial class Gizmo
         var rectMin = position;
         var rectMax = position + boxSize;
 
-        drawList.AddRectFilled(rectMin, rectMax, ImGui.GetColorU32(EditorColors.Color(0f, 0f, 0f, 0.55f)), 4f * scale);
+        drawList.AddRectFilled(rectMin, rectMax, ImGui.GetColorU32(ThemeColors.Color(0f, 0f, 0f, 0.55f)), 4f * scale);
         var textPos = rectMin + padding;
         drawList.AddText(textPos, ImGui.GetColorU32(ImGuiCol.Text), text);
         DrawModifierIndicatorRow(drawList, textPos, textSize, scale);
@@ -136,7 +145,7 @@ internal sealed partial class Gizmo
 
     private static void DrawAxisArrowhead(DrawBatch batch, GizmoAxisVisualState state, float scale, Vector4 axisColor)
     {
-        if (!ObjectMathUtility.TryNormalize(state.ScreenDirection, out var direction))
+        if (!NumericsUtility.TryNormalize(state.ScreenDirection, out var direction))
         {
             return;
         }
@@ -150,7 +159,7 @@ internal sealed partial class Gizmo
         var right = basePoint - (normal * arrowWidth);
 
         batch.AddScreenTriangle(tip, left, right, axisColor);
-        var outlineColor = EditorColors.Color(axisColor.X, axisColor.Y, axisColor.Z, MathF.Min(axisColor.W + 0.15f, 1f));
+        var outlineColor = ThemeColors.Color(axisColor.X, axisColor.Y, axisColor.Z, MathF.Min(axisColor.W + 0.15f, 1f));
         batch.AddScreenLine(tip, left, outlineColor, 1.1f * scale);
         batch.AddScreenLine(left, right, outlineColor, 1.1f * scale);
         batch.AddScreenLine(right, tip, outlineColor, 1.1f * scale);
@@ -160,19 +169,27 @@ internal sealed partial class Gizmo
     {
         var half = new Vector2(GizmoConstants.ScaleHandleSize * scale * 0.5f);
         var highlight = isActive || isHovered;
-        var fillColor = EditorColors.Color(axisColor.X, axisColor.Y, axisColor.Z, highlight ? 0.95f : 0.65f);
+        var fillColor = ThemeColors.Color(axisColor.X, axisColor.Y, axisColor.Z, highlight ? 0.95f : 0.65f);
         batch.AddScreenRectFilled(position - half, position + half, fillColor);
-        batch.AddScreenRect(position - half, position + half, EditorColors.Color(axisColor.X, axisColor.Y, axisColor.Z, 0.95f), 1f * scale);
+        batch.AddScreenRect(position - half, position + half, ThemeColors.Color(axisColor.X, axisColor.Y, axisColor.Z, 0.95f), 1f * scale);
     }
 
-    private static void DrawAxisLabel(ImDrawListPtr drawList, GizmoAxisVisualState state, float scale, Vector4 axisColor, string label, bool isActive, bool isHovered)
+    private static void DrawAxisLabel(
+        ImDrawListPtr drawList,
+        GizmoAxisVisualState state,
+        float scale,
+        Vector4 axisColor,
+        string label,
+        bool isActive,
+        bool isHovered,
+        in GizmoDrawOptions options)
     {
         if (string.IsNullOrEmpty(label))
         {
             return;
         }
 
-        var direction = !ObjectMathUtility.TryNormalize(state.ScreenDirection, out var normalizedDirection)
+        var direction = !NumericsUtility.TryNormalize(state.ScreenDirection, out var normalizedDirection)
             ? Vector2.UnitX
             : normalizedDirection;
         var center = state.ScreenEnd + (direction * GizmoConstants.AxisLabelDistance * scale);
@@ -180,24 +197,35 @@ internal sealed partial class Gizmo
         var padding = new Vector2(GizmoConstants.AxisLabelPadding * scale);
         var rectMin = center - (textSize * 0.5f) - padding;
         var rectMax = center + (textSize * 0.5f) + padding;
-        var backgroundColor = EditorColors.Color(axisColor.X, axisColor.Y, axisColor.Z, isActive || isHovered ? 0.95f : 0.70f);
+        if (!options.CanDrawLabel(rectMin, rectMax))
+        {
+            return;
+        }
+
+        var backgroundColor = ThemeColors.Color(axisColor.X, axisColor.Y, axisColor.Z, isActive || isHovered ? 0.95f : 0.70f);
         var textColor = isActive || isHovered
-            ? EditorColors.Color(0f, 0f, 0f, 0.95f)
-            : EditorColors.Color(0.05f, 0.05f, 0.05f, 0.90f);
+            ? ThemeColors.Color(0f, 0f, 0f, 0.95f)
+            : ThemeColors.Color(0.05f, 0.05f, 0.05f, 0.90f);
 
         drawList.AddRectFilled(rectMin, rectMax, ImGui.GetColorU32(backgroundColor), GizmoConstants.AxisLabelRoundness * scale);
-        drawList.AddRect(rectMin, rectMax, ImGui.GetColorU32(EditorColors.Color(axisColor.X, axisColor.Y, axisColor.Z, 0.95f)), GizmoConstants.AxisLabelRoundness * scale, ImDrawFlags.None, 1.05f * scale);
+        drawList.AddRect(rectMin, rectMax, ImGui.GetColorU32(ThemeColors.Color(axisColor.X, axisColor.Y, axisColor.Z, 0.95f)), GizmoConstants.AxisLabelRoundness * scale, ImDrawFlags.None, 1.05f * scale);
         drawList.AddText(center - (textSize * 0.5f), ImGui.GetColorU32(textColor), label);
     }
 
     private static void DrawCircularCenterHandle(DrawBatch batch, Vector2 screenPos, float scale, bool isHovered, bool isActive, bool alignToSurfaceNormal)
     {
         var radius = GizmoConstants.CenterPointRadius * scale;
-        var fillColor = isActive
-            ? EditorColors.Color(1f, 1f, 1f, 1f)
-            : isHovered
-                ? EditorColors.Color(1f, 1f, 1f, 0.98f)
-                : EditorColors.Color(1f, 1f, 1f, 0.95f);
+        float fillOpacity = 0.95f;
+        if (isActive)
+        {
+            fillOpacity = 1f;
+        }
+        else if (isHovered)
+        {
+            fillOpacity = 0.98f;
+        }
+
+        var fillColor = ThemeColors.Color(1f, 1f, 1f, fillOpacity);
         batch.AddScreenCircleFilled(screenPos, radius, fillColor, 32);
 
         if (!isHovered && !isActive)
@@ -206,8 +234,8 @@ internal sealed partial class Gizmo
         }
 
         var accentColor = alignToSurfaceNormal
-            ? EditorColors.AccentGreen
-            : EditorColors.AccentBlue;
+            ? ThemeColors.AccentGreen
+            : ThemeColors.AccentBlue;
         accentColor.W = isActive ? 0.95f : 0.80f;
         batch.AddScreenCircle(
             screenPos,
@@ -217,7 +245,11 @@ internal sealed partial class Gizmo
             48);
     }
 
-    private void DrawGizmoLabel(ImDrawListPtr drawList, in GizmoContext context, float scale)
+    private void DrawGizmoLabel(
+        ImDrawListPtr drawList,
+        in GizmoContext context,
+        float scale,
+        in GizmoDrawOptions options)
     {
         var modeLabel = Mode switch
         {
@@ -229,19 +261,24 @@ internal sealed partial class Gizmo
 
         var labelRoot = context.SelectionCount == 1
             ? context.PrimarySnapshot.Name
-            : $"{context.SelectionCount} objects";
+            : $"{context.SelectionCount} items";
         var label = string.IsNullOrEmpty(modeLabel)
             ? labelRoot
             : $"{labelRoot} [{modeLabel}]";
         var textSize = ImGui.CalcTextSize(label);
         var textPos = context.ScreenPos + new Vector2((GizmoConstants.CenterPointRadius * scale) + (6f * scale), -(textSize.Y * 0.5f));
+        if (!options.CanDrawLabel(textPos, textPos + textSize))
+        {
+            return;
+        }
+
         drawList.AddText(textPos, ImGui.GetColorU32(ImGuiCol.Text), label);
     }
 
     private static float ResolveRotationInteractionRadius(in RotationProjectionContext projection, float scale)
         => projection.VisualRadius + (GizmoConstants.RotationInteractionPadding * scale);
 
-    private void DrawRotationAxes(
+    private static void DrawRotationAxes(
         DrawBatch batch,
         in RotationProjectionContext projection,
         float scale,
@@ -268,7 +305,7 @@ internal sealed partial class Gizmo
         }
     }
 
-    private void DrawRotationAxisPath(
+    private static void DrawRotationAxisPath(
         DrawBatch batch,
         in RotationProjectionContext projection,
         float thickness,
@@ -375,7 +412,7 @@ internal sealed partial class Gizmo
         }
 
         var deltaRadians = RotationDragState.RotationDragAppliedRadians;
-        if (ObjectMathUtility.IsNearlyZero(deltaRadians, 0.0001f))
+        if (NumericsUtility.IsNearlyZero(deltaRadians, 0.0001f))
         {
             return;
         }
@@ -384,8 +421,8 @@ internal sealed partial class Gizmo
         var axisDirection = ResolveAxisWorldDirection(RotationDragState.ActiveAxis, projection.Rotation, projection.UseWorldSpace);
         var rotationMathProjection = CreateRotationMathProjection(projection);
         var highlightColor = EditorColors.GizmoRotationDragHighlight;
-        var fillColor = EditorColors.WithAlpha(highlightColor, GizmoConstants.RotationHighlightSectorFillAlpha);
-        var boundaryColor = EditorColors.WithAlpha(highlightColor, GizmoConstants.RotationHighlightSectorBoundaryAlpha);
+        var fillColor = ThemeColors.WithAlpha(highlightColor, GizmoConstants.RotationHighlightSectorFillAlpha);
+        var boundaryColor = ThemeColors.WithAlpha(highlightColor, GizmoConstants.RotationHighlightSectorBoundaryAlpha);
         var arcThickness = GizmoConstants.RotationRingThickness * scale * GizmoConstants.RotationHighlightThicknessMultiplier;
         var boundaryThickness = GizmoConstants.AxisLineThickness * scale * GizmoConstants.RotationHighlightSectorBoundaryThicknessMultiplier;
         Span<Vector2> projectedPoints = stackalloc Vector2[steps + 1];
@@ -500,7 +537,7 @@ internal sealed partial class Gizmo
         batch.AddScreenLine(center, point, color, thickness);
     }
 
-    private void DrawRotationSnapTicks(
+    private static void DrawRotationSnapTicks(
         DrawBatch batch,
         in RotationProjectionContext projection,
         float scale,
@@ -520,8 +557,8 @@ internal sealed partial class Gizmo
         var tickHalfLength = GizmoConstants.RotationSnapTickLength * scale * 0.5f;
         var majorTickHalfLength = GizmoConstants.RotationSnapMajorTickLength * scale * 0.5f;
         var tickThickness = GizmoConstants.RotationSnapTickThickness * scale;
-        var visibleColor = EditorColors.Color(0f, 0f, 0f, GizmoConstants.RotationSnapTickAlpha);
-        var hiddenColor = EditorColors.Color(0f, 0f, 0f, GizmoConstants.RotationSnapTickHiddenAlpha);
+        var visibleColor = ThemeColors.Color(0f, 0f, 0f, GizmoConstants.RotationSnapTickAlpha);
+        var hiddenColor = ThemeColors.Color(0f, 0f, 0f, GizmoConstants.RotationSnapTickHiddenAlpha);
         var majorStepRadians = MathF.PI * 0.5f;
 
         for (var index = 0; index < tickCount; ++index)
@@ -538,14 +575,14 @@ internal sealed partial class Gizmo
             }
 
             var radial = projected - projection.Center;
-            if (!ObjectMathUtility.TryNormalize(radial, out var radialDirection))
+            if (!NumericsUtility.TryNormalize(radial, out var radialDirection))
             {
                 continue;
             }
 
             var normalizedAngle = GizmoRotationMath.NormalizeAngle(angle - angleOffset);
             var majorStepIndex = normalizedAngle / majorStepRadians;
-            var isMajorTick = ObjectMathUtility.IsNearlyEqual(majorStepIndex, MathF.Round(majorStepIndex), 0.001f);
+            var isMajorTick = NumericsUtility.IsNearlyEqual(majorStepIndex, MathF.Round(majorStepIndex), 0.001f);
             var currentTickHalfLength = isMajorTick ? majorTickHalfLength : tickHalfLength;
             batch.AddScreenLine(
                 projected - (radialDirection * currentTickHalfLength),
@@ -591,7 +628,7 @@ internal sealed partial class Gizmo
 
     private static void DrawModifierIndicatorIcon(ImDrawListPtr drawList, Vector2 position, float fontSize, string icon)
     {
-        drawList.AddText(UiBuilder.IconFont, fontSize, position, ImGui.GetColorU32(EditorColors.Color(1f, 1f, 1f, 0.55f)), icon);
+        drawList.AddText(UiBuilder.IconFont, fontSize, position, ImGui.GetColorU32(ThemeColors.Color(1f, 1f, 1f, 0.55f)), icon);
     }
 
     private static Vector2 ResolveDragMetricsPosition(Vector2 referencePosition, Vector2 boxSize, float scale)

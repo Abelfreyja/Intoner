@@ -62,15 +62,15 @@ internal static class IntegerSlider
         Vector2 fillMax = new(fillX, trackMax.Y);
         Vector2 thumbCenter = new(fillX, trackY + (trackHeight * 0.5f));
         float thumbRadius = Scaled(ThumbRadius) + (active ? scale : 0f);
-        Vector4 trackFill = EditorColors.ButtonDefault with { W = enabled ? 0.46f : 0.18f };
-        Vector4 trackBorder = EditorColors.Border with { W = enabled ? 0.26f : 0.12f };
+        Vector4 trackFill = ThemeColors.ButtonDefault with { W = enabled ? 0.46f : 0.18f };
+        Vector4 trackBorder = ThemeColors.Border with { W = enabled ? 0.26f : 0.12f };
         Vector4 activeFill = accent with { W = enabled ? (active ? 0.92f : 0.68f) : 0.24f };
         Vector4 thumbFill = enabled
             ? accent with { W = active ? 1f : 0.88f }
-            : EditorColors.TextDisabled with { W = 0.34f };
+            : ThemeColors.TextDisabled with { W = 0.34f };
         Vector4 thumbBorder = hovered || active
-            ? EditorColors.Text with { W = enabled ? 0.72f : 0.22f }
-            : EditorColors.Border with { W = enabled ? 0.42f : 0.14f };
+            ? ThemeColors.Text with { W = enabled ? 0.72f : 0.22f }
+            : ThemeColors.Border with { W = enabled ? 0.42f : 0.14f };
         ImDrawListPtr drawList = ImGui.GetWindowDrawList();
         float rounding = trackHeight * 0.5f;
 

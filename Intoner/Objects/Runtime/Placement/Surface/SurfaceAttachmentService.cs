@@ -1,6 +1,7 @@
 using Intoner.Objects.Catalog;
 using Intoner.Objects.Models;
 using Intoner.Objects.Utils;
+using Intoner.Scene;
 using System.Numerics;
 using OrientedBounds = FFXIVClientStructs.FFXIV.Common.Math.OrientedBounds;
 
@@ -17,7 +18,7 @@ internal sealed class SurfaceAttachmentService(FurnitureMetadataResolver metadat
 
     public ObjectSnapshot ApplySurfaceDragAttachment(
         ObjectSnapshot snapshot,
-        ObjectSurfaceHit? hit,
+        SceneSurfaceHit? hit,
         IReadOnlyList<ObjectBoundsSnapshot> boundsSnapshots)
     {
         if (!TryResolveSurfaceDragAttachment(snapshot, hit, boundsSnapshots, out FurnitureModel furnitureModel, out Guid? parentId)
@@ -37,7 +38,7 @@ internal sealed class SurfaceAttachmentService(FurnitureMetadataResolver metadat
 
     public bool HasSurfaceDragAttachmentChange(
         ObjectSnapshot snapshot,
-        ObjectSurfaceHit hit,
+        SceneSurfaceHit hit,
         IReadOnlyList<ObjectBoundsSnapshot> boundsSnapshots)
         => TryResolveSurfaceDragAttachment(snapshot, hit, boundsSnapshots, out FurnitureModel furnitureModel, out Guid? parentId)
            && furnitureModel.AttachmentParentId != parentId;
@@ -166,7 +167,7 @@ internal sealed class SurfaceAttachmentService(FurnitureMetadataResolver metadat
             return false;
         }
 
-        ObjectTransform transform = snapshot.Transform with
+        SceneTransform transform = snapshot.Transform with
         {
             Position = snapshot.Transform.Position + (Vector3.UnitY * (parentTop - childBottom)),
         };
@@ -234,7 +235,7 @@ internal sealed class SurfaceAttachmentService(FurnitureMetadataResolver metadat
 
     private bool TryResolveSurfaceDragAttachment(
         ObjectSnapshot snapshot,
-        ObjectSurfaceHit? hit,
+        SceneSurfaceHit? hit,
         IReadOnlyList<ObjectBoundsSnapshot> boundsSnapshots,
         out FurnitureModel furnitureModel,
         out Guid? parentId)
@@ -256,15 +257,15 @@ internal sealed class SurfaceAttachmentService(FurnitureMetadataResolver metadat
 
     private static bool TryResolveSurfaceParent(
         HousingPlacementSurface surface,
-        ObjectSurfaceHit hit,
+        SceneSurfaceHit hit,
         Guid childObjectId,
         IReadOnlyList<ObjectBoundsSnapshot> boundsSnapshots,
         out Guid targetObjectId)
     {
         targetObjectId = Guid.Empty;
-        if (!hit.HasObjectTarget
-            || hit.TargetObjectId == childObjectId
-            || !TryFindBoundsSnapshot(boundsSnapshots, hit.TargetObjectId, out ObjectBoundsSnapshot? targetBounds)
+        if (!hit.HasItemTarget
+            || hit.TargetItemId == childObjectId
+            || !TryFindBoundsSnapshot(boundsSnapshots, hit.TargetItemId, out ObjectBoundsSnapshot? targetBounds)
             || targetBounds is null
             || targetBounds.Kind != ObjectKind.Furniture
             || !IsParentSurfaceHit(surface, hit, targetBounds))
@@ -272,20 +273,20 @@ internal sealed class SurfaceAttachmentService(FurnitureMetadataResolver metadat
             return false;
         }
 
-        targetObjectId = hit.TargetObjectId;
+        targetObjectId = hit.TargetItemId;
         return true;
     }
 
     private static bool IsParentSurfaceHit(
         HousingPlacementSurface surface,
-        ObjectSurfaceHit hit,
+        SceneSurfaceHit hit,
         ObjectBoundsSnapshot targetBounds)
         => PlacementSurfacePolicy.SupportsObjectSurface(targetBounds.PlacementSurfaceSupport, surface)
            && (surface == HousingPlacementSurface.Wall
             ? IsParentWallSurfaceHit(hit, targetBounds)
             : IsParentTabletopSurfaceHit(hit, targetBounds));
 
-    private static bool IsParentTabletopSurfaceHit(ObjectSurfaceHit hit, ObjectBoundsSnapshot targetBounds)
+    private static bool IsParentTabletopSurfaceHit(SceneSurfaceHit hit, ObjectBoundsSnapshot targetBounds)
     {
         if (hit.Normal.Y < ParentTabletopNormalThreshold
             || !TryResolveVerticalRange(targetBounds, out _, out float parentTop))
@@ -296,7 +297,7 @@ internal sealed class SurfaceAttachmentService(FurnitureMetadataResolver metadat
         return MathF.Abs(hit.Point.Y - parentTop) <= ParentSurfaceBoundsTolerance;
     }
 
-    private static bool IsParentWallSurfaceHit(ObjectSurfaceHit hit, ObjectBoundsSnapshot targetBounds)
+    private static bool IsParentWallSurfaceHit(SceneSurfaceHit hit, ObjectBoundsSnapshot targetBounds)
         => WallPlacementGeometry.IsWallSurfaceNormal(hit.Normal)
            && WallPlacementGeometry.ContainsWallSurfacePoint(
                targetBounds,
@@ -363,12 +364,12 @@ internal sealed class SurfaceAttachmentService(FurnitureMetadataResolver metadat
         {
             Vector3 center = localBounds.Transform.Translation;
             contactCenter = new Vector3(center.X, contactY, center.Z);
-            return ObjectMathUtility.IsFinite(contactCenter);
+            return NumericsUtility.IsFinite(contactCenter);
         }
 
         Vector3 boundsCenter = (boundsSnapshot.Min + boundsSnapshot.Max) * 0.5f;
         contactCenter = new Vector3(boundsCenter.X, contactY, boundsCenter.Z);
-        return ObjectMathUtility.IsFinite(contactCenter);
+        return NumericsUtility.IsFinite(contactCenter);
     }
 
     private static bool ContainsParentSurfacePoint(ObjectBoundsSnapshot parentBounds, Vector3 worldPoint)

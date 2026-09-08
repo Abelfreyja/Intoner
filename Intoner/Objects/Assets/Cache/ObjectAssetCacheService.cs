@@ -1,4 +1,4 @@
-using Intoner.Objects.Filesystem.Storage;
+using Intoner.Services.Storage;
 using Microsoft.Extensions.Logging;
 using System.Text.Json;
 
@@ -32,22 +32,19 @@ internal sealed class ObjectAssetCacheService : IObjectAssetCacheService
     };
 
     private readonly ILogger<ObjectAssetCacheService> _logger;
-    private readonly IObjectStoragePathService _pathService;
-    private readonly IObjectFileSystem _fileSystem;
-    private readonly ObjectAssetCacheSerializer _serializer;
+    private readonly IPluginStoragePaths _pathService;
+    private readonly IPluginFileSystem _fileSystem;
     private readonly ObjectAssetCachePayloadReader _payloadReader;
 
     public ObjectAssetCacheService(
         ILogger<ObjectAssetCacheService> logger,
-        IObjectStoragePathService pathService,
-        IObjectFileSystem fileSystem,
-        ObjectAssetCacheSerializer serializer,
+        IPluginStoragePaths pathService,
+        IPluginFileSystem fileSystem,
         ObjectAssetCachePayloadReader payloadReader)
     {
         _logger = logger;
         _pathService = pathService;
         _fileSystem = fileSystem;
-        _serializer = serializer;
         _payloadReader = payloadReader;
     }
 
@@ -146,7 +143,7 @@ internal sealed class ObjectAssetCacheService : IObjectAssetCacheService
                 return ObjectAssetCacheLoadResult.Empty;
             }
 
-            ObjectAssetCacheSnapshot snapshot = _serializer.Deserialize(manifest, loadedSectionPayloads);
+            ObjectAssetCacheSnapshot snapshot = ObjectAssetCacheSerializer.Deserialize(manifest, loadedSectionPayloads);
             _logger.LogInformation(
                 "loaded object asset cache sections {LoadedSections} with {StaticCollisionCount} static collision paths, {StaticBgObjectCount} static bg objects, {StaticVfxCount} static resolved vfx paths, {BgModelCount} bg models, {VfxCount} standalone vfx assets, and {TimelinePathCount} timeline referenced vfx paths",
                 loadedSections,
@@ -180,13 +177,13 @@ internal sealed class ObjectAssetCacheService : IObjectAssetCacheService
             }
         }
 
-        foreach ((ObjectAssetCacheSectionKind kind, ObjectAssetCacheSerializer.ObjectAssetCacheSectionPayload section) in _serializer.SerializeSections(request))
+        foreach ((ObjectAssetCacheSectionKind kind, ObjectAssetCacheSerializer.ObjectAssetCacheSectionPayload section) in ObjectAssetCacheSerializer.SerializeSections(request))
         {
             mergedSections[kind] = section;
         }
 
-        ObjectAssetCacheSerializer.ObjectAssetCacheSerializedData serializedData = _serializer.BuildSerializedData(mergedSections);
-        ObjectAssetCacheManifest manifest = _serializer.BuildManifest(
+        ObjectAssetCacheSerializer.ObjectAssetCacheSerializedData serializedData = ObjectAssetCacheSerializer.BuildSerializedData(mergedSections);
+        ObjectAssetCacheManifest manifest = ObjectAssetCacheSerializer.BuildManifest(
             request.GameVersion,
             request.SqpackIndexFingerprint,
             serializedData);

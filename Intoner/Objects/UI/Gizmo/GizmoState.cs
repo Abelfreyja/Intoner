@@ -1,6 +1,6 @@
-using Intoner.Objects.Models;
-using Intoner.Objects.Runtime;
-using Intoner.Objects.UI.Services;
+using Intoner.Objects.Utils;
+using Intoner.Scene;
+using Intoner.Services.Input;
 using System.Numerics;
 
 namespace Intoner.Objects.UI;
@@ -22,7 +22,7 @@ internal sealed class GizmoState
 
     public GizmoSurfaceDragSession SurfaceDrag { get; } = new();
 
-    public IGameInputSuppressionLease? SurfaceDragInputSuppressionLease { get; set; }
+    public IKeyboardInputLease? SurfaceDragKeyboardInputLease { get; set; }
 
     public Vector2 WheelCenter { get; private set; }
 
@@ -58,22 +58,24 @@ internal sealed class GizmoState
         => InvalidateCachedFrame();
 
     public void BeginSurfaceDrag(
-        IReadOnlyList<ObjectSnapshot> selectedSnapshots,
-        IReadOnlyList<ObjectBoundsSnapshot> boundsSnapshots,
-        ObjectSnapshot primarySnapshot,
+        IReadOnlyList<SceneItemSnapshot> selectedSnapshots,
+        SceneItemBoundsLookup boundsLookup,
+        SceneItemSnapshot primarySnapshot,
         Vector3 pivotPosition,
-        ObjectSurfaceTargetSnapshot surfaceTargets,
-        bool objectTargetsEnabled,
-        SurfaceObjectTargetShape objectTargetShape)
+        IReadOnlySet<Guid> selectedItemIds,
+        SceneSurfaceTargetSnapshot surfaceTargets,
+        bool itemTargetsEnabled,
+        SceneSurfaceTargetShape targetShape)
     {
         SurfaceDrag.Begin(
             selectedSnapshots,
-            boundsSnapshots,
+            boundsLookup,
             primarySnapshot,
             pivotPosition,
+            selectedItemIds,
             surfaceTargets,
-            objectTargetsEnabled,
-            objectTargetShape);
+            itemTargetsEnabled,
+            targetShape);
         TouchInteraction();
     }
 

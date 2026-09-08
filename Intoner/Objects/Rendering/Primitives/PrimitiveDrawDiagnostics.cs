@@ -1,10 +1,13 @@
+using Intoner.Services.Configuration;
+using Intoner.Scene.Rendering;
 using System.Globalization;
 using System.Numerics;
-using Intoner.Objects.Filesystem.Configuration;
+using System.Runtime.InteropServices;
 using RawViewportF = SharpDX.Mathematics.Interop.RawViewportF;
 
 namespace Intoner.Objects.Rendering.Primitives;
 
+[StructLayout(LayoutKind.Auto)]
 internal readonly record struct PrimitiveProjectedPoint(
     Vector2 Screen,
     float Depth,
@@ -23,16 +26,16 @@ internal struct PrimitiveDrawDiagnostics
 
     public PrimitiveDrawDiagnostics(int inputLines, int inputPoints, int inputScreens)
     {
-        InputLines          = inputLines;
-        InputPoints         = inputPoints;
-        InputScreens        = inputScreens;
-        _hasRange          = false;
-        _screenMin         = default;
-        _screenMax         = default;
+        InputLines = inputLines;
+        InputPoints = inputPoints;
+        InputScreens = inputScreens;
+        _hasRange = false;
+        _screenMin = default;
+        _screenMax = default;
         _projectedDepthMin = 0f;
         _projectedDepthMax = 0f;
-        _viewDepthMin      = 0f;
-        _viewDepthMax      = 0f;
+        _viewDepthMin = 0f;
+        _viewDepthMax = 0f;
     }
 
     public int InputLines { get; }
@@ -52,7 +55,7 @@ internal struct PrimitiveDrawDiagnostics
 
     public void MarkProjectionUnavailable(int lineCount, int pointCount)
     {
-        ProjectionRejectedLines  += lineCount;
+        ProjectionRejectedLines += lineCount;
         ProjectionRejectedPoints += pointCount;
     }
 
@@ -63,22 +66,22 @@ internal struct PrimitiveDrawDiagnostics
         var max = point.Screen + new Vector2(padding);
         if (!_hasRange)
         {
-            _screenMin         = min;
-            _screenMax         = max;
+            _screenMin = min;
+            _screenMax = max;
             _projectedDepthMin = point.Depth;
             _projectedDepthMax = point.Depth;
-            _viewDepthMin      = point.ViewDepth;
-            _viewDepthMax      = point.ViewDepth;
-            _hasRange          = true;
+            _viewDepthMin = point.ViewDepth;
+            _viewDepthMax = point.ViewDepth;
+            _hasRange = true;
             return;
         }
 
-        _screenMin         = Vector2.Min(_screenMin, min);
-        _screenMax         = Vector2.Max(_screenMax, max);
+        _screenMin = Vector2.Min(_screenMin, min);
+        _screenMax = Vector2.Max(_screenMax, max);
         _projectedDepthMin = Math.Min(_projectedDepthMin, point.Depth);
         _projectedDepthMax = Math.Max(_projectedDepthMax, point.Depth);
-        _viewDepthMin      = Math.Min(_viewDepthMin, point.ViewDepth);
-        _viewDepthMax      = Math.Max(_viewDepthMax, point.ViewDepth);
+        _viewDepthMin = Math.Min(_viewDepthMin, point.ViewDepth);
+        _viewDepthMax = Math.Max(_viewDepthMax, point.ViewDepth);
     }
 
     private string FormatScreenBounds()
@@ -99,9 +102,9 @@ internal struct PrimitiveDrawDiagnostics
     public string FormatSummary(
         PrimitiveDrawState state,
         RawViewportF viewport,
-        PrimitiveTextureSize finalTargetSize,
-        PrimitiveTextureSize sceneDepthSize,
-        in PrimitiveProjectionFrame projectionFrame,
+        SceneTextureSize finalTargetSize,
+        SceneTextureSize sceneDepthSize,
+        in SceneProjection projectionFrame,
         bool hasWorldProjection,
         PrimitiveGeometryBuildResult geometry,
         float viewDepthBias)
@@ -121,7 +124,7 @@ internal struct PrimitiveDrawDiagnostics
     private static string FormatBool(bool value)
         => value ? "true" : "false";
 
-    private static string FormatTexture(PrimitiveTextureSize size)
+    private static string FormatTexture(SceneTextureSize size)
         => size.ActualWidth == 0 || size.ActualHeight == 0
             ? "empty"
             : $"{size.ActualWidth}x{size.ActualHeight}/{size.AllocatedWidth}x{size.AllocatedHeight}";
@@ -159,7 +162,7 @@ internal struct PrimitiveDrawDiagnostics
             $"degenerateLines={DegenerateLines}");
 
     private string FormatProjection(
-        in PrimitiveProjectionFrame projectionFrame,
+        in SceneProjection projectionFrame,
         bool hasWorldProjection,
         float viewDepthBias)
         => hasWorldProjection
@@ -174,4 +177,3 @@ internal struct PrimitiveDrawDiagnostics
                 $"view={FormatViewDepthRange()}")
             : "projection: none";
 }
-

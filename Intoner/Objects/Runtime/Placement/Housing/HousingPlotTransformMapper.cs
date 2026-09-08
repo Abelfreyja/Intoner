@@ -1,5 +1,4 @@
-using Intoner.Objects.Models;
-using Intoner.Objects.Utils;
+using Intoner.Scene;
 using System.Numerics;
 
 namespace Intoner.Objects.Runtime;
@@ -9,7 +8,7 @@ internal static class HousingPlotTransformMapper
     private const float RadiansToDegrees = 180f / MathF.PI;
     private const float DegreesToRadians = MathF.PI / 180f;
 
-    public static ObjectTransform ToWorldTransform(HousingPlotLocalTransform localTransform, ObjectHousingPlotBasis? plotBasis)
+    public static SceneTransform ToWorldTransform(HousingPlotLocalTransform localTransform, ObjectHousingPlotBasis? plotBasis)
     {
         Vector3 worldPosition = localTransform.Position;
         float worldYawRadians = localTransform.YawRadians;
@@ -19,15 +18,15 @@ internal static class HousingPlotTransformMapper
             worldYawRadians -= basis.RotationRadians;
         }
 
-        return new ObjectTransform
+        return new SceneTransform
         {
             Position = worldPosition,
-            RotationDegrees = ObjectTransformMath.WrapRotationDegrees(new Vector3(0f, worldYawRadians * RadiansToDegrees, 0f)),
+            RotationDegrees = SceneTransformMath.WrapRotationDegrees(new Vector3(0f, worldYawRadians * RadiansToDegrees, 0f)),
             Scale = Vector3.One,
         };
     }
 
-    public static HousingPlotLocalTransform ToLocalTransform(ObjectTransform transform, ObjectHousingPlotBasis? plotBasis)
+    public static HousingPlotLocalTransform ToLocalTransform(SceneTransform transform, ObjectHousingPlotBasis? plotBasis)
     {
         Vector3 localPosition = transform.Position;
         float localYawRadians = transform.RotationDegrees.Y * DegreesToRadians;

@@ -1,7 +1,8 @@
 using Dalamud.Hooking;
 using Dalamud.Plugin.Services;
-using Intoner.Objects.Filesystem.Configuration;
-using Intoner.Objects.Utils;
+using Intoner.Services.Configuration;
+using Intoner.Services.Interop;
+using Intoner.Utils;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -32,11 +33,11 @@ internal sealed unsafe class ObjectHousingCullingService : IObjectHousingCulling
     private const ushort EmptyTransitionIndex = 0xFFFF;
 
     private readonly ILogger<ObjectHousingCullingService> _logger;
-    private readonly IObjectConfigurationService _configurationService;
+    private readonly IIntonerConfigurationService _configurationService;
     private readonly IGameInteropProvider _gameInteropProvider;
     private readonly ISigScanner _sigScanner;
     private readonly Lock _hookLock = new();
-    private readonly ObjectDisposalState _disposeState = new();
+    private readonly DisposalState _disposeState = new();
 
     private Hook<HousingFurnitureCullingUpdateDelegate>? _cullingUpdateHook;
     private bool _disableFurnitureDisplayCulling;
@@ -48,7 +49,7 @@ internal sealed unsafe class ObjectHousingCullingService : IObjectHousingCulling
 
     public ObjectHousingCullingService(
         ILogger<ObjectHousingCullingService> logger,
-        IObjectConfigurationService configurationService,
+        IIntonerConfigurationService configurationService,
         IGameInteropProvider gameInteropProvider,
         ISigScanner sigScanner)
     {
@@ -90,7 +91,7 @@ internal sealed unsafe class ObjectHousingCullingService : IObjectHousingCulling
 
         lock (_hookLock)
         {
-            ObjectInteropHookUtility.DisposeHook(_cullingUpdateHook);
+            InteropHookUtility.DisposeHook(_cullingUpdateHook);
             _cullingUpdateHook = null;
             _hookEnabled = false;
         }
@@ -110,7 +111,7 @@ internal sealed unsafe class ObjectHousingCullingService : IObjectHousingCulling
 
         if (_configurationService.Current.HousingCulling.DisableFurnitureDisplayCulling != enabled)
         {
-            _configurationService.Update(
+            _ = _configurationService.TryUpdate(
                 configuration => configuration.HousingCulling.DisableFurnitureDisplayCulling = enabled);
         }
     }
@@ -165,11 +166,11 @@ internal sealed unsafe class ObjectHousingCullingService : IObjectHousingCulling
             return false;
         }
 
-        _cullingUpdateHook = ObjectInteropHookUtility.CreateHook<HousingFurnitureCullingUpdateDelegate>(
+        _cullingUpdateHook = InteropHookUtility.CreateHook<HousingFurnitureCullingUpdateDelegate>(
             _logger,
             _gameInteropProvider,
             _sigScanner,
-            ObjectSignatures.HousingFurnitureCulling,
+            IntonerSignatures.HousingFurnitureCulling,
             HousingFurnitureCullingUpdateDetour);
         if (_cullingUpdateHook != null)
         {

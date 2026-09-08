@@ -5,20 +5,20 @@ namespace Intoner.Objects.UI.Settings.Components;
 internal sealed class ChoiceSettingEntry<TValue> : ISettingEntry
 {
     private readonly IReadOnlyList<ChoiceOption<TValue>> _options;
-    private readonly Func<DrawContext, TValue> _readValue;
-    private readonly Action<DrawContext, TValue> _writeValue;
-    private readonly Func<DrawContext, TValue, bool> _isOptionEnabled;
-    private readonly Func<DrawContext, bool> _isEnabled;
+    private readonly Func<TValue> _readValue;
+    private readonly Action<TValue> _writeValue;
+    private readonly Func<TValue, bool> _isOptionEnabled;
+    private readonly Func<bool> _isEnabled;
     private readonly ChoiceRowStyle _style;
     private readonly SettingRowLayout _layout;
 
     public ChoiceSettingEntry(
         SettingDefinition definition,
         IReadOnlyList<ChoiceOption<TValue>> options,
-        Func<DrawContext, TValue> readValue,
-        Action<DrawContext, TValue> writeValue,
-        Func<DrawContext, TValue, bool>? isOptionEnabled = null,
-        Func<DrawContext, bool>? isEnabled = null,
+        Func<TValue> readValue,
+        Action<TValue> writeValue,
+        Func<TValue, bool>? isOptionEnabled = null,
+        Func<bool>? isEnabled = null,
         ChoiceRowStyle style = ChoiceRowStyle.Combo,
         SettingRowLayout layout = default)
     {
@@ -26,8 +26,8 @@ internal sealed class ChoiceSettingEntry<TValue> : ISettingEntry
         _options = options;
         _readValue = readValue;
         _writeValue = writeValue;
-        _isOptionEnabled = isOptionEnabled ?? (static (_, _) => true);
-        _isEnabled = isEnabled ?? (static _ => true);
+        _isOptionEnabled = isOptionEnabled ?? (static _ => true);
+        _isEnabled = isEnabled ?? (static () => true);
         _style = style;
         _layout = layout;
     }
@@ -37,10 +37,10 @@ internal sealed class ChoiceSettingEntry<TValue> : ISettingEntry
     public SettingRowLayout Layout
         => _layout;
 
-    public void DrawRow(DrawContext context, Vector4 accent, bool prominentControl)
+    public void DrawRow(Vector4 accent, bool prominentControl)
     {
-        TValue value = _readValue(context);
-        bool enabled = _isEnabled(context);
+        TValue value = _readValue();
+        bool enabled = _isEnabled();
         bool changed = _style switch
         {
             ChoiceRowStyle.Segmented => SegmentedChoiceRow.Draw(
@@ -50,7 +50,7 @@ internal sealed class ChoiceSettingEntry<TValue> : ISettingEntry
                 accent,
                 prominentControl,
                 enabled,
-                option => _isOptionEnabled(context, option),
+                _isOptionEnabled,
                 _layout),
             _ => ChoiceRow.Draw(
                 Definition,
@@ -58,13 +58,13 @@ internal sealed class ChoiceSettingEntry<TValue> : ISettingEntry
                 ref value,
                 accent,
                 enabled,
-                option => _isOptionEnabled(context, option),
+                _isOptionEnabled,
                 _layout),
         };
 
         if (changed)
         {
-            _writeValue(context, value);
+            _writeValue(value);
         }
     }
 }

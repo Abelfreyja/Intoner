@@ -1,7 +1,7 @@
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Utility.Raii;
-using Intoner.Objects.UI;
+using Intoner.Objects.UI.Components;
 using System.Numerics;
 using static Intoner.Objects.UI.Settings.Components.SettingsChrome;
 
@@ -9,16 +9,7 @@ namespace Intoner.Objects.UI.Settings.Components;
 
 internal static class Toolbar
 {
-    public static bool Draw(SettingsView view, ref string searchText, int totalSettingCount)
-    {
-        string nextSearchText = searchText;
-        bool changed = DrawContent(view, ref nextSearchText, totalSettingCount);
-
-        searchText = nextSearchText;
-        return changed;
-    }
-
-    private static bool DrawContent(SettingsView view, ref string searchText, int totalSettingCount)
+    public static bool Draw(SettingsView view, ref string searchText, int totalEntryCount)
     {
         float headerHeight = Scaled(HeaderHeight);
         using var cellPadding = ImRaii.PushStyle(ImGuiStyleVar.CellPadding, Vector2.Zero);
@@ -40,30 +31,36 @@ internal static class Toolbar
         ImGui.Dummy(new Vector2(Scaled(BodyDividerColumnWidth), headerHeight));
 
         ImGui.TableNextColumn();
+        string statusText = view.Query.HasTokens
+            ? $"{view.AllResult.EntryCount}/{totalEntryCount}"
+            : $"{totalEntryCount} settings";
         bool changed = DrawSearch(
             "objectSettingsSearch",
             ref searchText,
-            new SearchFieldStatus(view.Query.HasTokens, view.AllResult.EntryCount, totalSettingCount),
-            EditorColors.AccentPurple);
+            new EditorSearchFieldOptions(
+                "Search object settings",
+                ThemeColors.AccentPrimary,
+                statusText,
+                view.Query.HasTokens && view.AllResult.EntryCount == 0));
 
         ImGui.TableNextColumn();
         return changed;
     }
 
-    private static bool DrawSearch(string id, ref string searchText, SearchFieldStatus status, Vector4 accent)
+    private static bool DrawSearch(string id, ref string searchText, EditorSearchFieldOptions options)
     {
-        float offsetY = MathF.Max(0f, (Scaled(HeaderHeight) - SearchField.DrawHeight) * 0.5f);
+        float offsetY = MathF.Max(0f, (Scaled(HeaderHeight) - EditorSearchField.Height) * 0.5f);
         ImGui.SetCursorPosY(ImGui.GetCursorPosY() + offsetY);
-        return SearchField.Draw(id, ref searchText, status, accent);
+        return EditorSearchField.Draw(id, ref searchText, options);
     }
 
     private static void DrawTitle(float height)
     {
         float offsetY = MathF.Max(0f, (height - ImGui.GetTextLineHeight()) * 0.5f);
         ImGui.SetCursorPosY(ImGui.GetCursorPosY() + offsetY);
-        DrawSectionIcon(FontAwesomeIcon.Cog, EditorColors.AccentPurple);
+        EditorIcon.DrawInline(FontAwesomeIcon.Cog, ThemeColors.AccentPrimary);
         ImGui.SameLine(0f, Scaled(8f));
-        ImGui.TextUnformatted("Object Settings");
+        ImGui.TextUnformatted("Settings");
     }
 
     private const ImGuiTableFlags ToolbarTableFlags =

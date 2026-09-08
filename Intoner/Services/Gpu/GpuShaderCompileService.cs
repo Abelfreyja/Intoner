@@ -1,6 +1,5 @@
-using System.Reflection;
-using System.Text;
 using SharpDX.D3DCompiler;
+using System.Reflection;
 
 namespace Intoner.Services.Gpu;
 
@@ -11,24 +10,21 @@ internal static class GpuShaderCompileService
         string resourceName,
         string shaderName,
         string entryPoint = "CSMain")
-        => new(
-            new Lazy<byte[]>(() => CreateComputeShaderBytecode(resourceAnchorType, resourceName, shaderName, entryPoint)));
+        => new(() => CreateComputeShaderBytecode(resourceAnchorType, resourceName, shaderName, entryPoint));
 
     public static GpuShaderBytecode CreateVertexShader(
         Type resourceAnchorType,
         string resourceName,
         string shaderName,
         string entryPoint = "VSMain")
-        => new(
-            new Lazy<byte[]>(() => CreateVertexShaderBytecode(resourceAnchorType, resourceName, shaderName, entryPoint)));
+        => new(() => CreateVertexShaderBytecode(resourceAnchorType, resourceName, shaderName, entryPoint));
 
     public static GpuShaderBytecode CreatePixelShader(
         Type resourceAnchorType,
         string resourceName,
         string shaderName,
         string entryPoint = "PSMain")
-        => new(
-            new Lazy<byte[]>(() => CreatePixelShaderBytecode(resourceAnchorType, resourceName, shaderName, entryPoint)));
+        => new(() => CreatePixelShaderBytecode(resourceAnchorType, resourceName, shaderName, entryPoint));
 
     private static byte[] CreateComputeShaderBytecode(
         Type resourceAnchorType,
@@ -58,13 +54,20 @@ internal static class GpuShaderCompileService
         string entryPoint,
         string profile)
     {
-        var shaderSource = LoadShaderSource(resourceAnchorType, resourceName);
+        Assembly assembly = resourceAnchorType.Assembly;
+        string shaderSource = LoadShaderSource(assembly, resourceName);
+        using var include = new EmbeddedResourceInclude(assembly, resourceName);
         using var compilation = ShaderBytecode.Compile(
             shaderSource,
             entryPoint,
             profile,
             ShaderFlags.OptimizationLevel3,
-            EffectFlags.None);
+            EffectFlags.None,
+            defines: null,
+            include: include,
+            sourceFileName: resourceName,
+            secondaryDataFlags: SecondaryDataFlags.None,
+            secondaryData: null);
 
         if (compilation is null)
         {
@@ -79,90 +82,114 @@ internal static class GpuShaderCompileService
         return compilation.Bytecode.Data;
     }
 
-    private static string LoadShaderSource(Type resourceAnchorType, string resourceName)
-        => LoadShaderSource(resourceAnchorType.Assembly, resourceName, []);
-
-    private static string LoadShaderSource(Assembly assembly, string resourceName, HashSet<string> loadStack)
+    private static string LoadShaderSource(Assembly assembly, string resourceName)
     {
-        if (!loadStack.Add(resourceName))
+        using Stream? stream = assembly.GetManifestResourceStream(resourceName);
+        if (stream is null)
         {
-            throw new InvalidOperationException($"shader include cycle detected at '{resourceName}'");
+            throw new InvalidOperationException($"missing embedded shader resource '{resourceName}'");
         }
 
-        try
+        using var reader = new StreamReader(stream);
+        return reader.ReadToEnd();
+    }
+
+    private sealed class EmbeddedResourceInclude : Include
+    {
+        private readonly Assembly _assembly;
+        private readonly string _rootResourceName;
+        private readonly Dictionary<Stream, string> _resourceNames = new(ReferenceEqualityComparer.Instance);
+
+        public EmbeddedResourceInclude(Assembly assembly, string rootResourceName)
         {
-            using var stream = assembly.GetManifestResourceStream(resourceName);
-            if (stream is null)
+            _assembly = assembly;
+            _rootResourceName = rootResourceName;
+        }
+
+        public IDisposable? Shadow { get; set; }
+
+        public Stream Open(IncludeType type, string fileName, Stream parentStream)
+        {
+            if (type != IncludeType.Local)
             {
-                throw new InvalidOperationException($"missing embedded shader resource '{resourceName}'");
+                throw new NotSupportedException("system shader includes are not supported");
             }
 
-            using var reader = new StreamReader(stream);
-            var shaderSource = reader.ReadToEnd();
-            return ExpandIncludes(assembly, resourceName, shaderSource, loadStack);
+            string parentResourceName = ResolveParentResourceName(parentStream);
+            string resourceName = ResolveResourceName(parentResourceName, fileName);
+            Stream stream = _assembly.GetManifestResourceStream(resourceName)
+                ?? throw new FileNotFoundException($"missing embedded shader include '{resourceName}'", fileName);
+            _resourceNames.Add(stream, resourceName);
+            return stream;
         }
-        finally
-        {
-            loadStack.Remove(resourceName);
-        }
-    }
 
-    private static string ExpandIncludes(Assembly assembly, string resourceName, string shaderSource, HashSet<string> loadStack)
-    {
-        var builder = new StringBuilder(shaderSource.Length + 256);
-        using var reader = new StringReader(shaderSource);
-        while (reader.ReadLine() is string line)
+        public void Close(Stream stream)
         {
-            if (TryResolveInclude(resourceName, line, out var includedResourceName))
+            _resourceNames.Remove(stream);
+            stream.Dispose();
+        }
+
+        public void Dispose()
+        {
+            foreach (Stream stream in _resourceNames.Keys)
             {
-                builder.AppendLine(LoadShaderSource(assembly, includedResourceName, loadStack));
-                continue;
+                stream.Dispose();
             }
 
-            builder.AppendLine(line);
+            _resourceNames.Clear();
+            Shadow?.Dispose();
+            Shadow = null;
         }
 
-        return builder.ToString();
-    }
-
-    private static bool TryResolveInclude(string resourceName, string line, out string includedResourceName)
-    {
-        var trimmedLine = line.TrimStart();
-        if (!trimmedLine.StartsWith("#include \"", StringComparison.Ordinal))
+        private string ResolveParentResourceName(Stream? parentStream)
         {
-            includedResourceName = string.Empty;
-            return false;
+            if (parentStream is null)
+            {
+                return _rootResourceName;
+            }
+
+            return _resourceNames.TryGetValue(parentStream, out string? resourceName)
+                ? resourceName
+                : throw new InvalidOperationException("shader include parent is not owned by this compiler");
         }
 
-        var includeStart = "#include \"".Length;
-        var includeEnd = trimmedLine.IndexOf('"', includeStart);
-        if (includeEnd <= includeStart)
+        private static string ResolveResourceName(string parentResourceName, string includePath)
         {
-            includedResourceName = string.Empty;
-            return false;
+            if (string.IsNullOrWhiteSpace(includePath) || Path.IsPathRooted(includePath))
+            {
+                throw new InvalidOperationException($"shader include path '{includePath}' must be relative");
+            }
+
+            int extensionSeparator = parentResourceName.LastIndexOf('.');
+            int fileSeparator = parentResourceName.LastIndexOf('.', extensionSeparator - 1);
+            if (fileSeparator < 0)
+            {
+                throw new InvalidOperationException($"shader resource '{parentResourceName}' is missing a file segment");
+            }
+
+            List<string> segments = [.. parentResourceName[..fileSeparator].Split('.')];
+            foreach (string segment in includePath.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (string.Equals(segment, ".", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                if (string.Equals(segment, "..", StringComparison.Ordinal))
+                {
+                    if (segments.Count == 0)
+                    {
+                        throw new InvalidOperationException($"shader include path '{includePath}' escapes the resource root");
+                    }
+
+                    segments.RemoveAt(segments.Count - 1);
+                    continue;
+                }
+
+                segments.Add(segment);
+            }
+
+            return string.Join('.', segments);
         }
-
-        var includePath = trimmedLine[includeStart..includeEnd]
-            .Replace('/', '.')
-            .Replace('\\', '.');
-        includedResourceName = ResolveSiblingResourceName(resourceName, includePath);
-        return true;
-    }
-
-    private static string ResolveSiblingResourceName(string resourceName, string includePath)
-    {
-        var extensionSeparator = resourceName.LastIndexOf('.');
-        if (extensionSeparator < 0)
-        {
-            throw new InvalidOperationException($"shader resource '{resourceName}' is missing an extension");
-        }
-
-        var fileSeparator = resourceName.LastIndexOf('.', extensionSeparator - 1);
-        if (fileSeparator < 0)
-        {
-            throw new InvalidOperationException($"shader resource '{resourceName}' is missing a file segment");
-        }
-
-        return resourceName[..(fileSeparator + 1)] + includePath;
     }
 }

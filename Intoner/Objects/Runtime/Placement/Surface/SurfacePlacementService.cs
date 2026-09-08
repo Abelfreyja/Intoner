@@ -1,5 +1,6 @@
 using Intoner.Objects.Catalog;
 using Intoner.Objects.Models;
+using Intoner.Scene;
 using System.Numerics;
 
 namespace Intoner.Objects.Runtime;
@@ -14,9 +15,9 @@ internal sealed class SurfacePlacementService(
         ObjectBoundsSnapshot? boundsSnapshot,
         Vector3 rayOrigin,
         Vector3 rayDirection,
-        out ObjectSurfaceHit hit)
+        out SceneSurfaceHit hit)
     {
-        hit = ObjectSurfaceHit.Empty;
+        hit = SceneSurfaceHit.Empty;
         if (!TryResolveHousingMetadata(snapshot, out HousingFurnitureMetadata metadata))
         {
             return false;
@@ -38,8 +39,8 @@ internal sealed class SurfacePlacementService(
             out hit);
     }
 
-    public bool ShouldUseNativePlacementOrigin(ObjectSnapshot snapshot, ObjectSurfaceHit hit)
-        => hit.Source == ObjectSurfaceHitSource.Native
+    public bool ShouldUseNativePlacementOrigin(ObjectSnapshot snapshot, SceneSurfaceHit hit)
+        => hit.Source == SceneSurfaceHitSource.Native
            && TryResolveHousingMetadata(snapshot, out HousingFurnitureMetadata metadata)
            && metadata.Surface is HousingPlacementSurface.Floor or HousingPlacementSurface.Tabletop
            && PlacementSurfacePolicy.TryValidateSurface(metadata, hit, out _);

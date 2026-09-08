@@ -1,5 +1,5 @@
+using Intoner.Services.Configuration;
 using System.Numerics;
-using Intoner.Objects.Filesystem.Configuration;
 
 namespace Intoner.Objects.Runtime;
 

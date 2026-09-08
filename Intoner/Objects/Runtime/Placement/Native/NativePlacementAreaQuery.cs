@@ -1,5 +1,5 @@
 using Dalamud.Plugin.Services;
-using Intoner.Objects.Utils;
+using Intoner.Services.Interop;
 using Microsoft.Extensions.Logging;
 using System.Numerics;
 
@@ -16,14 +16,14 @@ internal sealed unsafe class NativePlacementAreaQuery
         ILogger<NativePlacementAreaQuery> logger,
         ISigScanner sigScanner)
     {
-        _areaContainment = ObjectInteropHookUtility.CreateDelegate<NativeAreaContainmentDelegate>(
+        _areaContainment = InteropHookUtility.CreateDelegate<NativeAreaContainmentDelegate>(
             logger,
             sigScanner,
-            ObjectSignatures.NativeHousingPlacementAreaContainment);
-        _blockForPosition = ObjectInteropHookUtility.CreateDelegate<NativeBlockForPositionDelegate>(
+            IntonerSignatures.NativeHousingPlacementAreaContainment);
+        _blockForPosition = InteropHookUtility.CreateDelegate<NativeBlockForPositionDelegate>(
             logger,
             sigScanner,
-            ObjectSignatures.NativeHousingPlacementBlockForPosition);
+            IntonerSignatures.NativeHousingPlacementBlockForPosition);
     }
 
     public PlacementValidationStatus CheckCurrentPlot(Vector3 position)

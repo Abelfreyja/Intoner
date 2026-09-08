@@ -1,11 +1,12 @@
 using Intoner.Objects.Utils;
+using Intoner.Services.Serialization;
 using System.Text.Json;
 
 namespace Intoner.Objects.Api;
 
 internal static class MakePlaceJsonSerializer
 {
-    public static readonly JsonSerializerOptions JsonOptions = ObjectJsonSerializerOptionsUtility.CreateLenientIndented();
+    public static readonly JsonSerializerOptions JsonOptions = JsonSerializerOptionsUtility.CreateLenientIndented();
 
     public static string Serialize(MakePlaceLayoutDocument document)
         => JsonSerializer.Serialize(document, JsonOptions);

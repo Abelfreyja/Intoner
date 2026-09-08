@@ -1,12 +1,13 @@
 using Intoner.Objects.Models;
 using Intoner.Objects.Utils;
+using Intoner.Services.Serialization;
 using System.Text.Json;
 
 namespace Intoner.Objects.Api;
 
 internal static class ObjectLayoutJsonSerializer
 {
-    public static readonly JsonSerializerOptions JsonOptions = ObjectJsonSerializerOptionsUtility.CreateStrictIndented();
+    public static readonly JsonSerializerOptions JsonOptions = JsonSerializerOptionsUtility.CreateStrictIndented();
 
     private enum RequiredJsonValueKind
     {
@@ -26,6 +27,7 @@ internal static class ObjectLayoutJsonSerializer
         new(nameof(ObjectLayoutFileDocument.DocumentKind), RequiredJsonValueKind.String, "The selected layout file is missing a valid document kind."),
         new(nameof(ObjectLayoutFileDocument.Id), RequiredJsonValueKind.Guid, "The selected layout file is missing a layout id."),
         new(nameof(ObjectLayoutFileDocument.Name), RequiredJsonValueKind.String, "The selected layout file is missing a valid layout name."),
+        new(nameof(ObjectLayoutFileDocument.Revision), RequiredJsonValueKind.Int64, "The selected layout file is missing a valid layout revision."),
         new(nameof(ObjectLayoutFileDocument.ExportedAtUtc), RequiredJsonValueKind.DateTime, "The selected layout file is missing valid layout timestamps."),
         new(nameof(ObjectLayoutFileDocument.CreatedAtUtc), RequiredJsonValueKind.DateTime, "The selected layout file is missing valid layout timestamps."),
         new(nameof(ObjectLayoutFileDocument.UpdatedAtUtc), RequiredJsonValueKind.DateTime, "The selected layout file is missing valid layout timestamps."),
@@ -154,6 +156,12 @@ internal static class ObjectLayoutJsonSerializer
             return false;
         }
 
+        if (document.Revision <= 0)
+        {
+            errorMessage = "The selected layout file is missing a valid layout revision.";
+            return false;
+        }
+
         if (!TryToSnapshots(document.Objects, document.Id, out List<ObjectSnapshot> snapshots))
         {
             errorMessage = "The selected layout file contains invalid object data.";
@@ -163,6 +171,7 @@ internal static class ObjectLayoutJsonSerializer
         layout = BuildLayoutSnapshot(
             document.Id,
             document.Name,
+            document.Revision,
             document.CreatedAtUtc,
             document.UpdatedAtUtc,
             snapshots,
@@ -234,7 +243,7 @@ internal static class ObjectLayoutJsonSerializer
                 ObjectFolderUtility.OrderFolderColorMap(document.FolderColors, orderedFolders),
                 StringComparer.OrdinalIgnoreCase),
             DefaultLayoutId = document.DefaultLayoutId,
-            Name = ObjectStringUtility.TrimOrFallback(document.Name, "Recovered object workspace"),
+            Name = TextUtility.TrimOrFallback(document.Name, "Recovered object workspace"),
             Revision = document.PersistentRevision,
             CapturedAtUtc = document.SavedAtUtc,
         };
@@ -254,7 +263,7 @@ internal static class ObjectLayoutJsonSerializer
             SavedAtUtc = workspace.CapturedAtUtc,
             PersistentRevision = workspace.Revision,
             DefaultLayoutId = workspace.DefaultLayoutId,
-            Name = ObjectStringUtility.TrimOrFallback(workspace.Name, "Current object workspace"),
+            Name = TextUtility.TrimOrFallback(workspace.Name, "Current object workspace"),
             Objects = workspace.Objects.Select(BuildAutosaveObject).ToList(),
             Folders = [.. orderedFolders],
             FolderColors = new Dictionary<string, string>(
@@ -274,6 +283,7 @@ internal static class ObjectLayoutJsonSerializer
             FormatVersion = ObjectLayoutFileDocument.CurrentFormatVersion,
             Id = layout.Id,
             Name = layout.Name,
+            Revision = layout.Revision,
             ExportedAtUtc = DateTime.UtcNow,
             CreatedAtUtc = layout.CreatedAtUtc,
             UpdatedAtUtc = layout.UpdatedAtUtc,
@@ -290,7 +300,7 @@ internal static class ObjectLayoutJsonSerializer
         {
             FolderPath = ObjectFolderUtility.SanitizeFolderPath(snapshot.FolderPath),
             Locked = snapshot.Locked,
-            Object = ObjectApiMapper.ToDto(snapshot),
+            Object = ObjectApiMapper.ToWorldObject(snapshot),
         };
 
     private static ObjectLayoutAutosaveObject BuildAutosaveObject(ObjectSnapshot snapshot)
@@ -299,12 +309,13 @@ internal static class ObjectLayoutJsonSerializer
             LayoutId = snapshot.LayoutId,
             FolderPath = ObjectFolderUtility.SanitizeFolderPath(snapshot.FolderPath),
             Locked = snapshot.Locked,
-            Object = ObjectApiMapper.ToDto(snapshot),
+            Object = ObjectApiMapper.ToWorldObject(snapshot),
         };
 
     private static ObjectLayoutSnapshot BuildLayoutSnapshot(
         Guid layoutId,
         string name,
+        long revision,
         DateTime createdAtUtc,
         DateTime updatedAtUtc,
         IReadOnlyList<ObjectSnapshot> snapshots,
@@ -318,6 +329,7 @@ internal static class ObjectLayoutJsonSerializer
         {
             Id = layoutId,
             Name = name,
+            Revision = revision,
             CreatedAtUtc = createdAtUtc,
             UpdatedAtUtc = updatedAtUtc,
             Objects = snapshots.OrderBy(static snapshot => snapshot.CreatedAtUtc).ToList(),

@@ -10,6 +10,8 @@ using Intoner.Objects.Utils;
 using Intoner.UI;
 using System.Numerics;
 
+using Intoner.Scene;
+
 namespace Intoner.Objects.UI.Bounds;
 
 internal sealed class BoundsAnnotationRenderer
@@ -115,7 +117,7 @@ internal sealed class BoundsAnnotationRenderer
         Vector2 max = new(float.NegativeInfinity, float.NegativeInfinity);
         foreach (Vector3 worldCorner in worldCorners)
         {
-            if (!ObjectViewportProjectionUtility.TryProjectWorldPointToViewport(
+            if (!SceneViewportProjection.TryProjectWorldPointToViewport(
                     context.ViewProjection,
                     worldCorner,
                     context.ViewportPos,
@@ -150,7 +152,7 @@ internal sealed class BoundsAnnotationRenderer
             anchor = screenCorners[index];
         }
 
-        return ObjectMathUtility.IsFinite(anchor);
+        return NumericsUtility.IsFinite(anchor);
     }
 
     private static Vector2 ResolveScreenRectCorner(Vector2 min, Vector2 max, BoundsAnnotationCorner corner)
@@ -188,9 +190,9 @@ internal sealed class BoundsAnnotationRenderer
         Vector2 max = min + badgeSize;
 
         Vector2 shadowOffset = Vector2.One * (BadgeShadowOffset * scale);
-        Vector4 fill = EditorColors.WithAlpha(annotation.Accent, 0.95f);
-        Vector4 iconColor = EditorColors.Color(1f, 1f, 1f, 0.96f);
-        Vector4 shadowColor = EditorColors.Color(0f, 0f, 0f, BadgeShadowOpacity);
+        Vector4 fill = ThemeColors.WithAlpha(annotation.Accent, 0.95f);
+        Vector4 iconColor = ThemeColors.Color(1f, 1f, 1f, 0.96f);
+        Vector4 shadowColor = ThemeColors.Color(0f, 0f, 0f, BadgeShadowOpacity);
 
         drawList.AddRectFilled(min + shadowOffset, max + shadowOffset, ImGui.GetColorU32(shadowColor), BadgeRounding * scale);
         drawList.AddRectFilled(min, max, ImGui.GetColorU32(fill), BadgeRounding * scale);
@@ -273,20 +275,19 @@ internal sealed class BoundsAnnotationRenderer
 
         string title = annotation.TooltipTitle ?? string.Empty;
         string text = annotation.TooltipText ?? string.Empty;
-        UiSharedService.DrawAccentTooltip(() =>
-        {
-            using (ImRaii.PushFont(UiBuilder.IconFont))
+        IntonerTooltip.Draw(
+            () =>
             {
-                ImGui.TextColored(annotation.Accent, annotation.Icon.ToIconString());
-            }
-
-            ImGui.SameLine(0f, ImGui.GetStyle().ItemInnerSpacing.X);
-            ImGui.TextUnformatted(title);
-            ImGui.Separator();
-            using IDisposable wrap = ImRaiiScope.TextWrapPos(ImGui.GetCursorPosX() + ImGui.GetContentRegionAvail().X);
-            ImGui.TextUnformatted(text);
-            DrawFixes(annotation);
-        }, annotation.Accent, unscaledFixedWidth: TooltipWidth);
+                IntonerTooltipContent.Header(annotation.Icon, title, accentOverride: annotation.Accent);
+                IntonerTooltipContent.Separator();
+                IntonerTooltipContent.Notice(FontAwesomeIcon.InfoCircle, text, annotation.Accent);
+                DrawFixes(annotation);
+            },
+            new IntonerTooltipOptions
+            {
+                Accent = annotation.Accent,
+                Width = TooltipWidth,
+            });
     }
 
     private static void DrawFixes(BoundsAnnotation annotation)
@@ -296,14 +297,11 @@ internal sealed class BoundsAnnotationRenderer
             return;
         }
 
-        ImGui.Dummy(new Vector2(0f, 3f * ImGuiHelpers.GlobalScale));
-        ImGui.Separator();
-        ImGui.TextDisabled("Suggested fixes");
+        IntonerTooltipContent.Separator();
+        IntonerTooltipContent.SectionLabel("Suggested fixes", annotation.Accent);
         foreach (PlacementFixProposal fix in annotation.Fixes)
         {
-            ImGui.Bullet();
-            ImGui.SameLine();
-            ImGui.TextUnformatted(fix.Label);
+            IntonerTooltipContent.Item(FontAwesomeIcon.Magic, "Suggested fix", fix.Label, annotation.Accent);
         }
     }
 }

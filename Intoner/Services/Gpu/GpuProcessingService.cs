@@ -1,7 +1,6 @@
 using Dalamud.Interface;
 using Microsoft.Extensions.Logging;
 using SharpDX;
-using System.Runtime.InteropServices;
 
 namespace Intoner.Services.Gpu;
 
@@ -46,36 +45,22 @@ public sealed class GpuProcessingService : IDisposable
         return _device.TryCreateOperationDeviceClone(out d3d11Device);
     }
 
-    internal static void ReleaseComObject(ref nint ptr)
+    internal bool TryCreateCompatibleDeviceClone(out nint d3d11Device)
     {
-        if (ptr == nint.Zero)
-        {
-            return;
-        }
-
-        try
-        {
-            Marshal.Release(ptr);
-        }
-        catch
-        {
-            // ignore release errors
-        }
-        finally
-        {
-            ptr = nint.Zero;
-        }
+        d3d11Device = nint.Zero;
+        return !IsDisposed
+               && _device.TryCreateCompatibleDeviceClone(out d3d11Device);
     }
 
     public IDisposable EnterOperationScope(CancellationToken token)
-        => EnterOperationScope(token, GpuJobFlags.None);
+        => EnterOperationScope(token, GpuJobOptions.None);
 
-    public IDisposable EnterOperationScope(CancellationToken token, GpuJobFlags flags)
+    public IDisposable EnterOperationScope(CancellationToken token, GpuJobOptions options)
     {
-        return EnterOperationScopeAsync(token, flags).GetAwaiter().GetResult();
+        return EnterOperationScopeAsync(token, options).GetAwaiter().GetResult();
     }
 
-    public bool TryEnterOperationScope(CancellationToken token, GpuJobFlags flags, out IDisposable? scope)
+    public bool TryEnterOperationScope(CancellationToken token, GpuJobOptions options, out IDisposable? scope)
     {
         scope = null;
         if (token.IsCancellationRequested || IsDisposed)
@@ -83,7 +68,7 @@ public sealed class GpuProcessingService : IDisposable
             return false;
         }
 
-        var laneSemaphore = ResolveLaneSemaphore(flags);
+        var laneSemaphore = ResolveLaneSemaphore(options);
         if (!laneSemaphore.Wait(0))
         {
             return false;
@@ -128,14 +113,14 @@ public sealed class GpuProcessingService : IDisposable
         }
     }
 
-    public async Task<IDisposable> EnterOperationScopeAsync(CancellationToken token, GpuJobFlags flags)
+    public async Task<IDisposable> EnterOperationScopeAsync(CancellationToken token, GpuJobOptions options)
     {
         if (IsDisposed)
         {
             throw new ObjectDisposedException(nameof(GpuProcessingService));
         }
 
-        var laneSemaphore = ResolveLaneSemaphore(flags);
+        var laneSemaphore = ResolveLaneSemaphore(options);
         var laneHeld = false;
         var globalHeld = false;
         try
@@ -170,43 +155,12 @@ public sealed class GpuProcessingService : IDisposable
     }
 
     public async Task RunWithOperationAsync(Func<Task> action, CancellationToken token)
-        => await RunWithOperationAsync(action, token, GpuJobFlags.None).ConfigureAwait(false);
+        => await RunWithOperationAsync(action, token, GpuJobOptions.None).ConfigureAwait(false);
 
-    public async Task RunWithOperationAsync(Func<Task> action, CancellationToken token, GpuJobFlags flags)
+    public async Task RunWithOperationAsync(Func<Task> action, CancellationToken token, GpuJobOptions options)
     {
-        if (IsDisposed)
-        {
-            throw new ObjectDisposedException(nameof(GpuProcessingService));
-        }
-
-        var laneSemaphore = ResolveLaneSemaphore(flags);
-        var laneHeld = false;
-        var globalHeld = false;
-        try
-        {
-            await laneSemaphore.WaitAsync(token).ConfigureAwait(false);
-            laneHeld = true;
-            await _globalOperationSemaphore.WaitAsync(token).ConfigureAwait(false);
-            globalHeld = true;
-            if (IsDisposed)
-            {
-                throw new ObjectDisposedException(nameof(GpuProcessingService));
-            }
-
-            await action().ConfigureAwait(false);
-        }
-        finally
-        {
-            if (globalHeld)
-            {
-                _globalOperationSemaphore.Release();
-            }
-
-            if (laneHeld)
-            {
-                laneSemaphore.Release();
-            }
-        }
+        using IDisposable scope = await EnterOperationScopeAsync(token, options).ConfigureAwait(false);
+        await action().ConfigureAwait(false);
     }
 
     public void NotifyOperationFailure(Exception exception)
@@ -261,16 +215,16 @@ public sealed class GpuProcessingService : IDisposable
         }
     }
 
-    private SemaphoreSlim ResolveLaneSemaphore(GpuJobFlags flags)
+    private SemaphoreSlim ResolveLaneSemaphore(GpuJobOptions options)
     {
-        if ((flags & GpuJobFlags.TextureProcessing) != 0
-            && (flags & GpuJobFlags.ModelProcessing) == 0)
+        if ((options & GpuJobOptions.TextureProcessing) != GpuJobOptions.None
+            && (options & GpuJobOptions.ModelProcessing) == GpuJobOptions.None)
         {
             return _textureOperationSemaphore;
         }
 
-        if ((flags & GpuJobFlags.ModelProcessing) != 0
-            && (flags & GpuJobFlags.TextureProcessing) == 0)
+        if ((options & GpuJobOptions.ModelProcessing) != GpuJobOptions.None
+            && (options & GpuJobOptions.TextureProcessing) == GpuJobOptions.None)
         {
             return _modelOperationSemaphore;
         }

@@ -10,7 +10,7 @@ internal static class ObjectCollectionDiagnosticUtility
         HashSet<string> seenWarnings = new(StringComparer.OrdinalIgnoreCase);
         foreach (string warning in warnings)
         {
-            string normalizedWarning = ObjectStringUtility.TrimOrEmpty(warning);
+            string normalizedWarning = TextUtility.TrimOrEmpty(warning);
             if (normalizedWarning.Length == 0 || !seenWarnings.Add(normalizedWarning))
             {
                 continue;

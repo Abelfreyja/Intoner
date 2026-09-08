@@ -1,6 +1,5 @@
+using Intoner.Scene;
 using FFXIVClientStructs.FFXIV.Client.System.Input;
-using Intoner.Objects.Models;
-using Intoner.Objects.Runtime;
 using Intoner.Objects.Utils;
 using System.Numerics;
 
@@ -11,39 +10,38 @@ internal sealed partial class Gizmo
     private void BeginGizmoSurfaceDrag(in GizmoContext context)
     {
         _host.PrepareHistoryMutation();
-        var objectTargetsEnabled = Settings.SurfaceObjectTargetsEnabled;
-        var objectTargetShape = Settings.SurfaceObjectTargetShape;
-        var surfaceTargets = CaptureSurfaceTargets(context, objectTargetsEnabled, objectTargetShape);
+        bool itemTargetsEnabled = Settings.SurfaceItemTargetsEnabled;
+        SceneSurfaceTargetShape targetShape = Settings.SurfaceTargetShape;
+        HashSet<Guid> selectedItemIds = context.SelectedSnapshots
+            .Select(static snapshot => snapshot.Id)
+            .ToHashSet();
+        SceneSurfaceTargetSnapshot surfaceTargets = CaptureSurfaceTargets(selectedItemIds, itemTargetsEnabled, targetShape);
         State.BeginSurfaceDrag(
             context.SelectedSnapshots,
-            context.BoundsSnapshots,
+            context.BoundsLookup,
             context.PrimarySnapshot,
             context.PivotPosition,
+            selectedItemIds,
             surfaceTargets,
-            objectTargetsEnabled,
-            objectTargetShape);
-        DisposeSurfaceDragInputSuppressionLease();
-        SurfaceDragInputSuppressionLease = _gameInputSuppressionService.BeginKeyboardSuppression(GizmoConstants.SurfaceDragSuppressedKeys);
+            itemTargetsEnabled,
+            targetShape);
+        DisposeSurfaceDragKeyboardInputLease();
+        SurfaceDragKeyboardInputLease = _keyboardInput.BeginSuppression(GizmoConstants.SurfaceDragSuppressedKeys);
     }
 
-    private bool HandleGizmoSurfaceDragLifecycle(in GizmoContext context)
+    private void HandleGizmoSurfaceDragLifecycle(in GizmoContext context)
     {
         var matchesCurrentTarget = SurfaceDragState.Matches(context.PrimarySnapshot.Id);
         var currentContext = context;
-        if (!HandleActiveGizmoDragLifecycle(
-                matchesCurrentTarget,
-                true,
-                () =>
-                {
-                    HandleGizmoSurfaceDragKeyboardShortcuts(currentContext);
-                    UpdateGizmoSurfaceDrag(currentContext);
-                },
-                CompleteGizmoSurfaceDrag))
-        {
-            return false;
-        }
-
-        return true;
+        HandleActiveGizmoDragLifecycle(
+            matchesCurrentTarget,
+            true,
+            () =>
+            {
+                HandleGizmoSurfaceDragKeyboardShortcuts(currentContext);
+                UpdateGizmoSurfaceDrag(currentContext);
+            },
+            CompleteGizmoSurfaceDrag);
     }
 
     private void UpdateGizmoSurfaceDrag(in GizmoContext context)
@@ -62,29 +60,14 @@ internal sealed partial class Gizmo
         UpdateSingleGizmoSurfaceDrag(context, hit);
     }
 
-    private void UpdateSingleGizmoSurfaceDrag(in GizmoContext context, ObjectSurfaceHit hit)
+    private void UpdateSingleGizmoSurfaceDrag(in GizmoContext context, SceneSurfaceHit hit)
     {
         var result = ResolveSingleSurfaceDragResult(context, hit);
         var transform = ResolveSingleSurfaceDragTransform(result);
-        bool attachmentChanged = _surfaceAttachmentService.HasSurfaceDragAttachmentChange(
-            SurfaceDragState.CurrentSingleSnapshot,
-            hit,
-            context.BoundsSnapshots);
-
-        if (!HasSurfaceDragTransformChanged(
-                transform.Position,
-                SurfaceDragState.LastResolvedPosition,
-                transform.RotationDegrees,
-                SurfaceDragState.LastResolvedRotationDegrees)
-            && !attachmentChanged)
-        {
-            return;
-        }
-
         _ = TryApplyAndRecordSingleSurfaceDragTransform(context, transform, hit);
     }
 
-    private void UpdateMultiGizmoSurfaceDrag(in GizmoContext context, ObjectSurfaceHit hit)
+    private void UpdateMultiGizmoSurfaceDrag(in GizmoContext context, SceneSurfaceHit hit)
     {
         if (!TryResolveMultiGizmoSurfaceDragResult(context, hit, out var result))
         {
@@ -102,17 +85,19 @@ internal sealed partial class Gizmo
             return;
         }
 
-        _ = TryApplySurfaceDragSelectionResult(result);
+        _ = TryApplySurfaceDragSelectionResult(result, hit);
     }
 
     private bool TryResolveMultiGizmoSurfaceDragResult(
         in GizmoContext context,
-        ObjectSurfaceHit hit,
+        SceneSurfaceHit hit,
         out GizmoSurfaceDragSelectionResult result)
         => GizmoSurfaceDragSolver.TryResolveSelection(
             hit,
             SurfaceDragState.StartRotationQuaternion,
             SurfaceDragState.SelectionEntries,
+            context.ManipulationOptions.SurfaceAlignmentAxis,
+            context.ManipulationOptions.ForceSurfaceAlignment,
             SurfaceAlignToNormal,
             SurfaceDragState.RotationSteps,
             context.CameraRight,
@@ -125,8 +110,8 @@ internal sealed partial class Gizmo
             return;
         }
 
-        var yawSteps = SurfaceDragInputSuppressionLease?.ConsumePressedCount(SeVirtualKey.R) ?? 0;
-        var pitchSteps = SurfaceDragInputSuppressionLease?.ConsumePressedCount(SeVirtualKey.T) ?? 0;
+        var yawSteps = SurfaceDragKeyboardInputLease?.ConsumePressedCount(SeVirtualKey.R) ?? 0;
+        var pitchSteps = SurfaceDragKeyboardInputLease?.ConsumePressedCount(SeVirtualKey.T) ?? 0;
         if (SurfaceDragState.IsSingleSelection && SurfaceAlignToNormal)
         {
             pitchSteps = 0;
@@ -155,7 +140,7 @@ internal sealed partial class Gizmo
             return;
         }
 
-        _ = TryApplySurfaceDragSelectionResult(result);
+        _ = TryApplySurfaceDragSelectionResult(result, hit);
     }
 
     private void HandleSingleGizmoSurfaceDragKeyboardShortcuts(in GizmoContext context, int yawSteps, int pitchSteps)
@@ -181,13 +166,13 @@ internal sealed partial class Gizmo
         var transform = SurfaceDragState.StartSnapshot.Transform with
         {
             Position = SurfaceDragState.LastResolvedPosition,
-            RotationDegrees = ObjectTransformMath.ToRotationDegrees(rotationQuaternion, SurfaceDragState.LastResolvedRotationDegrees),
+            RotationDegrees = SceneTransformMath.ToRotationDegrees(rotationQuaternion, SurfaceDragState.LastResolvedRotationDegrees),
         };
 
         _ = TryApplyAndRecordSingleSurfaceDragTransform(context, transform, hit: null);
     }
 
-    private GizmoSurfaceDragSingleResult ResolveSingleSurfaceDragResult(in GizmoContext context, ObjectSurfaceHit hit)
+    private GizmoSurfaceDragSingleResult ResolveSingleSurfaceDragResult(in GizmoContext context, SceneSurfaceHit hit)
         => GizmoSurfaceDragSolver.ResolveSingle(
             hit,
             SurfaceDragState.StartSnapshot,
@@ -195,17 +180,18 @@ internal sealed partial class Gizmo
             SurfaceDragState.RotationSteps,
             context.CameraRight,
             SurfaceDragState.PrimaryEntry,
-            _surfacePlacementService.ShouldUseNativePlacementOrigin(SurfaceDragState.StartSnapshot, hit),
-            _surfacePlacementService.ShouldAlignWallSurface(SurfaceDragState.StartSnapshot),
+            context.ManipulationOptions.SurfaceAlignmentAxis,
+            context.Manipulation.UsesSurfaceOrigin(SurfaceDragState.StartSnapshot, hit),
+            context.ManipulationOptions.ForceSurfaceAlignment,
             SurfaceAlignToNormal);
 
     private bool TryApplySurfaceDragSingleResult(
         in GizmoContext context,
         in GizmoSurfaceDragSingleResult result,
-        ObjectSurfaceHit hit)
+        SceneSurfaceHit hit)
         => TryApplyAndRecordSingleSurfaceDragTransform(context, ResolveSingleSurfaceDragTransform(result), hit);
 
-    private ObjectTransform ResolveSingleSurfaceDragTransform(in GizmoSurfaceDragSingleResult result)
+    private SceneTransform ResolveSingleSurfaceDragTransform(in GizmoSurfaceDragSingleResult result)
         => result.Transform with
         {
             RotationDegrees = ResolveSingleSurfaceDragRotationDegrees(result),
@@ -213,8 +199,8 @@ internal sealed partial class Gizmo
 
     private bool TryApplyAndRecordSingleSurfaceDragTransform(
         in GizmoContext context,
-        ObjectTransform transform,
-        ObjectSurfaceHit? hit)
+        SceneTransform transform,
+        SceneSurfaceHit? hit)
     {
         if (!TryApplySurfaceDragSingleTransform(context, transform, hit, out var appliedSnapshot))
         {
@@ -227,42 +213,52 @@ internal sealed partial class Gizmo
 
     private bool TryApplySurfaceDragSingleTransform(
         in GizmoContext context,
-        ObjectTransform transform,
-        ObjectSurfaceHit? hit,
-        out ObjectSnapshot appliedSnapshot)
+        SceneTransform transform,
+        SceneSurfaceHit? hit,
+        out SceneItemSnapshot appliedSnapshot)
     {
         var entry = SurfaceDragState.PrimaryEntry;
-        var rotation = ObjectTransformMath.CreateRotationQuaternion(transform.RotationDegrees);
+        var rotation = SceneTransformMath.CreateRotationQuaternion(transform.RotationDegrees);
         var pivotOffset = entry.ResolvePivotOffset(rotation);
         var pivotPosition = transform.Position - pivotOffset;
         var snapPolicy = ResolveSurfaceDragSnapPolicy(pivotPosition);
         var snappedPivotPosition = snapPolicy.SnapPosition(pivotPosition);
         var appliedTransform = transform with { Position = snappedPivotPosition + pivotOffset };
-        ObjectSnapshot baseSnapshot = hit.HasValue
+        SceneItemSnapshot baseSnapshot = hit.HasValue
             ? SurfaceDragState.StartSnapshot
             : SurfaceDragState.CurrentSingleSnapshot;
-        ObjectSnapshot nextSnapshot = baseSnapshot with { Transform = appliedTransform };
-        nextSnapshot = _surfaceAttachmentService.ApplySurfaceDragAttachment(nextSnapshot, hit, context.BoundsSnapshots);
+        SceneItemSnapshot nextSnapshot = context.Manipulation.ApplySurfaceState(
+            baseSnapshot with { Transform = appliedTransform },
+            hit);
 
-        if (!_mutationService.TryUpdate(nextSnapshot, out appliedSnapshot))
+        if (Equals(nextSnapshot, SurfaceDragState.CurrentSingleSnapshot)
+            || !_sceneItemService.Update(nextSnapshot, out appliedSnapshot).IsApplied())
         {
+            appliedSnapshot = null!;
             return false;
         }
 
         return true;
     }
 
-    private bool TryApplySurfaceDragSelectionResult(in GizmoSurfaceDragSelectionResult result)
+    private bool TryApplySurfaceDragSelectionResult(
+        in GizmoSurfaceDragSelectionResult result,
+        SceneSurfaceHit hit)
     {
         var snappedPivotPosition = ResolveSurfaceDragSnapPolicy(result.PivotPosition).SnapPosition(result.PivotPosition);
         var groupDelta = GizmoSelectionTransformUtility.ResolveRotationDelta(SurfaceDragState.StartRotationQuaternion, result.GroupRotation);
         var resolvedGroupRotationDegrees = ResolveSurfaceDragSelectionRotationDegrees(result);
         var selectionEntries = SurfaceDragState.SelectionEntries;
-        var snapshots = new ObjectSnapshot[selectionEntries.Count];
+        var snapshots = new SceneItemSnapshot[selectionEntries.Count];
         for (var index = 0; index < selectionEntries.Count; ++index)
         {
             var entry = selectionEntries[index];
-            snapshots[index] = entry.Snapshot with
+            if (!TryGetManipulation(entry.Snapshot, out SceneItemManipulationPolicy? manipulation, out _))
+            {
+                return false;
+            }
+
+            SceneItemSnapshot transformed = entry.Snapshot with
             {
                 Transform = GizmoSelectionTransformUtility.ApplyRigidRotation(
                     entry,
@@ -270,9 +266,10 @@ internal sealed partial class Gizmo
                     groupDelta,
                     SurfaceDragState.ResolveReferenceRotationDegrees(entry.Snapshot.Id)),
             };
+            snapshots[index] = manipulation.ApplySurfaceState(transformed, hit);
         }
 
-        if (!_mutationService.TryUpdateMany(snapshots, out var appliedSnapshots))
+        if (!_sceneItemService.UpdateMany(snapshots, out IReadOnlyList<SceneItemSnapshot> appliedSnapshots).IsApplied())
         {
             return false;
         }
@@ -282,90 +279,83 @@ internal sealed partial class Gizmo
     }
 
     private Vector3 ResolveSingleSurfaceDragRotationDegrees(in GizmoSurfaceDragSingleResult result)
-        => ObjectTransformMath.ToRotationDegrees(result.RotationQuaternion, SurfaceDragState.LastResolvedRotationDegrees);
+        => SceneTransformMath.ToRotationDegrees(result.RotationQuaternion, SurfaceDragState.LastResolvedRotationDegrees);
 
     private Vector3 ResolveSurfaceDragSelectionRotationDegrees(in GizmoSurfaceDragSelectionResult result)
-        => ObjectTransformMath.ToRotationDegrees(result.GroupRotation, SurfaceDragState.LastResolvedRotationDegrees);
+        => SceneTransformMath.ToRotationDegrees(result.GroupRotation, SurfaceDragState.LastResolvedRotationDegrees);
 
-    private bool TryResolveCurrentPlacementHit(in GizmoContext context, out ObjectSurfaceHit hit)
+    private bool TryResolveCurrentPlacementHit(in GizmoContext context, out SceneSurfaceHit hit)
     {
-        hit = ObjectSurfaceHit.Empty;
+        hit = SceneSurfaceHit.Empty;
         if (!TryBuildCurrentMouseRay(context.ViewportPos, context.ViewportSize, out var rayOrigin, out var rayDirection))
         {
             return false;
         }
 
-        bool hasNativeHit = _surfacePlacementService.TryResolvePlacementHit(
+        bool hasWorldHit = context.Manipulation.TryResolveSurfaceHit(
             context.PrimarySnapshot,
             context.BoundsSnapshot,
             rayOrigin,
             rayDirection,
-            out ObjectSurfaceHit nativeHit);
-        if (!hasNativeHit)
+            out SceneSurfaceHit worldHit);
+        if (!hasWorldHit
+            && _surfaceService.TryResolveWorldHit(rayOrigin, rayDirection, out worldHit))
         {
-            hasNativeHit = _placementResolver.TryResolveFromRay(rayOrigin, rayDirection, out nativeHit);
+            hasWorldHit = true;
         }
-        if (SurfaceDragState.ObjectTargetsEnabled
-         && TryResolveObjectPlacementHit(context, rayOrigin, rayDirection, hasNativeHit ? nativeHit.Distance : float.PositiveInfinity, out hit))
+
+        if (SurfaceDragState.ItemTargetsEnabled
+            && TryResolveItemTargetHit(
+                context,
+                rayOrigin,
+                rayDirection,
+                hasWorldHit ? worldHit.Distance : float.PositiveInfinity,
+                out hit))
         {
             return true;
         }
 
-        hit = nativeHit;
-        return hasNativeHit;
+        hit = worldHit;
+        return hasWorldHit;
     }
 
-    private bool TryResolveObjectPlacementHit(
+    private bool TryResolveItemTargetHit(
         in GizmoContext context,
         Vector3 rayOrigin,
         Vector3 rayDirection,
         float maxDistance,
-        out ObjectSurfaceHit hit)
+        out SceneSurfaceHit hit)
     {
-        if (SurfaceDragState.ObjectTargetShape == SurfaceObjectTargetShape.Geometry)
+        if (SurfaceDragState.TargetShape == SceneSurfaceTargetShape.Geometry)
         {
-            return _surfaceTargetService.TryRaycastGeometryTargets(SurfaceDragState.SurfaceTargets, rayOrigin, rayDirection, maxDistance, out hit);
+            return _surfaceService.TryRaycastGeometryTargets(
+                SurfaceDragState.SurfaceTargets,
+                rayOrigin,
+                rayDirection,
+                maxDistance,
+                out hit);
         }
 
-        return ObjectBoundsRaycaster.TryRaycastNearest(
+        return SceneBoundsRaycaster.TryRaycastNearest(
             context.BoundsSnapshots,
-            id => IsSelectedSurfaceDragObject(id, SurfaceDragState.SelectionEntries),
+            SurfaceDragState.SelectedItemIds,
             rayOrigin,
             rayDirection,
             out hit,
             maxDistance);
     }
 
-    private static bool IsSelectedSurfaceDragObject(Guid id, IReadOnlyList<GizmoSelectionEntry> entries)
+    private SceneSurfaceTargetSnapshot CaptureSurfaceTargets(
+        IReadOnlySet<Guid> selectedItemIds,
+        bool itemTargetsEnabled,
+        SceneSurfaceTargetShape targetShape)
     {
-        foreach (GizmoSelectionEntry entry in entries)
+        if (!itemTargetsEnabled || targetShape != SceneSurfaceTargetShape.Geometry)
         {
-            if (entry.Snapshot.Id == id)
-            {
-                return true;
-            }
+            return SceneSurfaceTargetSnapshot.Empty;
         }
 
-        return false;
-    }
-
-    private ObjectSurfaceTargetSnapshot CaptureSurfaceTargets(
-        in GizmoContext context,
-        bool objectTargetsEnabled,
-        SurfaceObjectTargetShape objectTargetShape)
-    {
-        if (!objectTargetsEnabled || objectTargetShape != SurfaceObjectTargetShape.Geometry)
-        {
-            return ObjectSurfaceTargetSnapshot.Empty;
-        }
-
-        var excludedObjectIds = new HashSet<Guid>(context.SelectedSnapshots.Count);
-        foreach (var snapshot in context.SelectedSnapshots)
-        {
-            excludedObjectIds.Add(snapshot.Id);
-        }
-
-        return _surfaceTargetService.CaptureTargets(excludedObjectIds);
+        return _surfaceService.CaptureGeometryTargets(selectedItemIds);
     }
 }
 

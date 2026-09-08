@@ -1,6 +1,7 @@
 using Intoner.Objects.Catalog;
-using Intoner.Objects.Filesystem.Configuration;
+using Intoner.Services.Configuration;
 using Intoner.Objects.Models;
+using Intoner.Scene;
 
 namespace Intoner.Objects.Runtime;
 
@@ -55,7 +56,7 @@ internal sealed class SurfaceRule(
         ObjectBoundsSnapshot boundsSnapshot,
         HousingFurnitureMetadata metadata)
     {
-        if (!surfaceResolver.TryResolveSurface(context, snapshot, boundsSnapshot, metadata, out ObjectSurfaceHit hit, out PlacementIssueCode issueCode, out string surfaceError))
+        if (!surfaceResolver.TryResolveSurface(context, snapshot, boundsSnapshot, metadata, out SceneSurfaceHit hit, out PlacementIssueCode issueCode, out string surfaceError))
         {
             if (AllowsMissingIndoorSurface(context, metadata, issueCode))
             {

@@ -1,3 +1,4 @@
+using Intoner.Scene;
 using System.Numerics;
 using OrientedBounds = FFXIVClientStructs.FFXIV.Common.Math.OrientedBounds;
 
@@ -5,17 +6,19 @@ namespace Intoner.Objects.Utils;
 
 internal static class ObjectShapeMath
 {
+    private const float MaximumSkewAngleDegrees = 89.9f;
+
     public const int WireCircleSegmentCount = 16;
 
     public static Matrix4x4 CreateRigidTransform(Vector3 position, Vector3 rotationDegrees)
     {
-        var rotation = ObjectTransformMath.CreateRotationQuaternion(rotationDegrees);
+        var rotation = SceneTransformMath.CreateRotationQuaternion(rotationDegrees);
         return CreateRigidTransform(position, rotation);
     }
 
     public static Matrix4x4 CreateRigidTransform(Vector3 position, Quaternion rotation)
     {
-        var transform = Matrix4x4.CreateFromQuaternion(ObjectTransformMath.NormalizeQuaternion(rotation));
+        var transform = Matrix4x4.CreateFromQuaternion(SceneTransformMath.NormalizeQuaternion(rotation));
         transform.Translation = position;
         return transform;
     }
@@ -33,22 +36,56 @@ internal static class ObjectShapeMath
     }
 
     public static void CopyOrientedBoxCorners(OrientedBounds bounds, Span<Vector3> corners)
+        => CopyOrientedBoxCorners(bounds.Transform, bounds.HalfExtents, corners);
+
+    public static void CopyOrientedBoxCorners(SceneOrientedBounds bounds, Span<Vector3> corners)
+        => CopyOrientedBoxCorners(bounds.Transform, bounds.HalfExtents, corners);
+
+    public static bool TryCreateOrientedBounds(Matrix4x4 boxTransform, out SceneOrientedBounds bounds)
+    {
+        Vector3 axisX = new(boxTransform.M11, boxTransform.M12, boxTransform.M13);
+        Vector3 axisY = new(boxTransform.M21, boxTransform.M22, boxTransform.M23);
+        Vector3 axisZ = new(boxTransform.M31, boxTransform.M32, boxTransform.M33);
+        float sizeX = axisX.Length();
+        float sizeY = axisY.Length();
+        float sizeZ = axisZ.Length();
+        if (!NumericsUtility.IsFinite(boxTransform)
+            || sizeX <= NumericsUtility.ScalarEpsilon
+            || sizeY <= NumericsUtility.ScalarEpsilon
+            || sizeZ <= NumericsUtility.ScalarEpsilon)
+        {
+            bounds = default;
+            return false;
+        }
+
+        Matrix4x4 rigidTransform = new(
+            axisX.X / sizeX, axisX.Y / sizeX, axisX.Z / sizeX, 0f,
+            axisY.X / sizeY, axisY.Y / sizeY, axisY.Z / sizeY, 0f,
+            axisZ.X / sizeZ, axisZ.Y / sizeZ, axisZ.Z / sizeZ, 0f,
+            boxTransform.M41, boxTransform.M42, boxTransform.M43, 1f);
+        bounds = new SceneOrientedBounds(
+            rigidTransform,
+            new Vector3(sizeX, sizeY, sizeZ) * 0.5f);
+        return true;
+    }
+
+    private static void CopyOrientedBoxCorners(Matrix4x4 transform, Vector3 halfExtents, Span<Vector3> corners)
     {
         Span<Vector3> localCorners =
         [
-            new Vector3(-bounds.HalfExtents.X, -bounds.HalfExtents.Y, -bounds.HalfExtents.Z),
-            new Vector3(bounds.HalfExtents.X, -bounds.HalfExtents.Y, -bounds.HalfExtents.Z),
-            new Vector3(bounds.HalfExtents.X, bounds.HalfExtents.Y, -bounds.HalfExtents.Z),
-            new Vector3(-bounds.HalfExtents.X, bounds.HalfExtents.Y, -bounds.HalfExtents.Z),
-            new Vector3(-bounds.HalfExtents.X, -bounds.HalfExtents.Y, bounds.HalfExtents.Z),
-            new Vector3(bounds.HalfExtents.X, -bounds.HalfExtents.Y, bounds.HalfExtents.Z),
-            new Vector3(bounds.HalfExtents.X, bounds.HalfExtents.Y, bounds.HalfExtents.Z),
-            new Vector3(-bounds.HalfExtents.X, bounds.HalfExtents.Y, bounds.HalfExtents.Z),
+            new Vector3(-halfExtents.X, -halfExtents.Y, -halfExtents.Z),
+            new Vector3(halfExtents.X, -halfExtents.Y, -halfExtents.Z),
+            new Vector3(halfExtents.X, halfExtents.Y, -halfExtents.Z),
+            new Vector3(-halfExtents.X, halfExtents.Y, -halfExtents.Z),
+            new Vector3(-halfExtents.X, -halfExtents.Y, halfExtents.Z),
+            new Vector3(halfExtents.X, -halfExtents.Y, halfExtents.Z),
+            new Vector3(halfExtents.X, halfExtents.Y, halfExtents.Z),
+            new Vector3(-halfExtents.X, halfExtents.Y, halfExtents.Z),
         ];
 
         for (var index = 0; index < localCorners.Length; ++index)
         {
-            corners[index] = Vector3.Transform(localCorners[index], bounds.Transform);
+            corners[index] = Vector3.Transform(localCorners[index], transform);
         }
     }
 
@@ -76,18 +113,59 @@ internal static class ObjectShapeMath
         }
     }
 
-    public static void CopySquarePyramidBaseCorners(Matrix4x4 transform, float length, float angleDegrees, Span<Vector3> corners)
+    public static Matrix4x4 CreateForwardSkewedBoxTransform(
+        SceneTransform transform,
+        float length,
+        Vector2 skewAngleDegrees,
+        float lateralPadding = 0f)
     {
-        var halfExtent = length * MathF.Tan(Math.Clamp(angleDegrees, 0f, 179f) * (MathF.PI / 360f));
-        corners[0] = Vector3.Transform(new Vector3(-halfExtent, -halfExtent, length), transform);
-        corners[1] = Vector3.Transform(new Vector3(halfExtent, -halfExtent, length), transform);
-        corners[2] = Vector3.Transform(new Vector3(halfExtent, halfExtent, length), transform);
-        corners[3] = Vector3.Transform(new Vector3(-halfExtent, halfExtent, length), transform);
+        length = MathF.Max(length, 0.01f);
+        lateralPadding = MathF.Max(lateralPadding, 0f);
+
+        Matrix4x4 worldTransform = SceneTransformMath.CreateWorldTransform(transform);
+        Quaternion rotation = SceneTransformMath.CreateRotationQuaternion(transform.RotationDegrees);
+        Vector3 axisX = Vector3.TransformNormal(Vector3.UnitX, worldTransform);
+        Vector3 axisY = Vector3.TransformNormal(Vector3.UnitY, worldTransform);
+        Vector3 axisZ = Vector3.TransformNormal(Vector3.UnitZ, worldTransform);
+        Vector3 directionX = NormalizeOrFallback(axisX, Vector3.Transform(Vector3.UnitX, rotation));
+        Vector3 directionY = NormalizeOrFallback(axisY, Vector3.Transform(Vector3.UnitY, rotation));
+
+        axisX += directionX * (lateralPadding * 2f);
+        axisY += directionY * (lateralPadding * 2f);
+
+        float skewX = length * MathF.Tan(ToSkewRadians(skewAngleDegrees.Y));
+        float skewY = -length * MathF.Tan(ToSkewRadians(skewAngleDegrees.X));
+        Vector3 forward = (axisZ * length) + (directionX * skewX) + (directionY * skewY);
+        Vector3 center = transform.Position + (forward * 0.5f);
+
+        return new Matrix4x4(
+            axisX.X, axisX.Y, axisX.Z, 0f,
+            axisY.X, axisY.Y, axisY.Z, 0f,
+            forward.X, forward.Y, forward.Z, 0f,
+            center.X, center.Y, center.Z, 1f);
+    }
+
+    private static float ToSkewRadians(float angleDegrees)
+        => Math.Clamp(angleDegrees, -MaximumSkewAngleDegrees, MaximumSkewAngleDegrees) * (MathF.PI / 180f);
+
+    private static Vector3 NormalizeOrFallback(Vector3 value, Vector3 fallback)
+        => NumericsUtility.TryNormalize(value, out Vector3 normalized) ? normalized : fallback;
+
+    public static void CopyUnitBoxCorners(Matrix4x4 transform, Span<Vector3> corners)
+    {
+        corners[0] = Vector3.Transform(new Vector3(-0.5f, -0.5f, -0.5f), transform);
+        corners[1] = Vector3.Transform(new Vector3(0.5f, -0.5f, -0.5f), transform);
+        corners[2] = Vector3.Transform(new Vector3(0.5f, 0.5f, -0.5f), transform);
+        corners[3] = Vector3.Transform(new Vector3(-0.5f, 0.5f, -0.5f), transform);
+        corners[4] = Vector3.Transform(new Vector3(-0.5f, -0.5f, 0.5f), transform);
+        corners[5] = Vector3.Transform(new Vector3(0.5f, -0.5f, 0.5f), transform);
+        corners[6] = Vector3.Transform(new Vector3(0.5f, 0.5f, 0.5f), transform);
+        corners[7] = Vector3.Transform(new Vector3(-0.5f, 0.5f, 0.5f), transform);
     }
 
     public static float ComputeOrientedBoundsSupportExtent(Quaternion rotation, Vector3 halfExtents, Vector3 normal)
     {
-        if (!ObjectMathUtility.TryNormalize(normal, out var normalizedNormal))
+        if (!NumericsUtility.TryNormalize(normal, out var normalizedNormal))
         {
             return 0f;
         }

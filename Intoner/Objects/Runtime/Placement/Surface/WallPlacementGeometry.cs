@@ -1,10 +1,13 @@
 using Intoner.Objects.Models;
 using Intoner.Objects.Utils;
+using Intoner.Scene;
 using System.Numerics;
+using System.Runtime.InteropServices;
 using OrientedBounds = FFXIVClientStructs.FFXIV.Common.Math.OrientedBounds;
 
 namespace Intoner.Objects.Runtime;
 
+[StructLayout(LayoutKind.Auto)]
 internal readonly record struct WallPlacementProbe(Vector3 Origin, Vector3 Direction, float ExpectedDistance);
 
 internal static class WallPlacementGeometry
@@ -18,9 +21,9 @@ internal static class WallPlacementGeometry
         ObjectBoundsSnapshot boundsSnapshot,
         out WallPlacementProbe probe)
     {
-        Quaternion rotation = ObjectTransformMath.CreateRotationQuaternion(snapshot.Transform.RotationDegrees);
+        Quaternion rotation = SceneTransformMath.CreateRotationQuaternion(snapshot.Transform.RotationDegrees);
         Vector3 direction = Vector3.Transform(-Vector3.UnitZ, rotation);
-        if (!ObjectMathUtility.TryNormalize(direction, out direction))
+        if (!NumericsUtility.TryNormalize(direction, out direction))
         {
             probe = default;
             return false;
@@ -53,7 +56,7 @@ internal static class WallPlacementGeometry
         forwardContactPoint = default;
         backwardContactPoint = default;
         if (!TryResolveProbe(snapshot, boundsSnapshot, out WallPlacementProbe probe)
-            || probe.ExpectedDistance <= ObjectMathUtility.ScalarEpsilon)
+            || probe.ExpectedDistance <= NumericsUtility.ScalarEpsilon)
         {
             return false;
         }
@@ -64,7 +67,7 @@ internal static class WallPlacementGeometry
     }
 
     public static bool IsWallSurfaceNormal(Vector3 normal)
-        => ObjectMathUtility.TryNormalize(normal, out Vector3 normalizedNormal)
+        => NumericsUtility.TryNormalize(normal, out Vector3 normalizedNormal)
            && MathF.Abs(normalizedNormal.Y) <= WallNormalYThreshold;
 
     public static bool ContainsWallSurfacePoint(
@@ -89,7 +92,7 @@ internal static class WallPlacementGeometry
 
         Vector3 localPoint = Vector3.Transform(worldPoint, inverseTransform);
         Vector3 localNormal = Vector3.TransformNormal(expectedNormal, inverseTransform);
-        return ObjectMathUtility.TryNormalize(localNormal, out localNormal)
+        return NumericsUtility.TryNormalize(localNormal, out localNormal)
                && (ContainsLocalWallSurfacePoint(localPoint, localNormal, bounds.HalfExtents, Vector3.UnitX, tolerance)
                    || ContainsLocalWallSurfacePoint(localPoint, localNormal, bounds.HalfExtents, Vector3.UnitZ, tolerance));
     }
@@ -100,7 +103,7 @@ internal static class WallPlacementGeometry
         Vector3 expectedNormal,
         float tolerance)
     {
-        if (!ObjectMathUtility.TryNormalize(expectedNormal, out Vector3 normal))
+        if (!NumericsUtility.TryNormalize(expectedNormal, out Vector3 normal))
         {
             return false;
         }

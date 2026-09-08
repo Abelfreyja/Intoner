@@ -3,13 +3,13 @@ using System.Text;
 
 namespace Intoner.Objects.Assets.Cache;
 
-internal sealed class ObjectAssetCacheSerializer
+internal static class ObjectAssetCacheSerializer
 {
     internal const int FormatVersion = 1;
     internal const string CacheFileName = "assets.cache";
     private static readonly StringComparer PathComparer = StringComparer.OrdinalIgnoreCase;
 
-    public IReadOnlyDictionary<ObjectAssetCacheSectionKind, ObjectAssetCacheSectionPayload> SerializeSections(ObjectAssetCacheSaveRequest request)
+    public static IReadOnlyDictionary<ObjectAssetCacheSectionKind, ObjectAssetCacheSectionPayload> SerializeSections(ObjectAssetCacheSaveRequest request)
     {
         Dictionary<ObjectAssetCacheSectionKind, ObjectAssetCacheSectionPayload> sections = [];
         foreach (ObjectAssetCacheSectionDescriptor descriptor in request.Sections.EnumerateDescriptors())
@@ -31,7 +31,7 @@ internal sealed class ObjectAssetCacheSerializer
         return sections;
     }
 
-    public ObjectAssetCacheSerializedData BuildSerializedData(
+    public static ObjectAssetCacheSerializedData BuildSerializedData(
         IReadOnlyDictionary<ObjectAssetCacheSectionKind, ObjectAssetCacheSectionPayload> sections)
     {
         using MemoryStream stream = new();
@@ -58,11 +58,10 @@ internal sealed class ObjectAssetCacheSerializer
         return new ObjectAssetCacheSerializedData(
             payload,
             payload.LongLength,
-            ObjectAssetHashUtility.ComputeSha256Hex(payload),
             serializedSections.ToArray());
     }
 
-    public ObjectAssetCacheManifest BuildManifest(
+    public static ObjectAssetCacheManifest BuildManifest(
         string? gameVersion,
         string? sqpackIndexFingerprint,
         ObjectAssetCacheSerializedData serializedData)
@@ -74,7 +73,6 @@ internal sealed class ObjectAssetCacheSerializer
             string.IsNullOrWhiteSpace(sqpackIndexFingerprint) ? null : sqpackIndexFingerprint,
             DateTime.UtcNow,
             serializedData.PayloadLength,
-            serializedData.PayloadHash,
             serializedData.Sections
                 .Select(static section => new ObjectAssetCacheManifestSection(
                     section.Kind.ToManifestName(),
@@ -84,7 +82,7 @@ internal sealed class ObjectAssetCacheSerializer
                     section.Hash))
                 .ToArray());
 
-    public ObjectAssetCacheSnapshot Deserialize(
+    public static ObjectAssetCacheSnapshot Deserialize(
         ObjectAssetCacheManifest manifest,
         IReadOnlyDictionary<ObjectAssetCacheSectionKind, ReadOnlyMemory<byte>> sectionPayloads)
     {
@@ -517,7 +515,6 @@ internal sealed class ObjectAssetCacheSerializer
     internal sealed record ObjectAssetCacheSerializedData(
         byte[] Payload,
         long PayloadLength,
-        string PayloadHash,
         IReadOnlyList<SerializedSection> Sections);
 
     internal sealed record ObjectAssetCacheSectionPayload(

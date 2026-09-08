@@ -1,3 +1,4 @@
+using Intoner.Services.Gpu;
 using Microsoft.Extensions.Logging;
 using SharpDX.Direct3D11;
 using SharpDX.DXGI;
@@ -41,16 +42,7 @@ internal sealed unsafe partial class EdgeGlowRenderer
 
         try
         {
-            framebufferSet = new EdgeGlowFramebufferSet(
-                CreateFramebuffer(device, width, height),
-                CreateFramebuffer(device, width, height),
-                CreateFramebuffer(device, blurWidth, blurHeight),
-                CreateFramebuffer(device, width, height),
-                width,
-                height,
-                blurWidth,
-                blurHeight,
-                _framebufferGeneration);
+            framebufferSet = CreateFramebufferSet(device, width, height, blurWidth, blurHeight);
             return true;
         }
         catch (Exception ex)
@@ -83,58 +75,55 @@ internal sealed unsafe partial class EdgeGlowRenderer
         _availableFramebufferSets.Clear();
     }
 
-    private static EdgeGlowFramebuffer CreateFramebuffer(Device device, int width, int height)
+    private EdgeGlowFramebufferSet CreateFramebufferSet(
+        Device device,
+        int width,
+        int height,
+        int blurWidth,
+        int blurHeight)
     {
-        var texture = new Texture2D(device, new Texture2DDescription
+        GpuColorTarget? sharp = null;
+        GpuColorTarget? bloomSource = null;
+        GpuColorTarget? blurScratch = null;
+        GpuColorTarget? blurOutput = null;
+        try
         {
-            Width = width,
-            Height = height,
-            MipLevels = 1,
-            ArraySize = 1,
-            Format = Format.R8G8B8A8_UNorm,
-            SampleDescription = new SampleDescription(1, 0),
-            Usage = ResourceUsage.Default,
-            BindFlags = BindFlags.RenderTarget | BindFlags.ShaderResource,
-            CpuAccessFlags = CpuAccessFlags.None,
-            OptionFlags = ResourceOptionFlags.None,
-        });
-        var renderTargetView = new RenderTargetView(device, texture);
-        var shaderResourceView = new ShaderResourceView(device, texture);
-        return new EdgeGlowFramebuffer(texture, renderTargetView, shaderResourceView, width, height);
-    }
-
-    private sealed class EdgeGlowFramebuffer : IDisposable
-    {
-        public EdgeGlowFramebuffer(Texture2D texture, RenderTargetView renderTargetView, ShaderResourceView shaderResourceView, int width, int height)
-        {
-            Texture = texture;
-            RenderTargetView = renderTargetView;
-            ShaderResourceView = shaderResourceView;
-            Width = width;
-            Height = height;
+            sharp = new GpuColorTarget(device, width, height);
+            bloomSource = new GpuColorTarget(device, width, height);
+            blurScratch = new GpuColorTarget(device, blurWidth, blurHeight);
+            blurOutput = new GpuColorTarget(device, width, height);
+            EdgeGlowFramebufferSet result = new(
+                sharp,
+                bloomSource,
+                blurScratch,
+                blurOutput,
+                width,
+                height,
+                blurWidth,
+                blurHeight,
+                _framebufferGeneration);
+            sharp = null;
+            bloomSource = null;
+            blurScratch = null;
+            blurOutput = null;
+            return result;
         }
-
-        public Texture2D Texture { get; }
-        public RenderTargetView RenderTargetView { get; }
-        public ShaderResourceView ShaderResourceView { get; }
-        public int Width { get; }
-        public int Height { get; }
-
-        public void Dispose()
+        finally
         {
-            ShaderResourceView.Dispose();
-            RenderTargetView.Dispose();
-            Texture.Dispose();
+            blurOutput?.Dispose();
+            blurScratch?.Dispose();
+            bloomSource?.Dispose();
+            sharp?.Dispose();
         }
     }
 
     private sealed class EdgeGlowFramebufferSet : IDisposable
     {
         public EdgeGlowFramebufferSet(
-            EdgeGlowFramebuffer sharpFramebuffer,
-            EdgeGlowFramebuffer bloomSourceFramebuffer,
-            EdgeGlowFramebuffer blurScratchFramebuffer,
-            EdgeGlowFramebuffer blurOutputFramebuffer,
+            GpuColorTarget sharpFramebuffer,
+            GpuColorTarget bloomSourceFramebuffer,
+            GpuColorTarget blurScratchFramebuffer,
+            GpuColorTarget blurOutputFramebuffer,
             int width,
             int height,
             int blurWidth,
@@ -152,10 +141,10 @@ internal sealed unsafe partial class EdgeGlowRenderer
             Generation = generation;
         }
 
-        public EdgeGlowFramebuffer SharpFramebuffer { get; }
-        public EdgeGlowFramebuffer BloomSourceFramebuffer { get; }
-        public EdgeGlowFramebuffer BlurScratchFramebuffer { get; }
-        public EdgeGlowFramebuffer BlurOutputFramebuffer { get; }
+        public GpuColorTarget SharpFramebuffer { get; }
+        public GpuColorTarget BloomSourceFramebuffer { get; }
+        public GpuColorTarget BlurScratchFramebuffer { get; }
+        public GpuColorTarget BlurOutputFramebuffer { get; }
         public int Width { get; }
         public int Height { get; }
         public int BlurWidth { get; }

@@ -24,14 +24,33 @@ internal sealed class GpuFullscreenQuad : IDisposable
 
     public GpuFullscreenQuad(Device device, GpuShaderBytecode vertexShaderBytecode)
     {
-        _vertexShader = vertexShaderBytecode.CreateVertexShader(device);
-        _inputLayout = vertexShaderBytecode.CreateInputLayout(
-            device,
-            [
-                new InputElement("POSITION", 0, Format.R32G32_Float, 0, 0),
-                new InputElement("TEXCOORD", 0, Format.R32G32_Float, 8, 0),
-            ]);
-        _vertexBuffer = Buffer.Create(device, BindFlags.VertexBuffer, Vertices);
+        VertexShader? vertexShader = null;
+        InputLayout? inputLayout = null;
+        Buffer? vertexBuffer = null;
+        try
+        {
+            vertexShader = vertexShaderBytecode.CreateVertexShader(device);
+            inputLayout = vertexShaderBytecode.CreateInputLayout(
+                device,
+                [
+                    new InputElement("POSITION", 0, Format.R32G32_Float, 0, 0),
+                    new InputElement("TEXCOORD", 0, Format.R32G32_Float, 8, 0),
+                ]);
+            vertexBuffer = Buffer.Create(device, BindFlags.VertexBuffer, Vertices);
+
+            _vertexShader = vertexShader;
+            _inputLayout = inputLayout;
+            _vertexBuffer = vertexBuffer;
+            vertexShader = null;
+            inputLayout = null;
+            vertexBuffer = null;
+        }
+        finally
+        {
+            vertexBuffer?.Dispose();
+            inputLayout?.Dispose();
+            vertexShader?.Dispose();
+        }
     }
 
     public void Apply(DeviceContext context)
@@ -44,9 +63,21 @@ internal sealed class GpuFullscreenQuad : IDisposable
 
     public void Dispose()
     {
-        _vertexBuffer.Dispose();
-        _inputLayout.Dispose();
-        _vertexShader.Dispose();
+        try
+        {
+            _vertexBuffer.Dispose();
+        }
+        finally
+        {
+            try
+            {
+                _inputLayout.Dispose();
+            }
+            finally
+            {
+                _vertexShader.Dispose();
+            }
+        }
     }
 
 #pragma warning disable S4487 // gpu vertex fields are read by native vertex buffer upload

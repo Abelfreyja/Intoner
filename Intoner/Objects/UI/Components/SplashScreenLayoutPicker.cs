@@ -1,6 +1,5 @@
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
-using Dalamud.Interface.Utility.Raii;
 using System.Numerics;
 
 namespace Intoner.Objects.UI.Components;
@@ -31,12 +30,12 @@ internal static class SplashScreenLayoutPicker
         drawList.AddRectFilled(
             min,
             max,
-            ImGui.GetColorU32(EditorColors.WithAlpha(EditorColors.WindowBg, 0.98f)),
+            ImGui.GetColorU32(ThemeColors.WithAlpha(ThemeColors.WindowBg, 0.98f)),
             rounding);
         drawList.AddRect(
             min,
             max,
-            ImGui.GetColorU32(EditorColors.WithAlpha(EditorColors.Border, 0.82f)),
+            ImGui.GetColorU32(ThemeColors.WithAlpha(ThemeColors.Border, 0.82f)),
             rounding,
             ImDrawFlags.None,
             MathF.Max(1f, scale));
@@ -46,7 +45,7 @@ internal static class SplashScreenLayoutPicker
         Vector2 contentMax = max - new Vector2(padding, padding);
         drawList.AddText(
             contentMin,
-            ImGui.GetColorU32(EditorColors.Text),
+            ImGui.GetColorU32(ThemeColors.Text),
             "Open Layout");
         SplashScreenActionRequest? closeRequest = DrawCloseButton(drawList, contentMin, contentMax, scale, out bool closeHovered);
         hovered |= closeHovered;
@@ -56,7 +55,7 @@ internal static class SplashScreenLayoutPicker
         {
             drawList.AddText(
                 listMin,
-                ImGui.GetColorU32(EditorColors.WithAlpha(EditorColors.TextDisabled, 0.76f)),
+                ImGui.GetColorU32(ThemeColors.WithAlpha(ThemeColors.TextDisabled, 0.76f)),
                 "No saved layouts.");
             return closeRequest;
         }
@@ -86,19 +85,15 @@ internal static class SplashScreenLayoutPicker
         hovered = EditorInputUtility.IsMouseInside(min, max);
         if (hovered)
         {
-            drawList.AddRectFilled(min, max, ImGui.GetColorU32(EditorColors.WithAlpha(EditorColors.Button, 0.55f)), 4f * scale);
+            drawList.AddRectFilled(min, max, ImGui.GetColorU32(ThemeColors.WithAlpha(ThemeColors.Button, 0.55f)), 4f * scale);
         }
 
-        string iconText = FontAwesomeIcon.Times.ToIconString();
-        Vector2 iconSize;
-        using (ImRaii.PushFont(UiBuilder.IconFont))
-        {
-            iconSize = ImGui.CalcTextSize(iconText);
-            drawList.AddText(
-                min + ((new Vector2(size) - iconSize) * 0.5f),
-                ImGui.GetColorU32(EditorColors.WithAlpha(EditorColors.TextDisabled, hovered ? 0.95f : 0.74f)),
-                iconText);
-        }
+        EditorIcon.DrawCentered(
+            drawList,
+            FontAwesomeIcon.Times,
+            min,
+            max,
+            ThemeColors.WithAlpha(ThemeColors.TextDisabled, hovered ? 0.95f : 0.74f));
 
         return EditorInputUtility.IsMouseClickedInside(min, max)
             ? new SplashScreenActionRequest(SplashScreenActionKind.CloseLayouts)

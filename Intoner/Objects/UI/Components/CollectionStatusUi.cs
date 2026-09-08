@@ -1,13 +1,14 @@
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using Intoner.Objects.Collections;
-using Intoner.UI;
 using System.Numerics;
 
 namespace Intoner.Objects.UI.Components;
 
 internal sealed record ObjectCollectionHeaderStatus(
+    FontAwesomeIcon Icon,
     string IssueText,
     string DetailText,
     IReadOnlyList<string> Warnings,
@@ -38,12 +39,12 @@ internal static class CollectionStatusUi
         drawList.AddRectFilled(
             min,
             max,
-            ImGui.GetColorU32(EditorColors.WithAlpha(accent, 0.12f)),
+            ImGui.GetColorU32(ThemeColors.WithAlpha(accent, 0.12f)),
             999f);
         drawList.AddRect(
             min,
             max,
-            ImGui.GetColorU32(EditorColors.WithAlpha(accent, 0.34f)),
+            ImGui.GetColorU32(ThemeColors.WithAlpha(accent, 0.34f)),
             999f);
         drawList.AddText(
             new Vector2(min.X + paddingX, min.Y + paddingY),
@@ -56,16 +57,16 @@ internal static class CollectionStatusUi
     public static Vector4 ResolveObjectCollectionAccentColor(ObjectCollectionResolveState compileState)
         => compileState switch
         {
-            ObjectCollectionResolveState.Ready => EditorColors.AccentPurple,
-            ObjectCollectionResolveState.Resolving or ObjectCollectionResolveState.WaitingForPenumbra => EditorColors.AccentBlue,
-            ObjectCollectionResolveState.ModMissing or ObjectCollectionResolveState.ResolveFailed => EditorColors.AccentOrange,
-            _ => EditorColors.TextDisabled,
+            ObjectCollectionResolveState.Ready => ThemeColors.AccentPrimary,
+            ObjectCollectionResolveState.Resolving or ObjectCollectionResolveState.WaitingForPenumbra => ThemeColors.AccentBlue,
+            ObjectCollectionResolveState.ModMissing or ObjectCollectionResolveState.ResolveFailed => ThemeColors.AccentOrange,
+            _ => ThemeColors.TextDisabled,
         };
 
     public static string ResolveObjectCollectionStateLabel(ObjectCollectionResolveState compileState)
         => compileState switch
         {
-            ObjectCollectionResolveState.Ready => "ready",
+            ObjectCollectionResolveState.Ready => "active",
             ObjectCollectionResolveState.Resolving => "compiling",
             ObjectCollectionResolveState.WaitingForPenumbra => "waiting for Penumbra",
             ObjectCollectionResolveState.ModMissing => "missing mod",
@@ -86,91 +87,95 @@ internal static class CollectionStatusUi
         }
 
         return new ObjectCollectionHeaderStatus(
-            BuildObjectCollectionHeaderBadgeText(collection, assignedObjectCount, statusText),
+            ResolveObjectCollectionStateIcon(collection.ResolveState),
+            ResolveObjectCollectionIssueText(collection, assignedObjectCount, statusText),
             statusText,
             collection.Warnings,
             collection.KeepingLastGoodSnapshot);
     }
 
-    public static string BuildObjectCollectionHeaderBadgeText(
-        ObjectCollectionSnapshot collection,
-        int assignedObjectCount)
-        => ResolveObjectCollectionIssueText(collection, assignedObjectCount, collection.StatusText.Trim());
-
-    private static string BuildObjectCollectionHeaderBadgeText(
-        ObjectCollectionSnapshot collection,
-        int assignedObjectCount,
-        string statusText)
-        => ResolveObjectCollectionIssueText(collection, assignedObjectCount, statusText);
-
     public static void DrawObjectCollectionStatusTooltip(ObjectCollectionHeaderStatus status, Vector4 accent)
     {
-        UiSharedService.DrawAccentTooltip(
+        string summary = status.DetailText.Length > 0
+            ? status.DetailText
+            : status.IssueText;
+        float measuredWidth = IntonerTooltipContent.MeasureHeaderWidth(
+            status.Icon,
+            "Collection status",
+            summary);
+        foreach (string warning in status.Warnings)
+        {
+            measuredWidth = MathF.Max(
+                measuredWidth,
+                IntonerTooltipContent.MeasureHeaderWidth(
+                    FontAwesomeIcon.ExclamationTriangle,
+                    "Warning",
+                    warning));
+        }
+
+        if (status.KeepingLastGoodSnapshot)
+        {
+            measuredWidth = MathF.Max(
+                measuredWidth,
+                IntonerTooltipContent.MeasureHeaderWidth(
+                    FontAwesomeIcon.InfoCircle,
+                    "Last resolved data",
+                    "Kept in use while this issue is resolved"));
+        }
+
+        IntonerTooltip.DrawContentSized(
             () =>
             {
-                using var wrap = ImRaiiScope.TextWrapPos(ImGui.GetFontSize() * 42f);
-                using (ImRaii.PushColor(ImGuiCol.Text, accent))
-                {
-                    ImGui.TextUnformatted(status.IssueText);
-                }
-
-                if (status.DetailText.Length > 0)
-                {
-                    ImGuiHelpers.ScaledDummy(3f);
-                    using (ImRaii.PushColor(ImGuiCol.Text, EditorColors.TextDisabled))
-                    {
-                        ImGui.TextWrapped(status.DetailText);
-                    }
-                }
+                IntonerTooltipContent.Header(
+                    status.Icon,
+                    "Collection status",
+                    summary,
+                    accent);
 
                 if (status.Warnings.Count > 0)
                 {
-                    ImGuiHelpers.ScaledDummy(4f);
-                    ImGui.Separator();
-                    using (ImRaii.PushColor(ImGuiCol.Text, EditorColors.AccentOrange))
+                    IntonerTooltipContent.Separator();
+                    IntonerTooltipContent.SectionLabel("Warnings", ThemeColors.AccentOrange);
+                    foreach (string warning in status.Warnings)
                     {
-                        ImGui.TextUnformatted("warnings:");
-                        foreach (string warning in status.Warnings)
-                        {
-                            ImGui.TextWrapped($"- {warning}");
-                        }
+                        IntonerTooltipContent.Item(
+                            FontAwesomeIcon.ExclamationTriangle,
+                            "Warning",
+                            warning,
+                            ThemeColors.AccentOrange);
                     }
                 }
 
                 if (status.KeepingLastGoodSnapshot)
                 {
-                    ImGuiHelpers.ScaledDummy(4f);
-                    ImGui.Separator();
-                    using (ImRaii.PushColor(ImGuiCol.Text, EditorColors.AccentBlue))
-                    {
-                        ImGui.TextWrapped("keeping last resolved data");
-                    }
+                    IntonerTooltipContent.Separator();
+                    IntonerTooltipContent.Item(
+                        FontAwesomeIcon.InfoCircle,
+                        "Last resolved data",
+                        "Kept in use while this issue is resolved",
+                        ThemeColors.AccentBlue);
                 }
             },
-            accent);
+            measuredWidth,
+            new IntonerTooltipOptions
+            {
+                Accent = accent,
+                MaxWidth = 420f,
+            });
     }
 
-    public static string BuildObjectCollectionListStatus(
-        IReadOnlyList<ObjectCollectionSnapshot> collections,
-        ObjectCollectionSnapshot? selectedCollection)
-        => $"{(collections.Count == 1 ? "1 collection" : $"{collections.Count} collections")} | {(selectedCollection is null ? "no selection" : selectedCollection.Record.Name)}";
-
-    public static string BuildObjectCollectionInspectorStatus(
+    public static IReadOnlyList<EditorBadge> BuildObjectCollectionWorkspaceBadges(
         ObjectCollectionSnapshot collection,
         int assignedObjectCount)
-        => $"{BuildAssignedModsSubtitle(collection.Record.Entries.Count)} | {BuildRedirectCountLabel(collection.RedirectCount)} | {BuildAssignedObjectsSubtitle(assignedObjectCount)}";
-
-    public static string BuildObjectCollectionEntryDetail(ObjectCollectionSnapshot collection)
-        => $"{ResolveObjectCollectionStateLabel(collection.ResolveState)} | {BuildRedirectCountLabel(collection.RedirectCount)} | {BuildAssignedModsSubtitle(collection.Record.Entries.Count)}";
+        =>
+        [
+            EditorBadge.Count(FontAwesomeIcon.Cubes, collection.Record.Entries.Count, "assigned mod", "assigned mods"),
+            EditorBadge.Count(FontAwesomeIcon.ProjectDiagram, collection.RedirectCount, "redirect", "redirects"),
+            EditorBadge.Count(FontAwesomeIcon.Cube, assignedObjectCount, "placed object", "placed objects"),
+        ];
 
     public static string BuildAssignedModsSubtitle(int modCount)
         => modCount == 1 ? "1 assigned mod" : $"{modCount} assigned mods";
-
-    private static string BuildRedirectCountLabel(int redirectCount)
-        => redirectCount == 1 ? "1 redirect" : $"{redirectCount} redirects";
-
-    private static string BuildAssignedObjectsSubtitle(int objectCount)
-        => objectCount == 1 ? "1 placed object" : $"{objectCount} placed objects";
 
     private static string ResolveObjectCollectionIssueText(
         ObjectCollectionSnapshot collection,
@@ -191,6 +196,17 @@ internal static class CollectionStatusUi
             ObjectCollectionResolveState.ResolveFailed
                 => "resolve failed",
             _ => ResolveInactiveObjectCollectionIssue(collection, assignedObjectCount, statusText),
+        };
+
+    public static FontAwesomeIcon ResolveObjectCollectionStateIcon(ObjectCollectionResolveState state)
+        => state switch
+        {
+            ObjectCollectionResolveState.Ready => FontAwesomeIcon.CheckCircle,
+            ObjectCollectionResolveState.Resolving => FontAwesomeIcon.SyncAlt,
+            ObjectCollectionResolveState.WaitingForPenumbra => FontAwesomeIcon.Clock,
+            ObjectCollectionResolveState.ModMissing => FontAwesomeIcon.ExclamationTriangle,
+            ObjectCollectionResolveState.ResolveFailed => FontAwesomeIcon.TimesCircle,
+            _ => FontAwesomeIcon.InfoCircle,
         };
 
     private static string ResolveInactiveObjectCollectionIssue(
@@ -229,9 +245,14 @@ internal static class CollectionStatusUi
     }
 
     private static string ResolveObjectCollectionWarningIssue(IReadOnlyList<string> warnings)
-        => warnings.Any(static warning => warning.Contains("is missing", StringComparison.OrdinalIgnoreCase))
-            ? "missing Penumbra mods"
-            : warnings.Any(static warning => warning.Contains("no longer exists", StringComparison.OrdinalIgnoreCase))
-                ? "stale mod settings"
-                : "collection warnings";
+    {
+        if (warnings.Any(static warning => warning.Contains("is missing", StringComparison.OrdinalIgnoreCase)))
+        {
+            return "missing Penumbra mods";
+        }
+
+        return warnings.Any(static warning => warning.Contains("no longer exists", StringComparison.OrdinalIgnoreCase))
+            ? "stale mod settings"
+            : "collection warnings";
+    }
 }

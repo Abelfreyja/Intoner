@@ -2,7 +2,10 @@ using Dalamud.Plugin.Services;
 using Intoner.Objects.Models;
 using Intoner.Objects.Resources;
 using Intoner.Objects.Utils;
+using Intoner.Scene;
+using Intoner.Utils;
 using System.Numerics;
+using System.Runtime.InteropServices;
 using AxisAlignedBounds = FFXIVClientStructs.FFXIV.Common.Math.AxisAlignedBounds;
 using OrientedBounds = FFXIVClientStructs.FFXIV.Common.Math.OrientedBounds;
 
@@ -12,6 +15,7 @@ namespace Intoner.Objects.Runtime;
 /// <param name="LoadedAll">true when every desired object is active</param>
 /// <param name="CanApply">true when the current location can receive scene objects</param>
 /// <param name="NeedsRetry">true when a transient load failure left a refresh pending</param>
+[StructLayout(LayoutKind.Auto)]
 internal readonly record struct SceneReloadResult(bool LoadedAll, bool CanApply, bool NeedsRetry)
 {
     public static SceneReloadResult InvalidLocation { get; } = new(false, false, false);
@@ -28,6 +32,9 @@ internal readonly record struct SceneReloadResult(bool LoadedAll, bool CanApply,
 /// </summary>
 internal interface IObjectScene
 {
+    /// <summary>raised after a deferred scene refresh finishes reconciling desired state</summary>
+    event Action SceneRefreshed;
+
     /// <summary>
     /// Gets the currently active object snapshots.
     /// </summary>
@@ -44,7 +51,7 @@ internal interface IObjectScene
     /// Gets the current location scope used for active scene loading and runtime state resolution.
     /// </summary>
     /// <returns>The current location scope.</returns>
-    ObjectLocationScope GetCurrentLocationScope();
+    SceneLocationScope GetCurrentLocationScope();
 
     /// <summary>
     /// Gets the runtime state snapshots for the given composed scene snapshots.
@@ -82,13 +89,6 @@ internal interface IObjectScene
     bool ShouldApplyChangesNow();
 
     /// <summary>
-    /// Runs one scene mutation on the framework thread.
-    /// </summary>
-    /// <param name="applyRuntimeChanges">The scene mutation to apply.</param>
-    /// <returns>The scene mutation result.</returns>
-    ObjectTemporaryMutationStatus RunOnSceneThread(Func<ObjectTemporaryMutationStatus> applyRuntimeChanges);
-
-    /// <summary>
     /// Reloads the active scene for the current location scope.
     /// </summary>
     /// <returns>the scene reload result.</returns>
@@ -115,7 +115,7 @@ internal interface IObjectScene
     void HandleLogout();
 }
 
-internal sealed class ObjectScene : IObjectScene
+internal sealed class ObjectScene : IObjectScene, IDisposable
 {
     private enum ActiveEntryReuseStatus
     {
@@ -128,26 +128,31 @@ internal sealed class ObjectScene : IObjectScene
     private readonly IObjectKindService    _objectKindService;
     private readonly IObjectSceneSnapshotResolver _snapshotResolver;
     private readonly IObjectSceneState     _sceneState;
-    private readonly IObjectMutationService _mutationService;
-    private readonly IObjectRuntimeLocationService _locationService;
+    private readonly IObjectSceneMutationService _sceneMutations;
+    private readonly ISceneLocationService _locationService;
     private readonly IObjectResolvedCollectionStore _collectionStore;
+    private readonly List<ObjectBoundsSnapshot> _boundsBuffer = [];
+
+    public event Action? SceneRefreshed;
 
     public ObjectScene(
         IFramework framework,
         IObjectKindService objectKindService,
         IObjectSceneSnapshotResolver snapshotResolver,
         IObjectSceneState sceneState,
-        IObjectMutationService mutationService,
-        IObjectRuntimeLocationService locationService,
+        IObjectSceneMutationService sceneMutations,
+        ISceneLocationService locationService,
         IObjectResolvedCollectionStore collectionStore)
     {
         _framework = framework;
         _objectKindService = objectKindService;
         _snapshotResolver = snapshotResolver;
         _sceneState = sceneState;
-        _mutationService = mutationService;
+        _sceneMutations = sceneMutations;
         _locationService = locationService;
         _collectionStore = collectionStore;
+
+        _locationService.LocationInvalidated += HandleLocationInvalidated;
     }
 
     public IReadOnlyList<ObjectSnapshot> GetObjectSnapshots()
@@ -156,7 +161,7 @@ internal sealed class ObjectScene : IObjectScene
     public IReadOnlyList<ObjectBoundsSnapshot> GetBoundsSnapshots()
         => _sceneState.GetBoundsSnapshots();
 
-    public ObjectLocationScope GetCurrentLocationScope()
+    public SceneLocationScope GetCurrentLocationScope()
         => _locationService.GetCurrentLocationScope();
 
     public IReadOnlyList<ObjectRuntimeStateSnapshot> GetRuntimeStateSnapshots(IReadOnlyList<ObjectSnapshot> sceneSnapshots)
@@ -205,25 +210,26 @@ internal sealed class ObjectScene : IObjectScene
         return !refreshState.IsZoning && GetCurrentLocationScope().IsValid;
     }
 
-    public ObjectTemporaryMutationStatus RunOnSceneThread(Func<ObjectTemporaryMutationStatus> applyRuntimeChanges)
-        => ObjectFrameworkUtility.RunOnFrameworkThread(_framework, applyRuntimeChanges);
+    public void Dispose()
+        => _locationService.LocationInvalidated -= HandleLocationInvalidated;
 
     public SceneReloadResult ReloadForCurrentLocation()
-        => ObjectFrameworkUtility.RunOnFrameworkThread(_framework, ReloadForCurrentLocationInternal);
+        => FrameworkThreadUtility.Run(_framework, ReloadForCurrentLocationInternal);
 
     public void FrameworkUpdate()
     {
         RefreshObjectsForCurrentLocation();
 
-        var sceneObjects = GetActiveSceneObjects();
-        ProcessFrameworkUpdates(sceneObjects);
-        PublishBounds(sceneObjects);
+        IReadOnlyList<ObjectSceneEntry> entries = _sceneState.GetEntriesSnapshot();
+        ProcessFrameworkUpdates(entries);
+        PublishBounds(entries);
     }
 
     public void HandleZoneSwitchStart()
     {
         _sceneState.BeginZoning();
-        _mutationService.ClearAllActiveEntries(removePersistedState: false);
+        _sceneMutations.ClearAllActiveEntries(removePersistedState: false);
+        SceneRefreshed?.Invoke();
     }
 
     public void HandleZoneSwitchEnd()
@@ -232,7 +238,8 @@ internal sealed class ObjectScene : IObjectScene
     public void HandleLogout()
     {
         _sceneState.HandleLogout();
-        _mutationService.ClearAllActiveEntries(removePersistedState: false);
+        _sceneMutations.ClearAllActiveEntries(removePersistedState: false);
+        SceneRefreshed?.Invoke();
     }
 
     private void RefreshObjectsForCurrentLocation()
@@ -243,13 +250,17 @@ internal sealed class ObjectScene : IObjectScene
             return;
         }
 
-        ReloadForCurrentLocationInternal(currentLocation);
+        SceneReloadResult result = ReloadForCurrentLocationInternal(currentLocation);
+        if (result.IsApplied)
+        {
+            SceneRefreshed?.Invoke();
+        }
     }
 
     private SceneReloadResult ReloadForCurrentLocationInternal()
         => ReloadForCurrentLocationInternal(_locationService.GetCurrentLocationScope());
 
-    private SceneReloadResult ReloadForCurrentLocationInternal(ObjectLocationScope currentLocation)
+    private SceneReloadResult ReloadForCurrentLocationInternal(SceneLocationScope currentLocation)
     {
         if (!currentLocation.IsValid)
         {
@@ -266,7 +277,7 @@ internal sealed class ObjectScene : IObjectScene
 
     private static bool SnapshotsMatch(ObjectSceneEntry entry, ObjectSnapshot desiredSnapshot)
     {
-        if (entry.SceneObject.Kind != desiredSnapshot.Kind)
+        if (entry.Runtime.Kind != desiredSnapshot.Kind)
         {
             return false;
         }
@@ -274,51 +285,41 @@ internal sealed class ObjectScene : IObjectScene
         return entry.Snapshot == desiredSnapshot;
     }
 
-    private List<ISceneObject> GetActiveSceneObjects()
+    private static void ProcessFrameworkUpdates(IReadOnlyList<ObjectSceneEntry> entries)
     {
-        var entries = _sceneState.GetEntriesSnapshot();
-        var sceneObjects = new List<ISceneObject>(entries.Count);
-        foreach (var entry in entries)
+        for (int index = 0; index < entries.Count; ++index)
         {
-            sceneObjects.Add(entry.SceneObject);
-        }
-
-        return sceneObjects;
-    }
-
-    private void ProcessFrameworkUpdates(IReadOnlyList<ISceneObject> sceneObjects)
-    {
-        foreach (var sceneObject in sceneObjects)
-        {
-            if (!sceneObject.NeedsFrameworkUpdates)
+            IObjectRuntime runtime = entries[index].Runtime;
+            if (!runtime.NeedsFrameworkUpdates)
             {
                 continue;
             }
 
-            sceneObject.FrameworkUpdate();
+            runtime.FrameworkUpdate();
         }
     }
 
-    private void PublishBounds(IReadOnlyList<ISceneObject> sceneObjects)
+    private void PublishBounds(IReadOnlyList<ObjectSceneEntry> entries)
     {
-        List<ObjectBoundsSnapshot> boundsSnapshots = [];
-        foreach (var sceneObject in sceneObjects)
+        _boundsBuffer.Clear();
+        foreach (ObjectSceneEntry entry in entries)
         {
-            if (!TryCreateBoundsSnapshot(sceneObject, out var boundsSnapshot))
+            if (!TryCreateBoundsSnapshot(entry.Runtime, out ObjectBoundsSnapshot boundsSnapshot))
             {
                 continue;
             }
 
-            boundsSnapshots.Add(boundsSnapshot);
+            _boundsBuffer.Add(boundsSnapshot);
         }
 
-        _sceneState.SetBoundsSnapshots(boundsSnapshots);
+        _sceneState.SetBoundsSnapshots(_boundsBuffer);
     }
 
-    private bool ShouldReloadForCurrentLocation(ObjectSceneRefreshState refreshState, out ObjectLocationScope currentLocation)
+    private bool ShouldReloadForCurrentLocation(ObjectSceneRefreshState refreshState, out SceneLocationScope currentLocation)
     {
         currentLocation = default;
-        if (refreshState.IsZoning)
+        if (refreshState.IsZoning
+            || refreshState.HasLoadedLocation && !refreshState.NeedsRefresh)
         {
             return false;
         }
@@ -329,10 +330,7 @@ internal sealed class ObjectScene : IObjectScene
         }
 
         currentLocation = _locationService.GetCurrentLocationScope();
-        return currentLocation.IsValid
-            && (refreshState.NeedsRefresh
-                || !refreshState.HasLoadedLocation
-                || refreshState.LoadedLocation != currentLocation);
+        return currentLocation.IsValid;
     }
 
     private bool HasSceneLoadState(ObjectSceneRefreshState refreshState)
@@ -340,9 +338,12 @@ internal sealed class ObjectScene : IObjectScene
             || refreshState.HasLoadedLocation
             || _snapshotResolver.HasAnyLoadState();
 
+    private void HandleLocationInvalidated()
+        => _sceneState.MarkNeedsRefresh();
+
     private SceneReloadResult ClearSceneForInvalidLocation()
     {
-        _mutationService.ClearAllActiveEntries(removePersistedState: false);
+        _sceneMutations.ClearAllActiveEntries(removePersistedState: false);
         _sceneState.ClearLoadedLocation(needsRefresh: false);
         return SceneReloadResult.InvalidLocation;
     }
@@ -362,7 +363,7 @@ internal sealed class ObjectScene : IObjectScene
                 _sceneState.TryRemoveEntry(entry.Snapshot.Id, out _);
                 if (desiredRequestsById.TryGetValue(entry.Snapshot.Id, out var desiredRequest))
                 {
-                    _mutationService.RefreshCollectionUsage(entry.Snapshot, desiredRequest.Snapshot);
+                    _sceneMutations.RefreshCollectionUsage(entry.Snapshot, desiredRequest.Snapshot);
                     entriesToReplace.Add(entry);
                 }
                 else
@@ -381,8 +382,8 @@ internal sealed class ObjectScene : IObjectScene
         }
 
         _sceneState.ClearRuntimeFailuresExcept(desiredRequestsById.Keys);
-        _mutationService.DestroyEntries(entriesToDestroy);
-        _mutationService.DestroyReplacedEntries(entriesToReplace);
+        _sceneMutations.DestroyEntries(entriesToDestroy);
+        _sceneMutations.DestroyReplacedEntries(entriesToReplace);
         return activeObjectIds;
     }
 
@@ -417,7 +418,7 @@ internal sealed class ObjectScene : IObjectScene
             return false;
         }
 
-        bool loaded = _mutationService.TryCreateObject(
+        bool loaded = _sceneMutations.TryCreateObject(
             request.Snapshot,
             out _,
             applyDefaultLayout: false,
@@ -454,12 +455,12 @@ internal sealed class ObjectScene : IObjectScene
             return ActiveEntryReuseStatus.Reused;
         }
 
-        var refreshResult = entry.SceneObject.TryRefreshResources(desiredRequest.Snapshot);
+        var refreshResult = entry.Runtime.TryRefreshResources(desiredRequest.Snapshot);
         switch (refreshResult)
         {
-            case SceneObjectUpdateResult.Applied:
+            case ObjectRuntimeUpdateResult.Applied:
                 break;
-            case SceneObjectUpdateResult.RequiresRecreate:
+            case ObjectRuntimeUpdateResult.RequiresRecreate:
                 return ActiveEntryReuseStatus.Recreate;
             default:
                 _sceneState.SetRuntimeFailure(entry.Snapshot.Id, ObjectRuntimeFailureCodes.UpdateRejected);
@@ -473,7 +474,7 @@ internal sealed class ObjectScene : IObjectScene
     private void UpsertEntryResourceCollection(ObjectSceneEntry entry, SceneResourceCollectionState resourceCollection)
         => _sceneState.UpsertEntry(new ObjectSceneEntry
         {
-            SceneObject = entry.SceneObject,
+            Runtime = entry.Runtime,
             Source = entry.Source,
             ResourceCollection = resourceCollection,
         });
@@ -481,7 +482,7 @@ internal sealed class ObjectScene : IObjectScene
     private bool TryCreateInactiveRuntimeStateSnapshot(
         Guid id,
         IReadOnlyList<ObjectSnapshot> sceneSnapshots,
-        ObjectLocationScope currentLocation,
+        SceneLocationScope currentLocation,
         out ObjectRuntimeStateSnapshot snapshot)
     {
         foreach (var sceneSnapshot in sceneSnapshots)
@@ -510,15 +511,15 @@ internal sealed class ObjectScene : IObjectScene
             ObjectRuntimeStateKind.Active,
             null);
 
-    private static bool TryCreateBoundsSnapshot(ISceneObject sceneObject, out ObjectBoundsSnapshot boundsSnapshot)
+    private static bool TryCreateBoundsSnapshot(IObjectRuntime runtime, out ObjectBoundsSnapshot boundsSnapshot)
     {
-        var snapshot = sceneObject.Snapshot;
-        var hasWorldBounds = sceneObject.TryGetBounds(out var worldBounds);
-        var hasLocalBounds = sceneObject.TryGetOrientedBounds(out var localBounds);
-        var hasPlacementClearance = sceneObject.TryGetPlacementClearance(out ObjectPlacementClearance placementClearance);
-        var overlayShape = CreateOverlayShape(snapshot);
+        var snapshot = runtime.Snapshot;
+        var hasWorldBounds = runtime.TryGetBounds(out var worldBounds);
+        var hasLocalBounds = runtime.TryGetOrientedBounds(out var localBounds);
+        var hasPlacementClearance = runtime.TryGetPlacementClearance(out ObjectPlacementClearance placementClearance);
+        var overlayShapes = CreateOverlayShapes(snapshot);
 
-        if (!hasWorldBounds && !hasLocalBounds && !hasPlacementClearance && overlayShape is null)
+        if (!hasWorldBounds && !hasLocalBounds && !hasPlacementClearance && overlayShapes is null)
         {
             boundsSnapshot = default!;
             return false;
@@ -542,13 +543,13 @@ internal sealed class ObjectScene : IObjectScene
             snapshot.Id,
             snapshot.Name,
             snapshot.Kind,
-            sceneObject.Address,
+            runtime.Address,
             min,
             max,
             hasLocalBounds ? localBounds : null,
             hasPlacementClearance ? placementClearance : null,
-            sceneObject.PlacementSurfaceSupport,
-            overlayShape);
+            runtime.PlacementSurfaceSupport,
+            overlayShapes);
         return true;
     }
 
@@ -556,7 +557,7 @@ internal sealed class ObjectScene : IObjectScene
         ObjectSnapshot snapshot,
         bool isActive,
         string? failureCode,
-        ObjectLocationScope currentLocation)
+        SceneLocationScope currentLocation)
     {
         if (isActive)
         {
@@ -588,7 +589,7 @@ internal sealed class ObjectScene : IObjectScene
             null);
     }
 
-    private static ObjectOverlayShapeSnapshot? CreateOverlayShape(ObjectSnapshot snapshot)
+    private static IReadOnlyList<ObjectOverlayShapeSnapshot>? CreateOverlayShapes(ObjectSnapshot snapshot)
     {
         if (snapshot.Kind != ObjectKind.Light || snapshot.Model is not LightModel lightModel)
         {
@@ -599,12 +600,49 @@ internal sealed class ObjectScene : IObjectScene
         var range = MathF.Max(lightModel.Shape.Range, 0.01f);
         return lightModel.LightType switch
         {
-            LightType.WorldLight => null,
-            LightType.AreaLight => new ObjectOverlayShapeSnapshot(ObjectOverlayShapeKind.Sphere, transform, range, 0f),
-            LightType.SpotLight => new ObjectOverlayShapeSnapshot(ObjectOverlayShapeKind.Cone, transform, range, lightModel.Shape.LightAngle),
-            LightType.FlatLight => new ObjectOverlayShapeSnapshot(ObjectOverlayShapeKind.SquarePyramid, transform, range, lightModel.Shape.FalloffAngle),
-            _ => null,
+            LightType.WorldLight => [],
+            LightType.AreaLight => [new ObjectOverlayShapeSnapshot(ObjectOverlayShapeKind.Sphere, transform, range, 0f)],
+            LightType.SpotLight => CreateSpotLightOverlayShapes(transform, range, lightModel.Shape),
+            LightType.FlatLight => CreateFlatLightOverlayShapes(snapshot.Transform, range, lightModel.Shape),
+            _ => [],
         };
+    }
+
+    private static ObjectOverlayShapeSnapshot[] CreateSpotLightOverlayShapes(Matrix4x4 transform, float range, LightShape shape)
+    {
+        var lightAngle = Math.Clamp(shape.LightAngle, 0f, 180f);
+        var falloffAngle = Math.Clamp(lightAngle + shape.FalloffAngle, 0f, 180f);
+        if (falloffAngle <= lightAngle + 0.01f)
+        {
+            return [new ObjectOverlayShapeSnapshot(ObjectOverlayShapeKind.Cone, transform, range, lightAngle)];
+        }
+
+        return
+        [
+            new ObjectOverlayShapeSnapshot(ObjectOverlayShapeKind.Cone, transform, range, lightAngle),
+            new ObjectOverlayShapeSnapshot(ObjectOverlayShapeKind.Cone, transform, range, falloffAngle, 0.4f),
+        ];
+    }
+
+    private static ObjectOverlayShapeSnapshot[] CreateFlatLightOverlayShapes(SceneTransform transform, float range, LightShape shape)
+    {
+        Matrix4x4 coreTransform = ObjectShapeMath.CreateForwardSkewedBoxTransform(transform, range, shape.AngleDegrees);
+        float falloffPadding = MathF.Max(shape.FalloffAngle / 50f, 0f);
+        if (falloffPadding <= 0.0001f)
+        {
+            return [new ObjectOverlayShapeSnapshot(ObjectOverlayShapeKind.Box, coreTransform, 0f, 0f)];
+        }
+
+        return
+        [
+            new ObjectOverlayShapeSnapshot(ObjectOverlayShapeKind.Box, coreTransform, 0f, 0f),
+            new ObjectOverlayShapeSnapshot(
+                ObjectOverlayShapeKind.Box,
+                ObjectShapeMath.CreateForwardSkewedBoxTransform(transform, range, shape.AngleDegrees, falloffPadding),
+                0f,
+                0f,
+                0.4f),
+        ];
     }
 
     private static AxisAlignedBounds CreateAxisAlignedBounds(OrientedBounds bounds)

@@ -1,6 +1,6 @@
 using Intoner.Objects.Catalog;
-using Intoner.Objects.Filesystem.Configuration;
 using Intoner.Objects.Models;
+using Intoner.Services.Configuration;
 
 namespace Intoner.Objects.Runtime;
 

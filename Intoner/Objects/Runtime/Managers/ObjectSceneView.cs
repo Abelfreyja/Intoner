@@ -1,4 +1,5 @@
 using Intoner.Objects.Models;
+using Intoner.Scene;
 
 namespace Intoner.Objects.Runtime;
 
@@ -53,7 +54,7 @@ internal interface IObjectSceneView
     /// Gets the current creation context for new local objects.
     /// </summary>
     /// <returns>The current object creation context.</returns>
-    ObjectCreationContext GetCurrentLocationContext();
+    SceneCreationContext GetCurrentLocationContext();
 
     /// <summary>
     /// Gets the full composed-scene revision.
@@ -82,6 +83,14 @@ internal interface IObjectSceneView
     bool TryGetPersistedObjectSnapshot(Guid id, out ObjectSnapshot snapshot);
 
     /// <summary>
+    /// Tries to resolve one object from the current persistent scene.
+    /// </summary>
+    /// <param name="id">The object id.</param>
+    /// <param name="snapshot">The resolved standalone or default layout snapshot when found.</param>
+    /// <returns>true when the current persistent scene contains the object.</returns>
+    bool TryGetPersistentSceneObjectSnapshot(Guid id, out ObjectSnapshot snapshot);
+
+    /// <summary>
     /// Tries to resolve one scene object snapshot from the composed scene.
     /// </summary>
     /// <param name="id">The object id.</param>
@@ -105,7 +114,7 @@ internal sealed class ObjectSceneView : IObjectSceneView
     private readonly IObjectFolderService          _objectFolderService;
     private readonly IObjectPersistenceState       _persistenceState;
     private readonly IObjectRevisionTracker        _revisionTracker;
-    private readonly IObjectRuntimeLocationService _locationService;
+    private readonly ISceneLocationService         _locationService;
 
     public ObjectSceneView(
         IObjectScene scene,
@@ -113,7 +122,7 @@ internal sealed class ObjectSceneView : IObjectSceneView
         IObjectFolderService objectFolderService,
         IObjectPersistenceState persistenceState,
         IObjectRevisionTracker revisionTracker,
-        IObjectRuntimeLocationService locationService)
+        ISceneLocationService locationService)
     {
         _scene = scene;
         _snapshotResolver = snapshotResolver;
@@ -144,7 +153,7 @@ internal sealed class ObjectSceneView : IObjectSceneView
     public IReadOnlyList<ObjectRuntimeStateSnapshot> GetRuntimeStateSnapshots()
         => _scene.GetRuntimeStateSnapshots(_snapshotResolver.GetSceneSnapshots());
 
-    public ObjectCreationContext GetCurrentLocationContext()
+    public SceneCreationContext GetCurrentLocationContext()
         => _locationService.GetCurrentCreationContext();
 
     public long GetSceneRevision()
@@ -158,6 +167,9 @@ internal sealed class ObjectSceneView : IObjectSceneView
 
     public bool TryGetPersistedObjectSnapshot(Guid id, out ObjectSnapshot snapshot)
         => _persistenceState.TryGetPersistedSnapshot(id, out snapshot);
+
+    public bool TryGetPersistentSceneObjectSnapshot(Guid id, out ObjectSnapshot snapshot)
+        => _persistenceState.TryGetCurrentPersistedSnapshot(id, out snapshot);
 
     public bool TryGetSceneObjectSnapshot(Guid id, out ObjectSnapshot snapshot)
     {

@@ -32,25 +32,25 @@ internal static class VfxCatalogSearchTerms
         VfxLoopFacts loopFacts,
         IEnumerable<string> knownSearchTerms)
     {
-        HashSet<string> searchTerms = ObjectSearchTermUtility.CreateSet(path, catalogSource);
-        _ = ObjectSearchTermUtility.AddPathSegments(searchTerms, path);
-        _ = ObjectSearchTermUtility.AddTerms(searchTerms, knownSearchTerms);
+        HashSet<string> searchTerms = SearchTermUtility.CreateSet(path, catalogSource);
+        _ = SearchTermUtility.AddPathSegments(searchTerms, path);
+        _ = SearchTermUtility.AddTerms(searchTerms, knownSearchTerms);
         foreach (string familyLabel in familyHint.EnumerateSearchLabels())
         {
-            _ = ObjectSearchTermUtility.AddTerm(searchTerms, familyLabel);
+            _ = SearchTermUtility.AddTerm(searchTerms, familyLabel);
         }
 
         if (timelineReference.HasEvidence)
         {
-            _ = ObjectSearchTermUtility.AddTerms(searchTerms, timelineReference.BuildSearchTerms());
+            _ = SearchTermUtility.AddTerms(searchTerms, timelineReference.BuildSearchTerms());
         }
 
         if (loopFacts.IsPermanent)
         {
-            _ = ObjectSearchTermUtility.AddTerms(searchTerms, PermanentLoopSearchTerms);
+            _ = SearchTermUtility.AddTerms(searchTerms, PermanentLoopSearchTerms);
         }
 
-        return ObjectSearchTermUtility.BuildStableTerms(searchTerms);
+        return SearchTermUtility.BuildStableTerms(searchTerms);
     }
 }
 

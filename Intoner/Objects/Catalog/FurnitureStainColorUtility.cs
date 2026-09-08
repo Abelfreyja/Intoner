@@ -2,6 +2,7 @@ using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Graphics;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine.Group;
 using Intoner.Objects.Utils;
+using Intoner.Utils;
 
 namespace Intoner.Objects.Catalog;
 
@@ -12,7 +13,7 @@ internal static class FurnitureStainColorUtility
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (framework.IsFrameworkUnloading || ObjectFrameworkUtility.IsGameFrameworkDestroying())
+        if (framework.IsFrameworkUnloading || FrameworkUnloadUtility.IsGameFrameworkDestroying())
         {
             throw new OperationCanceledException(cancellationToken);
         }

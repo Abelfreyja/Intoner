@@ -36,6 +36,14 @@ internal interface IObjectPersistenceState
     bool TryGetPersistedSnapshot(Guid id, out ObjectSnapshot snapshot);
 
     /// <summary>
+    /// Tries to resolve one snapshot from the current persistent scene.
+    /// </summary>
+    /// <param name="id">The object id.</param>
+    /// <param name="snapshot">The resolved standalone or default layout snapshot when found.</param>
+    /// <returns>true when the current persistent scene contains the object.</returns>
+    bool TryGetCurrentPersistedSnapshot(Guid id, out ObjectSnapshot snapshot);
+
+    /// <summary>
     /// Tries to resolve one scene object snapshot from the composed scene.
     /// </summary>
     /// <param name="id">The object id.</param>
@@ -94,25 +102,34 @@ internal interface IObjectPersistenceState
     /// Stores or replaces one persisted snapshot.
     /// </summary>
     /// <param name="snapshot">The snapshot to store.</param>
-    void UpsertPersistedSnapshot(ObjectSnapshot snapshot);
+    /// <returns>true when the snapshot was stored.</returns>
+    bool TryUpsertPersistedSnapshot(ObjectSnapshot snapshot);
 
     /// <summary>
     /// Removes one persisted snapshot.
     /// </summary>
     /// <param name="snapshot">The snapshot to remove.</param>
-    void RemovePersistedSnapshot(ObjectSnapshot snapshot);
+    /// <returns>true when the snapshot was removed.</returns>
+    bool TryRemovePersistedSnapshot(ObjectSnapshot snapshot);
 
     /// <summary>
     /// Replaces one persisted snapshot with another, moving between standalone and layout storage when needed.
     /// </summary>
     /// <param name="previousSnapshot">The previous persisted snapshot.</param>
     /// <param name="nextSnapshot">The replacement snapshot.</param>
-    void ReplacePersistedSnapshot(ObjectSnapshot previousSnapshot, ObjectSnapshot nextSnapshot);
+    /// <returns>true when the replacement was stored.</returns>
+    bool TryReplacePersistedSnapshot(ObjectSnapshot previousSnapshot, ObjectSnapshot nextSnapshot);
 
     /// <summary>
     /// Clears all standalone persisted objects.
     /// </summary>
     void ClearStandaloneSnapshots();
+
+    /// <summary>
+    /// Replaces all standalone persisted objects without changing folder state.
+    /// </summary>
+    /// <param name="snapshots">The replacement standalone object snapshots.</param>
+    void ReplaceStandaloneSnapshots(IReadOnlyList<ObjectSnapshot> snapshots);
 
 }
 
@@ -193,9 +210,33 @@ internal sealed class ObjectPersistenceState : IObjectPersistenceState
         return false;
     }
 
+    public bool TryGetCurrentPersistedSnapshot(Guid id, out ObjectSnapshot snapshot)
+    {
+        lock (_stateLock)
+        {
+            if (_standaloneSnapshots.TryGetValue(id, out snapshot!))
+            {
+                return true;
+            }
+        }
+
+        if (TryGetDefaultLayout(out var defaultLayout))
+        {
+            ObjectSnapshot? layoutSnapshot = defaultLayout.Objects.FirstOrDefault(entry => entry.Id == id);
+            if (layoutSnapshot is not null)
+            {
+                snapshot = layoutSnapshot;
+                return true;
+            }
+        }
+
+        snapshot = default!;
+        return false;
+    }
+
     public bool TryGetSceneSnapshot(Guid id, IReadOnlyList<ObjectTemporaryLayoutSnapshot> temporaryLayouts, out ObjectSnapshot snapshot)
     {
-        if (TryGetPersistedSnapshot(id, out snapshot))
+        if (TryGetCurrentPersistedSnapshot(id, out snapshot))
         {
             return true;
         }
@@ -290,44 +331,44 @@ internal sealed class ObjectPersistenceState : IObjectPersistenceState
         return ObjectSceneSource.CreateStandalone(snapshot.LayoutId);
     }
 
-    public void UpsertPersistedSnapshot(ObjectSnapshot snapshot)
+    public bool TryUpsertPersistedSnapshot(ObjectSnapshot snapshot)
     {
         if (snapshot.LayoutId.HasValue)
         {
-            UpsertLayoutSnapshot(snapshot);
-            return;
+            return TryUpsertLayoutSnapshot(snapshot);
         }
 
         lock (_stateLock)
         {
             _standaloneSnapshots[snapshot.Id] = snapshot;
         }
+
+        return true;
     }
 
-    public void RemovePersistedSnapshot(ObjectSnapshot snapshot)
+    public bool TryRemovePersistedSnapshot(ObjectSnapshot snapshot)
     {
         if (snapshot.LayoutId.HasValue)
         {
-            RemoveLayoutSnapshot(snapshot.LayoutId.Value, snapshot.Id);
-            return;
+            return TryRemoveLayoutSnapshot(snapshot.LayoutId.Value, snapshot.Id);
         }
 
         lock (_stateLock)
         {
             _standaloneSnapshots.Remove(snapshot.Id);
         }
+
+        return true;
     }
 
-    public void ReplacePersistedSnapshot(ObjectSnapshot previousSnapshot, ObjectSnapshot nextSnapshot)
+    public bool TryReplacePersistedSnapshot(ObjectSnapshot previousSnapshot, ObjectSnapshot nextSnapshot)
     {
-        if (previousSnapshot.LayoutId == nextSnapshot.LayoutId)
+        if (previousSnapshot.LayoutId != nextSnapshot.LayoutId)
         {
-            UpsertPersistedSnapshot(nextSnapshot);
-            return;
+            return false;
         }
 
-        RemovePersistedSnapshot(previousSnapshot);
-        UpsertPersistedSnapshot(nextSnapshot);
+        return TryUpsertPersistedSnapshot(nextSnapshot);
     }
 
     public void ClearStandaloneSnapshots()
@@ -339,12 +380,24 @@ internal sealed class ObjectPersistenceState : IObjectPersistenceState
         _objectFolderService.ClearStandaloneState();
     }
 
-    private void UpsertLayoutSnapshot(ObjectSnapshot snapshot)
+    public void ReplaceStandaloneSnapshots(IReadOnlyList<ObjectSnapshot> snapshots)
+    {
+        lock (_stateLock)
+        {
+            _standaloneSnapshots.Clear();
+            foreach (ObjectSnapshot snapshot in snapshots)
+            {
+                _standaloneSnapshots[snapshot.Id] = snapshot with { LayoutId = null };
+            }
+        }
+    }
+
+    private bool TryUpsertLayoutSnapshot(ObjectSnapshot snapshot)
     {
         if (!snapshot.LayoutId.HasValue
             || !_layoutManager.TryGetLayout(snapshot.LayoutId.Value, out var layout))
         {
-            return;
+            return false;
         }
 
         var nextObjects = layout.Objects
@@ -352,27 +405,27 @@ internal sealed class ObjectPersistenceState : IObjectPersistenceState
             .Append(snapshot)
             .OrderBy(static entry => entry.CreatedAtUtc)
             .ToList();
-        _layoutManager.TryReplaceLayoutObjects(snapshot.LayoutId.Value, nextObjects);
+        return _layoutManager.TryReplaceLayoutObjects(snapshot.LayoutId.Value, nextObjects);
     }
 
-    private void RemoveLayoutSnapshot(Guid layoutId, Guid objectId)
+    private bool TryRemoveLayoutSnapshot(Guid layoutId, Guid objectId)
     {
         if (!_layoutManager.TryGetLayout(layoutId, out var layout))
         {
-            return;
+            return false;
         }
 
         var nextObjects = layout.Objects
             .Where(entry => entry.Id != objectId)
             .OrderBy(static entry => entry.CreatedAtUtc)
             .ToList();
-        _layoutManager.TryReplaceLayoutObjects(layoutId, nextObjects);
+        return _layoutManager.TryReplaceLayoutObjects(layoutId, nextObjects);
     }
 
     private static List<ObjectSnapshot> OrderDistinctSnapshots(IEnumerable<ObjectSnapshot> snapshots)
         => snapshots
             .GroupBy(static snapshot => snapshot.Id)
-            .Select(static group => group.Last())
+            .Select(static group => group.First())
             .OrderBy(static snapshot => snapshot.CreatedAtUtc)
             .ToList();
 }

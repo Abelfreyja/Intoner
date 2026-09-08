@@ -15,10 +15,10 @@ internal static class ObjectCatalogLabelUtility
 
     public static string NormalizeLabel(string? text)
     {
-        string label = ObjectStringUtility.TrimOrEmpty(text);
+        string label = TextUtility.TrimOrEmpty(text);
         return label.Length == 0
             ? string.Empty
-            : ObjectStringUtility.TrimOrEmpty(label.Replace('\n', ' ').Replace('\r', ' '));
+            : TextUtility.TrimOrEmpty(label.Replace('\n', ' ').Replace('\r', ' '));
     }
 
     public static string NormalizeFurnitureCategoryLabel(string? text)

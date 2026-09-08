@@ -42,7 +42,7 @@ internal sealed class ObjectAssetStandaloneVfxCatalog(IObjectAssetGameData gameD
     {
         string normalizedPath = GameAssetPathRules.NormalizeGamePath(path);
         report = null;
-        if (!GameAssetPathRules.IsFileKind(normalizedPath, GameAssetFileKind.Avfx) || !_gameData.FileExists(normalizedPath))
+        if (!GameAssetPathRules.IsFileKind(normalizedPath, GameAssetFileKind.Avfx))
         {
             return false;
         }
@@ -56,7 +56,7 @@ internal sealed class ObjectAssetStandaloneVfxCatalog(IObjectAssetGameData gameD
             analysis ??= resolvedPath.Analysis;
             resolvedEvidence |= resolvedPath.Evidence;
             pathContracts |= resolvedPath.Contracts;
-            knownSearchTerms = ObjectSearchTermUtility.MergeTerms(knownSearchTerms, resolvedPath.SearchTerms);
+            knownSearchTerms = SearchTermUtility.MergeTerms(knownSearchTerms, resolvedPath.SearchTerms);
             if (familyHint == KnownVfxFamily.None)
             {
                 familyHint = resolvedPath.Family;
@@ -78,7 +78,9 @@ internal sealed class ObjectAssetStandaloneVfxCatalog(IObjectAssetGameData gameD
 
         VfxTimelineReferenceInfo timelineReference = GetTimelineReferenceInfo(state, normalizedPath);
         RuntimeVfxEvidence sourceEvidence = (resolvedEvidence | evidence).WithoutAnalysisFlags() | timelineReference.NormalizedEvidence;
-        if (analysis is null && !VfxAssetAnalyzer.TryAnalyzeAvfx(_gameData, normalizedPath, out analysis))
+        if (analysis is null
+         && (!_gameData.FileExists(normalizedPath)
+          || !VfxAssetAnalyzer.TryAnalyzeAvfx(_gameData, normalizedPath, out analysis)))
         {
             return false;
         }
@@ -155,7 +157,7 @@ internal sealed class ObjectAssetStandaloneVfxCatalog(IObjectAssetGameData gameD
         bool runtimeObserved)
     {
         string normalizedPath = GameAssetPathRules.NormalizeGamePath(path);
-        IReadOnlyList<string> referenceSearchTerms = ObjectSearchTermUtility.MergeTerms(searchTerms, referenceInfo.BuildSearchTerms());
+        IReadOnlyList<string> referenceSearchTerms = SearchTermUtility.MergeTerms(searchTerms, referenceInfo.BuildSearchTerms());
         _ = AddKnowledgePath(state, normalizedPath, source, contract, referenceSearchTerms);
 
         ObservationApplyResult result = ObservationApplyResult.None;
@@ -285,9 +287,7 @@ internal sealed class ObjectAssetStandaloneVfxCatalog(IObjectAssetGameData gameD
     }
 
     private static AssetPathContract GetPathContracts(CatalogAssetState state, string path)
-        => state.KnowledgeBase.TryGetPath(path, out KnownAssetPath? knownPath)
-            ? knownPath.Contracts
-            : AssetPathContract.None;
+        => state.KnowledgeBase.GetContracts(path);
 
     private static KnownVfxFamily GetPathFamilyHint(CatalogAssetState state, string path)
     {
@@ -296,9 +296,10 @@ internal sealed class ObjectAssetStandaloneVfxCatalog(IObjectAssetGameData gameD
             return resolvedPath.Family;
         }
 
-        if (state.KnowledgeBase.TryGetPath(path, out KnownAssetPath? knownPath))
+        KnownVfxFamily knownFamily = state.KnowledgeBase.GetVfxFamily(path);
+        if (knownFamily != KnownVfxFamily.None)
         {
-            return knownPath.VfxFamily;
+            return knownFamily;
         }
 
         return KnownVfxFamilyExtensions.InferFamilyHintFromPath(path);

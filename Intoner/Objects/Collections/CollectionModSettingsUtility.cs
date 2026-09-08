@@ -1,11 +1,9 @@
-using Intoner.Objects.Utils;
-
 namespace Intoner.Objects.Collections;
 
 internal static class CollectionModSettingsUtility
 {
     public static string NormalizeGroupName(string? groupName)
-        => ObjectStringUtility.TrimOrEmpty(groupName);
+        => groupName ?? string.Empty;
 
     public static bool TryNormalizeOptionNames(IEnumerable<string>? optionNames, out List<string> normalizedOptionNames)
     {
@@ -15,12 +13,17 @@ internal static class CollectionModSettingsUtility
             return false;
         }
 
-        normalizedOptionNames = optionNames
-            .Select(ObjectStringUtility.TrimOrEmpty)
-            .Where(static optionName => optionName.Length > 0)
-            .Distinct(StringComparer.Ordinal)
-            .OrderBy(static optionName => optionName, StringComparer.Ordinal)
-            .ToList();
+        foreach (string? optionName in optionNames)
+        {
+            if (optionName is null)
+            {
+                normalizedOptionNames = [];
+                return false;
+            }
+
+            normalizedOptionNames.Add(optionName);
+        }
+
         return true;
     }
 
@@ -30,14 +33,38 @@ internal static class CollectionModSettingsUtility
             static pair => pair.Value.ToList(),
             StringComparer.Ordinal);
 
-    public static bool RemoveGroup(Dictionary<string, List<string>> settings, string groupName)
+    public static bool AreEqual(
+        IReadOnlyDictionary<string, List<string>> left,
+        IReadOnlyDictionary<string, List<string>> right)
     {
-        string normalizedGroupName = NormalizeGroupName(groupName);
-        if (normalizedGroupName.Length == 0)
+        if (left.Count != right.Count)
         {
             return false;
         }
 
+        foreach ((string groupName, List<string> optionNames) in left)
+        {
+            if (!right.TryGetValue(groupName, out List<string>? rightOptionNames)
+             || optionNames.Count != rightOptionNames.Count)
+            {
+                return false;
+            }
+
+            for (int index = 0; index < optionNames.Count; ++index)
+            {
+                if (!string.Equals(optionNames[index], rightOptionNames[index], StringComparison.Ordinal))
+                {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    public static bool RemoveGroup(Dictionary<string, List<string>> settings, string groupName)
+    {
+        string normalizedGroupName = NormalizeGroupName(groupName);
         if (settings.Remove(normalizedGroupName))
         {
             return true;

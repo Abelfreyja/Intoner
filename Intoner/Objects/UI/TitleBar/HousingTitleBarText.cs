@@ -1,4 +1,4 @@
-using Intoner.Objects.Filesystem.Configuration;
+using Intoner.Services.Configuration;
 using Intoner.Objects.Runtime;
 
 namespace Intoner.Objects.UI.TitleBar;

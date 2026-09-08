@@ -1,7 +1,6 @@
 using Dalamud.Bindings.ImGui;
-using Dalamud.Interface;
 using Dalamud.Interface.Utility;
-using Dalamud.Interface.Utility.Raii;
+using Intoner.UI;
 using System.Numerics;
 
 namespace Intoner.Objects.UI.TitleBar;
@@ -12,12 +11,19 @@ internal static class TitleBarIndicatorRenderer
     private const float VerticalPadding = 2f;
     private const float IndicatorSpacing = 8f;
     private const float IconSlotSize = 16f;
+    private const float IconScale = 0.80f;
     private const float IconGap = 6f;
     private const float ButtonGap = 10f;
     private const float TitleGap = 6f;
     private const float Rounding = 5f;
     private const float BorderOpacity = 0.52f;
     private const float TextOpacity = 0.94f;
+    private const float CounterHorizontalPadding = 5f;
+    private const float CounterDividerGap = 4f;
+    private const float CounterDividerWidth = 1f;
+    private const float CounterDividerHeight = 10f;
+    private const float CounterTextScale = 0.85f;
+    private const float CounterHoverOpacity = 0.10f;
 
     public static void Draw(
         TitleBarRenderContext context,
@@ -60,7 +66,20 @@ internal static class TitleBarIndicatorRenderer
                 continue;
             }
 
-            DrawIndicator(context.DrawList, indicator, label, textSize, indicatorMin, indicatorMax, scale);
+            bool isHovered = context.IsWindowHovered
+                          && ImGui.IsMouseHoveringRect(indicatorMin, indicatorMax, false);
+            DrawIndicator(context.DrawList, indicator, label, textSize, indicatorMin, indicatorMax, scale, isHovered);
+            if (isHovered && indicator.Tooltip is { } tooltip)
+            {
+                IntonerTooltip.Draw(
+                    tooltip.DrawContent,
+                    new IntonerTooltipOptions
+                    {
+                        Accent = indicator.Accent,
+                        Width = tooltip.Width,
+                    });
+            }
+
             cursorRight = indicatorMin.X - (IndicatorSpacing * scale);
         }
     }
@@ -118,14 +137,29 @@ internal static class TitleBarIndicatorRenderer
         out string label,
         out Vector2 textSize,
         out Vector2 indicatorSize)
-        => TryResolveLabel(indicator.Label, availableWidth, scale, out label, out textSize, out indicatorSize)
-           || (!string.Equals(indicator.Label, indicator.CompactLabel, StringComparison.Ordinal)
-               && TryResolveLabel(indicator.CompactLabel, availableWidth, scale, out label, out textSize, out indicatorSize));
+    {
+        if (indicator.Layout == TitleBarIndicatorLayout.Counter)
+        {
+            return TryResolveLabel(
+                indicator.CompactLabel,
+                availableWidth,
+                scale,
+                isCounter: true,
+                out label,
+                out textSize,
+                out indicatorSize);
+        }
+
+        return TryResolveLabel(indicator.Label, availableWidth, scale, isCounter: false, out label, out textSize, out indicatorSize)
+            || (!string.Equals(indicator.Label, indicator.CompactLabel, StringComparison.Ordinal)
+             && TryResolveLabel(indicator.CompactLabel, availableWidth, scale, isCounter: false, out label, out textSize, out indicatorSize));
+    }
 
     private static bool TryResolveLabel(
         string? candidate,
         float availableWidth,
         float scale,
+        bool isCounter,
         out string label,
         out Vector2 textSize,
         out Vector2 indicatorSize)
@@ -139,9 +173,14 @@ internal static class TitleBarIndicatorRenderer
         }
 
         float iconSlotSize = IconSlotSize * scale;
-        textSize = ImGui.CalcTextSize(label);
+        float textScale = isCounter ? CounterTextScale : 1f;
+        float horizontalPadding = isCounter ? CounterHorizontalPadding : HorizontalPadding;
+        float contentGap = isCounter
+            ? (CounterDividerGap * 2f) + CounterDividerWidth
+            : IconGap;
+        textSize = ImGui.CalcTextSize(label) * textScale;
         indicatorSize = new Vector2(
-            iconSlotSize + (IconGap * scale) + textSize.X + (HorizontalPadding * 2f * scale),
+            iconSlotSize + (contentGap * scale) + textSize.X + (horizontalPadding * 2f * scale),
             MathF.Max(iconSlotSize, textSize.Y) + (VerticalPadding * 2f * scale));
         return indicatorSize.X <= availableWidth;
     }
@@ -153,31 +192,72 @@ internal static class TitleBarIndicatorRenderer
         Vector2 textSize,
         Vector2 indicatorMin,
         Vector2 indicatorMax,
-        float scale)
+        float scale,
+        bool isHovered)
     {
-        Vector4 border = EditorColors.WithAlpha(indicator.Accent, BorderOpacity);
-        Vector4 textColor = EditorColors.Color(1f, 1f, 1f, TextOpacity);
-        string icon = indicator.Icon.ToIconString();
-        (Vector2 iconSize, float iconFontSize) = MeasureIcon(icon);
+        bool isCounter = indicator.Layout == TitleBarIndicatorLayout.Counter;
+        if (isCounter && isHovered)
+        {
+            drawList.AddRectFilled(
+                indicatorMin,
+                indicatorMax,
+                ImGui.GetColorU32(ThemeColors.WithAlpha(indicator.Accent, CounterHoverOpacity)),
+                Rounding * scale);
+        }
+        else if (!isCounter)
+        {
+            drawList.AddRect(
+                indicatorMin,
+                indicatorMax,
+                ImGui.GetColorU32(ThemeColors.WithAlpha(indicator.Accent, BorderOpacity)),
+                Rounding * scale);
+        }
+
+        float horizontalPadding = isCounter ? CounterHorizontalPadding : HorizontalPadding;
         float iconSlotSize = IconSlotSize * scale;
+        float centerY = (indicatorMin.Y + indicatorMax.Y) * 0.5f;
         Vector2 iconMin = new(
-            indicatorMin.X + (HorizontalPadding * scale),
-            indicatorMin.Y + ((indicatorMax.Y - indicatorMin.Y - iconSlotSize) * 0.5f));
-        Vector2 iconMax = iconMin + new Vector2(iconSlotSize);
-        Vector2 iconPosition = iconMin + ((new Vector2(iconSlotSize) - iconSize) * 0.5f);
+            indicatorMin.X + (horizontalPadding * scale),
+            centerY - (iconSlotSize * 0.5f));
+        EditorIcon.DrawCentered(
+            drawList,
+            indicator.Icon,
+            iconMin,
+            iconMin + new Vector2(iconSlotSize),
+            isCounter ? ThemeColors.WithAlpha(ThemeColors.Text, 0.92f) : indicator.Accent,
+            IconScale);
+
+        float textX = iconMin.X + iconSlotSize;
+        if (isCounter)
+        {
+            float dividerX = textX + (CounterDividerGap * scale);
+            float dividerHeight = CounterDividerHeight * scale;
+            Vector2 dividerMin = new(dividerX, centerY - (dividerHeight * 0.5f));
+            drawList.AddRectFilled(
+                dividerMin,
+                dividerMin + new Vector2(CounterDividerWidth * scale, dividerHeight),
+                ImGui.GetColorU32(ThemeColors.WithAlpha(indicator.Accent, 0.72f)),
+                0.5f * scale);
+            textX = dividerX + ((CounterDividerWidth + CounterDividerGap) * scale);
+        }
+        else
+        {
+            textX += IconGap * scale;
+        }
+
         Vector2 textPosition = new(
-            iconMax.X + (IconGap * scale),
-            indicatorMin.Y + ((indicatorMax.Y - indicatorMin.Y - textSize.Y) * 0.5f));
-
-        drawList.AddRect(indicatorMin, indicatorMax, ImGui.GetColorU32(border), Rounding * scale);
-        drawList.AddText(UiBuilder.IconFont, iconFontSize, iconPosition, ImGui.GetColorU32(indicator.Accent), icon);
-        drawList.AddText(textPosition, ImGui.GetColorU32(textColor), label);
-    }
-
-    private static (Vector2 Size, float FontSize) MeasureIcon(string icon)
-    {
-        using var iconFont = ImRaii.PushFont(UiBuilder.IconFont);
-        return (ImGui.CalcTextSize(icon), ImGui.GetFontSize());
+            textX,
+            centerY - (textSize.Y * 0.5f));
+        float textScale = isCounter ? CounterTextScale : 1f;
+        Vector4 textColor = isCounter
+            ? indicator.Accent
+            : ThemeColors.Color(1f, 1f, 1f, TextOpacity);
+        drawList.AddText(
+            ImGui.GetFont(),
+            ImGui.GetFontSize() * textScale,
+            textPosition,
+            ImGui.GetColorU32(textColor),
+            label);
     }
 
     private static string StripId(string title)

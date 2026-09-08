@@ -2,27 +2,25 @@ using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using Intoner.Objects.UI.Services.EdgeGlow;
-using Intoner.UI;
 using System.Numerics;
 
 namespace Intoner.Objects.UI.Components;
 
 internal sealed class EditorListCard(EdgeGlowRenderer edgeGlowRenderer)
 {
-    public readonly record struct Interaction(bool Clicked, bool Hovered, Vector2 Min, Vector2 Max);
+    public readonly record struct Interaction(bool Clicked, bool RightClicked, bool Hovered, Vector2 Min, Vector2 Max);
 
     public static float MinimumTextWidth => 40f * ImGuiHelpers.GlobalScale;
 
     public bool Draw(
         string id,
         string title,
-        string detail,
-        string badgeText,
-        string? badgeTooltip,
+        IReadOnlyList<EditorBadge> badges,
         bool selected,
         Vector4 accent,
         float height,
-        Action drawContextMenu)
+        Action drawContextMenu,
+        bool panelBadgeSurface = false)
     {
         Vector2 startPos = ImGui.GetCursorPos();
         float insetX = 4f * ImGuiHelpers.GlobalScale;
@@ -50,30 +48,21 @@ internal sealed class EditorListCard(EdgeGlowRenderer edgeGlowRenderer)
 
         DrawChrome(drawList, min, max, selected, interaction.Hovered, accent);
 
-        float badgePaddingX = 7f * scale;
-        float badgePaddingY = 3f * scale;
-        Vector2 badgeTextSize = ImGui.CalcTextSize(badgeText);
-        Vector2 badgeMin = new(max.X - badgeTextSize.X - (badgePaddingX * 2f) - padX, min.Y + padY);
-        Vector2 badgeMax = new(max.X - padX, badgeMin.Y + badgeTextSize.Y + (badgePaddingY * 2f));
-        drawList.AddRectFilled(badgeMin, badgeMax, ImGui.GetColorU32(accent with { W = selected ? 0.36f : 0.22f }), 999f);
-        drawList.AddText(new Vector2(badgeMin.X + badgePaddingX, badgeMin.Y + badgePaddingY), ImGui.GetColorU32(EditorColors.Text), badgeText);
-
-        if (!string.IsNullOrWhiteSpace(badgeTooltip) && EditorInputUtility.IsMouseInside(badgeMin, badgeMax))
-        {
-            UiSharedService.DrawAccentTooltipText(badgeTooltip, accent, wrapEms: 35f);
-        }
-
-        float textWidth = MathF.Max(MinimumTextWidth, badgeMin.X - min.X - (padX * 2f));
+        float textWidth = MathF.Max(MinimumTextWidth, max.X - min.X - (padX * 2f));
         drawList.AddText(
             new Vector2(min.X + padX, min.Y + padY),
-            ImGui.GetColorU32(EditorColors.Text),
+            ImGui.GetColorU32(ThemeColors.Text),
             EditorTextUtility.ClipTextToWidth(title, textWidth));
 
         float metaY = min.Y + padY + ImGui.GetTextLineHeight() + (4f * scale);
-        drawList.AddText(
-            new Vector2(min.X + padX, metaY),
-            ImGui.GetColorU32(EditorColors.TextDisabled with { W = 0.88f }),
-            EditorTextUtility.ClipTextToWidth(detail, textWidth));
+        EditorBadgeRenderer.DrawAt(
+            drawList,
+            badges,
+            min.X + padX,
+            metaY,
+            selected,
+            maxRight: max.X - padX,
+            panelSurface: panelBadgeSurface);
 
         return interaction.Clicked;
     }
@@ -91,6 +80,7 @@ internal sealed class EditorListCard(EdgeGlowRenderer edgeGlowRenderer)
         bool clicked = ImGui.Selectable($"##{id}", selected, flags, size);
         return new Interaction(
             clicked,
+            ImGui.IsItemClicked(ImGuiMouseButton.Right),
             ImGui.IsItemHovered(),
             ImGui.GetItemRectMin(),
             ImGui.GetItemRectMax());
@@ -104,16 +94,24 @@ internal sealed class EditorListCard(EdgeGlowRenderer edgeGlowRenderer)
         bool hovered,
         Vector4 accent)
     {
-        Vector4 fill = selected
-            ? accent with { W = 0.17f }
-            : hovered
-                ? accent with { W = 0.08f }
-                : EditorColors.ButtonDefault with { W = 0.22f };
-        Vector4 border = selected
-            ? accent with { W = 0.85f }
-            : hovered
-                ? accent with { W = 0.58f }
-                : EditorColors.Border with { W = 0.38f };
+        Vector4 fill = (selected, hovered) switch
+        {
+            (true, _)     => accent with { W = 0.17f },
+            (false, true) => accent with { W = 0.08f },
+            _             => ThemeColors.ButtonDefault with { W = 0.22f },
+        };
+        Vector4 border = (selected, hovered) switch
+        {
+            (true, _)     => accent with { W = 0.85f },
+            (false, true) => accent with { W = 0.58f },
+            _             => ThemeColors.Border with { W = 0.38f },
+        };
+        float railAlpha = (selected, hovered) switch
+        {
+            (true, _)     => 0.95f,
+            (false, true) => 0.72f,
+            _             => 0.55f,
+        };
 
         DrawFrame(
             drawList,
@@ -121,7 +119,7 @@ internal sealed class EditorListCard(EdgeGlowRenderer edgeGlowRenderer)
             max,
             fill,
             border,
-            accent with { W = selected ? 0.95f : hovered ? 0.72f : 0.55f },
+            accent with { W = railAlpha },
             8f * ImGuiHelpers.GlobalScale,
             hovered && !selected);
     }
@@ -134,9 +132,9 @@ internal sealed class EditorListCard(EdgeGlowRenderer edgeGlowRenderer)
         Vector4 border,
         Vector4 rail,
         float rounding,
-        bool showEdgeGlow)
+        bool showEdgeGlow,
+        ImDrawFlags cornerFlags = ImDrawFlags.RoundCornersRight)
     {
-        const ImDrawFlags cornerFlags = ImDrawFlags.RoundCornersRight;
         float scale = ImGuiHelpers.GlobalScale;
 
         drawList.AddRectFilled(min, max, ImGui.GetColorU32(fill), rounding, cornerFlags);

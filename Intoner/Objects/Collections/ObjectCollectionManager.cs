@@ -1,9 +1,12 @@
-using Intoner.Objects.Filesystem.Storage;
+using Intoner.Services.Storage;
 using Intoner.Objects.Models;
 using Intoner.Objects.Resources;
+using Intoner.Objects.Runtime;
 using Intoner.Objects.Utils;
 using Microsoft.Extensions.Logging;
 using System.Text.Json;
+
+using Intoner.Utils;
 
 namespace Intoner.Objects.Collections;
 
@@ -92,15 +95,18 @@ internal sealed class ObjectCollectionManager : IObjectCollectionManager
 
     private const string IdleStatusText = "collection is idle until assigned to an object";
 
-    private readonly IObjectStoragePathService _pathService;
-    private readonly IObjectFileSystem _fileSystem;
+    private readonly IPluginStoragePaths _pathService;
+    private readonly IPluginFileSystem _fileSystem;
     private readonly IObjectCollectionResolver _resolver;
     private readonly IObjectResolvedCollectionStore _resolvedCollectionStore;
     private readonly IObjectModDataSource _modDataSource;
+    private readonly IObjectLayoutManager _layoutManager;
+    private readonly IObjectPersistenceState _persistenceState;
+    private readonly IObjectRevisionTracker _revisionTracker;
     private readonly ILogger<ObjectCollectionManager> _logger;
-    private readonly Lock _stateLock = new();
+    private readonly Lock _stateLock;
     private readonly Dictionary<string, CollectionState> _collections = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ObjectDisposalState _disposeState = new();
+    private readonly DisposalState _disposeState = new();
     private readonly record struct CollectionUsage(
         IReadOnlyList<ObjectSnapshot> Snapshots,
         string Signature,
@@ -108,18 +114,26 @@ internal sealed class ObjectCollectionManager : IObjectCollectionManager
 
     public ObjectCollectionManager(
         ILogger<ObjectCollectionManager> logger,
-        IObjectStoragePathService pathService,
-        IObjectFileSystem fileSystem,
+        ObjectStateLock stateLock,
+        IPluginStoragePaths pathService,
+        IPluginFileSystem fileSystem,
         IObjectCollectionResolver resolver,
         IObjectResolvedCollectionStore resolvedCollectionStore,
-        IObjectModDataSource modDataSource)
+        IObjectModDataSource modDataSource,
+        IObjectLayoutManager layoutManager,
+        IObjectPersistenceState persistenceState,
+        IObjectRevisionTracker revisionTracker)
     {
         _logger = logger;
+        _stateLock = stateLock.Value;
         _pathService = pathService;
         _fileSystem = fileSystem;
         _resolver = resolver;
         _resolvedCollectionStore = resolvedCollectionStore;
         _modDataSource = modDataSource;
+        _layoutManager = layoutManager;
+        _persistenceState = persistenceState;
+        _revisionTracker = revisionTracker;
 
         LoadPersistedCollections();
         _modDataSource.StateChanged += HandleModDataChange;
@@ -173,7 +187,7 @@ internal sealed class ObjectCollectionManager : IObjectCollectionManager
             return false;
         }
 
-        string normalizedName = ObjectStringUtility.TrimOrEmpty(name);
+        string normalizedName = TextUtility.TrimOrEmpty(name);
         if (normalizedName.Length == 0)
         {
             snapshot = default!;
@@ -194,8 +208,15 @@ internal sealed class ObjectCollectionManager : IObjectCollectionManager
                 ResolveState = ObjectCollectionResolveState.Inactive,
                 StatusText = IdleStatusText,
             };
+            if (!TryWriteCollections(_collections.Values
+                    .Select(static current => current.Record)
+                    .Append(record)))
+            {
+                snapshot = default!;
+                return false;
+            }
+
             _collections.Add(collectionId, state);
-            TryWriteCollections();
             snapshot = CreateSnapshot(state);
         }
 
@@ -229,6 +250,23 @@ internal sealed class ObjectCollectionManager : IObjectCollectionManager
             }
 
             bool materializationChanged = !AreEntriesEqual(state.Record.Entries, normalizedRecord.Entries);
+            if (!materializationChanged
+                && string.Equals(state.Record.Name, normalizedRecord.Name, StringComparison.Ordinal))
+            {
+                snapshot = CreateSnapshot(state);
+                return true;
+            }
+
+            if (!TryWriteCollections(_collections.Values.Select(current => ReferenceEquals(current, state)
+                    ? normalizedRecord
+                    : current.Record)))
+            {
+                snapshot = default!;
+                return false;
+            }
+
+            ObjectCollection previousRecord = state.Record;
+            long previousMaterializationGeneration = state.MaterializationGeneration;
             state.Record = normalizedRecord;
             if (materializationChanged)
             {
@@ -238,6 +276,32 @@ internal sealed class ObjectCollectionManager : IObjectCollectionManager
                 }
             }
 
+            PersistentMutationStatus revisionStatus = AdvanceDependentRevisions(
+                new HashSet<string>(StringComparer.OrdinalIgnoreCase) { collectionId });
+            if (revisionStatus != PersistentMutationStatus.Success)
+            {
+                state.Record = previousRecord;
+                state.MaterializationGeneration = previousMaterializationGeneration;
+                bool restored = TryWriteCollections(_collections.Values.Select(static current => current.Record));
+                if (!restored)
+                {
+                    state.Record = normalizedRecord;
+                    state.MaterializationGeneration = materializationChanged
+                        ? checked(previousMaterializationGeneration + 1)
+                        : previousMaterializationGeneration;
+                }
+
+                if (!restored || revisionStatus == PersistentMutationStatus.RecoveryRequired)
+                {
+                    _logger.LogCritical(
+                        "object collection {CollectionId} dependency revision update failed and storage recovery is required",
+                        collectionId);
+                }
+
+                snapshot = default!;
+                return false;
+            }
+
             bool hasTrackedUsage = HasTrackedUsageLocked(state);
             shouldMaterialize = materializationChanged && hasTrackedUsage;
             shouldRemoveRuntimeCollection = materializationChanged && !hasTrackedUsage;
@@ -245,7 +309,6 @@ internal sealed class ObjectCollectionManager : IObjectCollectionManager
             {
                 ResetRuntimeStateLocked(state);
             }
-            TryWriteCollections();
             snapshot = CreateSnapshot(state);
         }
 
@@ -274,13 +337,37 @@ internal sealed class ObjectCollectionManager : IObjectCollectionManager
         lock (_stateLock)
         {
             string normalizedCollectionId = ObjectCollectionKeyUtility.NormalizeCollectionId(collectionId);
-            if (!_collections.Remove(normalizedCollectionId, out removedState))
+            if (!_collections.TryGetValue(normalizedCollectionId, out removedState)
+                || !TryWriteCollections(_collections
+                    .Where(pair => !string.Equals(pair.Key, normalizedCollectionId, StringComparison.OrdinalIgnoreCase))
+                    .Select(static pair => pair.Value.Record)))
             {
                 return false;
             }
 
+            _ = _collections.Remove(normalizedCollectionId);
+            PersistentMutationStatus revisionStatus = AdvanceDependentRevisions(
+                new HashSet<string>(StringComparer.OrdinalIgnoreCase) { normalizedCollectionId });
+            if (revisionStatus != PersistentMutationStatus.Success)
+            {
+                _collections.Add(normalizedCollectionId, removedState);
+                bool restored = TryWriteCollections(_collections.Values.Select(static current => current.Record));
+                if (!restored)
+                {
+                    _ = _collections.Remove(normalizedCollectionId);
+                }
+
+                if (!restored || revisionStatus == PersistentMutationStatus.RecoveryRequired)
+                {
+                    _logger.LogCritical(
+                        "object collection {CollectionId} deletion revision update failed and storage recovery is required",
+                        normalizedCollectionId);
+                }
+
+                return false;
+            }
+
             removedState.ResolveCancellation?.Cancel();
-            TryWriteCollections();
         }
 
         _resolvedCollectionStore.RemoveCollection(removedState.Record.CollectionId);
@@ -475,30 +562,31 @@ internal sealed class ObjectCollectionManager : IObjectCollectionManager
         return new ObjectCollectionsFile();
     }
 
-    private void TryWriteCollections()
+    private bool TryWriteCollections(IEnumerable<ObjectCollection> collections)
         => TryWriteDocument(new ObjectCollectionsFile
         {
-            Collections = _collections.Values
-                .Select(static state => state.Record)
+            Collections = collections
                 .OrderBy(static record => record.Name, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(static record => record.CollectionId, StringComparer.OrdinalIgnoreCase)
                 .ToList(),
         });
 
-    private void TryWriteDocument(ObjectCollectionsFile document)
+    private bool TryWriteDocument(ObjectCollectionsFile document)
     {
         try
         {
             string json = JsonSerializer.Serialize(document, JsonOptions);
             _fileSystem.WriteAllTextAtomic(_pathService.ObjectCollectionsPath, json);
+            return true;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "failed to save object collections");
+            return false;
         }
     }
 
-    private void ResetRuntimeStateLocked(CollectionState state)
+    private static void ResetRuntimeStateLocked(CollectionState state)
     {
         state.ResolveState = ObjectCollectionResolveState.Inactive;
         state.StatusText = IdleStatusText;
@@ -510,7 +598,7 @@ internal sealed class ObjectCollectionManager : IObjectCollectionManager
         state.ForceNextRuntimeRefresh = false;
     }
 
-    private bool ClearTrackedUsageLocked(CollectionState state)
+    private static bool ClearTrackedUsageLocked(CollectionState state)
     {
         bool hadTrackedUsage = HasTrackedUsageLocked(state);
         state.ResolveCancellation?.Cancel();
@@ -636,13 +724,20 @@ internal sealed class ObjectCollectionManager : IObjectCollectionManager
             return;
         }
 
+        List<string> affectedCollectionIds = [];
         List<string> trackedCollectionIds = [];
         lock (_stateLock)
         {
             bool forceRuntimeRefresh = invalidation.Kind == ObjectModDataChangeKind.ModContentChanged;
             foreach ((string collectionId, CollectionState state) in _collections)
             {
-                if (state.TrackedSnapshots.Count == 0 || !InvalidationTouchesCollection(invalidation, state.Record))
+                if (!InvalidationTouchesCollection(invalidation, state.Record))
+                {
+                    continue;
+                }
+
+                affectedCollectionIds.Add(collectionId);
+                if (state.TrackedSnapshots.Count == 0)
                 {
                     continue;
                 }
@@ -658,6 +753,19 @@ internal sealed class ObjectCollectionManager : IObjectCollectionManager
                 }
 
                 trackedCollectionIds.Add(collectionId);
+            }
+
+            if (affectedCollectionIds.Count > 0)
+            {
+                PersistentMutationStatus revisionStatus = AdvanceDependentRevisions(
+                    affectedCollectionIds.ToHashSet(StringComparer.OrdinalIgnoreCase));
+                if (revisionStatus != PersistentMutationStatus.Success)
+                {
+                    _logger.LogError(
+                        "could not advance layout revisions after {ChangeKind} object mod data change: {Status}",
+                        invalidation.Kind,
+                        revisionStatus);
+                }
             }
         }
 
@@ -893,7 +1001,7 @@ internal sealed class ObjectCollectionManager : IObjectCollectionManager
     private static bool TryNormalizeRecord(ObjectCollection record, out ObjectCollection normalizedRecord)
     {
         string collectionId = ObjectCollectionKeyUtility.NormalizeCollectionId(record.CollectionId);
-        string normalizedName = ObjectStringUtility.TrimOrEmpty(record.Name);
+        string normalizedName = TextUtility.TrimOrEmpty(record.Name);
         if (collectionId.Length == 0 || normalizedName.Length == 0 || record.Entries is null)
         {
             normalizedRecord = default!;
@@ -944,11 +1052,6 @@ internal sealed class ObjectCollectionManager : IObjectCollectionManager
         foreach ((string groupName, List<string>? optionNames) in entry.Settings)
         {
             string normalizedGroupName = CollectionModSettingsUtility.NormalizeGroupName(groupName);
-            if (normalizedGroupName.Length == 0)
-            {
-                continue;
-            }
-
             if (!CollectionModSettingsUtility.TryNormalizeOptionNames(optionNames, out List<string> normalizedOptions))
             {
                 return false;
@@ -959,8 +1062,8 @@ internal sealed class ObjectCollectionManager : IObjectCollectionManager
 
         normalizedEntry = new ObjectCollectionModSettings
         {
-            ModDirectory = ObjectStringUtility.TrimOrEmpty(entry.ModDirectory),
-            ModName = ObjectStringUtility.TrimOrEmpty(entry.ModName),
+            ModDirectory = TextUtility.TrimOrEmpty(entry.ModDirectory),
+            ModName = TextUtility.TrimOrEmpty(entry.ModName),
             Enabled = entry.Enabled,
             Priority = entry.Priority,
             Settings = settings,
@@ -1017,6 +1120,21 @@ internal sealed class ObjectCollectionManager : IObjectCollectionManager
         return true;
     }
 
+    private PersistentMutationStatus AdvanceDependentRevisions(IReadOnlySet<string> collectionIds)
+    {
+        bool standaloneAffected = _persistenceState.GetStandaloneSnapshots().Any(snapshot => collectionIds.Contains(
+            ObjectCollectionKeyUtility.NormalizeCollectionId(snapshot.CollectionId)));
+        PersistentMutationStatus status = _layoutManager.AdvanceCollectionDependencyRevisions(
+            collectionIds,
+            out bool defaultLayoutAffected);
+        if (status == PersistentMutationStatus.Success && (standaloneAffected || defaultLayoutAffected))
+        {
+            _revisionTracker.Increment(persistentChanged: true);
+        }
+
+        return status;
+    }
+
     private static ObjectCollectionSnapshot CreateSnapshot(CollectionState state)
         => new()
         {
@@ -1070,11 +1188,6 @@ internal sealed class ObjectCollectionManager : IObjectCollectionManager
 
     private static bool InvalidationTouchesCollection(ObjectModDataChange invalidation, ObjectCollection record)
     {
-        if (invalidation.AffectsAllCollections || invalidation.AffectedModDirectories.Count == 0)
-        {
-            return true;
-        }
-
         foreach (ObjectCollectionModSettings entry in record.Entries)
         {
             if (!entry.Enabled)
@@ -1084,7 +1197,8 @@ internal sealed class ObjectCollectionManager : IObjectCollectionManager
 
             string normalizedModDirectory = ObjectCollectionKeyUtility.NormalizeModDirectory(entry.ModDirectory);
             if (normalizedModDirectory.Length > 0
-             && invalidation.AffectedModDirectories.Contains(normalizedModDirectory))
+             && (invalidation.AffectsAllCollections
+                 || invalidation.AffectedModDirectories.Contains(normalizedModDirectory)))
             {
                 return true;
             }

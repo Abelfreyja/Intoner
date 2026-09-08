@@ -1,5 +1,5 @@
 using Dalamud.Plugin.Services;
-using Intoner.Objects.Filesystem.Configuration;
+using Intoner.Services.Configuration;
 using Lumina.Excel;
 using Lumina.Excel.Sheets;
 

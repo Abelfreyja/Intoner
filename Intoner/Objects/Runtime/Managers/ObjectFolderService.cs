@@ -57,6 +57,15 @@ internal interface IObjectFolderService
     /// Clears standalone explicit folder state
     /// </summary>
     void ClearStandaloneState();
+
+    /// <summary>
+    /// Replaces standalone explicit folder state without publishing a revision.
+    /// </summary>
+    /// <param name="folders">The replacement explicit folders.</param>
+    /// <param name="folderColors">The replacement folder color map.</param>
+    void ReplaceStandaloneState(
+        IReadOnlyList<string> folders,
+        IReadOnlyDictionary<string, string> folderColors);
 }
 
 internal sealed class ObjectFolderService : IObjectFolderService
@@ -80,69 +89,63 @@ internal sealed class ObjectFolderService : IObjectFolderService
 
     public ObjectFolderSceneState CaptureSceneState()
     {
-        List<string> standaloneFolders;
-        Dictionary<string, string> standaloneFolderColors;
         lock (_stateLock)
         {
-            standaloneFolders = [.. _standaloneFolders];
-            standaloneFolderColors = new Dictionary<string, string>(_standaloneFolderColors, StringComparer.OrdinalIgnoreCase);
-        }
+            Guid? defaultLayoutId = _layoutManager.GetDefaultLayoutId();
+            IReadOnlyList<string> defaultLayoutFolders = [];
+            IReadOnlyDictionary<string, string> defaultLayoutFolderColors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            if (defaultLayoutId.HasValue
+                && _layoutManager.TryGetLayout(defaultLayoutId.Value, out ObjectLayoutSnapshot defaultLayout))
+            {
+                defaultLayoutFolders = defaultLayout.Folders;
+                defaultLayoutFolderColors = defaultLayout.FolderColors;
+            }
 
-        var defaultLayoutId = _layoutManager.GetDefaultLayoutId();
-        IReadOnlyList<string> defaultLayoutFolders = [];
-        IReadOnlyDictionary<string, string> defaultLayoutFolderColors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        if (defaultLayoutId.HasValue
-            && _layoutManager.TryGetLayout(defaultLayoutId.Value, out var defaultLayout))
-        {
-            defaultLayoutFolders = defaultLayout.Folders;
-            defaultLayoutFolderColors = defaultLayout.FolderColors;
+            return new ObjectFolderSceneState
+            {
+                StandaloneFolders = ObjectFolderUtility.OrderFolders(_standaloneFolders),
+                StandaloneFolderColors = ObjectFolderUtility.OrderFolderColorMap(_standaloneFolderColors, _standaloneFolders),
+                DefaultLayoutId = defaultLayoutId,
+                DefaultLayoutFolders = ObjectFolderUtility.OrderFolders(defaultLayoutFolders),
+                DefaultLayoutFolderColors = ObjectFolderUtility.OrderFolderColorMap(defaultLayoutFolderColors, defaultLayoutFolders),
+            };
         }
-
-        return new ObjectFolderSceneState
-        {
-            StandaloneFolders = ObjectFolderUtility.OrderFolders(standaloneFolders),
-            StandaloneFolderColors = ObjectFolderUtility.OrderFolderColorMap(standaloneFolderColors, standaloneFolders),
-            DefaultLayoutId = defaultLayoutId,
-            DefaultLayoutFolders = ObjectFolderUtility.OrderFolders(defaultLayoutFolders),
-            DefaultLayoutFolderColors = ObjectFolderUtility.OrderFolderColorMap(defaultLayoutFolderColors, defaultLayoutFolders),
-        };
     }
 
     public bool TryApplySceneState(ObjectFolderSceneState state)
     {
         ArgumentNullException.ThrowIfNull(state);
 
-        var nextStandaloneFolders = ObjectFolderUtility.OrderFolders(state.StandaloneFolders);
-        var nextStandaloneFolderColors = ObjectFolderUtility.OrderFolderColorMap(state.StandaloneFolderColors, nextStandaloneFolders);
-        var nextDefaultLayoutFolders = ObjectFolderUtility.OrderFolders(state.DefaultLayoutFolders);
-        var nextDefaultLayoutFolderColors = ObjectFolderUtility.OrderFolderColorMap(state.DefaultLayoutFolderColors, nextDefaultLayoutFolders);
-        ObjectLayoutSnapshot layout = null!;
-        if (state.DefaultLayoutId.HasValue
-            && !_layoutManager.TryGetLayout(state.DefaultLayoutId.Value, out layout!))
+        lock (_stateLock)
         {
-            return false;
-        }
-
-        var changed = false;
-
-        if (state.DefaultLayoutId.HasValue)
-        {
-            var layoutId = state.DefaultLayoutId.Value;
-            if (!ObjectFolderUtility.FolderListsMatch(layout.Folders, nextDefaultLayoutFolders)
-                || !ObjectFolderUtility.FolderColorMapsMatch(layout.FolderColors, nextDefaultLayoutFolderColors))
+            IReadOnlyList<string> nextStandaloneFolders = ObjectFolderUtility.OrderFolders(state.StandaloneFolders);
+            IReadOnlyDictionary<string, string> nextStandaloneFolderColors = ObjectFolderUtility.OrderFolderColorMap(state.StandaloneFolderColors, nextStandaloneFolders);
+            IReadOnlyList<string> nextDefaultLayoutFolders = ObjectFolderUtility.OrderFolders(state.DefaultLayoutFolders);
+            IReadOnlyDictionary<string, string> nextDefaultLayoutFolderColors = ObjectFolderUtility.OrderFolderColorMap(state.DefaultLayoutFolderColors, nextDefaultLayoutFolders);
+            ObjectLayoutSnapshot layout = null!;
+            if (state.DefaultLayoutId.HasValue
+                && !_layoutManager.TryGetLayout(state.DefaultLayoutId.Value, out layout!))
             {
-                if (!_layoutManager.TryReplaceLayoutFolderState(layoutId, nextDefaultLayoutFolders, nextDefaultLayoutFolderColors))
+                return false;
+            }
+
+            bool changed = false;
+            if (state.DefaultLayoutId.HasValue
+                && (!ObjectFolderUtility.FolderListsMatch(layout.Folders, nextDefaultLayoutFolders)
+                    || !ObjectFolderUtility.FolderColorMapsMatch(layout.FolderColors, nextDefaultLayoutFolderColors)))
+            {
+                if (!_layoutManager.TryReplaceLayoutFolderState(
+                        state.DefaultLayoutId.Value,
+                        nextDefaultLayoutFolders,
+                        nextDefaultLayoutFolderColors))
                 {
                     return false;
                 }
 
                 changed = true;
             }
-        }
 
-        var standaloneFoldersChanged = false;
-        lock (_stateLock)
-        {
+            bool standaloneFoldersChanged = false;
             if (!ObjectFolderUtility.FolderListsMatch(_standaloneFolders, nextStandaloneFolders))
             {
                 _standaloneFolders = [.. nextStandaloneFolders];
@@ -156,14 +159,14 @@ internal sealed class ObjectFolderService : IObjectFolderService
                 _standaloneFolderColors = new Dictionary<string, string>(nextStandaloneFolderColors, StringComparer.OrdinalIgnoreCase);
                 changed = true;
             }
-        }
 
-        if (changed)
-        {
-            _revisionTracker.Increment(persistentChanged: true);
-        }
+            if (changed)
+            {
+                _revisionTracker.Increment(persistentChanged: true);
+            }
 
-        return changed;
+            return changed;
+        }
     }
 
     public IReadOnlyDictionary<string, string> GetSceneFolderColors()
@@ -179,7 +182,7 @@ internal sealed class ObjectFolderService : IObjectFolderService
     public IReadOnlyList<string> GetSceneFolders(IReadOnlyList<ObjectSnapshot> snapshots)
     {
         var sceneState = CaptureSceneState();
-        return ObjectFolderUtility.OrderFolders(
+        return ObjectFolderUtility.ExpandFolders(
             sceneState.StandaloneFolders
                 .Concat(sceneState.DefaultLayoutFolders)
                 .Concat(snapshots.Select(static snapshot => snapshot.FolderPath)));
@@ -213,11 +216,18 @@ internal sealed class ObjectFolderService : IObjectFolderService
     }
 
     public void ClearStandaloneState()
+        => ReplaceStandaloneState([], new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
+
+    public void ReplaceStandaloneState(
+        IReadOnlyList<string> folders,
+        IReadOnlyDictionary<string, string> folderColors)
     {
+        IReadOnlyList<string> orderedFolders = ObjectFolderUtility.OrderFolders(folders);
+        IReadOnlyDictionary<string, string> orderedFolderColors = ObjectFolderUtility.OrderFolderColorMap(folderColors, orderedFolders);
         lock (_stateLock)
         {
-            _standaloneFolders = [];
-            _standaloneFolderColors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            _standaloneFolders = [.. orderedFolders];
+            _standaloneFolderColors = new Dictionary<string, string>(orderedFolderColors, StringComparer.OrdinalIgnoreCase);
         }
     }
 }

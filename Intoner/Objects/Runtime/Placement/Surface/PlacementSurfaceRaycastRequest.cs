@@ -1,7 +1,9 @@
 using System.Numerics;
+using System.Runtime.InteropServices;
 
 namespace Intoner.Objects.Runtime;
 
+[StructLayout(LayoutKind.Auto)]
 internal readonly record struct PlacementSurfaceRaycastRequest(
     Guid ObjectId,
     Vector3 Origin,

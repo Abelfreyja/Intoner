@@ -1,6 +1,8 @@
 using Intoner.Objects.Utils;
 using System.Numerics;
 
+using Intoner.Scene;
+
 namespace Intoner.Objects.Rendering.Drawing;
 
 internal readonly record struct DrawContext(
@@ -20,11 +22,11 @@ internal readonly record struct DrawContext(
         out DrawContext context)
     {
         context = default;
-        if (!ObjectMathUtility.IsFinite(viewportPos)
-            || !ObjectMathUtility.IsFinite(viewportSize)
+        if (!NumericsUtility.IsFinite(viewportPos)
+            || !NumericsUtility.IsFinite(viewportSize)
             || viewportSize.X <= 0f
             || viewportSize.Y <= 0f
-            || !ObjectViewportProjectionUtility.TryGetEditorCameraProjection(out var viewProjection, out var viewMatrix, out var nearPlane))
+            || !SceneViewportProjection.TryGetEditorCameraProjection(out var viewProjection, out var viewMatrix, out var nearPlane))
         {
             return false;
         }

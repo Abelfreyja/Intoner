@@ -1,10 +1,29 @@
 using Dalamud.Interface;
 using Intoner.Objects.Models;
+using Intoner.Objects.UI.Components;
 using Intoner.Objects.Utils;
+using Intoner.Scene;
 using System.Numerics;
+using System.Runtime.InteropServices;
 
 namespace Intoner.Objects.UI;
 
+[StructLayout(LayoutKind.Auto)]
+internal readonly record struct GizmoDrawOptions(
+    bool PointerBlocked,
+    EditorScreenArea? ObscuredArea)
+{
+    public static GizmoDrawOptions Unobstructed { get; } = new(false, null);
+
+    public bool CanUsePointer(Vector2 position)
+        => !PointerBlocked
+           && !(ObscuredArea?.Contains(position) ?? false);
+
+    public bool CanDrawLabel(Vector2 min, Vector2 max)
+        => !(ObscuredArea?.Intersects(min, max) ?? false);
+}
+
+[StructLayout(LayoutKind.Auto)]
 internal readonly record struct RotationProjectionContext(
     Vector2 Center,
     float ScreenRadius,
@@ -20,6 +39,7 @@ internal readonly record struct RotationProjectionContext(
     Vector3? CameraRight,
     Vector3? CameraUp);
 
+[StructLayout(LayoutKind.Auto)]
 internal readonly record struct TranslationDragPlaneContext(
     Vector3 PlanePoint,
     Vector3 PlaneNormal,
@@ -27,11 +47,15 @@ internal readonly record struct TranslationDragPlaneContext(
     Vector2 ViewportPos,
     Vector2 ViewportSize);
 
+[StructLayout(LayoutKind.Auto)]
 internal readonly record struct GizmoContext(
-    IReadOnlyList<ObjectSnapshot> SelectedSnapshots,
-    ObjectSnapshot PrimarySnapshot,
-    IReadOnlyList<ObjectBoundsSnapshot> BoundsSnapshots,
-    ObjectBoundsSnapshot? BoundsSnapshot,
+    IReadOnlyList<SceneItemSnapshot> SelectedSnapshots,
+    SceneItemSnapshot PrimarySnapshot,
+    IReadOnlyList<SceneItemBoundsSnapshot> BoundsSnapshots,
+    SceneItemBoundsLookup BoundsLookup,
+    SceneItemBoundsSnapshot? BoundsSnapshot,
+    SceneItemManipulationPolicy Manipulation,
+    SceneItemManipulation ManipulationOptions,
     Vector3 PivotPosition,
     Vector2 ScreenPos,
     Vector2 ViewportPos,
@@ -43,20 +67,22 @@ internal readonly record struct GizmoContext(
     Vector3? CameraUp,
     float AxisWorldLength,
     bool UseWorldSpace,
-    bool ScaleSupported)
+    bool ScaleSupported,
+    bool SurfaceDragSupported)
 {
     public int SelectionCount => SelectedSnapshots.Count;
 }
 
+[StructLayout(LayoutKind.Auto)]
 internal readonly struct GizmoSelectionEntry
 {
-    public GizmoSelectionEntry(ObjectSnapshot snapshot, Vector3 pivotOffset, Quaternion startRotationQuaternion)
+    public GizmoSelectionEntry(SceneItemSnapshot snapshot, Vector3 pivotOffset, Quaternion startRotationQuaternion)
         : this(snapshot, pivotOffset, startRotationQuaternion, false, default, default)
     {
     }
 
     public GizmoSelectionEntry(
-        ObjectSnapshot snapshot,
+        SceneItemSnapshot snapshot,
         Vector3 pivotOffset,
         Quaternion startRotationQuaternion,
         bool hasBoundsData,
@@ -65,13 +91,13 @@ internal readonly struct GizmoSelectionEntry
     {
         Snapshot = snapshot;
         PivotOffset = pivotOffset;
-        StartRotationQuaternion = ObjectTransformMath.NormalizeQuaternion(startRotationQuaternion);
+        StartRotationQuaternion = SceneTransformMath.NormalizeQuaternion(startRotationQuaternion);
         HasBoundsData = hasBoundsData;
         BoundsCenterLocalOffset = boundsCenterLocalOffset;
         BoundsHalfExtents = boundsHalfExtents;
     }
 
-    public ObjectSnapshot Snapshot { get; }
+    public SceneItemSnapshot Snapshot { get; }
     public Vector3 PivotOffset { get; }
     public Quaternion StartRotationQuaternion { get; }
     public bool HasBoundsData { get; }
@@ -85,11 +111,12 @@ internal readonly struct GizmoSelectionEntry
             return PivotOffset;
         }
 
-        rotation = ObjectTransformMath.NormalizeQuaternion(rotation);
+        rotation = SceneTransformMath.NormalizeQuaternion(rotation);
         return -Vector3.Transform(BoundsCenterLocalOffset, rotation);
     }
 }
 
+[StructLayout(LayoutKind.Auto)]
 internal readonly record struct GizmoAxisVisualState(
     GizmoAxis Axis,
     Vector2 ScreenStart,
@@ -114,6 +141,7 @@ internal readonly record struct GizmoAxisVisualState(
         => Axis != GizmoAxis.None;
 }
 
+[StructLayout(LayoutKind.Auto)]
 internal readonly record struct RotationHoverState(
     GizmoAxis Axis,
     float Distance,
@@ -157,6 +185,7 @@ internal static class GizmoInteractionPhaseExtensions
         => phase == GizmoInteractionPhase.HoverCenter && centerHovered;
 }
 
+[StructLayout(LayoutKind.Auto)]
 internal readonly record struct GizmoInteractionAvailability(
     bool PointerInRegion,
     bool DragActive,
@@ -164,7 +193,7 @@ internal readonly record struct GizmoInteractionAvailability(
     bool WheelOpen)
 {
     public bool CanResolveHover
-        => !DragActive && !SurfaceDragActive && !WheelOpen;
+        => PointerInRegion && !DragActive && !SurfaceDragActive && !WheelOpen;
 
     public GizmoInteractionPhase ResolvePhase(bool centerHovered, bool axisHovered)
     {
@@ -194,6 +223,7 @@ internal readonly record struct GizmoInteractionAvailability(
     }
 }
 
+[StructLayout(LayoutKind.Auto)]
 internal readonly record struct GizmoInteractionState(
     GizmoInteractionPhase Phase,
     bool PointerInRegion,
@@ -216,6 +246,7 @@ internal readonly record struct GizmoInteractionState(
         => Phase.CanStartSurfaceDrag(CenterHovered);
 }
 
+[StructLayout(LayoutKind.Auto)]
 internal readonly record struct GizmoLinearInteractionState(
     GizmoInteractionState Common,
     GizmoAxis HoveredAxis,
@@ -226,6 +257,7 @@ internal readonly record struct GizmoLinearInteractionState(
         => Common.Phase == GizmoInteractionPhase.HoverAxis && HoveredAxisState.IsValid;
 }
 
+[StructLayout(LayoutKind.Auto)]
 internal readonly record struct GizmoRotationInteractionState(
     GizmoInteractionState Common,
     RotationHoverState HoverState,
@@ -235,6 +267,7 @@ internal readonly record struct GizmoRotationInteractionState(
         => Common.Phase == GizmoInteractionPhase.HoverAxis && HoverState.IsValid && HoverState.HasPoint;
 }
 
+[StructLayout(LayoutKind.Auto)]
 internal readonly struct GizmoFrame
 {
     public GizmoFrame(
@@ -281,6 +314,7 @@ internal readonly struct GizmoFrame
             : LinearInteraction.Common.Phase is GizmoInteractionPhase.HoverAxis or GizmoInteractionPhase.HoverCenter;
 }
 
+[StructLayout(LayoutKind.Auto)]
 internal readonly record struct GizmoFrameRequest(
     int FrameCount,
     int InteractionRevision,
@@ -288,14 +322,17 @@ internal readonly record struct GizmoFrameRequest(
     BoundsOverlaySpace BoundsOverlaySpace,
     int SelectionRevision,
     long SceneRevision,
-    Vector2 MousePosition);
+    Vector2 MousePosition,
+    bool PointerAvailable);
 
+[StructLayout(LayoutKind.Auto)]
 internal readonly record struct GizmoCachedFrame(GizmoFrameRequest Request, GizmoFrame Frame)
 {
     public bool Matches(in GizmoFrameRequest request)
         => Request == request;
 }
 
+[StructLayout(LayoutKind.Auto)]
 internal readonly record struct GizmoMetricInfo(string DeltaText, string? CurrentValueText)
 {
     public string Text
@@ -304,9 +341,10 @@ internal readonly record struct GizmoMetricInfo(string DeltaText, string? Curren
             : $"{DeltaText}\n{CurrentValueText}";
 }
 
+[StructLayout(LayoutKind.Auto)]
 internal readonly struct GizmoPositionSnapPolicy
 {
-    public GizmoPositionSnapPolicy(bool enabled, float step, in ObjectSnapBasis basis, Vector3 referencePosition)
+    public GizmoPositionSnapPolicy(bool enabled, float step, in SceneSnapBasis basis, Vector3 referencePosition)
     {
         Enabled = enabled;
         Step = step;
@@ -318,19 +356,19 @@ internal readonly struct GizmoPositionSnapPolicy
 
     public float Step { get; }
 
-    public ObjectSnapBasis Basis { get; }
+    public SceneSnapBasis Basis { get; }
 
     public Vector3 ReferencePosition { get; }
 
     public Vector3 SnapPosition(Vector3 position)
         => !Enabled
             ? position
-            : ObjectTransformSnapUtility.SnapPosition(position, Step, Basis);
+            : SceneTransformSnapUtility.SnapPosition(position, Step, Basis);
 
     public Vector3 SnapAxis(Vector3 position, int axisIndex)
         => !Enabled
             ? position
-            : ObjectTransformSnapUtility.SnapPositionAxis(position, axisIndex, Step, Basis);
+            : SceneTransformSnapUtility.SnapPositionAxis(position, axisIndex, Step, Basis);
 
     public Vector3 ResolveGridOrigin(GizmoAxis primaryAxis, GizmoAxis secondaryAxis, GizmoAxis preferredAxis)
     {
@@ -344,7 +382,7 @@ internal readonly struct GizmoPositionSnapPolicy
             return SnapAxis(ReferencePosition, GizmoAxisUtility.ToIndex(preferredAxis));
         }
 
-        return ObjectTransformSnapUtility.SnapPositionAxes(
+        return SceneTransformSnapUtility.SnapPositionAxes(
             ReferencePosition,
             primaryAxis == GizmoAxis.X || secondaryAxis == GizmoAxis.X,
             primaryAxis == GizmoAxis.Y || secondaryAxis == GizmoAxis.Y,
@@ -354,6 +392,7 @@ internal readonly struct GizmoPositionSnapPolicy
     }
 }
 
+[StructLayout(LayoutKind.Auto)]
 internal readonly struct GizmoTransformSnapPolicy
 {
     public GizmoTransformSnapPolicy(
@@ -398,14 +437,15 @@ internal readonly struct GizmoTransformSnapPolicy
     public float SnapRotationDegrees(float degrees)
         => !RotationEnabled
             ? degrees
-            : ObjectTransformSnapUtility.SnapAngleDegrees(degrees, RotationStepDegrees);
+            : SceneTransformSnapUtility.SnapAngleDegrees(degrees, RotationStepDegrees);
 
     public Vector3 SnapScale(Vector3 scale)
         => !ScaleEnabled
             ? scale
-            : ObjectTransformSnapUtility.SnapScale(scale, ScaleStep);
+            : SceneTransformSnapUtility.SnapScale(scale, ScaleStep);
 }
 
+[StructLayout(LayoutKind.Auto)]
 internal readonly record struct GizmoWheelSegment(
     FontAwesomeIcon Icon,
     string Tooltip,
@@ -414,6 +454,7 @@ internal readonly record struct GizmoWheelSegment(
     bool IsEnabled,
     Action OnClick);
 
+[StructLayout(LayoutKind.Auto)]
 internal readonly record struct GizmoRadialTooltipInfo(
     Vector2 MousePosition,
     string Title);

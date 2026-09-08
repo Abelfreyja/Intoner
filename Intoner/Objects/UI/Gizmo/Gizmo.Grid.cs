@@ -1,6 +1,7 @@
 using Intoner.Objects.Models;
 using Intoner.Objects.Rendering.Drawing;
 using Intoner.Objects.Utils;
+using Intoner.Scene;
 using System.Numerics;
 
 namespace Intoner.Objects.UI;
@@ -17,7 +18,7 @@ internal sealed partial class Gizmo
     private void DrawTranslationSnapGrid(in GizmoContext context, float scale, GizmoAxis preferredAxis)
     {
         var snapPolicy = ResolveActiveTransformSnapPolicy(context);
-        if (!snapPolicy.PositionEnabled || !ObjectMathUtility.HasLength(snapPolicy.PositionStep))
+        if (!snapPolicy.PositionEnabled || !NumericsUtility.HasLength(snapPolicy.PositionStep))
         {
             return;
         }
@@ -31,7 +32,7 @@ internal sealed partial class Gizmo
 
         var primaryDirection = ResolveSnapGridAxisDirection(primaryAxis, snapBasis);
         var secondaryDirection = ResolveSnapGridAxisDirection(secondaryAxis, snapBasis);
-        if (!ObjectMathUtility.HasLength(primaryDirection) || !ObjectMathUtility.HasLength(secondaryDirection))
+        if (!NumericsUtility.HasLength(primaryDirection) || !NumericsUtility.HasLength(secondaryDirection))
         {
             return;
         }
@@ -69,7 +70,7 @@ internal sealed partial class Gizmo
 
     private static bool TryResolveTranslationSnapGridAxes(
         in GizmoContext context,
-        in ObjectSnapBasis basis,
+        in SceneSnapBasis basis,
         Vector3? preferredPlaneNormal,
         GizmoAxis preferredAxis,
         out GizmoAxis primaryAxis,
@@ -105,7 +106,7 @@ internal sealed partial class Gizmo
 
     private static GizmoAxis ResolveBestCompanionGridAxis(
         in GizmoContext context,
-        in ObjectSnapBasis basis,
+        in SceneSnapBasis basis,
         Vector3? preferredPlaneNormal,
         GizmoAxis primaryAxis)
     {
@@ -135,7 +136,7 @@ internal sealed partial class Gizmo
 
     private static float ResolveTranslationSnapGridPlaneScore(
         in GizmoContext context,
-        in ObjectSnapBasis basis,
+        in SceneSnapBasis basis,
         Vector3? preferredPlaneNormal,
         GizmoAxis primaryAxis,
         GizmoAxis secondaryAxis)
@@ -143,19 +144,19 @@ internal sealed partial class Gizmo
         var primaryDirection = ResolveSnapGridAxisDirection(primaryAxis, basis);
         var secondaryDirection = ResolveSnapGridAxisDirection(secondaryAxis, basis);
         var planeNormal = Vector3.Cross(primaryDirection, secondaryDirection);
-        if (!ObjectMathUtility.TryNormalize(planeNormal, out var normalizedPlaneNormal))
+        if (!NumericsUtility.TryNormalize(planeNormal, out var normalizedPlaneNormal))
         {
             return float.MinValue;
         }
 
         var score = 0f;
         if (preferredPlaneNormal is { } surfaceNormal
-            && ObjectMathUtility.TryNormalize(surfaceNormal, out var normalizedSurfaceNormal))
+            && NumericsUtility.TryNormalize(surfaceNormal, out var normalizedSurfaceNormal))
         {
             score += MathF.Abs(Vector3.Dot(normalizedPlaneNormal, normalizedSurfaceNormal)) * 10f;
         }
 
-        if (!context.CameraViewDirection.HasValue || !ObjectMathUtility.TryNormalize(context.CameraViewDirection.Value, out var normalizedCameraDirection))
+        if (!context.CameraViewDirection.HasValue || !NumericsUtility.TryNormalize(context.CameraViewDirection.Value, out var normalizedCameraDirection))
         {
             return score;
         }
@@ -167,7 +168,7 @@ internal sealed partial class Gizmo
     {
         if (!SurfaceDragState.Matches(context.PrimarySnapshot.Id)
             || !TryResolveCurrentPlacementHit(context, out var hit)
-            || !ObjectMathUtility.TryNormalize(hit.Normal, out var surfaceNormal))
+            || !NumericsUtility.TryNormalize(hit.Normal, out var surfaceNormal))
         {
             return null;
         }
@@ -175,7 +176,7 @@ internal sealed partial class Gizmo
         return surfaceNormal;
     }
 
-    private static Vector3 ResolveSnapGridAxisDirection(GizmoAxis axis, in ObjectSnapBasis basis)
+    private static Vector3 ResolveSnapGridAxisDirection(GizmoAxis axis, in SceneSnapBasis basis)
         => ResolveAxisWorldDirection(axis, basis.Rotation, basis.Rotation == Quaternion.Identity);
 }
 

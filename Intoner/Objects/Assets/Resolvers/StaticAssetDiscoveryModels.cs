@@ -43,39 +43,5 @@ internal sealed record StaticAssetDiscoverySnapshot(
                 .Select(ObjectAssetCacheProjection.ToResolvedVfxPath)
                 .ToDictionary(static asset => asset.Path, static asset => asset, StringComparer.OrdinalIgnoreCase));
 
-    public PathKnowledgeBase BuildKnowledgeBase()
-    {
-        PathKnowledgeBase knowledgeBase = new();
-
-        foreach (string collisionPath in StaticCollisionPaths)
-        {
-            _ = knowledgeBase.AddPath(
-                collisionPath,
-                AssetPathSource.SqpackCollision,
-                AssetPathContract.SqpackNamedLeak,
-                ["sqpack collision"]);
-        }
-
-        foreach (GameDataBgObjectAsset gameDataBgObjectAsset in StaticGameDataBgObjects.Values)
-        {
-            _ = knowledgeBase.AddPath(
-                gameDataBgObjectAsset.ModelPath,
-                AssetPathSource.GameData,
-                AssetPathContract.None,
-                gameDataBgObjectAsset.SearchTerms);
-        }
-
-        foreach (ResolvedVfxPath resolvedVfxPath in StaticResolvedVfxPaths.Values)
-        {
-            _ = knowledgeBase.AddPath(
-                resolvedVfxPath.Path,
-                resolvedVfxPath.Sources,
-                resolvedVfxPath.Contracts,
-                resolvedVfxPath.SearchTerms,
-                resolvedVfxPath.Family);
-        }
-
-        return knowledgeBase;
-    }
 }
 
