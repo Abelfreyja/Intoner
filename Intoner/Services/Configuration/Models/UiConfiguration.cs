@@ -17,7 +17,7 @@ internal enum UiColorPreset
 internal sealed class UiThemeColorConfiguration
 {
     public UiColorSource Source { get; set; } = UiColorSource.Preset;
-    public UiColorPreset Preset { get; set; } = UiColorPreset.Purple;
+    public UiColorPreset Preset { get; set; } = UiColorPreset.Pink;
     public RgbColor CustomColor { get; set; } = new(217, 140, 184);
 
     public static UiThemeColorConfiguration CreateDefault()
