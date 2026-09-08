@@ -12,9 +12,9 @@ namespace Intoner.Objects.UI;
 
 internal sealed partial class EditorStartupView
 {
-    private const string SplashScreenRedirectUrl = "https://abelfreyja.xyz/";
-    private const string SplashScreenRedirectLabel = "goober";
-    private const string SplashScreenRedirectDetail = "abelfreyja.xyz";
+    private const string SplashScreenRedirectUrl = "https://github.com/Abelfreyja/Intoner";
+    private const string SplashScreenRedirectLabel = "Intoner";
+    private const string SplashScreenRedirectDetail = "not a rickroll";
     private const float SplashScreenWidth = 340f;
     private const float SplashScreenHeight = 438f;
     private const float SplashScreenBannerHeight = 176f;

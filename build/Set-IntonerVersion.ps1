@@ -9,17 +9,6 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-function Get-ProjectVersion([xml] $ProjectXml)
-{
-    $value = $ProjectXml.Project.PropertyGroup.Version | Select-Object -First 1
-    if ([string]::IsNullOrWhiteSpace($value))
-    {
-        throw "project does not define a Version property"
-    }
-
-    return [Version]::Parse($value)
-}
-
 function Assert-VersionComponent([int] $Value, [string] $Name)
 {
     if ($Value -lt 0 -or $Value -gt 65534)
@@ -55,16 +44,22 @@ function New-BumpedVersion([Version] $Current, [string] $BumpKind)
 
 $resolvedProjectPath = Resolve-Path -LiteralPath $ProjectPath
 [xml] $project = Get-Content -LiteralPath $resolvedProjectPath
+$versionNode = $project.SelectSingleNode('/Project/PropertyGroup/Version')
+if ($null -eq $versionNode -or [string]::IsNullOrWhiteSpace($versionNode.InnerText))
+{
+    throw "project does not define a Version property"
+}
+
 $nextVersion = if (-not [string]::IsNullOrWhiteSpace($Version))
 {
     [Version]::Parse($Version)
 }
 else
 {
-    New-BumpedVersion (Get-ProjectVersion $project) $Bump
+    New-BumpedVersion ([Version]::Parse($versionNode.InnerText)) $Bump
 }
 
 Assert-ValidVersion $nextVersion
-$project.Project.PropertyGroup.Version = $nextVersion.ToString()
+$versionNode.InnerText = $nextVersion.ToString()
 $project.Save($resolvedProjectPath)
 Write-Output $nextVersion.ToString()

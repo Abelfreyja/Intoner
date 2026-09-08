@@ -19,7 +19,13 @@ $versionScript = Join-Path $PSScriptRoot "Set-IntonerVersion.ps1"
 function Get-ProjectVersion([string] $Path)
 {
     [xml] $project = Get-Content -LiteralPath $Path
-    return [Version]::Parse($project.Project.PropertyGroup.Version)
+    $versionNode = $project.SelectSingleNode('/Project/PropertyGroup/Version')
+    if ($null -eq $versionNode -or [string]::IsNullOrWhiteSpace($versionNode.InnerText))
+    {
+        throw "project does not define a Version property"
+    }
+
+    return [Version]::Parse($versionNode.InnerText)
 }
 
 function Get-TestingVersion([Version] $BaseVersion, [string] $ExplicitVersion)
