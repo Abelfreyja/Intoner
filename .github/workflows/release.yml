@@ -83,8 +83,9 @@ jobs:
       run: .\build\Build-Intoner.ps1 -Mode deps -Configuration Release -Restore -UpdateSubmodules
 
     - name: Build Intoner
+      id: build
       shell: pwsh
-      run: .\build\Build-Intoner.ps1 -Mode verify -Configuration Release -Restore -Version "${{ steps.version.outputs.build_version }}"
+      run: .\build\Build-Intoner.ps1 -Mode verify -Configuration Release -Restore -Version "${{ steps.version.outputs.build_version }}" -GitHubOutputPath $env:GITHUB_OUTPUT
 
     - name: Read existing repo metadata
       id: existing_repo
@@ -106,7 +107,7 @@ jobs:
       run: |
         $arguments = @{
           Channel = "${{ inputs.channel }}"
-          PluginManifestPath = "Intoner\bin\x64\Release\Intoner\Intoner.json"
+          PluginManifestPath = "${{ steps.build.outputs.package_path }}/Intoner.json"
           OutputPath = "repo.json"
           ReleaseDownloadUrl = "${{ env.RELEASE_DOWNLOAD_URL }}"
           TestingDownloadUrl = "${{ env.TESTING_DOWNLOAD_URL }}"
@@ -162,7 +163,7 @@ jobs:
         name: Intoner v${{ steps.version.outputs.version }}
         make_latest: true
         files: |
-          Intoner/bin/x64/Release/Intoner/latest.zip
+          ${{ steps.build.outputs.package_path }}/latest.zip
           repo.json
 
     - name: Publish testing GitHub release
@@ -175,7 +176,7 @@ jobs:
         make_latest: false
         overwrite_files: true
         files: |
-          Intoner/bin/x64/Release/Intoner/latest.zip
+          ${{ steps.build.outputs.package_path }}/latest.zip
           repo.json
 
     - name: Publish Dalamud repo branch

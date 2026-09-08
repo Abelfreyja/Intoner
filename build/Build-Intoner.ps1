@@ -7,6 +7,8 @@ param(
 
     [string] $Version,
 
+    [string] $GitHubOutputPath,
+
     [int] $MaxCpuCount = [Math]::Max(1, [Math]::Min(2, [Environment]::ProcessorCount - 2)),
 
     [switch] $Restore,
@@ -213,6 +215,18 @@ try
                 "-p:IntonerVerifyOutputPath=$verifyOutputPath"
                 "-p:NotifyDalamudAfterBuild=false"
             )
+
+            if (-not [string]::IsNullOrWhiteSpace($GitHubOutputPath))
+            {
+                $packagePath = $verifyOutputPath
+                if ($Configuration -eq "Release")
+                {
+                    $packagePath = Join-Path $packagePath "Intoner"
+                }
+
+                Add-Content -LiteralPath $GitHubOutputPath -Value "package_path=$($packagePath.Replace('\', '/'))" -Encoding utf8
+            }
+
             break
         }
         default

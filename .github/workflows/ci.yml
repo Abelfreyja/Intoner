@@ -48,13 +48,14 @@ jobs:
       run: .\build\Build-Intoner.ps1 -Mode deps -Configuration Release -Restore -UpdateSubmodules
 
     - name: Build Intoner
+      id: build
       shell: pwsh
-      run: .\build\Build-Intoner.ps1 -Mode verify -Configuration Release -Restore
+      run: .\build\Build-Intoner.ps1 -Mode verify -Configuration Release -Restore -GitHubOutputPath $env:GITHUB_OUTPUT
 
     - name: Store artifacts
       uses: actions/upload-artifact@v4
       with:
         name: Intoner
-        path: .\Intoner\bin\x64\Release\Intoner\*
+        path: ${{ steps.build.outputs.package_path }}/*
         if-no-files-found: error
         retention-days: 7
