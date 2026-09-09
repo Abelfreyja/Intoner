@@ -16,11 +16,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <NoWarn>$(NoWarn);MA0048</NoWarn>
   </PropertyGroup>
-	
   <PropertyGroup Condition="'$(IntonerVerifyOutputPath)' != ''">
     <OutputPath>$(IntonerVerifyOutputPath)</OutputPath>
   </PropertyGroup>
-	
   <Target Name="SetIntonerSourceRevisionId" BeforeTargets="InitializeSourceControlInformationFromSourceControlManager;InitializeSourceControlInformation" Condition="'$(SourceRevisionId)' == ''">
     <Exec Condition="'$(Configuration)' == 'Debug' and Exists('$(MSBuildProjectDirectory)/../.git')" Command="git describe --tags --dirty --always --long" WorkingDirectory="$(MSBuildProjectDirectory)/.." ConsoleToMsBuild="true" IgnoreExitCode="true" StandardOutputImportance="Low" StandardErrorImportance="Low">
       <Output TaskParameter="ConsoleOutput" ItemName="_IntonerGitDescribeOutput" />
@@ -34,11 +32,9 @@
       <SourceRevisionId Condition="'$(Configuration)' != 'Debug'">build$([System.DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ss:fffZ"))</SourceRevisionId>
     </PropertyGroup>
   </Target>
-	
   <Target Name="NotifyDalamudAfterPackaging" AfterTargets="DefaultDalamudPackagerDebug" Condition="'$(Configuration)' == 'Debug' and '$(NotifyDalamudAfterBuild)' != 'false'">
     <Touch Files="$(TargetPath)" />
   </Target>
-	
   <ItemGroup>
     <PackageReference Include="Meziantou.Analyzer" Version="3.0.58">
       <PrivateAssets>all</PrivateAssets>
@@ -58,14 +54,12 @@
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
   </ItemGroup>
-	
   <ItemGroup>
     <ProjectReference Include="..\Intoner.Api\Intoner.Api.csproj" />
     <ProjectReference Include="..\Submodules\Penumbra.Api\Penumbra.Api.csproj" />
     <ProjectReference Include="..\Submodules\Penumbra.GameData\Penumbra.GameData.csproj" />
     <ProjectReference Include="..\Submodules\Penumbra.String\Penumbra.String.csproj" />
   </ItemGroup>
-	
   <ItemGroup>
     <EmbeddedResource Include="images\intoner.png" LogicalName="intoner.png" />
     <EmbeddedResource Include="Objects\Rendering\Primitives\Shaders\ScenePrimitives.hlsl">
@@ -102,5 +96,4 @@
       <LogicalName>Objects.UI.Shaders.Window.ObjectWindowGlass.hlsl</LogicalName>
     </EmbeddedResource>
   </ItemGroup>
-	
 </Project>
