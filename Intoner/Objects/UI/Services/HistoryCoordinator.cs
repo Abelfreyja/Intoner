@@ -541,19 +541,8 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
             afterSnapshots);
         if (changes.Count == 0)
         {
-            var kindLabel = SceneHistoryDescription.GetKindLabel(kind);
-            if (string.IsNullOrWhiteSpace(title))
-            {
-                _logger.LogError("scene history could not build replayable changes for {HistoryKind}", kindLabel);
-            }
-            else
-            {
-                _logger.LogError(
-                    "scene history could not build replayable changes for {HistoryKind} ({HistoryTitle})",
-                    kindLabel,
-                    title.Trim());
-            }
-
+            // completed edits can advance the revision without changing their final snapshots
+            TrackPersistentSceneRevision();
             return false;
         }
 
