@@ -1,9 +1,11 @@
 using Intoner.Objects.Assets;
 using Intoner.Objects.Models;
 using Intoner.Services.Configuration;
+using System.Runtime.InteropServices;
 
 namespace Intoner.Objects.Runtime;
 
+[StructLayout(LayoutKind.Auto)]
 internal readonly record struct ObjectHousingModeState(
     ObjectWorkspaceMode Mode,
     ObjectHousingSize Size,

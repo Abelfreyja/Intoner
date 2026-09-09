@@ -1,11 +1,11 @@
 using Dalamud.Plugin.Services;
+using FFXIVClientStructs.FFXIV.Client.System.Resource;
 using Intoner.Objects.Interop;
 using Intoner.Objects.Models;
 using Intoner.Objects.Resources;
 using Intoner.Objects.Utils;
 using Intoner.Scene;
 using Microsoft.Extensions.Logging;
-using FFXIVClientStructs.FFXIV.Client.System.Resource;
 using DrawObject = FFXIVClientStructs.FFXIV.Client.Graphics.Scene.DrawObject;
 using SceneBgObject = FFXIVClientStructs.FFXIV.Client.Graphics.Scene.BgObject;
 
@@ -16,10 +16,10 @@ internal sealed unsafe class BgObjectRuntime : DrawObjectRuntime
     private SceneBgObject* _bgObject;
     private DeferredVisualState _deferredVisualState;
     private readonly IDataManager _gameData;
-    private readonly IObjectPathResolver _pathResolver;
-    private readonly Func<IObjectResourceLoader> _resourceLoaderFactory;
-    private readonly IObjectResourceTracker _resourceTracker;
-    private string _modelPath = string.Empty;
+    private readonly ObjectPathResolver _pathResolver;
+    private readonly IObjectResourceLoader _resourceLoader;
+    private readonly ObjectResourceTracker _resourceTracker;
+    private string _modelPath;
     private ObjectResourceRegistration _rootHandleRegistration;
 
     public override ObjectKind Kind
@@ -40,20 +40,24 @@ internal sealed unsafe class BgObjectRuntime : DrawObjectRuntime
         ObjectSnapshot snapshot,
         SceneBgObject* bgObject,
         IDataManager gameData,
-        IObjectPathResolver pathResolver,
-        Func<IObjectResourceLoader> resourceLoaderFactory,
-        IObjectResourceTracker resourceTracker,
+        ObjectPathResolver pathResolver,
+        IObjectResourceLoader resourceLoader,
+        ObjectResourceTracker resourceTracker,
         string modelPath)
         : base(framework, logger, snapshot)
     {
         _bgObject = bgObject;
         _gameData = gameData;
         _pathResolver = pathResolver;
-        _resourceLoaderFactory = resourceLoaderFactory;
+        _resourceLoader = resourceLoader;
         _resourceTracker = resourceTracker;
         _modelPath = modelPath;
-        UpdateRegisteredRootHandle(snapshot);
+        _deferredVisualState = new DeferredVisualState();
+        _rootHandleRegistration = new ObjectResourceRegistration(snapshot.Id);
     }
+
+    internal override void Initialize()
+        => UpdateRegisteredRootHandle(Snapshot);
 
     protected override void FrameworkUpdateUnsafe()
     {
@@ -237,7 +241,7 @@ internal sealed unsafe class BgObjectRuntime : DrawObjectRuntime
     private IDisposable EnterRootLoadScope(ObjectResolvedRootPath resolvedResource)
         => resolvedResource.ResourceCollectionId.Length == 0
             ? default(ObjectResourceLoadScopeToken)
-            : _resourceLoaderFactory().EnterRootLoadScope(resolvedResource.ResourceCollectionId);
+            : _resourceLoader.EnterRootLoadScope(resolvedResource.ResourceCollectionId);
 
     private static bool NeedsModelReload(ObjectSnapshot snapshot, ObjectSnapshot previousSnapshot)
     {

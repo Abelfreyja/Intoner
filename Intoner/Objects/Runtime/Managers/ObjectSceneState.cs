@@ -132,11 +132,13 @@ internal interface IObjectSceneState
     ObjectSceneRefreshState GetRefreshState();
 
     /// <summary>
-    /// Stores the currently loaded location and refresh state.
+    /// Acknowledges one scene refresh without discarding newer refresh requests.
     /// </summary>
-    /// <param name="location">The loaded location scope.</param>
-    /// <param name="needsRefresh">Whether another refresh is still required.</param>
-    void SetLoadedLocation(SceneLocationScope location, bool needsRefresh);
+    /// <param name="location"> The loaded location scope. </param>
+    /// <param name="revision"> The refresh revision captured before reconciliation. </param>
+    /// <param name="needsRetry"> Whether a transient failure requires another refresh. </param>
+    /// <returns> true when another refresh remains pending. </returns>
+    bool CompleteRefresh(SceneLocationScope location, long revision, bool needsRetry);
 
     /// <summary>
     /// Clears the current loaded-location state.
@@ -171,6 +173,7 @@ internal sealed class ObjectSceneState : IObjectSceneState
     private SceneLocationScope _loadedLocation;
     private long _activeRevision = 1;
     private long _boundsRevision = 1;
+    private long _refreshRevision;
     private bool _hasLoadedLocation;
     private bool _needsLocationRefresh;
     private bool _isZoning;
@@ -409,6 +412,7 @@ internal sealed class ObjectSceneState : IObjectSceneState
     {
         lock (_stateLock)
         {
+            ++_refreshRevision;
             _needsLocationRefresh = true;
         }
     }
@@ -421,17 +425,19 @@ internal sealed class ObjectSceneState : IObjectSceneState
                 _loadedLocation,
                 _hasLoadedLocation,
                 _needsLocationRefresh,
-                _isZoning);
+                _isZoning,
+                _refreshRevision);
         }
     }
 
-    public void SetLoadedLocation(SceneLocationScope location, bool needsRefresh)
+    public bool CompleteRefresh(SceneLocationScope location, long revision, bool needsRetry)
     {
         lock (_stateLock)
         {
             _loadedLocation = location;
             _hasLoadedLocation = true;
-            _needsLocationRefresh = needsRefresh;
+            _needsLocationRefresh = needsRetry || revision != _refreshRevision;
+            return _needsLocationRefresh;
         }
     }
 
@@ -448,6 +454,7 @@ internal sealed class ObjectSceneState : IObjectSceneState
     {
         lock (_stateLock)
         {
+            ++_refreshRevision;
             _isZoning = true;
             _needsLocationRefresh = true;
             _hasLoadedLocation = false;
@@ -458,6 +465,7 @@ internal sealed class ObjectSceneState : IObjectSceneState
     {
         lock (_stateLock)
         {
+            ++_refreshRevision;
             _isZoning = false;
             _needsLocationRefresh = true;
         }
@@ -467,6 +475,7 @@ internal sealed class ObjectSceneState : IObjectSceneState
     {
         lock (_stateLock)
         {
+            ++_refreshRevision;
             _isZoning = true;
             _needsLocationRefresh = true;
             _hasLoadedLocation = false;
@@ -515,6 +524,7 @@ internal readonly record struct ObjectSceneRefreshState(
     SceneLocationScope LoadedLocation,
     bool HasLoadedLocation,
     bool NeedsRefresh,
-    bool IsZoning);
+    bool IsZoning,
+    long Revision);
 
 

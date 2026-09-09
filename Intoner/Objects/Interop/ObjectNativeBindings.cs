@@ -1,10 +1,11 @@
 using Dalamud.Plugin.Services;
+using Intoner.Objects.Models;
+using Intoner.Objects.Utils;
+using Intoner.Services.Interop;
 using Microsoft.Extensions.Logging;
 using System.Runtime.InteropServices;
 using SceneVfxObject = FFXIVClientStructs.FFXIV.Client.Graphics.Scene.VfxObject;
 using VfxResourceInstance = FFXIVClientStructs.FFXIV.Client.Graphics.Vfx.VfxResourceInstance;
-
-using Intoner.Services.Interop;
 
 namespace Intoner.Objects.Interop;
 
@@ -42,9 +43,14 @@ internal sealed unsafe class ObjectNativeBindings
             _setSpeedAddress = setSpeedAddress;
         }
 
+        public bool SupportsPlaybackState(float speed, bool paused)
+            => (_setSpeedAddress != nint.Zero || NumericsUtility.IsNearlyEqual(speed, VfxModel.DefaultSpeed))
+                && ((_pauseToggleAddress != nint.Zero && _isPausedAddress != nint.Zero) || !paused);
+
         public bool TryApplyPlaybackState(SceneVfxObject* vfxObject, float speed, bool paused)
         {
-            if (vfxObject == null || vfxObject->VfxResourceInstance == null)
+            if (!SupportsPlaybackState(speed, paused)
+                || vfxObject == null || vfxObject->VfxResourceInstance == null)
             {
                 return false;
             }

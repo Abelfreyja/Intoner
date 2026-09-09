@@ -7,20 +7,35 @@ namespace Intoner.Objects.Resources;
 /// <summary> shared object resource load collection scope </summary>
 internal sealed class ObjectResourceLoadScope : IDisposable
 {
-    private readonly ThreadLocal<string> _activeCollectionId = new(static () => string.Empty);
+    private readonly IObjectResolvedCollectionStore _collectionStore;
+    private readonly ThreadLocal<ObjectCollectionResolveData?> _activeCollection = new(static () => null);
     private readonly DisposalState _disposeState = new();
 
+    public ObjectResourceLoadScope(IObjectResolvedCollectionStore collectionStore)
+        => _collectionStore = collectionStore;
+
     public ObjectResourceLoadScopeToken EnterCollectionScope(string collectionId)
+        => EnterScope(_collectionStore.AcquireCollection(collectionId));
+
+    public ObjectResourceLoadScopeToken EnterResourceScope(long resourceScopeId)
+        => EnterScope(_collectionStore.AcquireResourceScope(resourceScopeId));
+
+    private ObjectResourceLoadScopeToken EnterScope(ObjectResourceCollectionLease? lease)
     {
-        string normalizedCollectionId = ObjectCollectionKeyUtility.NormalizeCollectionId(collectionId);
-        if (normalizedCollectionId.Length == 0
-         || !TryReadActiveCollectionId(out string previousCollectionId)
-         || !TryWriteActiveCollectionId(normalizedCollectionId))
+        if (lease is null)
         {
             return default;
         }
 
-        return new ObjectResourceLoadScopeToken(this, previousCollectionId);
+        if (_disposeState.IsDisposing
+         || !ObjectThreadLocalUtility.TryRead(_activeCollection, null, out ObjectCollectionResolveData? previousCollection)
+         || !TryWriteActiveCollection(lease.Snapshot))
+        {
+            lease.Dispose();
+            return default;
+        }
+
+        return new ObjectResourceLoadScopeToken(this, previousCollection, lease);
     }
 
     public bool TryReadActiveCollectionId(out string collectionId)
@@ -31,7 +46,27 @@ internal sealed class ObjectResourceLoadScope : IDisposable
             return false;
         }
 
-        return ObjectThreadLocalUtility.TryRead(_activeCollectionId, string.Empty, out collectionId);
+        if (!ObjectThreadLocalUtility.TryRead(_activeCollection, null, out ObjectCollectionResolveData? collection))
+        {
+            return false;
+        }
+
+        collectionId = collection?.CollectionId ?? string.Empty;
+        return true;
+    }
+
+    public bool TryReadActiveCollection(out ObjectCollectionResolveData collection)
+    {
+        collection = null!;
+        if (_disposeState.IsDisposing
+         || !ObjectThreadLocalUtility.TryRead(_activeCollection, null, out ObjectCollectionResolveData? active)
+         || active is null)
+        {
+            return false;
+        }
+
+        collection = active;
+        return true;
     }
 
     public void Dispose()
@@ -41,39 +76,50 @@ internal sealed class ObjectResourceLoadScope : IDisposable
             return;
         }
 
-        _activeCollectionId.Dispose();
+        _activeCollection.Dispose();
     }
 
-    private bool TryWriteActiveCollectionId(string collectionId)
+    private bool TryWriteActiveCollection(ObjectCollectionResolveData? collection)
     {
         if (_disposeState.IsDisposing)
         {
             return false;
         }
 
-        return ObjectThreadLocalUtility.TryWrite(_activeCollectionId, collectionId);
+        return ObjectThreadLocalUtility.TryWrite(_activeCollection, collection);
     }
 
-    internal void RestoreCollectionScope(string previousCollectionId)
-        => _ = TryWriteActiveCollectionId(previousCollectionId);
+    internal void RestoreCollectionScope(ObjectCollectionResolveData? previousCollection)
+        => _ = TryWriteActiveCollection(previousCollection);
 }
 
 internal readonly struct ObjectResourceLoadScopeToken : IDisposable
 {
     private readonly ObjectResourceLoadScope? _owner;
-    private readonly string _previousCollectionId;
+    private readonly ObjectCollectionResolveData? _previousCollection;
+    private readonly ObjectResourceCollectionLease? _lease;
 
-    public ObjectResourceLoadScopeToken(ObjectResourceLoadScope owner, string previousCollectionId)
+    public ObjectResourceLoadScopeToken(
+        ObjectResourceLoadScope owner,
+        ObjectCollectionResolveData? previousCollection,
+        ObjectResourceCollectionLease lease)
     {
         _owner = owner;
-        _previousCollectionId = previousCollectionId;
+        _previousCollection = previousCollection;
+        _lease = lease;
     }
+
+    public ObjectCollectionResolveData? Collection
+        => _lease?.Snapshot;
 
     public bool IsActive
         => _owner != null;
 
     public void Dispose()
-        => _owner?.RestoreCollectionScope(_previousCollectionId);
+    {
+        _owner?.RestoreCollectionScope(_previousCollection);
+        _lease?.Dispose();
+    }
 }
 
 

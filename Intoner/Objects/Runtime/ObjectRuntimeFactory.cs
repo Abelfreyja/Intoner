@@ -53,11 +53,10 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
     private readonly IDataManager _gameData;
     private readonly ObjectNativeBindings _nativeBindings;
     private readonly FurnitureEmoteGuard _emoteGuard;
-    private readonly IObjectKindService _objectKindService;
-    private readonly IObjectResourceTracker _resourceTracker;
-    private readonly Func<IObjectResourceLoader> _resourceLoaderFactory;
+    private readonly ObjectResourceTracker _resourceTracker;
+    private readonly IObjectResourceLoader _resourceLoader;
     private readonly IVfxResourceRewriteService _vfxResourceRewriteService;
-    private readonly IObjectPathResolver _pathResolver;
+    private readonly ObjectPathResolver _pathResolver;
 
     public ObjectRuntimeFactory(
         ILoggerFactory loggerFactory,
@@ -65,19 +64,17 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
         IDataManager gameData,
         ObjectNativeBindings nativeBindings,
         FurnitureEmoteGuard emoteGuard,
-        IObjectKindService objectKindService,
-        IObjectResourceTracker resourceTracker,
-        Func<IObjectResourceLoader> resourceLoaderFactory,
+        ObjectResourceTracker resourceTracker,
+        IObjectResourceLoader resourceLoader,
         IVfxResourceRewriteService vfxResourceRewriteService,
-        IObjectPathResolver pathResolver)
+        ObjectPathResolver pathResolver)
     {
         _framework = framework;
         _gameData = gameData;
         _nativeBindings = nativeBindings;
         _emoteGuard = emoteGuard;
-        _objectKindService = objectKindService;
         _resourceTracker = resourceTracker;
-        _resourceLoaderFactory = resourceLoaderFactory;
+        _resourceLoader = resourceLoader;
         _vfxResourceRewriteService = vfxResourceRewriteService;
         _pathResolver = pathResolver;
         _bgObjectLogger = loggerFactory.CreateLogger<BgObjectRuntime>();
@@ -88,22 +85,19 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
 
     public bool TryCreate(ObjectSnapshot snapshot, out IObjectRuntime runtime, out string failureCode)
     {
-        ObjectRuntimeCreateResult result = snapshot.Kind switch
+        ObjectRuntimeCreateResult result = FrameworkThreadUtility.Run(_framework, () => snapshot.Kind switch
         {
-            ObjectKind.BgObject => TryCreateBgObject(snapshot),
-            ObjectKind.Furniture => TryCreateFurniture(snapshot),
-            ObjectKind.Vfx => TryCreateVfx(snapshot),
-            ObjectKind.Light => TryCreateLight(snapshot),
+            ObjectKind.BgObject => TryCreateBgObjectUnsafe(snapshot),
+            ObjectKind.Furniture => TryCreateFurnitureUnsafe(snapshot),
+            ObjectKind.Vfx => TryCreateVfxUnsafe(snapshot),
+            ObjectKind.Light => TryCreateLightUnsafe(snapshot),
             _ => ObjectRuntimeCreateResult.Failed(ObjectRuntimeFailureCodes.ServiceMissing),
-        };
+        });
 
         runtime = result.Runtime!;
         failureCode = result.FailureCode;
         return result.Runtime is not null;
     }
-
-    private ObjectRuntimeCreateResult TryCreateBgObject(ObjectSnapshot snapshot)
-        => FrameworkThreadUtility.Run(_framework, () => TryCreateBgObjectUnsafe(snapshot));
 
     private ObjectRuntimeCreateResult TryCreateBgObjectUnsafe(ObjectSnapshot snapshot)
     {
@@ -137,18 +131,18 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
             return ObjectRuntimeCreateResult.Failed(ObjectRuntimeFailureCodes.CreateFailed);
         }
 
-        var runtime = new BgObjectRuntime(
-            _framework,
-            _bgObjectLogger,
-            CreateBootstrapSnapshot(snapshot),
-            bgObject,
-            _gameData,
-            _pathResolver,
-            _resourceLoaderFactory,
-            _resourceTracker,
-            resolvedResource.ResolvedPath);
         return FinalizeRuntimeCreate(
-            runtime,
+            () => new BgObjectRuntime(
+                _framework,
+                _bgObjectLogger,
+                snapshot with { Model = new BgObjectModel { ModelPath = bgObjectModel.ModelPath } },
+                bgObject,
+                _gameData,
+                _pathResolver,
+                _resourceLoader,
+                _resourceTracker,
+                resolvedResource.ResolvedPath),
+            () => BgObjectSceneInterop.Destroy(bgObject),
             snapshot,
             createdObject => LogCreatedRootResource(
                 _bgObjectLogger,
@@ -156,9 +150,6 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
                 createdObject.Address,
                 resolvedResource));
     }
-
-    private ObjectRuntimeCreateResult TryCreateFurniture(ObjectSnapshot snapshot)
-        => FrameworkThreadUtility.Run(_framework, () => TryCreateFurnitureUnsafe(snapshot));
 
     private ObjectRuntimeCreateResult TryCreateFurnitureUnsafe(ObjectSnapshot snapshot)
     {
@@ -218,35 +209,43 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
 
         if (!IsVisualSharedGroup(instance, out InstanceType instanceType))
         {
-            _furnitureLogger.LogError(
-                "furniture create returned native layout type {InstanceType} for path {SharedGroupPath}, destroying rejected instance",
-                instanceType,
-                furnitureModel.SharedGroupPath);
-            DestroyCreatedSharedGroup(destroySharedGroup, instance);
+            try
+            {
+                _furnitureLogger.LogError(
+                    "furniture create returned native layout type {InstanceType} for path {SharedGroupPath}, destroying rejected instance",
+                    instanceType,
+                    furnitureModel.SharedGroupPath);
+            }
+            finally
+            {
+                DestroyCreatedSharedGroup(destroySharedGroup, instance);
+            }
+
             return ObjectRuntimeCreateResult.Failed(ObjectRuntimeFailureCodes.NativeLayoutRejected);
         }
 
-        var runtime = new FurnitureObjectRuntime(
-            _framework,
-            _furnitureLogger,
-            CreateBootstrapSnapshot(snapshot),
-            instance,
-            resolvedResource.ResolvedPath,
-            _resourceTracker,
-            _emoteGuard,
-            destroySharedGroup);
-
-        applySharedGroupState(instance, 0);
-        runtime.RefreshCreatedVisualState();
-
         return FinalizeRuntimeCreate(
-            runtime,
+            () => new FurnitureObjectRuntime(
+                _framework,
+                _furnitureLogger,
+                snapshot with { Model = new FurnitureModel { SharedGroupPath = furnitureModel.SharedGroupPath } },
+                instance,
+                resolvedResource.ResolvedPath,
+                _resourceTracker,
+                _emoteGuard,
+                destroySharedGroup),
+            () => DestroyCreatedSharedGroup(destroySharedGroup, instance),
             snapshot,
             createdObject => LogCreatedRootResource(
                 _furnitureLogger,
                 "furniture shared group",
                 createdObject.Address,
-                resolvedResource));
+                resolvedResource),
+            createdObject =>
+            {
+                applySharedGroupState(instance, 0);
+                createdObject.RefreshCreatedVisualState();
+            });
     }
 
     private static bool IsVisualSharedGroup(SharedGroupLayoutInstance* instance, out InstanceType instanceType)
@@ -265,9 +264,6 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
         destroySharedGroup(&mutableInstance, 0);
     }
 
-    private ObjectRuntimeCreateResult TryCreateLight(ObjectSnapshot snapshot)
-        => FrameworkThreadUtility.Run(_framework, () => TryCreateLightUnsafe(snapshot));
-
     private ObjectRuntimeCreateResult TryCreateLightUnsafe(ObjectSnapshot snapshot)
     {
         var lightModel = (LightModel)snapshot.Model;
@@ -284,19 +280,16 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
             return ObjectRuntimeCreateResult.Failed(ObjectRuntimeFailureCodes.CreateFailed);
         }
 
-        var runtime = new LightObjectRuntime(
-            _framework,
-            _lightLogger,
-            CreateBootstrapSnapshot(snapshot),
-            light);
         return FinalizeRuntimeCreate(
-            runtime,
+            () => new LightObjectRuntime(
+                _framework,
+                _lightLogger,
+                snapshot,
+                light),
+            () => DrawObjectRuntime.DestroyNative((DrawObject*)light),
             snapshot,
             createdObject => _lightLogger.LogInformation("created light 0x{Address:X}", (ulong)createdObject.Address));
     }
-
-    private ObjectRuntimeCreateResult TryCreateVfx(ObjectSnapshot snapshot)
-        => FrameworkThreadUtility.Run(_framework, () => TryCreateVfxUnsafe(snapshot));
 
     private ObjectRuntimeCreateResult TryCreateVfxUnsafe(ObjectSnapshot snapshot)
     {
@@ -347,16 +340,16 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
             return ObjectRuntimeCreateResult.Failed(ObjectRuntimeFailureCodes.CreateFailed);
         }
 
-        var runtime = new VfxObjectRuntime(
-            _framework,
-            _vfxLogger,
-            CreateBootstrapSnapshot(snapshot),
-            vfxObject,
-            resolvedResource.ResolvedPath,
-            _nativeBindings.Vfx,
-            _resourceTracker);
         return FinalizeRuntimeCreate(
-            runtime,
+            () => new VfxObjectRuntime(
+                _framework,
+                _vfxLogger,
+                snapshot with { Model = new VfxModel { VfxPath = vfxModel.VfxPath } },
+                vfxObject,
+                resolvedResource.ResolvedPath,
+                _nativeBindings.Vfx,
+                _resourceTracker),
+            () => DrawObjectRuntime.DestroyNative((DrawObject*)vfxObject),
             snapshot,
             createdObject => LogCreatedRootResource(
                 _vfxLogger,
@@ -365,57 +358,44 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
                 resolvedResource));
     }
 
-    private ObjectSnapshot CreateBootstrapSnapshot(ObjectSnapshot snapshot)
-    {
-        var bootstrapSnapshot = _objectKindService.CreateDefaultSnapshot(snapshot.Kind, snapshot.Transform, snapshot.Name);
-        return bootstrapSnapshot with
-        {
-            Id = snapshot.Id,
-            Name = snapshot.Name,
-            FolderPath = snapshot.FolderPath,
-            CollectionId = snapshot.CollectionId,
-            Locked = snapshot.Locked,
-            Visible = snapshot.Visible,
-            Transform = snapshot.Transform,
-            Model = CreateBootstrapModel(snapshot),
-            LayoutId = snapshot.LayoutId,
-            CreatedAtUtc = snapshot.CreatedAtUtc,
-            CreatedIn = snapshot.CreatedIn,
-        };
-    }
-
-    private static ObjectData CreateBootstrapModel(ObjectSnapshot snapshot)
-        => snapshot.Kind switch
-        {
-            ObjectKind.BgObject => new BgObjectModel
-            {
-                ModelPath = ((BgObjectModel)snapshot.Model).ModelPath,
-            },
-            ObjectKind.Furniture => new FurnitureModel
-            {
-                SharedGroupPath = ((FurnitureModel)snapshot.Model).SharedGroupPath,
-            },
-            ObjectKind.Vfx => new VfxModel
-            {
-                VfxPath = ((VfxModel)snapshot.Model).VfxPath,
-            },
-            _ => snapshot.Model,
-        };
-
     private static ObjectRuntimeCreateResult FinalizeRuntimeCreate<TRuntime>(
-        TRuntime runtime,
+        Func<TRuntime> createRuntime,
+        Action destroyNative,
         ObjectSnapshot snapshot,
-        Action<TRuntime> onCreated)
-        where TRuntime : class, IObjectRuntime
+        Action<TRuntime> onCreated,
+        Action<TRuntime>? initializeNative = null)
+        where TRuntime : ObjectRuntime
     {
-        if (runtime.TryUpdate(snapshot) != ObjectRuntimeUpdateResult.Applied)
+        TRuntime? runtime = null;
+        bool transferred = false;
+        try
         {
-            runtime.Dispose();
-            return ObjectRuntimeCreateResult.Failed(ObjectRuntimeFailureCodes.UpdateRejected);
-        }
+            runtime = createRuntime();
+            runtime.Initialize();
+            initializeNative?.Invoke(runtime);
+            if (runtime.TryUpdate(snapshot) != ObjectRuntimeUpdateResult.Applied)
+            {
+                return ObjectRuntimeCreateResult.Failed(ObjectRuntimeFailureCodes.UpdateRejected);
+            }
 
-        onCreated(runtime);
-        return ObjectRuntimeCreateResult.Created(runtime);
+            onCreated(runtime);
+            transferred = true;
+            return ObjectRuntimeCreateResult.Created(runtime);
+        }
+        finally
+        {
+            if (!transferred)
+            {
+                if (runtime is not null)
+                {
+                    runtime.Dispose();
+                }
+                else
+                {
+                    destroyNative();
+                }
+            }
+        }
     }
 
     private static void LogCreatedRootResource(
@@ -473,13 +453,13 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
     private IDisposable EnterRootLoadScope(ObjectResolvedRootPath resolvedResource)
         => resolvedResource.ResourceCollectionId.Length == 0
             ? default(ObjectResourceLoadScopeToken)
-            : _resourceLoaderFactory().EnterRootLoadScope(resolvedResource.ResourceCollectionId);
+            : _resourceLoader.EnterRootLoadScope(resolvedResource.ResourceCollectionId);
 
     private IDisposable EnterVfxCacheIsolationScope(ObjectResolvedRootPath resolvedResource)
         => resolvedResource.ResourceCollectionId.Length == 0
             && resolvedResource.ResolvedPathKind == ObjectResolvedPathKind.GamePath
             && GameAssetPathRules.IsFileKind(resolvedResource.CreatePath, GameAssetFileKind.Avfx)
-            ? _resourceLoaderFactory().EnterRootCacheIsolation(resolvedResource.CreatePath)
+            ? _resourceLoader.EnterRootCacheIsolation(resolvedResource.CreatePath)
             : default(ObjectResourceLoadScopeToken);
 
     private bool TryResolveRootResource(

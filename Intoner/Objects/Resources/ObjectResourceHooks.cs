@@ -55,6 +55,7 @@ internal sealed unsafe class ObjectResourceHooks : IDisposable
     public delegate void SharedGroupLayoutResourceLoadDelegate(ResourceEventListener* listener, ResourceHandle* handle);
     public delegate void LayoutSharedGroupInsertObjectDelegate(LayoutSharedGroupObject* instance, ILayoutInstance* layoutInstance);
     public delegate nint ResourceHandleIncRefDelegate(ResourceHandle* handle);
+    public delegate nint ResourceHandleDestructorDelegate(ResourceHandle* handle);
     public delegate ulong SchedulerTimelineLoadResourcesDelegate(SchedulerTimeline* timeline);
     public delegate SchedulerResource* GetCachedScheduleResourceDelegate(
         SchedulerResourceManagement* resourceManagement,
@@ -76,6 +77,7 @@ internal sealed unsafe class ObjectResourceHooks : IDisposable
     public readonly Hook<SharedGroupLayoutResourceLoadDelegate>? SharedGroupLayoutResourceLoadHook;
     public readonly Hook<LayoutSharedGroupInsertObjectDelegate>? LayoutSharedGroupInsertObjectHook;
     public readonly Hook<ResourceHandleIncRefDelegate>? ResourceHandleIncRefHook;
+    public readonly Hook<ResourceHandleDestructorDelegate>? ResourceHandleDestructorHook;
     public readonly Hook<SchedulerTimelineLoadResourcesDelegate>? SchedulerTimelineLoadResourcesHook;
     public readonly Hook<GetCachedScheduleResourceDelegate>? GetCachedScheduleResourceHook;
 
@@ -94,6 +96,7 @@ internal sealed unsafe class ObjectResourceHooks : IDisposable
         SharedGroupLayoutResourceLoadDelegate sharedGroupLayoutResourceLoadDetour,
         LayoutSharedGroupInsertObjectDelegate layoutSharedGroupInsertObjectDetour,
         ResourceHandleIncRefDelegate resourceHandleIncRefDetour,
+        ResourceHandleDestructorDelegate resourceHandleDestructorDetour,
         SchedulerTimelineLoadResourcesDelegate schedulerTimelineLoadResourcesDetour,
         GetCachedScheduleResourceDelegate getCachedScheduleResourceDetour)
     {
@@ -108,6 +111,7 @@ internal sealed unsafe class ObjectResourceHooks : IDisposable
         SharedGroupLayoutResourceLoadHook = InteropHookUtility.CreateHook(logger, gameInteropProvider, sigScanner, IntonerSignatures.SharedGroupLayoutResourceLoadHook, sharedGroupLayoutResourceLoadDetour);
         LayoutSharedGroupInsertObjectHook = InteropHookUtility.CreateHookFromAddress(logger, gameInteropProvider, IntonerSignatures.LayoutSharedGroupInsertObject, layoutSharedGroupInsertObjectDetour);
         ResourceHandleIncRefHook = InteropHookUtility.CreateHookFromAddress(logger, gameInteropProvider, IntonerSignatures.ResourceHandleIncRef, resourceHandleIncRefDetour);
+        ResourceHandleDestructorHook = InteropHookUtility.CreateHook(logger, gameInteropProvider, sigScanner, IntonerSignatures.ResourceHandleDestructor, resourceHandleDestructorDetour);
         SchedulerTimelineLoadResourcesHook = InteropHookUtility.CreateHookFromAddress(logger, gameInteropProvider, IntonerSignatures.SchedulerTimelineLoadResources, schedulerTimelineLoadResourcesDetour);
         GetCachedScheduleResourceHook = InteropHookUtility.CreateHook(logger, gameInteropProvider, sigScanner, IntonerSignatures.CachedScheduleResource, getCachedScheduleResourceDetour);
 
@@ -124,6 +128,7 @@ internal sealed unsafe class ObjectResourceHooks : IDisposable
             InteropHookUtility.CreateEnableAction(SharedGroupLayoutResourceLoadHook),
             InteropHookUtility.CreateEnableAction(LayoutSharedGroupInsertObjectHook),
             InteropHookUtility.CreateEnableAction(ResourceHandleIncRefHook),
+            InteropHookUtility.CreateEnableAction(ResourceHandleDestructorHook),
             InteropHookUtility.CreateEnableAction(SchedulerTimelineLoadResourcesHook),
             InteropHookUtility.CreateEnableAction(GetCachedScheduleResourceHook),
         ];
@@ -141,6 +146,7 @@ internal sealed unsafe class ObjectResourceHooks : IDisposable
             InteropHookUtility.CreateDisposeAction(SharedGroupLayoutResourceLoadHook),
             InteropHookUtility.CreateDisposeAction(LayoutSharedGroupInsertObjectHook),
             InteropHookUtility.CreateDisposeAction(ResourceHandleIncRefHook),
+            InteropHookUtility.CreateDisposeAction(ResourceHandleDestructorHook),
             InteropHookUtility.CreateDisposeAction(SchedulerTimelineLoadResourcesHook),
             InteropHookUtility.CreateDisposeAction(GetCachedScheduleResourceHook),
         ];
@@ -170,7 +176,8 @@ internal sealed unsafe class ObjectResourceHooks : IDisposable
 
     public bool CanResolveResourceRequests()
         => GetResourceSyncHook != null
-        && GetResourceAsyncHook != null;
+        && GetResourceAsyncHook != null
+        && ResourceHandleDestructorHook != null;
 
     public void Enable()
         => _enableOnce.Execute(
@@ -193,7 +200,8 @@ internal sealed unsafe class ObjectResourceHooks : IDisposable
     private bool HasCoreCollectionHooks()
         => GetResourceSyncHook != null
         && GetResourceAsyncHook != null
-        && ResourceHandleIncRefHook != null;
+        && ResourceHandleIncRefHook != null
+        && ResourceHandleDestructorHook != null;
 
     private bool HasModelCollectionHooks()
         => ModelResourceLoadHook != null

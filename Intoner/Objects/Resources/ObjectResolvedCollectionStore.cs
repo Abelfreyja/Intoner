@@ -67,6 +67,17 @@ internal readonly record struct ObjectResolvedCollectionChangedInfo(
     long Revision,
     bool Removed);
 
+/// <summary> retains one object resource collection snapshot and it's memory resources </summary>
+internal sealed class ObjectResourceCollectionLease(ObjectResolvedCollectionStore owner, ObjectCollectionResolveData snapshot) : IDisposable
+{
+    private ObjectResolvedCollectionStore? _owner = owner;
+
+    public ObjectCollectionResolveData Snapshot { get; } = snapshot;
+
+    public void Dispose()
+        => Interlocked.Exchange(ref _owner, null)?.ReleaseResourceScope(Snapshot.ResourceScopeId);
+}
+
 /// <summary>
 /// Stores immutable object owned resource collection snapshots.
 /// </summary>
@@ -121,6 +132,27 @@ internal interface IObjectResolvedCollectionStore
     bool TryGetCollectionByResourceScopeId(long resourceScopeId, out ObjectCollectionResolveData snapshot);
 
     /// <summary>
+    /// Acquires a lease for the current registered object resource collection snapshot.
+    /// </summary>
+    /// <param name="collectionId">the collection id to resolve</param>
+    /// <returns>a lease that must be disposed, or null when the collection is unavailable</returns>
+    ObjectResourceCollectionLease? AcquireCollection(string collectionId);
+
+    /// <summary>
+    /// Acquires a lease for one current or retained object resource collection snapshot.
+    /// </summary>
+    /// <param name="resourceScopeId">the stable resource scope id encoded in a scoped resource path</param>
+    /// <returns>a lease that must be disposed, or null when the generation is unavailable</returns>
+    ObjectResourceCollectionLease? AcquireResourceScope(long resourceScopeId);
+
+    /// <summary>
+    /// Checks whether a local file path is used by a current or retained object resource collection.
+    /// </summary>
+    /// <param name="normalizedLocalFilePath">the normalized local file path</param>
+    /// <returns>true when a current or retained collection uses the path</returns>
+    bool ContainsLocalFilePath(string normalizedLocalFilePath);
+
+    /// <summary>
     /// Gets the current resource revision for one object root path inside a registered runtime collection.
     /// </summary>
     /// <param name="collectionId">the collection id to inspect</param>
@@ -145,23 +177,31 @@ internal interface IObjectResolvedCollectionStore
     bool RemoveCollection(string collectionId);
 }
 
-internal sealed class ObjectResolvedCollectionStore : IObjectResolvedCollectionStore
+internal sealed class ObjectResolvedCollectionStore : IObjectResolvedCollectionStore, IDisposable
 {
     private sealed record StoreState(
         ImmutableDictionary<string, ObjectCollectionResolveData> Collections,
-        ImmutableDictionary<long, ObjectCollectionResolveData> CollectionsByResourceScopeId);
+        ImmutableDictionary<long, ObjectCollectionResolveData> CollectionsByResourceScopeId,
+        ImmutableDictionary<string, int> LocalFilePathCounts);
 
     private readonly ILogger<ObjectResolvedCollectionStore> _logger;
+    private readonly ObjectMemoryResourceRegistry _memoryResources;
     private readonly Lock _mutationLock = new();
-    private StoreState _state = CreateState(
-        ImmutableDictionary.Create<string, ObjectCollectionResolveData>(StringComparer.OrdinalIgnoreCase));
+    private readonly Dictionary<long, int> _scopeLeaseCounts = [];
+    private readonly string _memoryOwnerPrefix = $"resource-scope:{Guid.NewGuid():N}:";
+    private StoreState _state = new(
+        ImmutableDictionary.Create<string, ObjectCollectionResolveData>(StringComparer.OrdinalIgnoreCase),
+        ImmutableDictionary<long, ObjectCollectionResolveData>.Empty,
+        ImmutableDictionary.Create<string, int>(StringComparer.OrdinalIgnoreCase));
     private long _nextRuntimeRevision;
+    private bool _disposed;
 
     public event Action<ObjectResolvedCollectionChangedInfo>? CollectionChanged;
 
-    public ObjectResolvedCollectionStore(ILogger<ObjectResolvedCollectionStore> logger)
+    public ObjectResolvedCollectionStore(ILogger<ObjectResolvedCollectionStore> logger, ObjectMemoryResourceRegistry memoryResources)
     {
         _logger = logger;
+        _memoryResources = memoryResources;
     }
 
     public ObjectCollectionResolveData RegisterCollection(
@@ -181,6 +221,7 @@ internal sealed class ObjectResolvedCollectionStore : IObjectResolvedCollectionS
         bool changed;
         lock (_mutationLock)
         {
+            ObjectDisposedException.ThrowIf(_disposed, this);
             StoreState current = Volatile.Read(ref _state);
             current.Collections.TryGetValue(normalizedCollectionId, out ObjectCollectionResolveData? existingSnapshot);
             snapshot = BuildCollectionSnapshot(
@@ -192,7 +233,7 @@ internal sealed class ObjectResolvedCollectionStore : IObjectResolvedCollectionS
             changed = !ReferenceEquals(snapshot, existingSnapshot);
             if (changed)
             {
-                Volatile.Write(ref _state, SetCollection(current, snapshot));
+                PublishCollections(current.Collections.SetItem(snapshot.CollectionId, snapshot));
             }
         }
 
@@ -214,6 +255,7 @@ internal sealed class ObjectResolvedCollectionStore : IObjectResolvedCollectionS
         List<ObjectResolvedCollectionChangedInfo> changes = [];
         lock (_mutationLock)
         {
+            ObjectDisposedException.ThrowIf(_disposed, this);
             ImmutableDictionary<string, ObjectCollectionResolveData>.Builder next = Volatile.Read(ref _state).Collections.ToBuilder();
             foreach (string collectionId in removedCollectionIds)
             {
@@ -250,7 +292,7 @@ internal sealed class ObjectResolvedCollectionStore : IObjectResolvedCollectionS
 
             if (changes.Count > 0)
             {
-                Volatile.Write(ref _state, CreateState(next.ToImmutable()));
+                PublishCollections(next.ToImmutable());
             }
         }
 
@@ -342,11 +384,90 @@ internal sealed class ObjectResolvedCollectionStore : IObjectResolvedCollectionS
                 return false;
             }
 
-            Volatile.Write(ref _state, RemoveCollection(current, removedSnapshot));
+            PublishCollections(current.Collections.Remove(normalizedCollectionId));
         }
 
         RaiseCollectionChanged(new ObjectResolvedCollectionChangedInfo(normalizedCollectionId, removedSnapshot.Revision, Removed: true));
         return true;
+    }
+
+    public ObjectResourceCollectionLease? AcquireCollection(string collectionId)
+    {
+        lock (_mutationLock)
+        {
+            return !_disposed && TryGetCollection(collectionId, out ObjectCollectionResolveData snapshot)
+                ? AcquireSnapshot(snapshot)
+                : null;
+        }
+    }
+
+    public ObjectResourceCollectionLease? AcquireResourceScope(long resourceScopeId)
+    {
+        lock (_mutationLock)
+        {
+            return !_disposed && TryGetCollectionByResourceScopeId(resourceScopeId, out ObjectCollectionResolveData snapshot)
+                ? AcquireSnapshot(snapshot)
+                : null;
+        }
+    }
+
+    public bool ContainsLocalFilePath(string normalizedLocalFilePath)
+        => Volatile.Read(ref _state).LocalFilePathCounts.ContainsKey(normalizedLocalFilePath);
+
+    private ObjectResourceCollectionLease AcquireSnapshot(ObjectCollectionResolveData snapshot)
+    {
+        _scopeLeaseCounts[snapshot.ResourceScopeId] = _scopeLeaseCounts.GetValueOrDefault(snapshot.ResourceScopeId) + 1;
+        return new ObjectResourceCollectionLease(this, snapshot);
+    }
+
+    internal void ReleaseResourceScope(long resourceScopeId)
+    {
+        lock (_mutationLock)
+        {
+            if (!_scopeLeaseCounts.TryGetValue(resourceScopeId, out int count))
+            {
+                return;
+            }
+
+            if (count > 1)
+            {
+                _scopeLeaseCounts[resourceScopeId] = count - 1;
+                return;
+            }
+
+            _scopeLeaseCounts.Remove(resourceScopeId);
+            StoreState current = Volatile.Read(ref _state);
+            ObjectCollectionResolveData snapshot = current.CollectionsByResourceScopeId[resourceScopeId];
+            if (current.Collections.TryGetValue(snapshot.CollectionId, out ObjectCollectionResolveData? active)
+             && active.ResourceScopeId == resourceScopeId)
+            {
+                return;
+            }
+
+            ImmutableDictionary<string, int>.Builder localPaths = current.LocalFilePathCounts.ToBuilder();
+            UpdateLocalFilePaths(localPaths, snapshot, -1);
+            Volatile.Write(ref _state, current with
+            {
+                CollectionsByResourceScopeId = current.CollectionsByResourceScopeId.Remove(resourceScopeId),
+                LocalFilePathCounts = localPaths.ToImmutable(),
+            });
+            _memoryResources.ReleaseOwner(GetMemoryOwner(resourceScopeId));
+        }
+    }
+
+    public void Dispose()
+    {
+        lock (_mutationLock)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            _scopeLeaseCounts.Clear();
+            PublishCollections(ImmutableDictionary.Create<string, ObjectCollectionResolveData>(StringComparer.OrdinalIgnoreCase));
+        }
     }
 
     private ObjectCollectionResolveData BuildCollectionSnapshot(
@@ -390,35 +511,71 @@ internal sealed class ObjectResolvedCollectionStore : IObjectResolvedCollectionS
         };
     }
 
-    private static StoreState CreateState(ImmutableDictionary<string, ObjectCollectionResolveData> collections)
+    private static void UpdateLocalFilePaths(
+        ImmutableDictionary<string, int>.Builder localPaths,
+        ObjectCollectionResolveData collection,
+        int change)
     {
+        foreach (string path in collection.Redirects.Values.Where(static path => path.IsLocalFile).Select(static path => path.Path))
+        {
+            int count = localPaths.GetValueOrDefault(path) + change;
+            if (count == 0)
+            {
+                localPaths.Remove(path);
+            }
+            else
+            {
+                localPaths[path] = count;
+            }
+        }
+    }
+
+    private void PublishCollections(ImmutableDictionary<string, ObjectCollectionResolveData> collections)
+    {
+        StoreState current = Volatile.Read(ref _state);
+        ImmutableDictionary<string, int>.Builder localPaths = current.LocalFilePathCounts.ToBuilder();
         ImmutableDictionary<long, ObjectCollectionResolveData>.Builder byResourceScopeId
             = ImmutableDictionary.CreateBuilder<long, ObjectCollectionResolveData>();
+        foreach (long scopeId in _scopeLeaseCounts.Keys)
+        {
+            byResourceScopeId[scopeId] = current.CollectionsByResourceScopeId[scopeId];
+        }
+
         foreach (ObjectCollectionResolveData collection in collections.Values)
         {
             byResourceScopeId[collection.ResourceScopeId] = collection;
+            if (current.CollectionsByResourceScopeId.ContainsKey(collection.ResourceScopeId))
+            {
+                continue;
+            }
+
+            UpdateLocalFilePaths(localPaths, collection, 1);
+            string memoryOwner = GetMemoryOwner(collection.ResourceScopeId);
+            foreach (ObjectResolvedPath path in collection.Redirects.Values.Where(static path => path.IsMemory))
+            {
+                _memoryResources.TryAcquireResource(memoryOwner, path.Path, out _);
+            }
         }
 
-        return new StoreState(collections, byResourceScopeId.ToImmutable());
-    }
-
-    private static StoreState SetCollection(StoreState state, ObjectCollectionResolveData collection)
-    {
-        ImmutableDictionary<long, ObjectCollectionResolveData> byResourceScopeId = state.CollectionsByResourceScopeId;
-        if (state.Collections.TryGetValue(collection.CollectionId, out ObjectCollectionResolveData? previous))
+        List<long> retiredScopeIds = [];
+        foreach ((long scopeId, ObjectCollectionResolveData collection) in current.CollectionsByResourceScopeId)
         {
-            byResourceScopeId = byResourceScopeId.Remove(previous.ResourceScopeId);
+            if (!byResourceScopeId.ContainsKey(scopeId))
+            {
+                UpdateLocalFilePaths(localPaths, collection, -1);
+                retiredScopeIds.Add(scopeId);
+            }
         }
 
-        return new StoreState(
-            state.Collections.SetItem(collection.CollectionId, collection),
-            byResourceScopeId.SetItem(collection.ResourceScopeId, collection));
+        Volatile.Write(ref _state, new StoreState(collections, byResourceScopeId.ToImmutable(), localPaths.ToImmutable()));
+        foreach (long scopeId in retiredScopeIds)
+        {
+            _memoryResources.ReleaseOwner(GetMemoryOwner(scopeId));
+        }
     }
 
-    private static StoreState RemoveCollection(StoreState state, ObjectCollectionResolveData collection)
-        => new(
-            state.Collections.Remove(collection.CollectionId),
-            state.CollectionsByResourceScopeId.Remove(collection.ResourceScopeId));
+    private string GetMemoryOwner(long resourceScopeId)
+        => string.Concat(_memoryOwnerPrefix, resourceScopeId.ToString(CultureInfo.InvariantCulture));
 
     private static bool RedirectsMatch(
         IReadOnlyDictionary<string, ObjectResolvedPath> left,

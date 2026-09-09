@@ -72,7 +72,7 @@ internal interface IObjectMemoryResourceService : IDisposable
     /// </summary>
     /// <param name="fileDescriptor">the native file descriptor</param>
     /// <param name="resource">the resolved memory resource</param>
-    /// <returns>the native file job result</returns>
+    /// <returns>1 after completion, or 0 when the read could not start</returns>
     unsafe byte ReadResource(ClientFileDescriptor* fileDescriptor, ObjectMemoryResource resource);
 
     /// <summary>
@@ -127,7 +127,7 @@ internal sealed unsafe class ObjectMemoryResourceService : IObjectMemoryResource
 
     private readonly ILogger<ObjectMemoryResourceService> _logger;
     private readonly ObjectTextureLodService _lodService;
-    private readonly ObjectMemoryResourceRegistry _registry = new();
+    private readonly ObjectMemoryResourceRegistry _registry;
     private readonly DisposalState _disposeState = new();
     private readonly ObjectLockedOnce _enableOnce = new();
     private readonly Hook<FileDescriptorReadDelegate>? _fileDescriptorReadHook;
@@ -140,11 +140,13 @@ internal sealed unsafe class ObjectMemoryResourceService : IObjectMemoryResource
     public ObjectMemoryResourceService(
         ILogger<ObjectMemoryResourceService> logger,
         ObjectTextureLodService lodService,
+        ObjectMemoryResourceRegistry registry,
         IGameInteropProvider gameInteropProvider,
         ISigScanner sigScanner)
     {
         _logger = logger;
         _lodService = lodService;
+        _registry = registry;
 
         _fileDescriptorReadHook = InteropHookUtility.CreateHookFromAddress<FileDescriptorReadDelegate>(
             _logger,

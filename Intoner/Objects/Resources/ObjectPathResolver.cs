@@ -63,35 +63,21 @@ internal readonly record struct ObjectResolvedRootPath
         };
 }
 
-/// <summary>
-/// Resolves root object resource requests against the object owned resource collection set.
-/// </summary>
-internal interface IObjectPathResolver
-{
-    /// <summary>
-    /// Resolves one root object resource request.
-    /// </summary>
-    /// <param name="snapshot">the object snapshot requesting the resource</param>
-    /// <param name="kind">the root resource kind being created</param>
-    /// <param name="requestedPath">the requested game path from the snapshot model</param>
-    /// <returns>the resolved root resource request</returns>
-    ObjectResolvedRootPath ResolveRootPath(ObjectSnapshot snapshot, ObjectRootPathKind kind, string requestedPath);
-}
-
-internal sealed class ObjectPathResolver : IObjectPathResolver
+/// <summary> resolves object root paths against their resource collections </summary>
+internal sealed class ObjectPathResolver
 {
     private readonly IObjectResolvedCollectionStore _collectionStore;
-    private readonly Func<IObjectFileReadService> _fileReadServiceFactory;
-    private readonly Func<IObjectResourceLoader> _resourceLoaderFactory;
+    private readonly ObjectFileReadService _fileReadService;
+    private readonly IObjectResourceLoader _resourceLoader;
 
     public ObjectPathResolver(
         IObjectResolvedCollectionStore collectionStore,
-        Func<IObjectFileReadService> fileReadServiceFactory,
-        Func<IObjectResourceLoader> resourceLoaderFactory)
+        ObjectFileReadService fileReadService,
+        IObjectResourceLoader resourceLoader)
     {
         _collectionStore = collectionStore;
-        _fileReadServiceFactory = fileReadServiceFactory;
-        _resourceLoaderFactory = resourceLoaderFactory;
+        _fileReadService = fileReadService;
+        _resourceLoader = resourceLoader;
     }
 
     public ObjectResolvedRootPath ResolveRootPath(ObjectSnapshot snapshot, ObjectRootPathKind kind, string requestedPath)
@@ -107,7 +93,7 @@ internal sealed class ObjectPathResolver : IObjectPathResolver
          && collection.Redirects.Count > 0)
         {
             resourceCollectionId = requestedCollectionId;
-            if (!ResourceLoader.CanResolveCollectionResources(kind))
+            if (!_resourceLoader.CanResolveCollectionResources(kind))
             {
                 status = ObjectResolvedRootPathStatus.ResourceHooksUnavailable;
             }
@@ -127,13 +113,13 @@ internal sealed class ObjectPathResolver : IObjectPathResolver
 
         if (status == ObjectResolvedRootPathStatus.Ready
             && resolvedPath.IsLocalFile
-            && !FileReadService.CanLoadLocalFilePath(resolvedPath.Path))
+            && !_fileReadService.CanLoadLocalFilePath(resolvedPath.Path))
         {
             status = ObjectResolvedRootPathStatus.UnsupportedLocalFile;
         }
         else if (status == ObjectResolvedRootPathStatus.Ready
             && resolvedPath.IsMemory
-            && !FileReadService.CanLoadMemoryResourcePath(resolvedPath.Path))
+            && !_fileReadService.CanLoadMemoryResourcePath(resolvedPath.Path))
         {
             status = ObjectResolvedRootPathStatus.UnsupportedMemoryResource;
         }
@@ -160,12 +146,4 @@ internal sealed class ObjectPathResolver : IObjectPathResolver
             _ => false,
         };
     }
-
-    private IObjectFileReadService FileReadService
-        => _fileReadServiceFactory();
-
-    private IObjectResourceLoader ResourceLoader
-        => _resourceLoaderFactory();
 }
-
-

@@ -89,11 +89,11 @@ internal interface IObjectSceneMutationService
     /// <summary> disposes active entries removed from the desired scene </summary>
     void DestroyEntries(IEnumerable<ObjectSceneEntry> entries);
 
-    /// <summary> disposes replaced entries whose collection usage was already updated </summary>
-    void DestroyReplacedEntries(IEnumerable<ObjectSceneEntry> entries);
-
-    /// <summary> refreshes collection usage for one active snapshot replacement </summary>
-    void RefreshCollectionUsage(ObjectSnapshot? previousSnapshot, ObjectSnapshot? nextSnapshot);
+    /// <summary> replaces an active runtime only after its replacement was created </summary>
+    /// <param name="snapshot"> The desired object snapshot. </param>
+    /// <param name="source"> The desired scene source. </param>
+    /// <returns> true when replacement and ownership updates succeeded. </returns>
+    bool TryReplaceObject(ObjectSnapshot snapshot, ObjectSceneSource source);
 
     /// <summary> clears every active object entry and optionally its persisted state </summary>
     void ClearAllActiveEntries(bool removePersistedState);
@@ -708,6 +708,7 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
 
         _objectCollectionManager.EnsureCollectionMaterialized(sanitizedSnapshot.CollectionId, [sanitizedSnapshot]);
 
+        SceneResourceCollectionState resourceCollection = GetResourceCollectionState(sanitizedSnapshot);
         if (!_runtimeFactory.Value.TryCreate(sanitizedSnapshot, out var runtime, out string failureCode))
         {
             _sceneState.SetRuntimeFailure(sanitizedSnapshot.Id, failureCode);
@@ -720,7 +721,7 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
         {
             Runtime = runtime,
             Source = source,
-            ResourceCollection = GetResourceCollectionState(sanitizedSnapshot),
+            ResourceCollection = resourceCollection,
         };
         _sceneState.UpsertEntry(createdEntry);
         if (!TryRefreshCollectionUsage(null, sanitizedSnapshot))
@@ -753,11 +754,33 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
         return true;
     }
 
-    public void DestroyEntries(IEnumerable<ObjectSceneEntry> entries)
-        => DestroyEntries(entries, releaseCollectionUsage: true);
+    public bool TryReplaceObject(ObjectSnapshot snapshot, ObjectSceneSource source)
+    {
+        lock (_stateLock)
+        {
+            if (!_sceneState.TryGetEntry(snapshot.Id, out ObjectSceneEntry entry))
+            {
+                return false;
+            }
 
-    public void DestroyReplacedEntries(IEnumerable<ObjectSceneEntry> entries)
-        => DestroyEntries(entries, releaseCollectionUsage: false);
+            if (!_objectKindService.TrySanitizeSnapshot(snapshot, out ObjectSnapshot sanitizedSnapshot))
+            {
+                _sceneState.SetRuntimeFailure(snapshot.Id, ObjectRuntimeFailureCodes.InvalidObject);
+                return false;
+            }
+
+            if (source.UsesUserHousingPolicy
+                && !_housingModePolicy.TryValidateCreate(sanitizedSnapshot, GetHousingPolicySceneSnapshots(), out _))
+            {
+                _sceneState.SetRuntimeFailure(snapshot.Id, ObjectRuntimeFailureCodes.HousingModeRejected);
+                return false;
+            }
+
+            return TryReplaceEntryRuntime(entry, entry.Snapshot, sanitizedSnapshot,
+                persistSnapshot: false, sourceOverride: source, updateCollectionUsage: true, out _)
+                == ActiveEntryUpdateStatus.Applied;
+        }
+    }
 
     private bool TryRemoveActiveEntry(ObjectSceneEntry entry, bool releaseCollectionUsage)
     {
@@ -765,11 +788,11 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
         return TryDestroyEntry(entry, releaseCollectionUsage);
     }
 
-    private void DestroyEntries(IEnumerable<ObjectSceneEntry> entries, bool releaseCollectionUsage)
+    public void DestroyEntries(IEnumerable<ObjectSceneEntry> entries)
     {
         foreach (var entry in entries)
         {
-            _ = TryDestroyEntry(entry, releaseCollectionUsage);
+            _ = TryDestroyEntry(entry);
         }
     }
 
@@ -1034,10 +1057,11 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
                 out appliedSnapshot);
         }
 
+        SceneResourceCollectionState resourceCollection = GetResourceCollectionState(nextSnapshot);
         switch (entry.Runtime.TryUpdate(nextSnapshot))
         {
             case ObjectRuntimeUpdateResult.Applied:
-                UpsertActiveEntryMetadata(entry, sourceOverride ?? entry.Source);
+                UpsertActiveEntryMetadata(entry, sourceOverride ?? entry.Source, resourceCollection);
                 return CompleteActiveEntryUpdate(
                     entry,
                     previousSnapshot,
@@ -1140,6 +1164,7 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
         }
 
         _objectCollectionManager.EnsureCollectionMaterialized(nextSnapshot.CollectionId, [nextSnapshot]);
+        SceneResourceCollectionState resourceCollection = GetResourceCollectionState(nextSnapshot);
         if (!_runtimeFactory.Value.TryCreate(nextSnapshot, out IObjectRuntime replacement, out string failureCode))
         {
             _sceneState.SetRuntimeFailure(nextSnapshot.Id, failureCode);
@@ -1162,7 +1187,7 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
         {
             Runtime = replacement,
             Source = sourceOverride ?? entry.Source,
-            ResourceCollection = GetResourceCollectionState(nextSnapshot),
+            ResourceCollection = resourceCollection,
         });
         bool runtimeApplied = TryDestroyEntry(entry, releaseCollectionUsage: false);
         if (updateCollectionUsage)
@@ -1179,10 +1204,11 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
 
     private bool TryRestoreEntryRuntime(ObjectSceneEntry entry, ObjectSnapshot previousSnapshot)
     {
+        SceneResourceCollectionState resourceCollection = GetResourceCollectionState(previousSnapshot);
         switch (entry.Runtime.TryUpdate(previousSnapshot))
         {
             case ObjectRuntimeUpdateResult.Applied:
-                UpsertActiveEntryMetadata(entry, entry.Source);
+                UpsertActiveEntryMetadata(entry, entry.Source, resourceCollection);
                 return true;
             case ObjectRuntimeUpdateResult.RequiresRecreate:
                 return TryReplaceEntryRuntime(
@@ -1203,14 +1229,13 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
     private void UpsertActiveEntryMetadata(
         ObjectSceneEntry entry,
         ObjectSceneSource source,
-        SceneResourceCollectionState? resourceCollection = null)
+        SceneResourceCollectionState resourceCollection)
     {
         _sceneState.UpsertEntry(new ObjectSceneEntry
         {
             Runtime = entry.Runtime,
             Source = source,
-            ResourceCollection = resourceCollection
-                ?? GetResourceCollectionState(entry.Runtime.Snapshot),
+            ResourceCollection = resourceCollection,
         });
     }
 
@@ -1321,9 +1346,6 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
         return SceneMutationStatus.RecoveryRequired;
     }
 
-    public void RefreshCollectionUsage(ObjectSnapshot? previousSnapshot, ObjectSnapshot? nextSnapshot)
-        => _objectCollectionManager.RefreshCollectionUsage(previousSnapshot, nextSnapshot);
-
     private bool TryDestroyEntry(ObjectSceneEntry entry, bool releaseCollectionUsage = true)
     {
         bool success = TryDisposeRuntime(entry.Runtime, entry.Snapshot.Id);
@@ -1355,7 +1377,7 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
     {
         try
         {
-            RefreshCollectionUsage(previousSnapshot, nextSnapshot);
+            _objectCollectionManager.RefreshCollectionUsage(previousSnapshot, nextSnapshot);
             return true;
         }
         catch (Exception ex)

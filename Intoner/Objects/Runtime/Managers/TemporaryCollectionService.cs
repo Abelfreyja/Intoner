@@ -44,16 +44,17 @@ internal interface ITemporaryCollectionService
 internal sealed class TemporaryCollectionService : ITemporaryCollectionService
 {
     private readonly IObjectResolvedCollectionStore _collectionStore;
-    private readonly Func<IObjectMemoryResourceService> _memoryResourceServiceFactory;
+    private readonly IObjectMemoryResourceService _memoryResourceService;
+
     private readonly Lock _publicationLock = new();
     private readonly Dictionary<string, IReadOnlySet<string>> _publishedCollectionIds = new(StringComparer.OrdinalIgnoreCase);
 
     public TemporaryCollectionService(
         IObjectResolvedCollectionStore collectionStore,
-        Func<IObjectMemoryResourceService> memoryResourceServiceFactory)
+        IObjectMemoryResourceService memoryResourceService)
     {
         _collectionStore = collectionStore;
-        _memoryResourceServiceFactory = memoryResourceServiceFactory;
+        _memoryResourceService = memoryResourceService;
     }
 
     public ObjectTemporaryMutationResult TryPrepare(
@@ -93,7 +94,7 @@ internal sealed class TemporaryCollectionService : ITemporaryCollectionService
                     out IReadOnlyList<ObjectPathRedirection> redirects)
                 || !redirectsByCollection.TryAdd(runtimeCollection.CollectionId, redirects))
             {
-                MemoryResourceService.ReleaseOwner(memoryOwnerId);
+                _memoryResourceService.ReleaseOwner(memoryOwnerId);
                 return new ObjectTemporaryMutationResult(ObjectTemporaryMutationStatus.InvalidCollection, 0);
             }
 
@@ -103,7 +104,7 @@ internal sealed class TemporaryCollectionService : ITemporaryCollectionService
 
         if (!retainedMemory)
         {
-            MemoryResourceService.ReleaseOwner(memoryOwnerId);
+            _memoryResourceService.ReleaseOwner(memoryOwnerId);
         }
 
         prepared = new PreparedTemporaryCollections(
@@ -174,7 +175,7 @@ internal sealed class TemporaryCollectionService : ITemporaryCollectionService
     {
         foreach (string ownerId in retiredOwnerIds.Where(ownerId => !string.Equals(ownerId, activeOwnerId, StringComparison.OrdinalIgnoreCase)))
         {
-            MemoryResourceService.ReleaseOwner(ownerId);
+            _memoryResourceService.ReleaseOwner(ownerId);
         }
     }
 
@@ -182,7 +183,7 @@ internal sealed class TemporaryCollectionService : ITemporaryCollectionService
     {
         if (prepared.HasUncommittedMemoryLease && prepared.MemoryOwnerId.Length > 0)
         {
-            MemoryResourceService.ReleaseOwner(prepared.MemoryOwnerId);
+            _memoryResourceService.ReleaseOwner(prepared.MemoryOwnerId);
         }
     }
 
@@ -334,12 +335,12 @@ internal sealed class TemporaryCollectionService : ITemporaryCollectionService
                 return false;
             }
 
-            resolvedPath = MemoryResourceService.RegisterResource(memoryOwnerId, gamePath, replacement.Data);
+            resolvedPath = _memoryResourceService.RegisterResource(memoryOwnerId, gamePath, replacement.Data);
             retainedMemory = true;
         }
         else if (ObjectMemoryResourcePathUtility.TryParse(replacement.Path, out ObjectMemoryResourcePath memoryPath)
-            && MemoryResourceService.TryAcquireResource(memoryOwnerId, memoryPath.Path, out ObjectMemoryResource resource)
-            && MemoryResourceService.CanLoadMemoryResource(resource))
+            && _memoryResourceService.TryAcquireResource(memoryOwnerId, memoryPath.Path, out ObjectMemoryResource resource)
+            && _memoryResourceService.CanLoadMemoryResource(resource))
         {
             resolvedPath = ObjectResolvedPath.FromMemory(resource.MemoryPath);
             retainedMemory = true;
@@ -399,8 +400,8 @@ internal sealed class TemporaryCollectionService : ITemporaryCollectionService
                 return true;
             case ObjectTemporaryCollectionReplacementKind.Memory
                 when ObjectMemoryResourcePathUtility.TryParse(replacement.Path, out ObjectMemoryResourcePath memoryPath)
-                && MemoryResourceService.TryGetResource(memoryPath.Path, out ObjectMemoryResource resource)
-                && MemoryResourceService.CanLoadMemoryResource(resource):
+                && _memoryResourceService.TryGetResource(memoryPath.Path, out ObjectMemoryResource resource)
+                && _memoryResourceService.CanLoadMemoryResource(resource):
                 resolvedPath = ObjectResolvedPath.FromMemory(resource.MemoryPath);
                 return true;
             default:
@@ -411,7 +412,4 @@ internal sealed class TemporaryCollectionService : ITemporaryCollectionService
 
     private static string CreateMemoryOwnerId(string sourceKey, Guid sessionId, long revision)
         => $"temporary:{sourceKey}:{sessionId:D}:{revision}:{Guid.NewGuid():N}";
-
-    private IObjectMemoryResourceService MemoryResourceService
-        => _memoryResourceServiceFactory();
 }

@@ -169,7 +169,7 @@ internal static class IntonerServiceCollectionExtensions
         services.AddScoped<FurnitureCatalogResolver>();
         services.AddScoped<IFurnitureStainService, FurnitureStainService>();
         services.AddScoped<EditorLoadCoordinator>();
-        services.AddSingleton<IObjectPathResolver, ObjectPathResolver>();
+        services.AddSingleton<ObjectPathResolver>();
         return services;
     }
 
@@ -187,14 +187,12 @@ internal static class IntonerServiceCollectionExtensions
     {
         services.AddSingleton<ObjectTextureLodService>();
         services.AddSingleton<ObjectResourceLoadScope>();
+        services.AddSingleton<ObjectMemoryResourceRegistry>();
         services.AddSingleton<IObjectMemoryResourceService, ObjectMemoryResourceService>();
-        services.AddSingleton<Func<IObjectMemoryResourceService>>(provider => () => provider.GetRequiredService<IObjectMemoryResourceService>());
         services.AddSingleton<IVfxResourceRewriteService, VfxResourceRewriteService>();
-        services.AddSingleton<IObjectFileReadService, ObjectFileReadService>();
-        services.AddSingleton<IObjectResourceTracker, ObjectResourceTracker>();
+        services.AddSingleton<ObjectFileReadService>();
+        services.AddSingleton<ObjectResourceTracker>();
         services.AddSingleton<IObjectResourceLoader, ObjectResourceLoader>();
-        services.AddSingleton<Func<IObjectFileReadService>>(provider => () => provider.GetRequiredService<IObjectFileReadService>());
-        services.AddSingleton<Func<IObjectResourceLoader>>(provider => () => provider.GetRequiredService<IObjectResourceLoader>());
         return services;
     }
 

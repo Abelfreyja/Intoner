@@ -14,13 +14,13 @@ internal sealed unsafe class FurnitureObjectRuntime : LayoutObjectRuntime
 {
     private readonly FurnitureEmoteGuard _emoteGuard;
     private readonly delegate* unmanaged<SharedGroupLayoutInstance**, nint, void> _destroySharedGroup;
-    private readonly IObjectResourceTracker _resourceTracker;
+    private readonly ObjectResourceTracker _resourceTracker;
 
     private SharedGroupLayoutInstance* _instance;
     private DeferredVisualState _deferredVisualState;
     private SharedGroupChildState _visualChildState;
     private bool _visualChildReady;
-    private string _sharedGroupPath = string.Empty;
+    private string _sharedGroupPath;
     private ObjectResourceRegistration _rootHandleRegistration;
     private ObjectResourceRegistration _rootInstanceRegistration;
 
@@ -42,7 +42,7 @@ internal sealed unsafe class FurnitureObjectRuntime : LayoutObjectRuntime
         ObjectSnapshot snapshot,
         SharedGroupLayoutInstance* instance,
         string sharedGroupPath,
-        IObjectResourceTracker resourceTracker,
+        ObjectResourceTracker resourceTracker,
         FurnitureEmoteGuard emoteGuard,
         delegate* unmanaged<SharedGroupLayoutInstance**, nint, void> destroySharedGroup)
         : base(framework, logger, snapshot)
@@ -52,10 +52,13 @@ internal sealed unsafe class FurnitureObjectRuntime : LayoutObjectRuntime
         _resourceTracker = resourceTracker;
         _emoteGuard = emoteGuard;
         _destroySharedGroup = destroySharedGroup;
+        _deferredVisualState = new DeferredVisualState();
         _rootHandleRegistration = new ObjectResourceRegistration(snapshot.Id);
         _rootInstanceRegistration = new ObjectResourceRegistration(snapshot.Id);
-        UpdateRegisteredRootHandle(snapshot);
     }
+
+    internal override void Initialize()
+        => UpdateRegisteredRootHandle(Snapshot);
 
     protected override void FrameworkUpdateUnsafe()
     {

@@ -12,9 +12,9 @@ using OrientedBounds = FFXIVClientStructs.FFXIV.Common.Math.OrientedBounds;
 namespace Intoner.Objects.Runtime;
 
 /// <summary> active scene reload result </summary>
-/// <param name="LoadedAll">true when every desired object is active</param>
+/// <param name="LoadedAll">true when every desired object and resource update was applied</param>
 /// <param name="CanApply">true when the current location can receive scene objects</param>
-/// <param name="NeedsRetry">true when a transient load failure left a refresh pending</param>
+/// <param name="NeedsRetry">true when a transient failure or newer request left a refresh pending</param>
 [StructLayout(LayoutKind.Auto)]
 internal readonly record struct SceneReloadResult(bool LoadedAll, bool CanApply, bool NeedsRetry)
 {
@@ -23,6 +23,7 @@ internal readonly record struct SceneReloadResult(bool LoadedAll, bool CanApply,
     public static SceneReloadResult LoadedLocation(bool loadedAll, bool needsRetry)
         => new(loadedAll, true, needsRetry);
 
+    /// <summary> reconciliation finished, including any permanent object failures </summary>
     public bool IsApplied
         => CanApply && !NeedsRetry;
 }
@@ -117,13 +118,6 @@ internal interface IObjectScene
 
 internal sealed class ObjectScene : IObjectScene, IDisposable
 {
-    private enum ActiveEntryReuseStatus
-    {
-        Reused,
-        Recreate,
-        Rejected,
-    }
-
     private readonly IFramework            _framework;
     private readonly IObjectKindService    _objectKindService;
     private readonly IObjectSceneSnapshotResolver _snapshotResolver;
@@ -190,7 +184,8 @@ internal sealed class ObjectScene : IObjectScene, IDisposable
     {
         if (_sceneState.TryGetEntry(id, out _))
         {
-            snapshot = CreateActiveRuntimeStateSnapshot(id);
+            _sceneState.TryGetRuntimeFailureCode(id, out string? failureCode);
+            snapshot = CreateActiveRuntimeStateSnapshot(id, failureCode);
             return true;
         }
 
@@ -250,7 +245,7 @@ internal sealed class ObjectScene : IObjectScene, IDisposable
             return;
         }
 
-        SceneReloadResult result = ReloadForCurrentLocationInternal(currentLocation);
+        SceneReloadResult result = ReloadForCurrentLocationInternal(currentLocation, refreshState.Revision);
         if (result.IsApplied)
         {
             SceneRefreshed?.Invoke();
@@ -258,9 +253,12 @@ internal sealed class ObjectScene : IObjectScene, IDisposable
     }
 
     private SceneReloadResult ReloadForCurrentLocationInternal()
-        => ReloadForCurrentLocationInternal(_locationService.GetCurrentLocationScope());
+    {
+        long refreshRevision = _sceneState.GetRefreshState().Revision;
+        return ReloadForCurrentLocationInternal(_locationService.GetCurrentLocationScope(), refreshRevision);
+    }
 
-    private SceneReloadResult ReloadForCurrentLocationInternal(SceneLocationScope currentLocation)
+    private SceneReloadResult ReloadForCurrentLocationInternal(SceneLocationScope currentLocation, long refreshRevision)
     {
         if (!currentLocation.IsValid)
         {
@@ -268,21 +266,10 @@ internal sealed class ObjectScene : IObjectScene, IDisposable
         }
 
         var desiredRequests = _snapshotResolver.GetLoadRequests(currentLocation);
-        var activeObjectIds = ReconcileActiveEntries(desiredRequests);
-        SceneReloadResult loadResult = LoadMissingEntries(desiredRequests, activeObjectIds);
+        SceneReloadResult loadResult = ReconcileEntries(desiredRequests);
 
-        _sceneState.SetLoadedLocation(currentLocation, needsRefresh: loadResult.NeedsRetry);
-        return loadResult;
-    }
-
-    private static bool SnapshotsMatch(ObjectSceneEntry entry, ObjectSnapshot desiredSnapshot)
-    {
-        if (entry.Runtime.Kind != desiredSnapshot.Kind)
-        {
-            return false;
-        }
-
-        return entry.Snapshot == desiredSnapshot;
+        bool needsRetry = _sceneState.CompleteRefresh(currentLocation, refreshRevision, loadResult.NeedsRetry);
+        return loadResult with { NeedsRetry = needsRetry };
     }
 
     private static void ProcessFrameworkUpdates(IReadOnlyList<ObjectSceneEntry> entries)
@@ -348,97 +335,72 @@ internal sealed class ObjectScene : IObjectScene, IDisposable
         return SceneReloadResult.InvalidLocation;
     }
 
-    private HashSet<Guid> ReconcileActiveEntries(IReadOnlyList<ObjectSceneLoadRequest> desiredRequests)
+    private SceneReloadResult ReconcileEntries(IReadOnlyList<ObjectSceneLoadRequest> desiredRequests)
     {
-        var desiredRequestsById = desiredRequests.ToDictionary(static request => request.Snapshot.Id);
-
+        HashSet<Guid> desiredIds = desiredRequests.Select(static request => request.Snapshot.Id).ToHashSet();
         List<ObjectSceneEntry> entriesToDestroy = [];
-        List<ObjectSceneEntry> entriesToReplace = [];
-        HashSet<Guid> activeObjectIds = [];
-        foreach (var entry in _sceneState.GetEntriesSnapshot())
+        foreach (ObjectSceneEntry entry in _sceneState.GetEntriesSnapshot().Where(entry => !desiredIds.Contains(entry.Snapshot.Id)))
         {
-            var reuseStatus = TryReuseActiveEntry(entry, desiredRequestsById);
-            if (reuseStatus == ActiveEntryReuseStatus.Recreate)
-            {
-                _sceneState.TryRemoveEntry(entry.Snapshot.Id, out _);
-                if (desiredRequestsById.TryGetValue(entry.Snapshot.Id, out var desiredRequest))
-                {
-                    _sceneMutations.RefreshCollectionUsage(entry.Snapshot, desiredRequest.Snapshot);
-                    entriesToReplace.Add(entry);
-                }
-                else
-                {
-                    entriesToDestroy.Add(entry);
-                }
-
-                continue;
-            }
-
-            activeObjectIds.Add(entry.Snapshot.Id);
-            if (reuseStatus == ActiveEntryReuseStatus.Reused)
-            {
-                _sceneState.ClearRuntimeFailure(entry.Snapshot.Id);
-            }
+            _sceneState.TryRemoveEntry(entry.Snapshot.Id, out _);
+            entriesToDestroy.Add(entry);
         }
 
-        _sceneState.ClearRuntimeFailuresExcept(desiredRequestsById.Keys);
+        _sceneState.ClearRuntimeFailuresExcept(desiredIds);
         _sceneMutations.DestroyEntries(entriesToDestroy);
-        _sceneMutations.DestroyReplacedEntries(entriesToReplace);
-        return activeObjectIds;
-    }
-
-    private SceneReloadResult LoadMissingEntries(IReadOnlyList<ObjectSceneLoadRequest> desiredRequests, IReadOnlySet<Guid> activeObjectIds)
-    {
-        var loadedAll = true;
-        var needsRetry = false;
-        foreach (var request in desiredRequests)
+        bool loadedAll = true;
+        bool needsRetry = false;
+        foreach (ObjectSceneLoadRequest request in desiredRequests)
         {
-            if (activeObjectIds.Contains(request.Snapshot.Id))
+            if (TryReconcileEntry(request))
             {
                 continue;
             }
 
-            if (!TryLoadDesiredEntry(request, out string? failureCode))
-            {
-                loadedAll = false;
-                needsRetry |= ObjectRuntimeFailureCodes.ShouldRetrySceneLoad(failureCode);
-            }
+            _sceneState.TryGetRuntimeFailureCode(request.Snapshot.Id, out string? failureCode);
+            loadedAll = false;
+            needsRetry |= ObjectRuntimeFailureCodes.ShouldRetrySceneLoad(failureCode);
         }
 
         return SceneReloadResult.LoadedLocation(loadedAll, needsRetry);
     }
 
-    private bool TryLoadDesiredEntry(ObjectSceneLoadRequest request, out string? failureCode)
+    private bool TryReconcileEntry(ObjectSceneLoadRequest request)
     {
-        failureCode = null;
+        if (_sceneState.TryGetEntry(request.Snapshot.Id, out ObjectSceneEntry entry))
+        {
+            switch (TryReuseActiveEntry(entry, request))
+            {
+                case ObjectRuntimeUpdateResult.Applied:
+                    _sceneState.ClearRuntimeFailure(request.Snapshot.Id);
+                    return true;
+                case ObjectRuntimeUpdateResult.RequiresRecreate:
+                    return _sceneMutations.TryReplaceObject(request.Snapshot, request.Source);
+                default:
+                    return false;
+            }
+        }
+
         if (!_objectKindService.CanCreate(request.Snapshot.Kind))
         {
-            failureCode = ObjectRuntimeFailureCodes.ServiceMissing;
-            _sceneState.SetRuntimeFailure(request.Snapshot.Id, failureCode);
+            _sceneState.SetRuntimeFailure(request.Snapshot.Id, ObjectRuntimeFailureCodes.ServiceMissing);
             return false;
         }
 
-        bool loaded = _sceneMutations.TryCreateObject(
+        return _sceneMutations.TryCreateObject(
             request.Snapshot,
             out _,
             applyDefaultLayout: false,
             persistSnapshot: false,
             sourceOverride: request.Source);
-        if (!loaded)
-        {
-            _ = _sceneState.TryGetRuntimeFailureCode(request.Snapshot.Id, out failureCode);
-        }
-
-        return loaded;
     }
 
-    private ActiveEntryReuseStatus TryReuseActiveEntry(ObjectSceneEntry entry, IReadOnlyDictionary<Guid, ObjectSceneLoadRequest> desiredRequestsById)
+    private ObjectRuntimeUpdateResult TryReuseActiveEntry(ObjectSceneEntry entry, ObjectSceneLoadRequest desiredRequest)
     {
-        if (!desiredRequestsById.TryGetValue(entry.Snapshot.Id, out var desiredRequest)
-         || entry.Source != desiredRequest.Source
-         || !SnapshotsMatch(entry, desiredRequest.Snapshot))
+        if (entry.Source != desiredRequest.Source
+            || entry.Runtime.Kind != desiredRequest.Snapshot.Kind
+            || entry.Snapshot != desiredRequest.Snapshot)
         {
-            return ActiveEntryReuseStatus.Recreate;
+            return ObjectRuntimeUpdateResult.RequiresRecreate;
         }
 
         long currentCollectionRevision = _collectionStore.GetCollectionRevision(
@@ -446,29 +408,23 @@ internal sealed class ObjectScene : IObjectScene, IDisposable
             ObjectSnapshotUtility.GetRootResourcePath(desiredRequest.Snapshot));
         if (entry.ResourceCollection.MatchesCurrentRevision(currentCollectionRevision))
         {
-            return ActiveEntryReuseStatus.Reused;
+            return ObjectRuntimeUpdateResult.Applied;
         }
 
-        if (entry.ResourceCollection.IsPendingWithoutRuntimeRevision(currentCollectionRevision))
-        {
-            UpsertEntryResourceCollection(entry, SceneResourceCollectionState.Current(currentCollectionRevision));
-            return ActiveEntryReuseStatus.Reused;
-        }
-
-        var refreshResult = entry.Runtime.TryRefreshResources(desiredRequest.Snapshot);
-        switch (refreshResult)
+        ObjectRuntimeUpdateResult result = entry.ResourceCollection.IsPendingWithoutRuntimeRevision(currentCollectionRevision)
+            ? ObjectRuntimeUpdateResult.Applied
+            : entry.Runtime.TryRefreshResources(desiredRequest.Snapshot);
+        switch (result)
         {
             case ObjectRuntimeUpdateResult.Applied:
+                UpsertEntryResourceCollection(entry, SceneResourceCollectionState.Current(currentCollectionRevision));
                 break;
-            case ObjectRuntimeUpdateResult.RequiresRecreate:
-                return ActiveEntryReuseStatus.Recreate;
-            default:
+            case ObjectRuntimeUpdateResult.Rejected:
                 _sceneState.SetRuntimeFailure(entry.Snapshot.Id, ObjectRuntimeFailureCodes.UpdateRejected);
-                return ActiveEntryReuseStatus.Rejected;
+                break;
         }
 
-        UpsertEntryResourceCollection(entry, SceneResourceCollectionState.Current(currentCollectionRevision));
-        return ActiveEntryReuseStatus.Reused;
+        return result;
     }
 
     private void UpsertEntryResourceCollection(ObjectSceneEntry entry, SceneResourceCollectionState resourceCollection)
@@ -505,11 +461,11 @@ internal sealed class ObjectScene : IObjectScene, IDisposable
         return false;
     }
 
-    private static ObjectRuntimeStateSnapshot CreateActiveRuntimeStateSnapshot(Guid id)
+    private static ObjectRuntimeStateSnapshot CreateActiveRuntimeStateSnapshot(Guid id, string? failureCode)
         => new(
             id,
-            ObjectRuntimeStateKind.Active,
-            null);
+            string.IsNullOrEmpty(failureCode) ? ObjectRuntimeStateKind.Active : ObjectRuntimeStateKind.LoadFailed,
+            failureCode);
 
     private static bool TryCreateBoundsSnapshot(IObjectRuntime runtime, out ObjectBoundsSnapshot boundsSnapshot)
     {
@@ -561,10 +517,7 @@ internal sealed class ObjectScene : IObjectScene, IDisposable
     {
         if (isActive)
         {
-            return new ObjectRuntimeStateSnapshot(
-                snapshot.Id,
-                ObjectRuntimeStateKind.Active,
-                null);
+            return CreateActiveRuntimeStateSnapshot(snapshot.Id, failureCode);
         }
 
         if (currentLocation.IsValid && !ObjectSnapshotUtility.MatchesLocation(snapshot, currentLocation))

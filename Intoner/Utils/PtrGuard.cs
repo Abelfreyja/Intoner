@@ -8,9 +8,9 @@ namespace Intoner.Utils
     public static partial class PtrGuard
     {
         private static readonly nuint _hardMinWindows =
-            (nuint)(IntPtr.Size == 8 ? 0x0000000100000000UL : 0x0000000000010000UL);
+            (nuint)(nint.Size == 8 ? 0x0000000100000000UL : 0x0000000000010000UL);
         private static readonly nuint _hardMaxWindows =
-            (nuint)(IntPtr.Size == 8 ? 0x00007FFFFFFFFFFFUL : 0x7FFFFFFFUL);
+            (nuint)(nint.Size == 8 ? 0x00007FFFFFFFFFFFUL : 0x7FFFFFFFUL);
         private const nuint _alignmentPtr = 0x7;
 
         private static readonly (nuint min, nuint max) _sysRange = GetSysRange();
@@ -75,8 +75,8 @@ namespace Intoner.Utils
             if (!LooksLikePtr(addr))
                 return false;
 
-            return ReadProcessMemory(GetCurrentProcess(), addr, out value, (nuint)IntPtr.Size, out nuint bytesRead)
-                   && bytesRead == (nuint)IntPtr.Size;
+            return ReadProcessMemory(GetCurrentProcess(), addr, out value, (nuint)nint.Size, out nuint bytesRead)
+                   && bytesRead == (nuint)nint.Size;
         }
 
         public static bool IsReadable(nint addr, nuint size)

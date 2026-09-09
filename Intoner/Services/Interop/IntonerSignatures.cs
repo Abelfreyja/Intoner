@@ -116,6 +116,8 @@ internal static unsafe class IntonerSignatures
     // resource targets
     public static readonly NativeDirectSignatureTarget ModelLoad = new(ModelResourceLoad, "object model resource load");
     public static readonly NativeDirectSignatureTarget ApricotLoad = new(ApricotResourceLoad, "object apricot resource load");
+    public static readonly NativeDirectSignatureTarget ResourceHandleDestructor =
+        new(Sigs.ResourceHandleDestructor, "object resource handle destruction");
     public static readonly NativeDirectSignatureTarget AvfxResourceBufferLoadHook =
         new(AvfxResourceBufferLoad, "AVFX resource buffer load");
     public static readonly NativeDirectSignatureTarget SharedGroupLayoutResourceLoadHook =
@@ -140,6 +142,8 @@ internal static unsafe class IntonerSignatures
         new(GetResourceHandleType, "object resource handle type from path");
     public static readonly NativeStaticAddressTarget ResourceRsfService =
         new(RsfServiceAddress, 0, "object resource RSF service");
+    public static readonly NativeStaticAddressTarget ResourceLodConfig =
+        new(LodConfig, 0, "object texture lod config");
     public static readonly NativeResolvedAddressTarget ResourceFileDescriptorRead =
         new((nint)FileDescriptor.MemberFunctionPointers.Read, "object resource file descriptor read");
     public static readonly NativeResolvedAddressTarget ResourceFileJob =
@@ -206,11 +210,10 @@ internal static unsafe class IntonerSignatures
 
     private static readonly NativeDirectSignatureTarget[] DirectSignatureTargets =
     [
-        new(LodConfig, "object lod config"),
-
         // resource
         ModelLoad,
         ApricotLoad,
+        ResourceHandleDestructor,
         CachedScheduleResource,
         AvfxResourceBufferLoadHook,
         SharedGroupLayoutResourceLoadHook,
@@ -304,6 +307,7 @@ internal static unsafe class IntonerSignatures
     private static readonly NativeStaticAddressTarget[] NativeStaticAddressTargets =
     [
         ResourceRsfService,
+        ResourceLodConfig,
     ];
 
     [Conditional("DEBUG")]

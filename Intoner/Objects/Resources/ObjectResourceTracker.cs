@@ -6,14 +6,16 @@ namespace Intoner.Objects.Resources;
 /// <summary> one tracked object resource handle scope </summary>
 internal readonly record struct ObjectResourceScope
 {
-    internal ObjectResourceScope(string resourceCollectionId, string resolvedPath)
+    internal ObjectResourceScope(string resourceCollectionId, string resolvedPath, long resourceScopeId = 0)
     {
         ResourceCollectionId = ObjectCollectionKeyUtility.NormalizeCollectionId(resourceCollectionId);
         ResolvedPath = ObjectResourcePathUtility.NormalizeTrackedPath(resolvedPath);
+        ResourceScopeId = resourceScopeId;
     }
 
     public string ResourceCollectionId { get; } = string.Empty;
     public string ResolvedPath { get; } = string.Empty;
+    public long ResourceScopeId { get; }
 }
 
 internal enum ObjectResourceRegistrationKind
@@ -41,13 +43,13 @@ internal struct ObjectResourceRegistration
     public bool IsRegistered
         => _address != nint.Zero;
 
-    public void UpdateRootHandle(IObjectResourceTracker tracker, nint handle, ObjectResourceScope scope)
+    public void UpdateRootHandle(ObjectResourceTracker tracker, nint handle, ObjectResourceScope scope)
         => Update(tracker, ObjectResourceRegistrationKind.RootHandle, handle, scope);
 
-    public void UpdateRootInstance(IObjectResourceTracker tracker, nint instance, ObjectResourceScope scope)
+    public void UpdateRootInstance(ObjectResourceTracker tracker, nint instance, ObjectResourceScope scope)
         => Update(tracker, ObjectResourceRegistrationKind.RootInstance, instance, scope);
 
-    public void Clear(IObjectResourceTracker tracker)
+    public void Clear(ObjectResourceTracker tracker)
     {
         if (_address == nint.Zero)
         {
@@ -70,7 +72,7 @@ internal struct ObjectResourceRegistration
     }
 
     private void Update(
-        IObjectResourceTracker tracker,
+        ObjectResourceTracker tracker,
         ObjectResourceRegistrationKind kind,
         nint address,
         ObjectResourceScope scope)
@@ -108,97 +110,41 @@ internal struct ObjectResourceRegistration
     }
 }
 
-/// <summary>
-/// Stores object owned root and redirected resource handles so dependent loads can recover collection context later.
-/// </summary>
-internal interface IObjectResourceTracker
+/// <summary> retains collection generations for native roots and dependent resource loads </summary>
+internal sealed class ObjectResourceTracker : IDisposable
 {
-    /// <summary>
-    /// Registers or replaces one root resource handle scope.
-    /// </summary>
-    /// <param name="resourceHandleAddress">the native root resource handle address</param>
-    /// <param name="ownerId">the local scene object registration owner</param>
-    /// <param name="handleScope">the tracked collection scope for that handle</param>
-    void RegisterOrUpdateRootHandle(nint resourceHandleAddress, Guid ownerId, ObjectResourceScope handleScope);
-
-    /// <summary>
-    /// Registers or replaces one root sgb instance scope.
-    /// </summary>
-    /// <param name="instanceAddress">the native sgb instance address</param>
-    /// <param name="ownerId">the local scene object registration owner</param>
-    /// <param name="instanceScope">the tracked collection scope for that instance</param>
-    void RegisterOrUpdateRootInstance(nint instanceAddress, Guid ownerId, ObjectResourceScope instanceScope);
-
-    /// <summary>
-    /// Registers or replaces one redirected resource handle scope.
-    /// </summary>
-    /// <param name="resourceHandleAddress">the native redirected resource handle address</param>
-    /// <param name="handleScope">the tracked collection scope for that handle</param>
-    void RegisterOrUpdateHandleScope(nint resourceHandleAddress, ObjectResourceScope handleScope);
-
-    /// <summary>
-    /// Tries to resolve one tracked resource handle scope.
-    /// </summary>
-    /// <param name="resourceHandleAddress">the native tracked resource handle address</param>
-    /// <param name="handleScope">the tracked scope metadata when found</param>
-    /// <returns>true when the handle scope is currently registered</returns>
-    bool TryGetHandleScope(nint resourceHandleAddress, out ObjectResourceScope handleScope);
-
-    /// <summary>
-    /// Tries to resolve one tracked sgb instance scope.
-    /// </summary>
-    /// <param name="instanceAddress">the native sgb instance address</param>
-    /// <param name="instanceScope">the tracked scope metadata when found</param>
-    /// <returns>true when the instance scope is currently registered</returns>
-    bool TryGetInstanceScope(nint instanceAddress, out ObjectResourceScope instanceScope);
-
-    /// <summary>
-    /// Removes one registered root resource handle scope.
-    /// </summary>
-    /// <param name="resourceHandleAddress">the native root resource handle address</param>
-    /// <param name="ownerId">the local scene object registration owner</param>
-    /// <returns>true when an entry was removed</returns>
-    bool RemoveRootHandle(nint resourceHandleAddress, Guid ownerId);
-
-    /// <summary>
-    /// Removes one registered root sgb instance scope.
-    /// </summary>
-    /// <param name="instanceAddress">the native root sgb instance address</param>
-    /// <param name="ownerId">the local scene object registration owner</param>
-    /// <returns>true when an entry was removed</returns>
-    bool RemoveRootInstance(nint instanceAddress, Guid ownerId);
-
-    /// <summary>
-    /// Removes one tracked resource handle scope.
-    /// </summary>
-    /// <param name="resourceHandleAddress">the native tracked resource handle address</param>
-    /// <returns>true when a tracked entry was removed</returns>
-    bool RemoveTrackedHandle(nint resourceHandleAddress);
-
-    /// <summary>
-    /// Removes one tracked sgb instance scope.
-    /// </summary>
-    /// <param name="instanceAddress">the native tracked sgb instance address</param>
-    /// <returns>true when a tracked entry was removed</returns>
-    bool RemoveTrackedInstance(nint instanceAddress);
-}
-
-internal sealed class ObjectResourceTracker : IObjectResourceTracker
-{
-    private sealed class TrackedResourceScopes
+    private sealed class TrackedResourceScopes : IDisposable
     {
         public readonly Dictionary<Guid, ObjectResourceScope> RootScopes = [];
         public readonly HashSet<ObjectResourceScope> RedirectedScopes = [];
+        public readonly Dictionary<long, ObjectResourceCollectionLease> Leases = [];
+
+        public void Dispose()
+        {
+            foreach (ObjectResourceCollectionLease lease in Leases.Values)
+            {
+                lease.Dispose();
+            }
+        }
     }
 
     private readonly ILogger<ObjectResourceTracker> _logger;
+    private readonly IObjectResolvedCollectionStore _collectionStore;
+    private readonly ObjectResourceLoadScope _loadScope;
+
     private readonly Lock _lock = new();
     private readonly Dictionary<nint, TrackedResourceScopes> _handleScopes = [];
     private readonly Dictionary<nint, TrackedResourceScopes> _instanceScopes = [];
+    private bool _disposed;
 
-    public ObjectResourceTracker(ILogger<ObjectResourceTracker> logger)
+    public ObjectResourceTracker(
+        ILogger<ObjectResourceTracker> logger,
+        IObjectResolvedCollectionStore collectionStore,
+        ObjectResourceLoadScope loadScope)
     {
         _logger = logger;
+        _collectionStore = collectionStore;
+        _loadScope = loadScope;
     }
 
     public void RegisterOrUpdateRootHandle(nint resourceHandleAddress, Guid ownerId, ObjectResourceScope handleScope)
@@ -213,9 +159,20 @@ internal sealed class ObjectResourceTracker : IObjectResourceTracker
 
         lock (_lock)
         {
+            if (_disposed)
+            {
+                return;
+            }
+
             TrackedResourceScopes trackedScopes = GetOrAddTrackedScopes(_handleScopes, resourceHandleAddress);
-            trackedScopes.RedirectedScopes.Add(handleScope);
-            LogConflictingScopes(resourceHandleAddress, trackedScopes);
+            if (!TryRetainScope(trackedScopes, handleScope, out ObjectResourceScope retainedScope))
+            {
+                RemoveAddressIfEmpty(_handleScopes, resourceHandleAddress, trackedScopes);
+                return;
+            }
+
+            trackedScopes.RedirectedScopes.Add(retainedScope);
+            _ = TryResolveSingleScope(resourceHandleAddress, trackedScopes, out _);
         }
     }
 
@@ -237,6 +194,21 @@ internal sealed class ObjectResourceTracker : IObjectResourceTracker
     public bool RemoveTrackedInstance(nint instanceAddress)
         => RemoveTrackedScope(_instanceScopes, instanceAddress);
 
+    public void Dispose()
+    {
+        lock (_lock)
+        {
+            _disposed = true;
+            foreach (TrackedResourceScopes scopes in _handleScopes.Values.Concat(_instanceScopes.Values))
+            {
+                scopes.Dispose();
+            }
+
+            _handleScopes.Clear();
+            _instanceScopes.Clear();
+        }
+    }
+
     private void RegisterOrUpdateRootScope(
         Dictionary<nint, TrackedResourceScopes> scopesByAddress,
         nint address,
@@ -251,9 +223,79 @@ internal sealed class ObjectResourceTracker : IObjectResourceTracker
 
         lock (_lock)
         {
+            if (_disposed)
+            {
+                return;
+            }
+
             TrackedResourceScopes trackedScopes = GetOrAddTrackedScopes(scopesByAddress, address);
-            trackedScopes.RootScopes[ownerId] = scope;
-            LogConflictingScopes(address, trackedScopes);
+            if (TryRetainScope(trackedScopes, scope, out ObjectResourceScope retainedScope))
+            {
+                trackedScopes.RootScopes[ownerId] = retainedScope;
+            }
+            else
+            {
+                trackedScopes.RootScopes.Remove(ownerId);
+            }
+
+            ReleaseUnusedScopes(trackedScopes);
+            RemoveAddressIfEmpty(scopesByAddress, address, trackedScopes);
+            _ = TryResolveSingleScope(address, trackedScopes, out _);
+        }
+    }
+
+    private bool TryRetainScope(TrackedResourceScopes trackedScopes, ObjectResourceScope scope, out ObjectResourceScope retainedScope)
+    {
+        retainedScope = default;
+        long resourceScopeId = scope.ResourceScopeId;
+        if (resourceScopeId == 0)
+        {
+            // root registration follows the generation already returned by the native loader
+            resourceScopeId = trackedScopes.RedirectedScopes.FirstOrDefault(redirectedScope
+                => string.Equals(redirectedScope.ResourceCollectionId, scope.ResourceCollectionId, StringComparison.Ordinal)
+                && string.Equals(redirectedScope.ResolvedPath, scope.ResolvedPath, StringComparison.OrdinalIgnoreCase)).ResourceScopeId;
+        }
+
+        if (resourceScopeId == 0
+         && _loadScope.TryReadActiveCollection(out ObjectCollectionResolveData activeCollection)
+         && string.Equals(activeCollection.CollectionId, scope.ResourceCollectionId, StringComparison.Ordinal))
+        {
+            resourceScopeId = activeCollection.ResourceScopeId;
+        }
+
+        if (!trackedScopes.Leases.TryGetValue(resourceScopeId, out ObjectResourceCollectionLease? lease))
+        {
+            lease = resourceScopeId == 0
+                ? _collectionStore.AcquireCollection(scope.ResourceCollectionId)
+                : _collectionStore.AcquireResourceScope(resourceScopeId);
+            if (lease is null)
+            {
+                return false;
+            }
+
+            resourceScopeId = lease.Snapshot.ResourceScopeId;
+            if (!trackedScopes.Leases.TryAdd(resourceScopeId, lease))
+            {
+                lease.Dispose();
+            }
+        }
+
+        retainedScope = new ObjectResourceScope(scope.ResourceCollectionId, scope.ResolvedPath, resourceScopeId);
+        return true;
+    }
+
+    private static void ReleaseUnusedScopes(TrackedResourceScopes trackedScopes)
+    {
+        foreach (long scopeId in trackedScopes.Leases.Keys.ToArray())
+        {
+            if (trackedScopes.RootScopes.Values.Any(scope => scope.ResourceScopeId == scopeId)
+             || trackedScopes.RedirectedScopes.Any(scope => scope.ResourceScopeId == scopeId))
+            {
+                continue;
+            }
+
+            trackedScopes.Leases.Remove(scopeId, out ObjectResourceCollectionLease? lease);
+            lease!.Dispose();
         }
     }
 
@@ -289,6 +331,7 @@ internal sealed class ObjectResourceTracker : IObjectResourceTracker
             }
 
             bool removed = trackedScopes.RootScopes.Remove(ownerId);
+            ReleaseUnusedScopes(trackedScopes);
             RemoveAddressIfEmpty(scopesByAddress, address, trackedScopes);
             return removed;
         }
@@ -303,15 +346,13 @@ internal sealed class ObjectResourceTracker : IObjectResourceTracker
 
         lock (_lock)
         {
-            if (!scopesByAddress.TryGetValue(address, out TrackedResourceScopes? trackedScopes))
+            if (!scopesByAddress.Remove(address, out TrackedResourceScopes? trackedScopes))
             {
                 return false;
             }
 
-            bool removed = trackedScopes.RedirectedScopes.Count > 0;
-            trackedScopes.RedirectedScopes.Clear();
-            RemoveAddressIfEmpty(scopesByAddress, address, trackedScopes);
-            return removed;
+            trackedScopes.Dispose();
+            return true;
         }
     }
 
@@ -397,59 +438,11 @@ internal sealed class ObjectResourceTracker : IObjectResourceTracker
             return true;
         }
 
+        // we don't skip
         _logger.LogDebug(
-            "skipping object resource scope for shared address 0x{Address:X} because it has conflicting collection scopes",
+            "object resource address 0x{Address:X} has conflicting collection scopes",
             (ulong)address);
         currentScope = default;
         return false;
     }
-
-    private void LogConflictingScopes(nint address, TrackedResourceScopes trackedScopes)
-    {
-        if (!HasConflictingScopes(trackedScopes))
-        {
-            return;
-        }
-
-        _logger.LogDebug(
-            "tracked object resource address 0x{Address:X} has multiple collection scopes and dependent loads will not guess a collection",
-            (ulong)address);
-    }
-
-    private static bool HasConflictingScopes(TrackedResourceScopes trackedScopes)
-    {
-        bool hasScope = false;
-        ObjectResourceScope currentScope = default;
-        foreach (ObjectResourceScope scope in trackedScopes.RootScopes.Values)
-        {
-            if (!TryMatchScope(scope, ref currentScope, ref hasScope))
-            {
-                return true;
-            }
-        }
-
-        foreach (ObjectResourceScope scope in trackedScopes.RedirectedScopes)
-        {
-            if (!TryMatchScope(scope, ref currentScope, ref hasScope))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private static bool TryMatchScope(ObjectResourceScope scope, ref ObjectResourceScope currentScope, ref bool hasScope)
-    {
-        if (!hasScope)
-        {
-            currentScope = scope;
-            hasScope = true;
-            return true;
-        }
-
-        return currentScope == scope;
-    }
 }
-
-

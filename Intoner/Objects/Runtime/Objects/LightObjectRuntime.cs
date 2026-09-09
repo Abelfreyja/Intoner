@@ -117,8 +117,7 @@ internal sealed unsafe class LightObjectRuntime : DrawObjectRuntime
         }
 
         Logger.LogInformation("destroying light 0x{Address:X}", (ulong)(nint)_light);
-        _light->CleanupRender();
-        _light->Dtor(DestroyFlagsFree);
+        DestroyNative((DrawObject*)_light);
         _light = null;
     }
 

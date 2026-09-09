@@ -39,7 +39,7 @@ internal sealed class GpuTextureView(Texture2D texture, ShaderResourceView view)
                     texture = new Texture2D(
                         device,
                         CreateTextureDescription(width, height),
-                        new DataRectangle((IntPtr)pixelData, width * 4));
+                        new DataRectangle((nint)pixelData, width * 4));
                     ShaderResourceView view = new(device, texture);
                     GpuTextureView result = new(texture, view);
                     texture = null;

@@ -186,6 +186,10 @@ internal abstract class ObjectRuntime : IObjectRuntime
         Snapshot = snapshot;
     }
 
+    internal virtual void Initialize()
+    {
+    }
+
     public ObjectRuntimeUpdateResult TryUpdate(ObjectSnapshot snapshot)
         => RunOnFrameworkThread(() => TryUpdateUnsafe(snapshot));
 
@@ -210,7 +214,13 @@ internal abstract class ObjectRuntime : IObjectRuntime
 
     public void Dispose()
     {
-        if (_disposed)
+        Dispose(disposing: true);
+        GC.SuppressFinalize(this);
+    }
+
+    protected virtual void Dispose(bool disposing)
+    {
+        if (_disposed || !disposing)
         {
             return;
         }
@@ -314,6 +324,12 @@ internal abstract unsafe class LayoutObjectRuntime : ObjectRuntime
 
 internal abstract unsafe class DrawObjectRuntime : ObjectRuntime
 {
+    internal static void DestroyNative(DrawObject* drawObject)
+    {
+        drawObject->CleanupRender();
+        drawObject->Dtor(DestroyFlagsFree);
+    }
+
     protected abstract DrawObject* DrawObjectPointer { get; }
 
     protected DrawObjectRuntime(IFramework framework, ILogger logger, ObjectSnapshot snapshot)

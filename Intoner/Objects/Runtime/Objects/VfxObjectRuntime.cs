@@ -3,7 +3,6 @@ using Intoner.Objects.Assets;
 using Intoner.Objects.Interop;
 using Intoner.Objects.Models;
 using Intoner.Objects.Resources;
-using Intoner.Objects.Utils;
 using Intoner.Scene;
 using Microsoft.Extensions.Logging;
 using System.Numerics;
@@ -22,7 +21,7 @@ internal sealed unsafe class VfxObjectRuntime : DrawObjectRuntime
     private SceneVfxObject* _vfxObject;
     private string _vfxPath;
     private readonly ObjectNativeBindings.VfxBinding _nativeBinding;
-    private readonly IObjectResourceTracker _resourceTracker;
+    private readonly ObjectResourceTracker _resourceTracker;
     private bool _needsPlaybackApply;
     private bool _needsVisualReplay = true;
     private long _nextLoopReplayMilliseconds;
@@ -50,7 +49,7 @@ internal sealed unsafe class VfxObjectRuntime : DrawObjectRuntime
         SceneVfxObject* vfxObject,
         string vfxPath,
         ObjectNativeBindings.VfxBinding nativeBinding,
-        IObjectResourceTracker resourceTracker)
+        ObjectResourceTracker resourceTracker)
         : base(framework, logger, snapshot)
     {
         _vfxObject = vfxObject;
@@ -58,8 +57,10 @@ internal sealed unsafe class VfxObjectRuntime : DrawObjectRuntime
         _nativeBinding = nativeBinding;
         _resourceTracker = resourceTracker;
         _rootHandleRegistration = new ObjectResourceRegistration(snapshot.Id);
-        UpdateRegisteredRootHandle(snapshot);
     }
+
+    internal override void Initialize()
+        => UpdateRegisteredRootHandle(Snapshot);
 
     private bool HasActiveLoopReplay
         => Snapshot.Model is VfxModel model && IsLoopReplayActive(model);
@@ -102,6 +103,12 @@ internal sealed unsafe class VfxObjectRuntime : DrawObjectRuntime
         if (string.IsNullOrWhiteSpace(vfxModel.VfxPath) || !GameAssetPathRules.IsFileKind(vfxModel.VfxPath, GameAssetFileKind.Avfx))
         {
             Logger.LogDebug("skipping vfx update because path is empty or invalid");
+            return ObjectRuntimeUpdateResult.Rejected;
+        }
+
+        if (!_nativeBinding.SupportsPlaybackState(vfxModel.Speed, vfxModel.Paused))
+        {
+            Logger.LogDebug("skipping vfx update because playback bindings are unavailable");
             return ObjectRuntimeUpdateResult.Rejected;
         }
 
@@ -193,8 +200,7 @@ internal sealed unsafe class VfxObjectRuntime : DrawObjectRuntime
             _vfxPath);
 
         _rootHandleRegistration.Clear(_resourceTracker);
-        _vfxObject->CleanupRender();
-        _vfxObject->Dtor(DestroyFlagsFree);
+        DestroyNative((DrawObject*)_vfxObject);
 
         _vfxObject = null;
         _vfxPath = string.Empty;

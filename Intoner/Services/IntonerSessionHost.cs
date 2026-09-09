@@ -85,8 +85,7 @@ internal sealed class IntonerSessionHost : IAsyncDisposable
             }
             else
             {
-                await scope.DisposeAsync().ConfigureAwait(false);
-                await provider.DisposeAsync().ConfigureAwait(false);
+                await DisposeServicesAsync(scope, provider).ConfigureAwait(false);
             }
 
             throw;
@@ -114,8 +113,19 @@ internal sealed class IntonerSessionHost : IAsyncDisposable
         }
         finally
         {
-            await _scope.DisposeAsync().ConfigureAwait(false);
-            await _provider.DisposeAsync().ConfigureAwait(false);
+            await DisposeServicesAsync(_scope, _provider).ConfigureAwait(false);
+        }
+    }
+
+    internal static async ValueTask DisposeServicesAsync(AsyncServiceScope scope, ServiceProvider provider)
+    {
+        try
+        {
+            await scope.DisposeAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            await provider.DisposeAsync().ConfigureAwait(false);
         }
     }
 }

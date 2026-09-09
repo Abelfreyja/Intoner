@@ -89,12 +89,6 @@ internal static unsafe class FurnitureSceneInterop
         return true;
     }
 
-    private static void ApplyCustomStainColor(SharedGroupLayoutInstance* instance, Vector4 customColor)
-    {
-        var stainColor = ColorUtility.ToOpaqueByteColor(customColor);
-        ApplyCustomStainColor(&instance->Instances, &stainColor);
-    }
-
     private static bool TryApplyNativeStainColor(ILogger logger, SharedGroupLayoutInstance* instance, byte chosenStainId)
     {
         var sharedGroupChildCount = GetSharedGroupChildCount(instance);
@@ -194,9 +188,15 @@ internal static unsafe class FurnitureSceneInterop
         return primaryPath.HasValue ? primaryPath.ToString() : string.Empty;
     }
 
+    private static void ApplyCustomStainColor(SharedGroupLayoutInstance* instance, Vector4 customColor)
+    {
+        var stainColor = ColorUtility.ToOpaqueByteColor(customColor);
+        ApplyCustomStainColor(&instance->Instances, &stainColor);
+    }
+
     private static void ApplyCustomStainColor(ChildNodeContainer* container, ByteColor* stainColor)
     {
-        foreach (var child in container->Instances)
+        foreach (var child in container->Instances.AsSpan())
         {
             var node = child.Value;
             if (node == null || node->Instance == null)
@@ -216,7 +216,7 @@ internal static unsafe class FurnitureSceneInterop
 
     private static void AppendSelectionDraws(ChildNodeContainer* container, ObjectSnapshot snapshot, SceneSelectionCollector collector)
     {
-        foreach (var child in container->Instances)
+        foreach (var child in container->Instances.AsSpan())
         {
             var node = child.Value;
             if (node == null || node->Instance == null)
@@ -250,7 +250,7 @@ internal static unsafe class FurnitureSceneInterop
 
     private static void ApplyTransparency(ChildNodeContainer* container, float transparency)
     {
-        foreach (var child in container->Instances)
+        foreach (var child in container->Instances.AsSpan())
         {
             var node = child.Value;
             if (node == null || node->Instance == null)
@@ -287,7 +287,7 @@ internal static unsafe class FurnitureSceneInterop
 
     private static void ApplyOutlineColor(ChildNodeContainer* container, ObjectOutlineColor outlineColor)
     {
-        foreach (var child in container->Instances)
+        foreach (var child in container->Instances.AsSpan())
         {
             var node = child.Value;
             if (node == null || node->Instance == null)
