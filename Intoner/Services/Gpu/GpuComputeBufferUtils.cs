@@ -247,7 +247,7 @@ internal static class GpuComputeBufferUtils
         DeviceContext context,
         D3D11Buffer sourceBuffer,
         int elementCount,
-        GpuResourcePoolService? resourcePool = null)
+        GpuResourcePoolService resourcePool)
         => ReadBackArray(
             device,
             context,
@@ -304,7 +304,7 @@ internal static class GpuComputeBufferUtils
         DeviceContext context,
         D3D11Buffer sourceBuffer,
         int elementCount,
-        GpuResourcePoolService? resourcePool = null)
+        GpuResourcePoolService resourcePool)
         => ReadBackArray(
             device,
             context,
@@ -345,7 +345,7 @@ internal static class GpuComputeBufferUtils
         D3D11Buffer sourceBuffer,
         int elementCount,
         int elementSizeInBytes,
-        GpuResourcePoolService? resourcePool,
+        GpuResourcePoolService resourcePool,
         string sizeErrorMessage,
         Func<nint, T[]> reader)
     {
@@ -361,8 +361,7 @@ internal static class GpuComputeBufferUtils
             throw new InvalidOperationException(sizeErrorMessage);
         }
 
-        var pool = resourcePool ?? GpuResourcePoolService.Shared;
-        var readbackBuffer = pool.RentReadbackBufferFromRing(device, sizeInBytes);
+        var readbackBuffer = resourcePool.RentReadbackBufferFromRing(device, sizeInBytes);
         CopyBufferToReadback(context, sourceBuffer, readbackBuffer, sizeInBytes, sourceSizeInBytes);
         var mapped = context.MapSubresource(readbackBuffer, 0, MapMode.Read, MapFlags.None);
         try

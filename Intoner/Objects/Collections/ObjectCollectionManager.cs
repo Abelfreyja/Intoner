@@ -1,17 +1,16 @@
-using Intoner.Services.Storage;
 using Intoner.Objects.Models;
 using Intoner.Objects.Resources;
 using Intoner.Objects.Runtime;
 using Intoner.Objects.Utils;
+using Intoner.Services.Storage;
+using Intoner.Utils;
 using Microsoft.Extensions.Logging;
 using System.Text.Json;
-
-using Intoner.Utils;
 
 namespace Intoner.Objects.Collections;
 
 /// <summary> owns object collections, persistence, and runtime materialization </summary>
-internal interface IObjectCollectionManager : IDisposable
+internal interface IObjectCollectionManager : IAsyncDisposable
 {
     /// <summary> raised when collections or runtime state change </summary>
     event Action? CollectionsChanged;
@@ -106,6 +105,7 @@ internal sealed class ObjectCollectionManager : IObjectCollectionManager
     private readonly ILogger<ObjectCollectionManager> _logger;
     private readonly Lock _stateLock;
     private readonly Dictionary<string, CollectionState> _collections = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<CancellationTokenSource, Task> _resolveTasks = [];
     private readonly DisposalState _disposeState = new();
     private readonly record struct CollectionUsage(
         IReadOnlyList<ObjectSnapshot> Snapshots,
@@ -469,7 +469,7 @@ internal sealed class ObjectCollectionManager : IObjectCollectionManager
         }
     }
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
         if (!_disposeState.TryBeginDispose())
         {
@@ -478,19 +478,46 @@ internal sealed class ObjectCollectionManager : IObjectCollectionManager
 
         _modDataSource.StateChanged -= HandleModDataChange;
 
-        List<CancellationTokenSource> cancellations;
+        try
+        {
+            await StopResolveTasksAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            lock (_stateLock)
+            {
+                foreach (string collectionId in _collections.Keys)
+                {
+                    _resolvedCollectionStore.RemoveCollection(collectionId);
+                }
+            }
+        }
+    }
+
+    private Task StopResolveTasksAsync()
+    {
         lock (_stateLock)
         {
-            cancellations = _collections.Values
-                .Select(static state => state.ResolveCancellation)
-                .Where(static cancellation => cancellation is not null)
-                .Cast<CancellationTokenSource>()
-                .ToList();
-        }
+            Task completion = Task.WhenAll(_resolveTasks.Values);
+            // cancellation and disposal share the same lock
+            foreach (CancellationTokenSource cancellation in _resolveTasks.Keys.ToArray())
+            {
+                if (!_resolveTasks.ContainsKey(cancellation))
+                {
+                    continue;
+                }
 
-        foreach (CancellationTokenSource cancellation in cancellations)
-        {
-            cancellation.Cancel();
+                try
+                {
+                    cancellation.Cancel();
+                }
+                catch (AggregateException ex)
+                {
+                    _logger.LogWarning(ex, "object collection resolve cancellation failed");
+                }
+            }
+
+            return completion;
         }
     }
 
@@ -780,13 +807,6 @@ internal sealed class ObjectCollectionManager : IObjectCollectionManager
         CollectionUsage usage,
         CollectionMaterializationStamp materializationStamp)
     {
-        if (IsDisposing)
-        {
-            return;
-        }
-
-        CancellationTokenSource cancellation;
-        CancellationToken cancellationToken;
         lock (_stateLock)
         {
             if (IsDisposing || !_collections.TryGetValue(collectionId, out CollectionState? state))
@@ -795,174 +815,145 @@ internal sealed class ObjectCollectionManager : IObjectCollectionManager
             }
 
             state.ResolveCancellation?.Cancel();
-            cancellation = new CancellationTokenSource();
-            cancellationToken = cancellation.Token;
+            CancellationTokenSource cancellation = new();
             state.ResolveCancellation = cancellation;
             state.PendingMaterialization = materializationStamp;
+            _resolveTasks.Add(cancellation, Task.Run(() =>
+                ResolveCollectionAsync(collectionId, usage, cancellation, materializationStamp)));
         }
-
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                await ResolveCollectionAsync(
-                    collectionId,
-                    usage,
-                    cancellation,
-                    cancellationToken,
-                    materializationStamp).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                // ignore replaced resolve requests
-            }
-            catch (Exception ex)
-            {
-                HandleResolveFailure(collectionId, usage, cancellation, materializationStamp, ex);
-            }
-            finally
-            {
-                DisposeResolveCancellation(collectionId, cancellation);
-            }
-        });
     }
 
     private async Task ResolveCollectionAsync(
         string collectionId,
         CollectionUsage usage,
         CancellationTokenSource resolveCancellation,
-        CancellationToken cancellationToken,
         CollectionMaterializationStamp materializationStamp)
     {
-        ObjectCollection record;
-        lock (_stateLock)
+        try
         {
-            if (IsDisposing
-                || !_collections.TryGetValue(collectionId, out CollectionState? state)
-                || !ReferenceEquals(state.ResolveCancellation, resolveCancellation))
+            ObjectCollection record;
+            lock (_stateLock)
             {
-                return;
+                if (IsDisposing
+                    || !_collections.TryGetValue(collectionId, out CollectionState? state)
+                    || !ReferenceEquals(state.ResolveCancellation, resolveCancellation))
+                {
+                    return;
+                }
+
+                record = CloneCollectionRecord(state.Record);
             }
 
-            record = CloneCollectionRecord(state.Record);
+            ObjectCollectionResolveResult result = await _resolver.ResolveAsync(
+                record, usage.Snapshots, resolveCancellation.Token).ConfigureAwait(false);
+            if (TryApplyResolveResult(collectionId, usage, resolveCancellation, materializationStamp, result))
+            {
+                _logger.LogInformation(
+                    "object collection {CollectionId} resolve result {ResolveState} with {RedirectCount} redirects for {UsageCount} objects: {StatusText}",
+                    collectionId, result.ResolveState, result.Redirects.Count, usage.Snapshots.Count, result.StatusText);
+                RaiseCollectionsChanged();
+            }
         }
-
-        ObjectCollectionResolveResult resolveResult = await _resolver.ResolveAsync(record, usage.Snapshots, cancellationToken).ConfigureAwait(false);
-        if (IsDisposing || cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException)
         {
-            return;
+            // ignore replaced resolve requests
         }
+        catch (Exception ex)
+        {
+            ObjectCollectionResolveResult failure = new()
+            {
+                ResolveState = ObjectCollectionResolveState.ResolveFailed,
+                StatusText = $"object collection resolve failed: {ex.Message}",
+            };
+            if (TryApplyResolveResult(collectionId, usage, resolveCancellation, materializationStamp, failure, forceRuntimeRefresh: true))
+            {
+                _logger.LogWarning(ex, "object collection {CollectionId} resolve task failed", collectionId);
+                RaiseCollectionsChanged();
+            }
+        }
+        finally
+        {
+            DisposeResolveCancellation(collectionId, resolveCancellation);
+        }
+    }
 
-        bool shouldRegisterRuntimeCollection;
-        string runtimeCollectionId = string.Empty;
-        IReadOnlyList<ObjectPathRedirection> runtimeRedirects = [];
-        bool forceRuntimeRefresh = false;
+    private bool TryApplyResolveResult(
+        string collectionId,
+        CollectionUsage usage,
+        CancellationTokenSource resolveCancellation,
+        CollectionMaterializationStamp materializationStamp,
+        ObjectCollectionResolveResult resolveResult,
+        bool forceRuntimeRefresh = false)
+    {
         lock (_stateLock)
         {
             if (IsDisposing
+                || resolveCancellation.IsCancellationRequested
                 || !_collections.TryGetValue(collectionId, out CollectionState? state)
                 || !CanApplyResolveResultLocked(state, usage, resolveCancellation, materializationStamp))
             {
-                return;
+                return false;
             }
 
             bool keepLastGoodSnapshot = resolveResult.KeepLastGoodSnapshot
                 && state.CurrentMaterialization.MatchesUsage(usage.Signature, state.MaterializationGeneration)
                 && _resolvedCollectionStore.TryGetCollection(state.Record.CollectionId, out _);
 
-            AcceptMaterializationLocked(state, materializationStamp);
-            forceRuntimeRefresh = state.ForceNextRuntimeRefresh;
+            state.CurrentMaterialization = materializationStamp;
+            state.PendingMaterialization = CollectionMaterializationStamp.Empty;
+            forceRuntimeRefresh |= state.ForceNextRuntimeRefresh;
             state.ForceNextRuntimeRefresh = false;
             state.ResolveState = resolveResult.ResolveState;
             state.StatusText = resolveResult.StatusText;
             state.Warnings = resolveResult.Warnings;
             state.KeepingLastGoodSnapshot = keepLastGoodSnapshot;
             state.RedirectCount = resolveResult.Redirects.Count;
-            runtimeCollectionId = state.Record.CollectionId;
+            string runtimeCollectionId = state.Record.CollectionId;
+            IReadOnlyList<ObjectPathRedirection> runtimeRedirects = [];
 
             if (resolveResult.ResolveState == ObjectCollectionResolveState.Ready)
             {
                 runtimeRedirects = resolveResult.Redirects;
             }
 
-            shouldRegisterRuntimeCollection = !keepLastGoodSnapshot;
-        }
+            bool shouldRegisterRuntimeCollection = !keepLastGoodSnapshot;
 
-        if (!shouldRegisterRuntimeCollection
-            && forceRuntimeRefresh
-            && _resolvedCollectionStore.TryGetCollection(runtimeCollectionId, out ObjectCollectionResolveData existingRuntimeCollection))
-        {
-            shouldRegisterRuntimeCollection = true;
-            runtimeRedirects = ObjectPathRedirectionUtility.CreateStableList(
-                existingRuntimeCollection.Redirects.Select(static pair =>
-                    new ObjectPathRedirection(pair.Key, pair.Value)));
-        }
-
-        if (shouldRegisterRuntimeCollection)
-        {
-            _resolvedCollectionStore.RegisterCollection(
-                runtimeCollectionId,
-                runtimeRedirects,
-                forceRefresh: forceRuntimeRefresh,
-                resourceViews: resolveResult.ResourceViews);
-        }
-
-        _logger.LogInformation(
-            "object collection {CollectionId} resolve result {ResolveState} with {RedirectCount} redirects for {UsageCount} objects: {StatusText}",
-            collectionId,
-            resolveResult.ResolveState,
-            resolveResult.Redirects.Count,
-            usage.Snapshots.Count,
-            resolveResult.StatusText);
-
-        RaiseCollectionsChanged();
-    }
-
-    private void HandleResolveFailure(
-        string collectionId,
-        CollectionUsage usage,
-        CancellationTokenSource resolveCancellation,
-        CollectionMaterializationStamp materializationStamp,
-        Exception ex)
-    {
-        string runtimeCollectionId = string.Empty;
-        lock (_stateLock)
-        {
-            if (IsDisposing
-                || !_collections.TryGetValue(collectionId, out CollectionState? state)
-                || !CanApplyResolveResultLocked(state, usage, resolveCancellation, materializationStamp))
+            if (!shouldRegisterRuntimeCollection
+                && forceRuntimeRefresh
+                && _resolvedCollectionStore.TryGetCollection(runtimeCollectionId, out ObjectCollectionResolveData existingRuntimeCollection))
             {
-                return;
+                shouldRegisterRuntimeCollection = true;
+                runtimeRedirects = ObjectPathRedirectionUtility.CreateStableList(
+                    existingRuntimeCollection.Redirects.Select(static pair =>
+                        new ObjectPathRedirection(pair.Key, pair.Value)));
             }
 
-            AcceptMaterializationLocked(state, materializationStamp);
-            state.ForceNextRuntimeRefresh = false;
-            state.ResolveState = ObjectCollectionResolveState.ResolveFailed;
-            state.StatusText = $"object collection resolve failed: {ex.Message}";
-            state.Warnings = [];
-            state.KeepingLastGoodSnapshot = false;
-            state.RedirectCount = 0;
-            runtimeCollectionId = state.Record.CollectionId;
-        }
+            if (shouldRegisterRuntimeCollection)
+            {
+                _resolvedCollectionStore.RegisterCollection(
+                    runtimeCollectionId,
+                    runtimeRedirects,
+                    forceRefresh: forceRuntimeRefresh,
+                    resourceViews: resolveResult.ResourceViews);
+            }
 
-        _logger.LogWarning(ex, "object collection {CollectionId} resolve task failed", collectionId);
-        _resolvedCollectionStore.RegisterCollection(runtimeCollectionId, [], forceRefresh: true);
-        RaiseCollectionsChanged();
+            return true;
+        }
     }
 
     private void DisposeResolveCancellation(string collectionId, CancellationTokenSource resolveCancellation)
     {
         lock (_stateLock)
         {
-            if (!IsDisposing
-             && _collections.TryGetValue(collectionId, out CollectionState? state)
+            if (_collections.TryGetValue(collectionId, out CollectionState? state)
              && ReferenceEquals(state.ResolveCancellation, resolveCancellation))
             {
                 state.ResolveCancellation = null;
             }
-        }
 
-        resolveCancellation.Dispose();
+            _resolveTasks.Remove(resolveCancellation);
+            resolveCancellation.Dispose();
+        }
     }
 
     private static bool CanApplyResolveResultLocked(
@@ -984,12 +975,6 @@ internal sealed class ObjectCollectionManager : IObjectCollectionManager
 
     private static CollectionMaterializationStamp CreateMaterializationStampLocked(CollectionState state, string usageSignature)
         => new(usageSignature, state.MaterializationGeneration, state.InvalidationVersion);
-
-    private static void AcceptMaterializationLocked(CollectionState state, CollectionMaterializationStamp materializationStamp)
-    {
-        state.CurrentMaterialization = materializationStamp;
-        state.PendingMaterialization = CollectionMaterializationStamp.Empty;
-    }
 
     private static bool HasPendingResolveLocked(CollectionState state, CollectionMaterializationStamp materializationStamp)
         => state.ResolveCancellation is { IsCancellationRequested: false }

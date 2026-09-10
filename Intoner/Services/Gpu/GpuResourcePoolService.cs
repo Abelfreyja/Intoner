@@ -140,8 +140,6 @@ public sealed class GpuResourcePoolService : IDisposable
     private const int MaxItemsPerBucket = 4;
     private const int DefaultReadbackRingSize = 3;
 
-    public static GpuResourcePoolService Shared { get; } = new();
-
     private readonly Lock _sync = new();
     private readonly Dictionary<StructuredBufferPoolKey, Stack<PooledStructuredBuffer>> _structuredBuffers = new();
     private readonly Dictionary<Texture2DPoolKey, Stack<PooledTexture2D>> _textures = new();
@@ -244,65 +242,6 @@ public sealed class GpuResourcePoolService : IDisposable
             }
 
             return ring.Rent();
-        }
-    }
-
-    public void InvalidateDeviceResources(nint devicePointer)
-    {
-        if (devicePointer == nint.Zero)
-        {
-            return;
-        }
-
-        List<PooledStructuredBuffer>? structuredToDispose = null;
-        List<PooledTexture2D>? texturesToDispose = null;
-        List<ReadbackBufferRing>? ringsToDispose = null;
-        lock (_sync)
-        {
-            foreach (var pair in _structuredBuffers.Where(kvp => kvp.Key.DevicePointer == devicePointer).ToArray())
-            {
-                _structuredBuffers.Remove(pair.Key);
-                structuredToDispose ??= [];
-                structuredToDispose.AddRange(pair.Value);
-            }
-
-            foreach (var pair in _textures.Where(kvp => kvp.Key.DevicePointer == devicePointer).ToArray())
-            {
-                _textures.Remove(pair.Key);
-                texturesToDispose ??= [];
-                texturesToDispose.AddRange(pair.Value);
-            }
-
-            foreach (var pair in _readbackRings.Where(kvp => kvp.Key.DevicePointer == devicePointer).ToArray())
-            {
-                _readbackRings.Remove(pair.Key);
-                ringsToDispose ??= [];
-                ringsToDispose.Add(pair.Value);
-            }
-        }
-
-        if (structuredToDispose is not null)
-        {
-            for (var i = 0; i < structuredToDispose.Count; i++)
-            {
-                structuredToDispose[i].Dispose();
-            }
-        }
-
-        if (texturesToDispose is not null)
-        {
-            for (var i = 0; i < texturesToDispose.Count; i++)
-            {
-                texturesToDispose[i].Dispose();
-            }
-        }
-
-        if (ringsToDispose is not null)
-        {
-            for (var i = 0; i < ringsToDispose.Count; i++)
-            {
-                ringsToDispose[i].Dispose();
-            }
         }
     }
 

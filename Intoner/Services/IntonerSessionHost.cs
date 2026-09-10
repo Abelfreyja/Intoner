@@ -12,13 +12,6 @@ namespace Intoner.Services;
 
 internal sealed class IntonerSessionHost : IAsyncDisposable
 {
-    private static readonly ServiceProviderOptions ProviderOptions = new()
-    {
-        ValidateOnBuild = true,
-        ValidateScopes = true,
-    };
-
-    private readonly ServiceProvider _provider;
     private readonly AsyncServiceScope _scope;
     private readonly ILogger<IntonerSessionHost> _logger;
     private readonly IIntonerMediator _mediator;
@@ -27,14 +20,12 @@ internal sealed class IntonerSessionHost : IAsyncDisposable
     private int _disposed;
 
     private IntonerSessionHost(
-        ServiceProvider provider,
         AsyncServiceScope scope,
         ILogger<IntonerSessionHost> logger,
         IIntonerMediator mediator,
         IntonerWindowService windowService,
         ObjectHousingCullingService housingCullingService)
     {
-        _provider = provider;
         _scope = scope;
         _logger = logger;
         _mediator = mediator;
@@ -43,14 +34,9 @@ internal sealed class IntonerSessionHost : IAsyncDisposable
     }
 
     public static async Task<IntonerSessionHost> CreateAsync(
-        IntonerDalamudServices dalamudServices,
+        IServiceProvider provider,
         CancellationToken cancellationToken)
     {
-        ServiceCollection services = [];
-        services
-            .AddIntonerServices(dalamudServices);
-
-        ServiceProvider provider = services.BuildServiceProvider(ProviderOptions);
         AsyncServiceScope scope = provider.CreateAsyncScope();
         IntonerSessionHost? host = null;
 
@@ -64,7 +50,6 @@ internal sealed class IntonerSessionHost : IAsyncDisposable
             ILogger<IntonerSessionHost> logger = scopedProvider.GetRequiredService<ILogger<IntonerSessionHost>>();
             IntonerSignatures.Verify(scopedProvider.GetRequiredService<ISigScanner>(), logger);
             host = new IntonerSessionHost(
-                provider,
                 scope,
                 logger,
                 scopedProvider.GetRequiredService<IIntonerMediator>(),
@@ -81,15 +66,7 @@ internal sealed class IntonerSessionHost : IAsyncDisposable
         }
         catch
         {
-            if (host is not null)
-            {
-                await host.DisposeAsync().ConfigureAwait(false);
-            }
-            else
-            {
-                await DisposeServicesAsync(scope, provider).ConfigureAwait(false);
-            }
-
+            await (host?.DisposeAsync() ?? scope.DisposeAsync()).ConfigureAwait(false);
             throw;
         }
     }
@@ -107,27 +84,17 @@ internal sealed class IntonerSessionHost : IAsyncDisposable
             return;
         }
 
-        try
+        await using (_scope.ConfigureAwait(false))
         {
             _logger.LogInformation("Intoner session services shutting down");
-            _windowService.Stop();
-            await _housingCullingService.StopAsync(CancellationToken.None).ConfigureAwait(false);
-        }
-        finally
-        {
-            await DisposeServicesAsync(_scope, _provider).ConfigureAwait(false);
-        }
-    }
-
-    internal static async ValueTask DisposeServicesAsync(AsyncServiceScope scope, ServiceProvider provider)
-    {
-        try
-        {
-            await scope.DisposeAsync().ConfigureAwait(false);
-        }
-        finally
-        {
-            await provider.DisposeAsync().ConfigureAwait(false);
+            try
+            {
+                _windowService.Stop();
+            }
+            finally
+            {
+                await _housingCullingService.StopAsync(CancellationToken.None).ConfigureAwait(false);
+            }
         }
     }
 }

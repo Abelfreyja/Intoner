@@ -131,7 +131,7 @@ internal static class IntonerServiceCollectionExtensions
         services.AddSingleton<IPluginStoragePaths, PluginStoragePaths>();
         services.AddSingleton<IPluginFileSystem, PluginFileSystem>();
         services.AddSingleton<IIntonerConfigurationService, IntonerConfigurationService>();
-        services.AddSingleton<ISceneStore, SceneStore>();
+        services.AddScoped<ISceneStore, SceneStore>();
 
         services.AddSingleton<IObjectFileWatcherService, ObjectFileWatcherService>();
         services.AddScoped<IObjectLayoutStore, ObjectLayoutStore>();
@@ -236,8 +236,8 @@ internal static class IntonerServiceCollectionExtensions
         services.AddScoped<IObjectRuntimeLocationService>(provider => provider.GetRequiredService<ObjectRuntimeLocationService>());
         services.AddScoped<IObjectRuntimeFactory, ObjectRuntimeFactory>();
         services.AddScoped<Func<IObjectRuntimeFactory>>(provider => () => provider.GetRequiredService<IObjectRuntimeFactory>());
-        services.AddScoped<ObjectHousingCullingService>();
-        services.AddScoped<IObjectHousingCullingService>(provider => provider.GetRequiredService<ObjectHousingCullingService>());
+        services.AddSingleton<ObjectHousingCullingService>();
+        services.AddSingleton<IObjectHousingCullingService>(provider => provider.GetRequiredService<ObjectHousingCullingService>());
         return services;
     }
 
@@ -347,15 +347,15 @@ internal static class IntonerServiceCollectionExtensions
     private static IServiceCollection AddShortcutServices(this IServiceCollection services)
     {
         services.AddSingleton<IShortcutProvider, EditorShortcuts>();
-        services.AddScoped<IKeyboardInputService, KeyboardInputService>();
+        services.AddSingleton<IKeyboardInputService, KeyboardInputService>();
         services.AddScoped<IShortcutService, ShortcutService>();
         return services;
     }
 
     private static IServiceCollection AddEditorServices(this IServiceCollection services)
     {
-        services.AddSingleton<FileDialogManager>();
-        services.AddSingleton<UiSharedService>();
+        services.AddScoped<FileDialogManager>();
+        services.AddScoped<UiSharedService>();
         services.AddSingleton<TerritoryArtworkService>();
         services.AddScoped<IntonerThemeStyle>();
         services.AddScoped<IntonerUiPerformanceService>();

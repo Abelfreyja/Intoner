@@ -1,5 +1,6 @@
 using Dalamud.Game.Command;
 using Dalamud.Interface;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Intoner.Services;
 
@@ -10,6 +11,7 @@ internal sealed class IntonerPluginHost : IAsyncDisposable
     private readonly IntonerDalamudServices _dalamudServices;
     private readonly SemaphoreSlim _lifecycleLock = new(1, 1);
 
+    private ServiceProvider? _provider;
     private IntonerSessionHost? _sessionHost;
     private CancellationTokenSource? _lifecycleCts;
     private bool _loaded;
@@ -33,6 +35,14 @@ internal sealed class IntonerPluginHost : IAsyncDisposable
 
         try
         {
+            ServiceCollection services = [];
+            services.AddIntonerServices(_dalamudServices);
+            _provider = services.BuildServiceProvider(new ServiceProviderOptions
+            {
+                ValidateOnBuild = true,
+                ValidateScopes = true,
+            });
+
             _dalamudServices.CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
             {
                 HelpMessage = "Open Intoner.",
@@ -41,7 +51,7 @@ internal sealed class IntonerPluginHost : IAsyncDisposable
 
             IUiBuilder uiBuilder = _dalamudServices.PluginInterface.UiBuilder;
             uiBuilder.OpenConfigUi += HandleOpenConfigUiRequested;
-            uiBuilder.OpenMainUi += HandleOpenMainUiRequested;
+            uiBuilder.OpenMainUi += RequestMainWindowToggle;
             _uiEventsRegistered = true;
 
             _lifecycleCts = new CancellationTokenSource();
@@ -68,9 +78,10 @@ internal sealed class IntonerPluginHost : IAsyncDisposable
         }
 
         _disposed = true;
-        if (_lifecycleCts is not null)
+        using CancellationTokenSource? lifecycleCts = _lifecycleCts;
+        if (lifecycleCts is not null)
         {
-            await _lifecycleCts.CancelAsync().ConfigureAwait(false);
+            await lifecycleCts.CancelAsync().ConfigureAwait(false);
         }
 
         if (_clientEventsRegistered)
@@ -83,7 +94,7 @@ internal sealed class IntonerPluginHost : IAsyncDisposable
         {
             IUiBuilder uiBuilder = _dalamudServices.PluginInterface.UiBuilder;
             uiBuilder.OpenConfigUi -= HandleOpenConfigUiRequested;
-            uiBuilder.OpenMainUi -= HandleOpenMainUiRequested;
+            uiBuilder.OpenMainUi -= RequestMainWindowToggle;
         }
 
         if (_commandRegistered)
@@ -91,13 +102,33 @@ internal sealed class IntonerPluginHost : IAsyncDisposable
             _dalamudServices.CommandManager.RemoveHandler(CommandName);
         }
 
+        await _lifecycleLock.WaitAsync().ConfigureAwait(false);
         try
         {
-            await UpdateSessionHostAsync(CancellationToken.None).ConfigureAwait(false);
+            await DisposeServicesAsync(TakeSessionHost(), _provider).ConfigureAwait(false);
         }
         finally
         {
-            _lifecycleCts?.Dispose();
+            _provider = null;
+            _lifecycleLock.Release();
+        }
+    }
+
+    internal static async ValueTask DisposeServicesAsync(IAsyncDisposable? session, ServiceProvider? provider)
+    {
+        try
+        {
+            if (session is not null)
+            {
+                await session.DisposeAsync().ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            if (provider is not null)
+            {
+                await provider.DisposeAsync().ConfigureAwait(false);
+            }
         }
     }
 
@@ -111,7 +142,7 @@ internal sealed class IntonerPluginHost : IAsyncDisposable
         {
             if (!IsGameSessionActive)
             {
-                await DisposeSessionHostAsync().ConfigureAwait(false);
+                await DisposeServicesAsync(TakeSessionHost(), null).ConfigureAwait(false);
                 return;
             }
 
@@ -120,7 +151,7 @@ internal sealed class IntonerPluginHost : IAsyncDisposable
                 return;
             }
 
-            IntonerSessionHost host = await IntonerSessionHost.CreateAsync(_dalamudServices, cancellationToken).ConfigureAwait(false);
+            IntonerSessionHost host = await IntonerSessionHost.CreateAsync(_provider!, cancellationToken).ConfigureAwait(false);
             if (!IsGameSessionActive)
             {
                 await host.DisposeAsync().ConfigureAwait(false);
@@ -135,13 +166,11 @@ internal sealed class IntonerPluginHost : IAsyncDisposable
         }
     }
 
-    private async ValueTask DisposeSessionHostAsync()
+    private IntonerSessionHost? TakeSessionHost()
     {
-        if (_sessionHost is not null)
-        {
-            await _sessionHost.DisposeAsync().ConfigureAwait(false);
-            _sessionHost = null;
-        }
+        IntonerSessionHost? host = _sessionHost;
+        _sessionHost = null;
+        return host;
     }
 
     private void HandleClientLogin()
@@ -181,13 +210,6 @@ internal sealed class IntonerPluginHost : IAsyncDisposable
     }
 
     private void OnCommand(string command, string args)
-    {
-        _ = command;
-        _ = args;
-        RequestMainWindowToggle();
-    }
-
-    private void HandleOpenMainUiRequested()
         => RequestMainWindowToggle();
 
     private void HandleOpenConfigUiRequested()

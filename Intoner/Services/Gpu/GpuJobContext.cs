@@ -14,7 +14,6 @@ public enum GpuJobOptions
 internal sealed class GpuJobContext : IDisposable
 {
     private readonly IDisposable _operationScope;
-    private readonly nint _devicePointer;
     private bool _disposed;
 
     internal GpuJobContext(
@@ -35,7 +34,6 @@ internal sealed class GpuJobContext : IDisposable
         Context = context;
         ResourcePool = resourcePool;
         _operationScope = operationScope;
-        _devicePointer = device.NativePointer;
     }
 
     public GpuProcessingService GpuProcessingService { get; }
@@ -71,7 +69,6 @@ internal sealed class GpuJobContext : IDisposable
             {
                 try
                 {
-                    GpuResourcePoolService.Shared.InvalidateDeviceResources(_devicePointer);
                     Device.Dispose();
                 }
                 finally

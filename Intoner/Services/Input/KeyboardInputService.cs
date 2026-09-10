@@ -3,6 +3,7 @@ using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.System.Input;
 using FFXIVClientStructs.FFXIV.Client.UI;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using System.Runtime.InteropServices;
 
 namespace Intoner.Services.Input;
@@ -129,6 +130,7 @@ internal sealed unsafe class KeyboardInputService : IKeyboardInputService, IDisp
     }
 
     private readonly IFramework _framework;
+    private readonly ILogger<KeyboardInputService> _logger;
     private readonly Lock _stateLock = new();
     private readonly Dictionary<object, KeyboardInputRegistration> _registrationsByKey = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<SeVirtualKey, int> _activeKeyRefCounts = [];
@@ -143,24 +145,34 @@ internal sealed unsafe class KeyboardInputService : IKeyboardInputService, IDisp
         IGameInteropProvider gameInteropProvider)
     {
         _framework = framework;
-        _inputPressedHook = CreateInputHook(gameInteropProvider, (nint)InputData.MemberFunctionPointers.IsInputIdPressed, InputPressedDetour);
-        _inputDownHook = CreateInputHook(gameInteropProvider, (nint)InputData.MemberFunctionPointers.IsInputIdDown, InputDownDetour);
-        _inputHeldHook = CreateInputHook(gameInteropProvider, (nint)InputData.MemberFunctionPointers.IsInputIdHeld, InputHeldDetour);
-
-        _inputPressedHook?.Enable();
-        _inputDownHook?.Enable();
-        _inputHeldHook?.Enable();
-        _framework.Update += HandleFrameworkUpdate;
-
-        if (_inputPressedHook == null || _inputDownHook == null || _inputHeldHook == null)
+        _logger = logger;
+        try
         {
-            logger.LogWarning("keyboard input service did not resolve all input detours");
+            _inputPressedHook = CreateInputHook(gameInteropProvider, (nint)InputData.MemberFunctionPointers.IsInputIdPressed, InputPressedDetour);
+            _inputDownHook = CreateInputHook(gameInteropProvider, (nint)InputData.MemberFunctionPointers.IsInputIdDown, InputDownDetour);
+            _inputHeldHook = CreateInputHook(gameInteropProvider, (nint)InputData.MemberFunctionPointers.IsInputIdHeld, InputHeldDetour);
+
+            _inputPressedHook?.Enable();
+            _inputDownHook?.Enable();
+            _inputHeldHook?.Enable();
+            _framework.Update += HandleFrameworkUpdate;
+
+            if (_inputPressedHook == null || _inputDownHook == null || _inputHeldHook == null)
+            {
+                logger.LogWarning("keyboard input service did not resolve all input detours");
+            }
+        }
+        catch
+        {
+            Dispose();
+            throw;
         }
     }
 
     internal KeyboardInputService(IFramework framework)
     {
         _framework = framework;
+        _logger = NullLogger<KeyboardInputService>.Instance;
     }
 
     public bool IsTextInputActive
@@ -207,15 +219,34 @@ internal sealed unsafe class KeyboardInputService : IKeyboardInputService, IDisp
             return;
         }
 
-        _framework.Update -= HandleFrameworkUpdate;
-        _inputPressedHook?.Dispose();
-        _inputDownHook?.Dispose();
-        _inputHeldHook?.Dispose();
-
-        lock (_stateLock)
+        try
         {
-            _registrationsByKey.Clear();
-            _activeKeyRefCounts.Clear();
+            _framework.Update -= HandleFrameworkUpdate;
+        }
+        finally
+        {
+            DisposeHooks(_logger, _inputHeldHook, _inputDownHook, _inputPressedHook);
+
+            lock (_stateLock)
+            {
+                _registrationsByKey.Clear();
+                _activeKeyRefCounts.Clear();
+            }
+        }
+    }
+
+    internal static void DisposeHooks(ILogger logger, params ReadOnlySpan<IDalamudHook?> hooks)
+    {
+        foreach (IDalamudHook? hook in hooks)
+        {
+            try
+            {
+                hook?.Dispose();
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "failed to dispose keyboard input hook");
+            }
         }
     }
 

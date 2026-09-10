@@ -175,8 +175,7 @@ public sealed class GpuProcessingService : IDisposable
             return;
         }
 
-        var lostDevice = _device.MarkDeviceLost(exception);
-        GpuResourcePoolService.Shared.InvalidateDeviceResources(lostDevice);
+        _device.MarkDeviceLost(exception);
     }
 
     public void Dispose()
@@ -186,13 +185,11 @@ public sealed class GpuProcessingService : IDisposable
             return;
         }
 
-        var currentDevice = _device.GetCurrentDevicePointer();
         _genericOperationSemaphore.Dispose();
         _modelOperationSemaphore.Dispose();
         _textureOperationSemaphore.Dispose();
         _globalOperationSemaphore.Dispose();
         _device.Dispose();
-        GpuResourcePoolService.Shared.InvalidateDeviceResources(currentDevice);
     }
 
     private readonly struct GpuOperationScope : IDisposable

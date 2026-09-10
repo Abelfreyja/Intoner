@@ -1,8 +1,8 @@
-using System.Runtime.InteropServices;
 using Dalamud.Interface;
 using Intoner.Services.Interop;
 using Microsoft.Extensions.Logging;
 using SharpDX.Direct3D11;
+using System.Runtime.InteropServices;
 using DxgiDevice = SharpDX.DXGI.Device;
 
 namespace Intoner.Services.Gpu;
@@ -115,20 +115,10 @@ internal sealed partial class GpuProcessingDevice : IDisposable
         }
     }
 
-    public nint GetCurrentDevicePointer()
+    public void MarkDeviceLost(Exception? exception = null)
     {
         lock (_sync)
         {
-            return _device;
-        }
-    }
-
-    public nint MarkDeviceLost(Exception? exception = null)
-    {
-        nint lostDevicePointer;
-        lock (_sync)
-        {
-            lostDevicePointer = _device;
             _initialized = false;
             _available = false;
             ReleaseDeviceUnsafe();
@@ -142,8 +132,6 @@ internal sealed partial class GpuProcessingDevice : IDisposable
         {
             _logger.LogWarning(exception, "GPU processing device marked lost; it will reinitialize on next request.");
         }
-
-        return lostDevicePointer;
     }
 
     private void InitializeUnsafe()
