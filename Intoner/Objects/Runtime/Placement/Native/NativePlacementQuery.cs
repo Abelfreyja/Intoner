@@ -15,6 +15,7 @@ namespace Intoner.Objects.Runtime;
 internal readonly record struct NativeHousingPlacementState(
     ObjectHousingArea? CurrentArea,
     HousingPlacementBlock Block,
+    byte? CurrentPlotIndex,
     bool HasCollisionScene);
 
 internal sealed class NativePlacementQuery(
@@ -136,11 +137,15 @@ internal sealed class NativePlacementQuery(
                 : areaQuery.CheckCurrentPlot(position));
     }
 
-    private unsafe NativeHousingPlacementState ResolveCurrentHousingStateOnFramework()
-        => new(
+    private NativeHousingPlacementState ResolveCurrentHousingStateOnFramework()
+    {
+        byte? currentPlotIndex = TryResolveCurrentPlotBlock(out byte blockId) ? blockId : null;
+        return new NativeHousingPlacementState(
             TryResolveCurrentHousingAreaOnFramework(out ObjectHousingArea area) ? area : null,
-            ResolveCurrentHousingBlockOnFramework(),
+            ResolveCurrentHousingBlockOnFramework(currentPlotIndex),
+            currentPlotIndex,
             ObjectCollisionSceneQuery.HasScene());
+    }
 
     private static unsafe bool TryResolveCurrentHousingAreaOnFramework(out ObjectHousingArea area)
     {
@@ -170,14 +175,14 @@ internal sealed class NativePlacementQuery(
         return false;
     }
 
-    private unsafe HousingPlacementBlock ResolveCurrentHousingBlockOnFramework()
+    private HousingPlacementBlock ResolveCurrentHousingBlockOnFramework(byte? currentPlotIndex)
     {
         if (TryResolvePlayerHousingBlock(out byte playerBlockId))
         {
             return new HousingPlacementBlock(playerBlockId, HousingPlacementBlockSource.PlayerMapRange);
         }
 
-        if (TryResolveCurrentPlotBlock(out byte currentPlotBlockId))
+        if (currentPlotIndex is { } currentPlotBlockId)
         {
             return new HousingPlacementBlock(currentPlotBlockId, HousingPlacementBlockSource.CurrentPlot);
         }

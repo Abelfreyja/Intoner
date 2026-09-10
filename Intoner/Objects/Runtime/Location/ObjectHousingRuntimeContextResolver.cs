@@ -9,24 +9,26 @@ internal sealed class ObjectHousingRuntimeContextResolver(
     NativePlacementQuery nativePlacementQuery)
 {
     public ObjectHousingRuntimeContext Resolve(uint territoryId)
+        => Resolve(territoryId, nativePlacementQuery.ResolveCurrentHousingState());
+
+    public ObjectHousingRuntimeContext Resolve(uint territoryId, NativeHousingPlacementState nativeState)
     {
-        NativeHousingPlacementState nativeState = nativePlacementQuery.ResolveCurrentHousingState();
-        ObjectHousingPlotContext? plot = TryResolveOutdoorPlot(
-            territoryId,
-            nativeState.Block,
-            out ObjectHousingPlotContext resolvedPlot)
+        ObjectHousingPlotContext? plot = nativeState.CurrentArea == ObjectHousingArea.Outdoor
+            && TryResolveOutdoorPlot(
+                territoryId,
+                nativeState.CurrentPlotIndex,
+                out ObjectHousingPlotContext resolvedPlot)
             ? resolvedPlot
             : null;
         ObjectHousingPlotBasis? plotBasis = plot is { } basisPlot
-            && nativeState.Block.Id is { } blockId
+            && nativeState.CurrentPlotIndex is { } blockId
             && ObjectHousingPlotBasisTable.TryResolve(basisPlot.District, basisPlot.Plot, blockId, out ObjectHousingPlotBasis resolvedBasis)
             ? resolvedBasis
             : null;
         HousingPlacementSizeResult size = ResolveHousingSize(
             territoryId,
             nativeState.CurrentArea,
-            nativeState.Block,
-            plot);
+            nativeState.Block);
 
         return new ObjectHousingRuntimeContext(
             nativeState.CurrentArea,
@@ -42,12 +44,11 @@ internal sealed class ObjectHousingRuntimeContextResolver(
     private HousingPlacementSizeResult ResolveHousingSize(
         uint territoryId,
         ObjectHousingArea? currentArea,
-        HousingPlacementBlock block,
-        ObjectHousingPlotContext? plot)
+        HousingPlacementBlock block)
         => currentArea switch
         {
             ObjectHousingArea.Indoor  => ResolveIndoorSize(territoryId),
-            ObjectHousingArea.Outdoor => ResolveOutdoorSize(block, plot),
+            ObjectHousingArea.Outdoor => ResolveOutdoorSize(territoryId, block),
             _                         => HousingPlacementSizeResult.Unavailable,
         };
 
@@ -57,8 +58,8 @@ internal sealed class ObjectHousingRuntimeContextResolver(
             : HousingPlacementSizeResult.Unavailable;
 
     private static HousingPlacementSizeResult ResolveOutdoorSize(
-        HousingPlacementBlock block,
-        ObjectHousingPlotContext? plot)
+        uint territoryId,
+        HousingPlacementBlock block)
     {
         HousingPlacementSizeSource source = block.Source switch
         {
@@ -66,8 +67,8 @@ internal sealed class ObjectHousingRuntimeContextResolver(
             HousingPlacementBlockSource.CurrentPlot    => HousingPlacementSizeSource.CurrentPlot,
             _                                          => HousingPlacementSizeSource.None,
         };
-        if (plot is not { } resolvedPlot
-            || source == HousingPlacementSizeSource.None)
+        if (source == HousingPlacementSizeSource.None
+            || !TryResolveOutdoorPlot(territoryId, block.Id, out ObjectHousingPlotContext resolvedPlot))
         {
             return HousingPlacementSizeResult.Unavailable;
         }
@@ -79,12 +80,12 @@ internal sealed class ObjectHousingRuntimeContextResolver(
 
     private static bool TryResolveOutdoorPlot(
         uint territoryId,
-        HousingPlacementBlock block,
+        byte? nativePlotIndex,
         out ObjectHousingPlotContext plotContext)
     {
         plotContext = default;
         if (territoryId == 0
-            || block.Id is not { } blockId
+            || nativePlotIndex is not { } blockId
             || !ObjectHousingPlotIndexUtility.TryConvertNativePlotIndex(blockId, out int plot)
             || !ObjectHousingAddress.TryResolveDistrict(territoryId, out ObjectHousingDistrict district))
         {

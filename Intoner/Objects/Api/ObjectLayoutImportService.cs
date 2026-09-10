@@ -1,5 +1,6 @@
 using Intoner.Objects.Models;
 using Intoner.Objects.Runtime;
+using Intoner.Services.Configuration;
 
 namespace Intoner.Objects.Api;
 
@@ -18,7 +19,8 @@ internal sealed class ObjectLayoutImportService(
             ObjectRuntimeLocationContext currentLocation = locationService.GetCurrentContext();
             if (currentLocation.Scope != requiredLocation.Scope
              || currentLocation.Housing.CurrentArea != requiredLocation.Housing.CurrentArea
-             || currentLocation.Housing.CurrentSize != requiredLocation.Housing.CurrentSize
+             || (currentLocation.Housing.CurrentArea != ObjectHousingArea.Outdoor
+                 && currentLocation.Housing.CurrentSize != requiredLocation.Housing.CurrentSize)
              || currentLocation.Housing.PlotBasis != requiredLocation.Housing.PlotBasis)
             {
                 return ObjectLayoutTransferResult.Failure("The housing location changed during import. Import the layout again in the target housing area.");
