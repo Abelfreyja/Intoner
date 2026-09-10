@@ -1,4 +1,5 @@
 using Dalamud.Plugin.Services;
+using Intoner.Objects.Filesystem.Layouts;
 using Intoner.Objects.Interop;
 using Intoner.Objects.Interop.Ipc;
 using Intoner.Objects.UI;
@@ -56,6 +57,7 @@ internal sealed class IntonerSessionHost : IAsyncDisposable
         try
         {
             IServiceProvider scopedProvider = scope.ServiceProvider;
+            _ = scopedProvider.GetRequiredService<IObjectLayoutRecoveryService>().TryPrepareSession();
             IntonerWindowService windowService = scopedProvider.GetRequiredService<IntonerWindowService>();
             EditorWindow editorWindow = scopedProvider.GetRequiredService<EditorWindow>();
             EditorBackgroundWindow editorBackgroundWindow = scopedProvider.GetRequiredService<EditorBackgroundWindow>();

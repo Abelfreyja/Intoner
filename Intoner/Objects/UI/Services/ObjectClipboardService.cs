@@ -72,12 +72,12 @@ internal sealed class ObjectClipboardService : IObjectClipboardService
 
     public bool CopyObjects(IReadOnlyList<ObjectSnapshot> snapshots)
     {
-        IReadOnlyList<string> folders = ObjectFolderUtility.OrderFolders(
-            snapshots.Select(static snapshot => snapshot.FolderPath));
-        IReadOnlyDictionary<string, string> colors = ObjectFolderUtility.OrderFolderColorMap(
-            _folders.GetSceneFolderColors(),
-            folders);
-        return ObjectTransferMapper.TryCreateDocument(snapshots, folders, colors, out ObjectTransferDocument document)
+        HashSet<string> paths = snapshots
+            .Select(static snapshot => ObjectFolderUtility.SanitizeFolderPath(snapshot.FolderPath))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        List<ObjectFolderSnapshot> folders = _folders.BuildLayoutExport(snapshots)
+            .Where(folder => paths.Contains(folder.Path)).ToList();
+        return ObjectTransferMapper.TryCreateDocument(snapshots, folders, out ObjectTransferDocument document)
             && Write(document);
     }
 
@@ -86,8 +86,7 @@ internal sealed class ObjectClipboardService : IObjectClipboardService
         return ObjectTransferMapper.TryCreateFolderDocument(
                 snapshots,
                 folderPath,
-                _folders.GetSceneFolders(snapshots),
-                _folders.GetSceneFolderColors(),
+                ObjectFolderUtility.ExpandFolderEntries(_folders.BuildLayoutExport(snapshots)),
                 out ObjectTransferDocument document)
             && Write(document);
     }

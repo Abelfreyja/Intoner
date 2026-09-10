@@ -431,8 +431,7 @@ internal sealed class PersistentSceneApi(
             defaultLayout,
             ObjectApiMapper.ToPersistentSet(
                 sceneView.GetStandaloneObjectSnapshots(),
-                folderState.StandaloneFolders,
-                folderState.StandaloneFolderColors),
+                folderState.StandaloneFolders),
             ObjectApiMapper.ToLocation(sceneView.GetCurrentLocationContext()));
     }
 

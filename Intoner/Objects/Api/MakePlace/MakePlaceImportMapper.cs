@@ -57,7 +57,6 @@ internal sealed class MakePlaceImportMapper(
             importedName,
             snapshots,
             [],
-            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
             BuildImportStatus(importedName, snapshots.Count, skippedFurnitureCount, ignoredFurnitureCount, ignoredFixtureCount, areaContext));
         errorMessage = string.Empty;
         return true;

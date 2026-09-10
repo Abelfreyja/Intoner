@@ -54,7 +54,7 @@ internal interface IObjectManager
         long? expectedPersistentRevision = null);
 
     /// <summary>
-    /// Replaces the current persisted workspace with an autosaved workspace snapshot.
+    /// restores independent copies of an autosaved workspace without changing existing saved layouts
     /// </summary>
     /// <param name="workspace">the recovered workspace snapshot</param>
     /// <param name="message">the recovery result message</param>
@@ -77,11 +77,6 @@ internal interface IObjectManager
 
 internal sealed class ObjectManager : IObjectManager, IDisposable
 {
-    private readonly record struct RecoveredWorkspace(
-        Guid? DefaultLayoutId,
-        IReadOnlyList<ObjectSnapshot> StandaloneObjects,
-        IReadOnlyList<ObjectSnapshot> DefaultLayoutObjects);
-
     private readonly ILogger<ObjectManager> _logger;
     private readonly Lock _stateLock;
     private readonly IFramework _framework;
@@ -137,6 +132,7 @@ internal sealed class ObjectManager : IObjectManager, IDisposable
         _scene = scene;
         _collectionStore = collectionStore;
         _layoutAutoSaveService = layoutAutoSaveService;
+
         _isTransitioning = _locationService.IsTransitioning;
 
         _framework.Update += HandleFrameworkUpdate;
@@ -183,12 +179,11 @@ internal sealed class ObjectManager : IObjectManager, IDisposable
                     "current objects are not valid for the active housing mode");
             }
 
-            ObjectLayoutFolderExport layoutFolderExport = _objectFolderService.BuildLayoutExport(layoutSnapshots);
+            IReadOnlyList<ObjectFolderSnapshot> layoutFolders = _objectFolderService.BuildLayoutExport(layoutSnapshots);
             if (!_layoutManager.TryCreateLayout(
                     name,
                     layoutSnapshots,
-                    layoutFolderExport.Folders,
-                    layoutFolderExport.FolderColors,
+                    layoutFolders,
                     out ObjectLayoutSnapshot layout))
             {
                 return PersistentMutationResult.Failed(
@@ -369,7 +364,13 @@ internal sealed class ObjectManager : IObjectManager, IDisposable
         PersistentMutationResult commitResult;
         lock (_stateLock)
         {
-            RecoveredWorkspace recovered = BuildRecoveredWorkspace(workspace);
+            if (!ObjectSnapshotUtility.TryCopyWithNewIds(workspace.Objects, out List<ObjectSnapshot> copies))
+            {
+                message = "The autosave contains invalid or duplicate object ids.";
+                return false;
+            }
+
+            ObjectPersistentSceneUpdate recovered = BuildRecoveredWorkspace(workspace, copies);
             IReadOnlyList<ObjectSnapshot> recoveredObjects = recovered.StandaloneObjects
                 .Concat(recovered.DefaultLayoutObjects)
                 .ToList();
@@ -378,26 +379,57 @@ internal sealed class ObjectManager : IObjectManager, IDisposable
                 return false;
             }
 
-            if (!_objectIdentityService.TryValidatePersistentSceneReplacement(recoveredObjects, recovered.DefaultLayoutId, out _))
+            if (!_objectIdentityService.TryValidatePersistentSceneReplacement(recoveredObjects, null, out _))
             {
                 message = "an object id belongs to another scene source";
                 return false;
             }
 
-            ObjectFolderSceneState recoveredFolderState = BuildRecoveredFolderState(workspace, recovered);
-            commitResult = CommitPersistentScene(new ObjectPersistentSceneUpdate
+            ObjectLayoutSnapshot? recoveryLayout = null;
+            if (recovered.DefaultLayoutId.HasValue)
             {
-                StandaloneObjects = recovered.StandaloneObjects,
-                StandaloneFolders = recoveredFolderState.StandaloneFolders,
-                StandaloneFolderColors = recoveredFolderState.StandaloneFolderColors,
-                DefaultLayoutId = recovered.DefaultLayoutId,
-                DefaultLayoutObjects = recovered.DefaultLayoutObjects,
-                DefaultLayoutFolders = recoveredFolderState.DefaultLayoutFolders,
-                DefaultLayoutFolderColors = recoveredFolderState.DefaultLayoutFolderColors,
-            });
+                string name = $"Recovered {TextUtility.TrimOrFallback(workspace.Name, "object workspace")}";
+                if (!_layoutManager.TryCreateLayout(
+                        name,
+                        recovered.DefaultLayoutObjects,
+                        recovered.DefaultLayoutFolders,
+                        out recoveryLayout))
+                {
+                    message = "The recovered layout copy could not be stored.";
+                    return false;
+                }
+
+                recovered = recovered with
+                {
+                    DefaultLayoutId = recoveryLayout.Id,
+                    DefaultLayoutObjects = recoveryLayout.Objects,
+                    DefaultLayoutFolders = recoveryLayout.Folders,
+                };
+            }
+
+            commitResult = CommitPersistentScene(recovered);
             if (!commitResult.IsAccepted)
             {
                 message = commitResult.Message;
+                if (recoveryLayout is not null)
+                {
+                    if (_layoutManager.GetDefaultLayoutId() == recoveryLayout.Id)
+                    {
+                        message += " The recovered layout copy was kept because the previous selection could not be restored.";
+                    }
+                    else if (!TryRestorePersistentSceneStep(
+                                 () => _layoutManager.DeleteLayout(recoveryLayout.Id) == PersistentMutationStatus.Success,
+                                 "unused recovery layout"))
+                    {
+                        message += " The unused recovered layout copy could not be removed.";
+                    }
+                }
+
+                if (commitResult.Status == PersistentMutationStatus.RecoveryRequired)
+                {
+                    _scene.MarkNeedsRefresh();
+                }
+
                 return false;
             }
         }
@@ -648,8 +680,7 @@ internal sealed class ObjectManager : IObjectManager, IDisposable
                 bool layoutReplaced = _layoutManager.TryReplaceLayoutContent(
                     update.DefaultLayoutId.Value,
                     update.DefaultLayoutObjects,
-                    update.DefaultLayoutFolders,
-                    update.DefaultLayoutFolderColors);
+                    update.DefaultLayoutFolders);
                 if (!layoutReplaced)
                 {
                     return WithCurrentRevisions(PersistentMutationResult.Failed(
@@ -675,7 +706,7 @@ internal sealed class ObjectManager : IObjectManager, IDisposable
             }
 
             _persistenceState.ReplaceStandaloneSnapshots(update.StandaloneObjects);
-            _objectFolderService.ReplaceStandaloneState(update.StandaloneFolders, update.StandaloneFolderColors);
+            _objectFolderService.ReplaceStandaloneState(update.StandaloneFolders);
             IncrementPersistentSceneRevision();
             return WithCurrentRevisions(PersistentMutationResult.Success());
         }
@@ -739,9 +770,7 @@ internal sealed class ObjectManager : IObjectManager, IDisposable
         restored = TryRestorePersistentSceneStep(
             () =>
             {
-                _objectFolderService.ReplaceStandaloneState(
-                    previousFolderState.StandaloneFolders,
-                    previousFolderState.StandaloneFolderColors);
+                _objectFolderService.ReplaceStandaloneState(previousFolderState.StandaloneFolders);
                 return true;
             },
             "standalone folders") && restored;
@@ -767,29 +796,17 @@ internal sealed class ObjectManager : IObjectManager, IDisposable
         return false;
     }
 
-    private RecoveredWorkspace BuildRecoveredWorkspace(ObjectPersistentWorkspaceSnapshot workspace)
+    private static ObjectPersistentSceneUpdate BuildRecoveredWorkspace(
+        ObjectPersistentWorkspaceSnapshot workspace,
+        IReadOnlyList<ObjectSnapshot> copies)
     {
-        Guid? defaultLayoutId = workspace.DefaultLayoutId.HasValue
-            && _layoutManager.TryGetLayout(workspace.DefaultLayoutId.Value, out _)
-                ? workspace.DefaultLayoutId.Value
-                : null;
-
-        if (!defaultLayoutId.HasValue)
-        {
-            return new RecoveredWorkspace(
-                null,
-                workspace.Objects.Select(static snapshot => snapshot with { LayoutId = null }).ToList(),
-                []);
-        }
-
-        Guid layoutId = defaultLayoutId.Value;
         List<ObjectSnapshot> defaultLayoutObjects = [];
         List<ObjectSnapshot> standaloneObjects = [];
-        foreach (ObjectSnapshot snapshot in workspace.Objects)
+        foreach (ObjectSnapshot snapshot in copies)
         {
-            if (snapshot.LayoutId == layoutId)
+            if (workspace.DefaultLayoutId.HasValue && snapshot.LayoutId == workspace.DefaultLayoutId)
             {
-                defaultLayoutObjects.Add(snapshot with { LayoutId = layoutId });
+                defaultLayoutObjects.Add(snapshot);
             }
             else
             {
@@ -797,45 +814,26 @@ internal sealed class ObjectManager : IObjectManager, IDisposable
             }
         }
 
-        return new RecoveredWorkspace(defaultLayoutId, standaloneObjects, defaultLayoutObjects);
-    }
-
-    private static ObjectFolderSceneState BuildRecoveredFolderState(ObjectPersistentWorkspaceSnapshot workspace, RecoveredWorkspace recovered)
-    {
-        IReadOnlyList<string> standaloneFolders = ResolveRecoveredFolders(workspace, recovered.StandaloneObjects);
-        IReadOnlyList<string> defaultLayoutFolders = recovered.DefaultLayoutId.HasValue
-            ? ResolveRecoveredFolders(workspace, recovered.DefaultLayoutObjects)
+        IReadOnlyList<ObjectFolderSnapshot> standaloneFolders = ResolveRecoveredFolders(workspace.StandaloneFolders, standaloneObjects);
+        IReadOnlyList<ObjectFolderSnapshot> defaultLayoutFolders = workspace.DefaultLayoutId.HasValue
+            ? ResolveRecoveredFolders(workspace.DefaultLayoutFolders, defaultLayoutObjects)
             : [];
 
-        return new ObjectFolderSceneState
+        return new ObjectPersistentSceneUpdate
         {
+            StandaloneObjects = standaloneObjects,
             StandaloneFolders = standaloneFolders,
-            StandaloneFolderColors = ObjectFolderUtility.OrderFolderColorMap(workspace.FolderColors, standaloneFolders),
-            DefaultLayoutId = recovered.DefaultLayoutId,
+            DefaultLayoutId = workspace.DefaultLayoutId,
+            DefaultLayoutObjects = defaultLayoutObjects,
             DefaultLayoutFolders = defaultLayoutFolders,
-            DefaultLayoutFolderColors = ObjectFolderUtility.OrderFolderColorMap(workspace.FolderColors, defaultLayoutFolders),
         };
     }
 
-    private static IReadOnlyList<string> ResolveRecoveredFolders(ObjectPersistentWorkspaceSnapshot workspace, IReadOnlyList<ObjectSnapshot> objects)
-    {
-        if (objects.Count == 0)
-        {
-            return [];
-        }
-
-        HashSet<string> objectFolders = new(objects.Select(static snapshot => ObjectFolderUtility.SanitizeFolderPath(snapshot.FolderPath)), StringComparer.OrdinalIgnoreCase);
-        return ObjectFolderUtility.OrderFolders(workspace.Folders.Where(folder => IsRecoveredFolderUsed(folder, objectFolders)).Concat(objectFolders));
-    }
-
-    private static bool IsRecoveredFolderUsed(string folder, IReadOnlySet<string> objectFolders)
-    {
-        string sanitizedFolder = ObjectFolderUtility.SanitizeFolderPath(folder);
-        return !string.IsNullOrWhiteSpace(sanitizedFolder)
-            && objectFolders.Any(objectFolder => ObjectFolderUtility.IsSameOrDescendant(
-                objectFolder,
-                sanitizedFolder));
-    }
+    private static IReadOnlyList<ObjectFolderSnapshot> ResolveRecoveredFolders(
+        IEnumerable<ObjectFolderSnapshot> folders,
+        IReadOnlyList<ObjectSnapshot> objects)
+        => ObjectFolderUtility.ExpandFolderEntries(
+            folders.Concat(objects.Select(static snapshot => new ObjectFolderSnapshot(snapshot.FolderPath))));
 
     private void HandleFrameworkUpdate(IFramework framework)
     {

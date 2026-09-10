@@ -17,17 +17,14 @@ internal interface IObjectLayoutAutoSaveService
 internal sealed class ObjectLayoutAutoSaveService : IObjectLayoutAutoSaveService
 {
     private readonly ILogger<ObjectLayoutAutoSaveService> _logger;
-    private readonly IIntonerConfigurationService          _configurationService;
+    private readonly IIntonerConfigurationService         _configurationService;
     private readonly IPluginStoragePaths                  _pathService;
     private readonly IPluginFileSystem                    _fileSystem;
     private readonly IObjectPersistenceState              _persistenceState;
-    private readonly IObjectFolderService                 _folderService;
-    private readonly IObjectLayoutManager                 _layoutManager;
-    private readonly IObjectRevisionTracker               _revisionTracker;
+    private readonly IObjectLayoutRecoveryService         _recoveryService;
 
     private DateTime _nextSaveAtUtc = DateTime.MinValue;
     private long _lastSavedPersistentRevision;
-    private bool _autosaveFileDeletedForCurrentRevision;
 
     public ObjectLayoutAutoSaveService(
         ILogger<ObjectLayoutAutoSaveService> logger,
@@ -35,21 +32,23 @@ internal sealed class ObjectLayoutAutoSaveService : IObjectLayoutAutoSaveService
         IPluginStoragePaths pathService,
         IPluginFileSystem fileSystem,
         IObjectPersistenceState persistenceState,
-        IObjectFolderService folderService,
-        IObjectLayoutManager layoutManager,
-        IObjectRevisionTracker revisionTracker)
+        IObjectLayoutRecoveryService recoveryService)
     {
         _logger               = logger;
         _configurationService = configurationService;
         _pathService          = pathService;
         _fileSystem           = fileSystem;
         _persistenceState     = persistenceState;
-        _folderService        = folderService;
-        _layoutManager        = layoutManager;
-        _revisionTracker      = revisionTracker;
+        _recoveryService      = recoveryService;
+
+        // only persistent edits should create a draft for this session
+        _lastSavedPersistentRevision = persistenceState.Revision;
     }
 
     public void FrameworkUpdate()
+        => FrameworkUpdate(DateTime.UtcNow);
+
+    internal void FrameworkUpdate(DateTime now)
     {
         LayoutAutoSaveConfiguration configuration = _configurationService.Current.LayoutAutoSave;
         if (!configuration.Enabled)
@@ -57,91 +56,49 @@ internal sealed class ObjectLayoutAutoSaveService : IObjectLayoutAutoSaveService
             return;
         }
 
-        DateTime now = DateTime.UtcNow;
         if (now < _nextSaveAtUtc)
         {
             return;
         }
 
         _nextSaveAtUtc = now + ResolveInterval(configuration);
-        long persistentRevision = _revisionTracker.GetPersistentSceneRevision();
-        if (!_persistenceState.HasPersistentSceneState())
-        {
-            DeleteAutosaveForEmptyWorkspace(persistentRevision);
-            return;
-        }
-
-        if (persistentRevision == _lastSavedPersistentRevision)
+        if (!_recoveryService.TryPrepareSession())
         {
             return;
         }
 
-        TryWriteAutosave(persistentRevision, now);
+        if (_persistenceState.Revision == _lastSavedPersistentRevision)
+        {
+            return;
+        }
+
+        TrySaveWorkspace(now);
     }
 
-    private void TryWriteAutosave(long persistentRevision, DateTime savedAtUtc)
+    private void TrySaveWorkspace(DateTime savedAtUtc)
     {
         try
         {
-            ObjectPersistentWorkspaceSnapshot workspace = CapturePersistentWorkspace(persistentRevision, savedAtUtc);
-            ObjectLayoutAutosaveDocument document = ObjectLayoutJsonSerializer.BuildAutosaveDocument(workspace);
+            ObjectPersistentWorkspaceSnapshot workspace = _persistenceState.CaptureWorkspace(savedAtUtc);
+            if (workspace.Objects.Count == 0 && workspace.StandaloneFolders.Count == 0 && workspace.DefaultLayoutFolders.Count == 0)
+            {
+                _fileSystem.DeleteFile(_pathService.ObjectAutosaveCurrentPath);
+            }
+            else
+            {
+                ObjectLayoutAutosaveDocument document = ObjectLayoutJsonSerializer.BuildAutosaveDocument(
+                    workspace with { Name = $"{workspace.Name} autosave" });
+                _fileSystem.WriteAllTextAtomic(
+                    _pathService.ObjectAutosaveCurrentPath,
+                    ObjectLayoutJsonSerializer.SerializeAutosave(document));
+            }
 
-            _fileSystem.WriteAllTextAtomic(
-                _pathService.ObjectAutosaveCurrentPath,
-                ObjectLayoutJsonSerializer.SerializeAutosave(document));
-            _lastSavedPersistentRevision = persistentRevision;
-            _autosaveFileDeletedForCurrentRevision = false;
+            _lastSavedPersistentRevision = workspace.Revision;
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "failed to write object layout autosave draft");
+            _logger.LogWarning(ex, "failed to update object layout autosave draft");
         }
-    }
-
-    private ObjectPersistentWorkspaceSnapshot CapturePersistentWorkspace(long persistentRevision, DateTime savedAtUtc)
-    {
-        IReadOnlyList<ObjectSnapshot> snapshots = _persistenceState.GetPersistedSnapshots();
-        return new ObjectPersistentWorkspaceSnapshot
-        {
-            Objects = snapshots,
-            Folders = _folderService.GetSceneFolders(snapshots),
-            FolderColors = _folderService.GetSceneFolderColors(),
-            DefaultLayoutId = _layoutManager.GetDefaultLayoutId(),
-            Name = ResolveAutosaveName(),
-            Revision = persistentRevision,
-            CapturedAtUtc = savedAtUtc,
-        };
-    }
-
-    private void DeleteAutosaveForEmptyWorkspace(long persistentRevision)
-    {
-        if (_autosaveFileDeletedForCurrentRevision)
-        {
-            _lastSavedPersistentRevision = persistentRevision;
-            return;
-        }
-
-        try
-        {
-            _fileSystem.DeleteFile(_pathService.ObjectAutosaveCurrentPath);
-            _lastSavedPersistentRevision = persistentRevision;
-            _autosaveFileDeletedForCurrentRevision = true;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "failed to remove empty object layout autosave draft");
-        }
-    }
-
-    private string ResolveAutosaveName()
-    {
-        Guid? defaultLayoutId = _layoutManager.GetDefaultLayoutId();
-        if (defaultLayoutId.HasValue && _layoutManager.TryGetLayout(defaultLayoutId.Value, out ObjectLayoutSnapshot layout))
-        {
-            return $"{layout.Name} autosave";
-        }
-
-        return "Standalone objects autosave";
     }
 
     private static TimeSpan ResolveInterval(LayoutAutoSaveConfiguration configuration)

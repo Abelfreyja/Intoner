@@ -36,7 +36,6 @@ internal sealed class ObjectLayoutTransferCodec(
                 layout.Name,
                 layout.Objects.Select(static snapshot => snapshot with { LayoutId = null }).ToList(),
                 layout.Folders,
-                layout.FolderColors,
                 $"Imported layout '{layout.Name}' from json.");
             return true;
         }

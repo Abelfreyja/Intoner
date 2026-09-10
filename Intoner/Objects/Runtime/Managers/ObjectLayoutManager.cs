@@ -82,14 +82,12 @@ internal interface IObjectLayoutManager
     /// <param name="name">the requested layout name.</param>
     /// <param name="objects">the initial layout objects.</param>
     /// <param name="folders">the initial folders.</param>
-    /// <param name="folderColors">the initial folder color map.</param>
     /// <param name="layout">the created layout snapshot when storage succeeds.</param>
     /// <returns>true when the layout was stored and added.</returns>
     bool TryCreateLayout(
         string name,
         IReadOnlyList<ObjectSnapshot> objects,
-        IReadOnlyList<string> folders,
-        IReadOnlyDictionary<string, string> folderColors,
+        IReadOnlyList<ObjectFolderSnapshot> folders,
         out ObjectLayoutSnapshot layout);
 
     /// <summary>
@@ -114,13 +112,11 @@ internal interface IObjectLayoutManager
     /// <param name="id">The saved layout id.</param>
     /// <param name="objects">The replacement object list.</param>
     /// <param name="folders">The replacement explicit folder list.</param>
-    /// <param name="folderColors">The replacement folder color map.</param>
     /// <returns>true when the layout exists and was updated.</returns>
     bool TryReplaceLayoutContent(
         Guid id,
         IReadOnlyList<ObjectSnapshot> objects,
-        IReadOnlyList<string> folders,
-        IReadOnlyDictionary<string, string> folderColors);
+        IReadOnlyList<ObjectFolderSnapshot> folders);
 
     /// <summary>
     /// Restores one saved layout snapshot without changing its metadata.
@@ -135,24 +131,7 @@ internal interface IObjectLayoutManager
     /// <param name="id">The layout id.</param>
     /// <param name="folders">The replacement folder list.</param>
     /// <returns>true when the layout exists and was updated.</returns>
-    bool TryReplaceLayoutFolders(Guid id, IReadOnlyList<string> folders);
-
-    /// <summary>
-    /// Replaces the explicit folder colors for one saved layout.
-    /// </summary>
-    /// <param name="id">The layout id.</param>
-    /// <param name="folderColors">The replacement folder color map.</param>
-    /// <returns>true when the layout exists and was updated.</returns>
-    bool TryReplaceLayoutFolderColors(Guid id, IReadOnlyDictionary<string, string> folderColors);
-
-    /// <summary>
-    /// Replaces explicit folders and folder colors for one saved layout in one write.
-    /// </summary>
-    /// <param name="id">The layout id.</param>
-    /// <param name="folders">the replacement folder list.</param>
-    /// <param name="folderColors">the replacement folder color map.</param>
-    /// <returns>true when the layout exists and was updated.</returns>
-    bool TryReplaceLayoutFolderState(Guid id, IReadOnlyList<string> folders, IReadOnlyDictionary<string, string> folderColors);
+    bool TryReplaceLayoutFolders(Guid id, IReadOnlyList<ObjectFolderSnapshot> folders);
 
     /// <summary> advances revisions for saved layouts that reference any supplied object collection </summary>
     /// <param name="collectionIds">the changed collection ids</param>
@@ -382,18 +361,17 @@ internal sealed class ObjectLayoutManager : IObjectLayoutManager
     }
 
     public bool TryCreateLayout(string name, out ObjectLayoutSnapshot layout)
-        => TryCreateLayout(name, [], [], new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase), out layout);
+        => TryCreateLayout(name, [], [], out layout);
 
     public bool TryCreateLayout(
         string name,
         IReadOnlyList<ObjectSnapshot> objects,
-        IReadOnlyList<string> folders,
-        IReadOnlyDictionary<string, string> folderColors,
+        IReadOnlyList<ObjectFolderSnapshot> folders,
         out ObjectLayoutSnapshot layout)
     {
         lock (_stateLock)
         {
-            layout = BuildCreatedLayout(name, objects, folders, folderColors);
+            layout = BuildCreatedLayout(name, objects, folders);
             if (!TryValidateLayoutCandidate(layout, out _))
             {
                 layout = null!;
@@ -442,52 +420,12 @@ internal sealed class ObjectLayoutManager : IObjectLayoutManager
                     .ToList(),
             });
 
-    public bool TryReplaceLayoutFolderState(Guid id, IReadOnlyList<string> folders, IReadOnlyDictionary<string, string> folderColors)
+    public bool TryReplaceLayoutFolders(Guid id, IReadOnlyList<ObjectFolderSnapshot> folders)
         => TryUpdateLayout(
             id,
-            layout =>
+            layout => layout with
             {
-                IReadOnlyList<string> orderedFolders = ObjectFolderUtility.OrderFolders(folders);
-                IReadOnlyDictionary<string, string> orderedFolderColors = ObjectFolderUtility.OrderFolderColorMap(folderColors, orderedFolders);
-                return ObjectFolderUtility.FolderListsMatch(layout.Folders, orderedFolders)
-                    && ObjectFolderUtility.FolderColorMapsMatch(layout.FolderColors, orderedFolderColors)
-                        ? null
-                        : layout with
-                        {
-                            Folders = orderedFolders,
-                            FolderColors = orderedFolderColors,
-                        };
-            });
-
-    public bool TryReplaceLayoutFolders(Guid id, IReadOnlyList<string> folders)
-        => TryUpdateLayout(
-            id,
-            layout =>
-            {
-                IReadOnlyList<string> orderedFolders = ObjectFolderUtility.OrderFolders(folders);
-                IReadOnlyDictionary<string, string> orderedFolderColors = ObjectFolderUtility.OrderFolderColorMap(layout.FolderColors, orderedFolders);
-                return ObjectFolderUtility.FolderListsMatch(layout.Folders, orderedFolders)
-                    && ObjectFolderUtility.FolderColorMapsMatch(layout.FolderColors, orderedFolderColors)
-                        ? null
-                        : layout with
-                        {
-                            Folders = orderedFolders,
-                            FolderColors = orderedFolderColors,
-                        };
-            });
-
-    public bool TryReplaceLayoutFolderColors(Guid id, IReadOnlyDictionary<string, string> folderColors)
-        => TryUpdateLayout(
-            id,
-            layout =>
-            {
-                IReadOnlyDictionary<string, string> orderedFolderColors = ObjectFolderUtility.OrderFolderColorMap(folderColors, layout.Folders);
-                return ObjectFolderUtility.FolderColorMapsMatch(layout.FolderColors, orderedFolderColors)
-                    ? null
-                    : layout with
-                    {
-                        FolderColors = orderedFolderColors,
-                    };
+                Folders = ObjectFolderUtility.OrderFolderEntries(folders),
             });
 
     public PersistentMutationStatus AdvanceCollectionDependencyRevisions(
@@ -550,22 +488,16 @@ internal sealed class ObjectLayoutManager : IObjectLayoutManager
     public bool TryReplaceLayoutContent(
         Guid id,
         IReadOnlyList<ObjectSnapshot> objects,
-        IReadOnlyList<string> folders,
-        IReadOnlyDictionary<string, string> folderColors)
+        IReadOnlyList<ObjectFolderSnapshot> folders)
         => TryUpdateLayout(
             id,
-            layout =>
+            layout => layout with
             {
-                IReadOnlyList<string> orderedFolders = ObjectFolderUtility.OrderFolders(folders);
-                return layout with
-                {
-                    Objects = objects
-                        .Select(snapshot => snapshot with { LayoutId = id })
-                        .OrderBy(static snapshot => snapshot.CreatedAtUtc)
-                        .ToList(),
-                    Folders = orderedFolders,
-                    FolderColors = ObjectFolderUtility.OrderFolderColorMap(folderColors, orderedFolders),
-                };
+                Objects = objects
+                    .Select(snapshot => snapshot with { LayoutId = id })
+                    .OrderBy(static snapshot => snapshot.CreatedAtUtc)
+                    .ToList(),
+                Folders = ObjectFolderUtility.OrderFolderEntries(folders),
             });
 
     public bool TryRestoreLayout(ObjectLayoutSnapshot layout)
@@ -692,7 +624,7 @@ internal sealed class ObjectLayoutManager : IObjectLayoutManager
             foreach (Guid layoutId in _layoutOrder)
             {
                 if (!_layouts.TryGetValue(layoutId, out ObjectLayoutSnapshot? layout)
-                    || layout.Objects.Count == 0 && layout.Folders.Count == 0 && layout.FolderColors.Count == 0)
+                    || layout.Objects.Count == 0 && layout.Folders.Count == 0)
                 {
                     continue;
                 }
@@ -703,7 +635,6 @@ internal sealed class ObjectLayoutManager : IObjectLayoutManager
                     layout with
                     {
                         Folders = [],
-                        FolderColors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
                         Objects = [],
                     },
                     now));
@@ -795,8 +726,7 @@ internal sealed class ObjectLayoutManager : IObjectLayoutManager
     private ObjectLayoutSnapshot BuildCreatedLayout(
         string name,
         IReadOnlyList<ObjectSnapshot> objects,
-        IReadOnlyList<string> folders,
-        IReadOnlyDictionary<string, string> folderColors)
+        IReadOnlyList<ObjectFolderSnapshot> folders)
     {
         var layoutId = Guid.NewGuid();
         var now = DateTime.UtcNow;
@@ -804,8 +734,8 @@ internal sealed class ObjectLayoutManager : IObjectLayoutManager
             .Select(snapshot => snapshot with { LayoutId = layoutId })
             .OrderBy(static snapshot => snapshot.CreatedAtUtc)
             .ToList();
-        IReadOnlyList<string> orderedFolders = ObjectFolderUtility.OrderFolders(
-            folders.Concat(layoutObjects.Select(static snapshot => snapshot.FolderPath)));
+        IReadOnlyList<ObjectFolderSnapshot> orderedFolders = ObjectFolderUtility.OrderFolderEntries(
+            folders.Concat(layoutObjects.Select(static snapshot => new ObjectFolderSnapshot(snapshot.FolderPath))));
 
         return new ObjectLayoutSnapshot
         {
@@ -816,7 +746,6 @@ internal sealed class ObjectLayoutManager : IObjectLayoutManager
             UpdatedAtUtc = now,
             Objects = layoutObjects,
             Folders = orderedFolders,
-            FolderColors = ObjectFolderUtility.OrderFolderColorMap(folderColors, orderedFolders),
         };
     }
 
@@ -959,8 +888,7 @@ internal sealed class ObjectLayoutManager : IObjectLayoutManager
            && string.Equals(left.Name, right.Name, StringComparison.Ordinal)
            && left.CreatedAtUtc == right.CreatedAtUtc
            && left.Objects.SequenceEqual(right.Objects)
-           && ObjectFolderUtility.FolderListsMatch(left.Folders, right.Folders)
-           && ObjectFolderUtility.FolderColorMapsMatch(left.FolderColors, right.FolderColors);
+           && ObjectFolderUtility.FolderEntriesMatch(left.Folders, right.Folders);
 
     private static bool LayoutsMatch(ObjectLayoutSnapshot? left, ObjectLayoutSnapshot? right)
         => ReferenceEquals(left, right)

@@ -6,6 +6,40 @@ namespace Intoner.Objects.Utils;
 
 internal static class ObjectSnapshotUtility
 {
+    /// <summary> copies snapshots with fresh ids, remapping internal attachments and clearing external attachments </summary>
+    public static bool TryCopyWithNewIds(IReadOnlyList<ObjectSnapshot> snapshots, out List<ObjectSnapshot> copies)
+    {
+        copies = [];
+        Dictionary<Guid, Guid> copiedIds = new(snapshots.Count);
+        foreach (Guid id in snapshots.Select(static snapshot => snapshot.Id))
+        {
+            if (id == Guid.Empty || !copiedIds.TryAdd(id, Guid.NewGuid()))
+            {
+                return false;
+            }
+        }
+
+        copies = new List<ObjectSnapshot>(snapshots.Count);
+        foreach (ObjectSnapshot snapshot in snapshots)
+        {
+            ObjectData model = snapshot.Model;
+            if (model is FurnitureModel furniture)
+            {
+                model = furniture with
+                {
+                    AttachmentParentId = furniture.AttachmentParentId is { } parentId
+                        && copiedIds.TryGetValue(parentId, out Guid copiedParentId)
+                            ? copiedParentId
+                            : null,
+                };
+            }
+
+            copies.Add(snapshot with { Id = copiedIds[snapshot.Id], Model = model });
+        }
+
+        return true;
+    }
+
     public static bool MatchesLocation(ObjectSnapshot snapshot, SceneLocationScope currentLocation)
     {
         if (!snapshot.CreatedIn.IsValid)

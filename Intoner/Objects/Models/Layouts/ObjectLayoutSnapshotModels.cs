@@ -13,16 +13,15 @@ internal sealed record ObjectLayoutSnapshot
     public long Revision { get; init; } = 1;
     public DateTime CreatedAtUtc { get; init; } = DateTime.UtcNow;
     public DateTime UpdatedAtUtc { get; init; } = DateTime.UtcNow;
-    public IReadOnlyList<string> Folders { get; init; } = [];
-    public IReadOnlyDictionary<string, string> FolderColors { get; init; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    public IReadOnlyList<ObjectFolderSnapshot> Folders { get; init; } = [];
     public IReadOnlyList<ObjectSnapshot> Objects { get; init; } = [];
 }
 
 internal sealed record ObjectPersistentWorkspaceSnapshot
 {
     public IReadOnlyList<ObjectSnapshot> Objects { get; init; } = [];
-    public IReadOnlyList<string> Folders { get; init; } = [];
-    public IReadOnlyDictionary<string, string> FolderColors { get; init; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    public IReadOnlyList<ObjectFolderSnapshot> StandaloneFolders { get; init; } = [];
+    public IReadOnlyList<ObjectFolderSnapshot> DefaultLayoutFolders { get; init; } = [];
     public Guid? DefaultLayoutId { get; init; }
     public string Name { get; init; } = string.Empty;
     public long Revision { get; init; }
@@ -43,12 +42,10 @@ internal sealed record ObjectPersistentSceneUpdate
 {
     public long ExpectedRevision { get; init; }
     public IReadOnlyList<ObjectSnapshot> StandaloneObjects { get; init; } = [];
-    public IReadOnlyList<string> StandaloneFolders { get; init; } = [];
-    public IReadOnlyDictionary<string, string> StandaloneFolderColors { get; init; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    public IReadOnlyList<ObjectFolderSnapshot> StandaloneFolders { get; init; } = [];
     public Guid? DefaultLayoutId { get; init; }
     public IReadOnlyList<ObjectSnapshot> DefaultLayoutObjects { get; init; } = [];
-    public IReadOnlyList<string> DefaultLayoutFolders { get; init; } = [];
-    public IReadOnlyDictionary<string, string> DefaultLayoutFolderColors { get; init; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    public IReadOnlyList<ObjectFolderSnapshot> DefaultLayoutFolders { get; init; } = [];
 }
 
 internal sealed record ObjectLoadedLayoutSnapshot

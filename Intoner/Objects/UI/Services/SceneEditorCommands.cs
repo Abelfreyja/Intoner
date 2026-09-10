@@ -82,8 +82,7 @@ internal sealed class SceneEditorCommands
 
         ObjectFolderSceneState afterFolderState = ObjectFolderSceneStateUtility.AddFolders(
             beforeFolderState,
-            import.Folders,
-            import.FolderColors);
+            import.Folders);
         Guid[] selectionBefore = _interaction.CaptureSelection();
         Guid[] createdIds = import.Objects.Select(static snapshot => snapshot.Id).ToArray();
         string title = ResolvePasteHistoryTitle(import, destination);

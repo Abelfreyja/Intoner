@@ -12,46 +12,26 @@ internal static class ObjectFolderSceneStateUtility
             return state;
         }
 
-        return state.DefaultLayoutId.HasValue
-            ? state with
-            {
-                DefaultLayoutFolders = ObjectFolderUtility.OrderFolders(
-                    state.DefaultLayoutFolders.Append(sanitizedFolderPath)),
-            }
-            : state with
-            {
-                StandaloneFolders = ObjectFolderUtility.OrderFolders(
-                    state.StandaloneFolders.Append(sanitizedFolderPath)),
-            };
+        return AddFolders(state, [new ObjectFolderSnapshot(sanitizedFolderPath)]);
     }
 
     public static ObjectFolderSceneState AddFolders(
         ObjectFolderSceneState state,
-        IEnumerable<string> folderPaths,
-        IReadOnlyDictionary<string, string> folderColors)
+        IEnumerable<ObjectFolderSnapshot> folders)
     {
-        IReadOnlyList<string> currentFolders = state.DefaultLayoutId.HasValue
+        IReadOnlyList<ObjectFolderSnapshot> currentFolders = state.DefaultLayoutId.HasValue
             ? state.DefaultLayoutFolders
             : state.StandaloneFolders;
-        IReadOnlyDictionary<string, string> currentColors = state.DefaultLayoutId.HasValue
-            ? state.DefaultLayoutFolderColors
-            : state.StandaloneFolderColors;
-        IReadOnlyList<string> nextFolders = ObjectFolderUtility.OrderFolders(currentFolders.Concat(folderPaths));
-        IReadOnlyDictionary<string, string> nextColors = ObjectFolderUtility.OrderFolderColorMap(
-            currentColors.Concat(folderColors.Where(entry => string.IsNullOrEmpty(
-                ObjectFolderUtility.GetFolderColorValue(currentColors, entry.Key)))),
-            nextFolders);
+        IReadOnlyList<ObjectFolderSnapshot> nextFolders = ObjectFolderUtility.OrderFolderEntries(currentFolders.Concat(folders));
 
         return state.DefaultLayoutId.HasValue
             ? state with
             {
                 DefaultLayoutFolders = nextFolders,
-                DefaultLayoutFolderColors = nextColors,
             }
             : state with
             {
                 StandaloneFolders = nextFolders,
-                StandaloneFolderColors = nextColors,
             };
     }
 
@@ -115,13 +95,11 @@ internal static class ObjectFolderSceneStateUtility
             : AddFolder(state, sanitizedFolderPath);
         return nextState with
         {
-            StandaloneFolderColors = ApplyFolderColorMapEntry(
-                nextState.StandaloneFolderColors,
+            StandaloneFolders = ApplyFolderColor(
                 nextState.StandaloneFolders,
                 sanitizedFolderPath,
                 sanitizedColorValue),
-            DefaultLayoutFolderColors = ApplyFolderColorMapEntry(
-                nextState.DefaultLayoutFolderColors,
+            DefaultLayoutFolders = ApplyFolderColor(
                 nextState.DefaultLayoutFolders,
                 sanitizedFolderPath,
                 sanitizedColorValue),
@@ -130,93 +108,52 @@ internal static class ObjectFolderSceneStateUtility
 
     public static bool StatesMatch(ObjectFolderSceneState left, ObjectFolderSceneState right)
         => left.DefaultLayoutId == right.DefaultLayoutId
-            && ObjectFolderUtility.FolderListsMatch(left.StandaloneFolders, right.StandaloneFolders)
-            && ObjectFolderUtility.FolderColorMapsMatch(left.StandaloneFolderColors, right.StandaloneFolderColors)
-            && ObjectFolderUtility.FolderListsMatch(left.DefaultLayoutFolders, right.DefaultLayoutFolders)
-            && ObjectFolderUtility.FolderColorMapsMatch(left.DefaultLayoutFolderColors, right.DefaultLayoutFolderColors);
+            && ObjectFolderUtility.FolderEntriesMatch(left.StandaloneFolders, right.StandaloneFolders)
+            && ObjectFolderUtility.FolderEntriesMatch(left.DefaultLayoutFolders, right.DefaultLayoutFolders);
 
-    private static IReadOnlyDictionary<string, string> ApplyFolderColorMapEntry(
-        IReadOnlyDictionary<string, string> folderColors,
-        IEnumerable<string> validFolders,
+    private static IReadOnlyList<ObjectFolderSnapshot> ApplyFolderColor(
+        IReadOnlyList<ObjectFolderSnapshot> folders,
         string folderPath,
         string colorValue)
     {
-        var sanitizedFolderPath = ObjectFolderUtility.SanitizeFolderPath(folderPath);
-        if (string.IsNullOrEmpty(sanitizedFolderPath))
-        {
-            return ObjectFolderUtility.OrderFolderColorMap(folderColors, validFolders);
-        }
-
-        var nextColors = CreateMutableFolderColorMap(folderColors);
-
-        if (string.IsNullOrEmpty(colorValue))
-        {
-            nextColors.Remove(sanitizedFolderPath);
-        }
-        else
-        {
-            nextColors[sanitizedFolderPath] = colorValue;
-        }
-
-        return ObjectFolderUtility.OrderFolderColorMap(nextColors, validFolders);
+        string? color = colorValue.Length > 0 ? colorValue : null;
+        return ObjectFolderUtility.OrderFolderEntries(folders.Select(folder =>
+            string.Equals(ObjectFolderUtility.SanitizeFolderPath(folder.Path), folderPath, StringComparison.OrdinalIgnoreCase)
+                ? folder with { Color = color }
+                : folder));
     }
 
     private static ObjectFolderSceneState TransformFolderPaths(
         ObjectFolderSceneState state,
         Func<string, string?> transform,
         Func<string, bool>? includeColor = null)
-    {
-        (IReadOnlyList<string> StandaloneFolders, IReadOnlyDictionary<string, string> StandaloneColors) standalone =
-            TransformFolderSet(state.StandaloneFolders, state.StandaloneFolderColors, transform, includeColor);
-        (IReadOnlyList<string> LayoutFolders, IReadOnlyDictionary<string, string> LayoutColors) layout =
-            TransformFolderSet(state.DefaultLayoutFolders, state.DefaultLayoutFolderColors, transform, includeColor);
-        return state with
+        => state with
         {
-            StandaloneFolders = standalone.StandaloneFolders,
-            StandaloneFolderColors = standalone.StandaloneColors,
-            DefaultLayoutFolders = layout.LayoutFolders,
-            DefaultLayoutFolderColors = layout.LayoutColors,
+            StandaloneFolders = TransformFolderSet(state.StandaloneFolders, transform, includeColor),
+            DefaultLayoutFolders = TransformFolderSet(state.DefaultLayoutFolders, transform, includeColor),
         };
-    }
 
-    private static (IReadOnlyList<string> Folders, IReadOnlyDictionary<string, string> Colors) TransformFolderSet(
-        IReadOnlyList<string> folders,
-        IReadOnlyDictionary<string, string> colors,
+    private static IReadOnlyList<ObjectFolderSnapshot> TransformFolderSet(
+        IReadOnlyList<ObjectFolderSnapshot> folders,
         Func<string, string?> transform,
         Func<string, bool>? includeColor)
     {
-        List<string> transformedFolders = [];
-        Dictionary<string, string> transformedColors = new(StringComparer.OrdinalIgnoreCase);
-        foreach (string folder in folders)
+        List<ObjectFolderSnapshot> transformedFolders = [];
+        foreach (ObjectFolderSnapshot folder in folders)
         {
-            string sourcePath = ObjectFolderUtility.SanitizeFolderPath(folder);
+            string sourcePath = ObjectFolderUtility.SanitizeFolderPath(folder.Path);
             string destinationPath = ObjectFolderUtility.SanitizeFolderPath(transform(sourcePath));
             if (destinationPath.Length == 0)
             {
                 continue;
             }
 
-            transformedFolders.Add(destinationPath);
-            string color = ObjectFolderUtility.GetFolderColorValue(colors, sourcePath);
-            if (color.Length > 0 && (includeColor?.Invoke(sourcePath) ?? true))
-            {
-                transformedColors.TryAdd(destinationPath, color);
-            }
+            transformedFolders.Add(new ObjectFolderSnapshot(
+                destinationPath,
+                (includeColor?.Invoke(sourcePath) ?? true) ? folder.Color : null));
         }
 
-        IReadOnlyList<string> orderedFolders = ObjectFolderUtility.OrderFolders(transformedFolders);
-        return (orderedFolders, ObjectFolderUtility.OrderFolderColorMap(transformedColors, orderedFolders));
-    }
-
-    private static Dictionary<string, string> CreateMutableFolderColorMap(IReadOnlyDictionary<string, string> folderColors)
-    {
-        Dictionary<string, string> nextColors = new(StringComparer.OrdinalIgnoreCase);
-        foreach (var entry in folderColors)
-        {
-            nextColors[ObjectFolderUtility.SanitizeFolderPath(entry.Key)] = ObjectFolderUtility.SanitizeFolderColorValue(entry.Value);
-        }
-
-        return nextColors;
+        return ObjectFolderUtility.OrderFolderEntries(transformedFolders);
     }
 }
 

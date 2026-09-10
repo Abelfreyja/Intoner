@@ -20,8 +20,7 @@ internal readonly record struct ObjectLayoutTransferResult(bool Success, ObjectL
 internal sealed record ObjectLayoutImportPayload(
     string Name,
     IReadOnlyList<ObjectSnapshot> Snapshots,
-    IReadOnlyList<string> Folders,
-    IReadOnlyDictionary<string, string> FolderColors,
+    IReadOnlyList<ObjectFolderSnapshot> Folders,
     string SuccessMessage)
 {
     public ObjectRuntimeLocationContext? RequiredLocation { get; init; }

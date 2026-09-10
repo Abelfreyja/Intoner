@@ -44,16 +44,15 @@ internal static class ObjectApiMapper
             layout.Revision,
             layout.CreatedAtUtc,
             layout.UpdatedAtUtc,
-            ToPersistentSet(layout.Objects, layout.Folders, layout.FolderColors));
+            ToPersistentSet(layout.Objects, layout.Folders));
 
     public static PersistentObjectSet ToPersistentSet(
         IReadOnlyList<ObjectSnapshot> objects,
-        IReadOnlyList<string> folders,
-        IReadOnlyDictionary<string, string> folderColors)
+        IReadOnlyList<ObjectFolderSnapshot> folders)
         => new(
             objects.Select(ToPersistentObject).ToList(),
-            folders.ToList(),
-            new Dictionary<string, string>(folderColors, StringComparer.OrdinalIgnoreCase));
+            folders.Select(static folder => folder.Path).ToList(),
+            ObjectFolderUtility.ToFolderColorMap(folders));
 
     public static LoadedObjectLayout ToLoadedLayout(ObjectLoadedLayoutSnapshot layout)
         => new(
@@ -207,7 +206,7 @@ internal static class ObjectApiMapper
     {
         if (dto is null
             || dto.ExpectedRevision <= 0
-            || !TryToPersistentSet(dto.Standalone, null, out List<ObjectSnapshot> standaloneObjects, out IReadOnlyList<string> standaloneFolders, out IReadOnlyDictionary<string, string> standaloneFolderColors))
+            || !TryToPersistentSet(dto.Standalone, null, out List<ObjectSnapshot> standaloneObjects, out IReadOnlyList<ObjectFolderSnapshot> standaloneFolders))
         {
             update = null!;
             return false;
@@ -215,8 +214,7 @@ internal static class ObjectApiMapper
 
         Guid? defaultLayoutId = null;
         List<ObjectSnapshot> defaultLayoutObjects = [];
-        IReadOnlyList<string> defaultLayoutFolders = [];
-        IReadOnlyDictionary<string, string> defaultLayoutFolderColors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        IReadOnlyList<ObjectFolderSnapshot> defaultLayoutFolders = [];
         if (dto.DefaultLayout is not null)
         {
             defaultLayoutId = dto.DefaultLayout.LayoutId;
@@ -225,8 +223,7 @@ internal static class ObjectApiMapper
                     dto.DefaultLayout.Content,
                     defaultLayoutId,
                     out defaultLayoutObjects,
-                    out defaultLayoutFolders,
-                    out defaultLayoutFolderColors))
+                    out defaultLayoutFolders))
             {
                 update = null!;
                 return false;
@@ -246,11 +243,9 @@ internal static class ObjectApiMapper
             ExpectedRevision = dto.ExpectedRevision,
             StandaloneObjects = standaloneObjects,
             StandaloneFolders = standaloneFolders,
-            StandaloneFolderColors = standaloneFolderColors,
             DefaultLayoutId = defaultLayoutId,
             DefaultLayoutObjects = defaultLayoutObjects,
             DefaultLayoutFolders = defaultLayoutFolders,
-            DefaultLayoutFolderColors = defaultLayoutFolderColors,
         };
         return true;
     }
@@ -433,14 +428,12 @@ internal static class ObjectApiMapper
         PersistentObjectSet? dto,
         Guid? layoutId,
         out List<ObjectSnapshot> objects,
-        out IReadOnlyList<string> folders,
-        out IReadOnlyDictionary<string, string> folderColors)
+        out IReadOnlyList<ObjectFolderSnapshot> folders)
     {
         if (dto?.Objects is null || dto.Folders is null || dto.FolderColors is null)
         {
             objects = [];
             folders = [];
-            folderColors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             return false;
         }
 
@@ -453,15 +446,13 @@ internal static class ObjectApiMapper
             {
                 objects = [];
                 folders = [];
-                folderColors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 return false;
             }
 
             objects.Add(snapshot with { LayoutId = layoutId });
         }
 
-        folders = ObjectFolderUtility.OrderFolders(dto.Folders);
-        folderColors = ObjectFolderUtility.OrderFolderColorMap(dto.FolderColors, folders);
+        folders = ObjectFolderUtility.FromFolderColorMap(dto.Folders, dto.FolderColors);
         return true;
     }
 

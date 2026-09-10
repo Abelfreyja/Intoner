@@ -57,12 +57,14 @@ internal sealed partial class ObjectLibraryBrowser
         }
 
         ObjectFolderSceneState folderState = _objectFolderService.CaptureSceneState();
-        IReadOnlyDictionary<string, string> folderColors = folderState.DefaultLayoutId.HasValue
-            ? folderState.DefaultLayoutFolderColors
-            : folderState.StandaloneFolderColors;
+        IReadOnlyList<ObjectFolderSnapshot> folders = folderState.DefaultLayoutId.HasValue
+            ? folderState.DefaultLayoutFolders
+            : folderState.StandaloneFolders;
+        string color = folders.FirstOrDefault(folder => string.Equals(
+            folder.Path, normalizedFolderPath, StringComparison.OrdinalIgnoreCase))?.Color ?? string.Empty;
         return _objectLibrary.TryCreatePrefab(
             name,
-            ObjectFolderUtility.GetFolderColorValue(folderColors, normalizedFolderPath),
+            color,
             context,
             snapshots,
             parentFolderId: null,

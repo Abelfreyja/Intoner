@@ -35,6 +35,12 @@ internal interface IPluginStoragePaths
     /// <summary> gets the latest object autosave layout path </summary>
     string ObjectAutosaveCurrentPath { get; }
 
+    /// <summary> gets the previous session's object autosave path </summary>
+    string ObjectAutosaveRecoveryPath { get; }
+
+    /// <summary> gets the latest rejected object autosave path </summary>
+    string ObjectAutosaveRejectedPath { get; }
+
     /// <summary> gets the directory used by the object asset cache </summary>
     string AssetCacheRootPath { get; }
 
@@ -62,6 +68,8 @@ internal sealed class PluginStoragePaths : IPluginStoragePaths
         ObjectLayoutsPath = Path.Combine(ObjectRootPath, "layouts");
         ObjectAutosaveRootPath = Path.Combine(ObjectRootPath, "autosaves");
         ObjectAutosaveCurrentPath = Path.Combine(ObjectAutosaveRootPath, "current.autosave.json");
+        ObjectAutosaveRecoveryPath = Path.Combine(ObjectAutosaveRootPath, "recovery.autosave.json");
+        ObjectAutosaveRejectedPath = Path.Combine(ObjectAutosaveRootPath, "rejected.autosave.json");
         AssetCacheRootPath = Path.Combine(ObjectRootPath, "asset-cache");
         AssetCacheManifestPath = Path.Combine(AssetCacheRootPath, "manifest.json");
         AssetCachePayloadPath = Path.Combine(AssetCacheRootPath, "assets.cache");
@@ -87,6 +95,10 @@ internal sealed class PluginStoragePaths : IPluginStoragePaths
     public string ObjectAutosaveRootPath { get; }
 
     public string ObjectAutosaveCurrentPath { get; }
+
+    public string ObjectAutosaveRecoveryPath { get; }
+
+    public string ObjectAutosaveRejectedPath { get; }
 
     public string AssetCacheRootPath { get; }
 

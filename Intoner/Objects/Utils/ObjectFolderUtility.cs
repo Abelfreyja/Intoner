@@ -1,3 +1,4 @@
+using Intoner.Objects.Models;
 using System.Numerics;
 
 namespace Intoner.Objects.Utils;
@@ -145,6 +146,101 @@ internal static class ObjectFolderUtility
     public static IReadOnlyList<string> ExpandFolders(IEnumerable<string> folderPaths)
         => OrderFolders(folderPaths.SelectMany(static path => EnumerateFolderAncestors(path, includeSelf: true)));
 
+    public static IReadOnlyList<ObjectFolderSnapshot> OrderFolderEntries(IEnumerable<ObjectFolderSnapshot> folders)
+    {
+        Dictionary<string, ObjectFolderSnapshot> entries = new(StringComparer.OrdinalIgnoreCase);
+        foreach (ObjectFolderSnapshot folder in folders)
+        {
+            string path = SanitizeFolderPath(folder.Path);
+            if (path.Length == 0)
+            {
+                continue;
+            }
+
+            string color = SanitizeFolderColorValue(folder.Color);
+            if (!entries.TryGetValue(path, out ObjectFolderSnapshot? existing))
+            {
+                entries.Add(path, new ObjectFolderSnapshot(path, color.Length > 0 ? color : null));
+            }
+            else if (existing.Color is null && color.Length > 0)
+            {
+                // the first explicit color wins when folder sources overlap
+                entries[path] = existing with { Color = color };
+            }
+        }
+
+        return entries.Values.OrderBy(static folder => folder.Path, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    public static IReadOnlyList<ObjectFolderSnapshot> ExpandFolderEntries(IEnumerable<ObjectFolderSnapshot> folders)
+    {
+        List<ObjectFolderSnapshot> entries = [];
+        foreach (ObjectFolderSnapshot folder in folders)
+        {
+            entries.Add(folder);
+            foreach (string parent in EnumerateFolderAncestors(folder.Path))
+            {
+                entries.Add(new ObjectFolderSnapshot(parent));
+            }
+        }
+
+        return OrderFolderEntries(entries);
+    }
+
+    public static bool FolderEntriesMatch(IReadOnlyList<ObjectFolderSnapshot> left, IReadOnlyList<ObjectFolderSnapshot> right)
+    {
+        if (ReferenceEquals(left, right))
+        {
+            return true;
+        }
+
+        if (left.Count != right.Count)
+        {
+            return false;
+        }
+
+        for (int index = 0; index < left.Count; ++index)
+        {
+            if (!string.Equals(left[index].Path, right[index].Path, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(left[index].Color, right[index].Color, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    public static IReadOnlyList<ObjectFolderSnapshot> FromFolderColorMap(
+        IEnumerable<string> paths,
+        IReadOnlyDictionary<string, string> colors)
+    {
+        Dictionary<string, string> normalizedColors = new(StringComparer.OrdinalIgnoreCase);
+        foreach ((string key, string value) in colors)
+        {
+            string path = SanitizeFolderPath(key);
+            string color = SanitizeFolderColorValue(value);
+            if (path.Length > 0 && color.Length > 0)
+            {
+                normalizedColors[path] = color;
+            }
+        }
+
+        return OrderFolderEntries(paths.Select(path => new ObjectFolderSnapshot(
+            path, normalizedColors.GetValueOrDefault(SanitizeFolderPath(path)))));
+    }
+
+    public static IReadOnlyDictionary<string, string> ToFolderColorMap(IEnumerable<ObjectFolderSnapshot> folders)
+    {
+        Dictionary<string, string> colors = new(StringComparer.OrdinalIgnoreCase);
+        foreach (ObjectFolderSnapshot folder in folders.Where(static folder => !string.IsNullOrEmpty(folder.Color)))
+        {
+            colors[folder.Path] = folder.Color!;
+        }
+
+        return colors;
+    }
+
     public static string ResolveAvailableFolderPath(string preferredPath, IEnumerable<string> existingPaths)
         => ResolveAvailableFolderPath(
             preferredPath,
@@ -173,29 +269,6 @@ internal static class ObjectFolderUtility
         return candidate;
     }
 
-    public static bool FolderListsMatch(IReadOnlyList<string> left, IReadOnlyList<string> right)
-    {
-        if (ReferenceEquals(left, right))
-        {
-            return true;
-        }
-
-        if (left.Count != right.Count)
-        {
-            return false;
-        }
-
-        for (var i = 0; i < left.Count; ++i)
-        {
-            if (!string.Equals(left[i], right[i], StringComparison.OrdinalIgnoreCase))
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
     public static string SanitizeFolderColorValue(string? colorValue)
     {
         if (!TryParseFolderColorValue(colorValue, out var parsedColor))
@@ -204,56 +277,6 @@ internal static class ObjectFolderUtility
         }
 
         return FormatFolderColorValue(parsedColor);
-    }
-
-    public static IReadOnlyDictionary<string, string> OrderFolderColorMap(
-        IEnumerable<KeyValuePair<string, string>> folderColors,
-        IEnumerable<string>? validFolders = null)
-    {
-        var validFolderSet = validFolders is null
-            ? null
-            : CreateFolderSet(validFolders);
-        Dictionary<string, string> orderedColors = new(StringComparer.OrdinalIgnoreCase);
-        foreach (var entry in folderColors
-                     .Select(entry => new KeyValuePair<string, string>(SanitizeFolderPath(entry.Key), SanitizeFolderColorValue(entry.Value)))
-                     .Where(static entry => !string.IsNullOrWhiteSpace(entry.Key) && !string.IsNullOrWhiteSpace(entry.Value))
-                     .OrderBy(static entry => entry.Key, StringComparer.OrdinalIgnoreCase))
-        {
-            if (validFolderSet is not null && !validFolderSet.Contains(entry.Key))
-            {
-                continue;
-            }
-
-            orderedColors[entry.Key] = entry.Value;
-        }
-
-        return orderedColors;
-    }
-
-    public static bool FolderColorMapsMatch(IReadOnlyDictionary<string, string> left, IReadOnlyDictionary<string, string> right)
-    {
-        if (ReferenceEquals(left, right))
-        {
-            return true;
-        }
-
-        if (left.Count != right.Count)
-        {
-            return false;
-        }
-
-        foreach (var entry in left)
-        {
-            var leftPath = SanitizeFolderPath(entry.Key);
-            var leftColorValue = SanitizeFolderColorValue(entry.Value);
-            var rightColorValue = GetFolderColorValue(right, leftPath);
-            if (!string.Equals(leftColorValue, rightColorValue, StringComparison.OrdinalIgnoreCase))
-            {
-                return false;
-            }
-        }
-
-        return true;
     }
 
     public static string GetFolderColorValue(IReadOnlyDictionary<string, string> folderColors, string folderPath)

@@ -1,5 +1,4 @@
 using Intoner.Objects.Models;
-using Intoner.Objects.Utils;
 
 namespace Intoner.Objects.Runtime;
 
@@ -8,6 +7,14 @@ namespace Intoner.Objects.Runtime;
 /// </summary>
 internal interface IObjectPersistenceState
 {
+    /// <summary> gets the published persistent scene revision </summary>
+    long Revision { get; }
+
+    /// <summary> captures current persistent objects, folder owners, and their revision under the scene state lock </summary>
+    /// <param name="capturedAtUtc"> the capture timestamp in UTC </param>
+    /// <returns> the current persistent workspace, excluding unloaded and temporary layouts </returns>
+    ObjectPersistentWorkspaceSnapshot CaptureWorkspace(DateTime capturedAtUtc);
+
     /// <summary>
     /// Gets persisted standalone objects that are not part of a layout.
     /// </summary>
@@ -135,10 +142,11 @@ internal interface IObjectPersistenceState
 
 internal sealed class ObjectPersistenceState : IObjectPersistenceState
 {
-    private readonly Lock                 _stateLock;
+    private readonly Lock _stateLock;
     private readonly IObjectLayoutManager _layoutManager;
-    private readonly IObjectKindService   _objectKindService;
+    private readonly IObjectKindService _objectKindService;
     private readonly IObjectFolderService _objectFolderService;
+    private readonly IObjectRevisionTracker _revisionTracker;
 
     private readonly Dictionary<Guid, ObjectSnapshot> _standaloneSnapshots = [];
     private readonly Dictionary<ObjectKind, int> _kindCounters = [];
@@ -147,12 +155,35 @@ internal sealed class ObjectPersistenceState : IObjectPersistenceState
         ObjectStateLock stateLock,
         IObjectLayoutManager layoutManager,
         IObjectKindService objectKindService,
-        IObjectFolderService objectFolderService)
+        IObjectFolderService objectFolderService,
+        IObjectRevisionTracker revisionTracker)
     {
         _stateLock = stateLock.Value;
         _layoutManager = layoutManager;
         _objectKindService = objectKindService;
         _objectFolderService = objectFolderService;
+        _revisionTracker = revisionTracker;
+    }
+
+    public long Revision
+        => _revisionTracker.GetPersistentSceneRevision();
+
+    public ObjectPersistentWorkspaceSnapshot CaptureWorkspace(DateTime capturedAtUtc)
+    {
+        lock (_stateLock)
+        {
+            ObjectFolderSceneState folderState = _objectFolderService.CaptureSceneState();
+            return new ObjectPersistentWorkspaceSnapshot
+            {
+                Objects = GetPersistedSnapshots(),
+                StandaloneFolders = folderState.StandaloneFolders,
+                DefaultLayoutFolders = folderState.DefaultLayoutFolders,
+                DefaultLayoutId = folderState.DefaultLayoutId,
+                Name = TryGetDefaultLayout(out ObjectLayoutSnapshot layout) ? layout.Name : "Standalone objects",
+                Revision = Revision,
+                CapturedAtUtc = capturedAtUtc,
+            };
+        }
     }
 
     public IReadOnlyList<ObjectSnapshot> GetStandaloneSnapshots()
@@ -282,8 +313,7 @@ internal sealed class ObjectPersistenceState : IObjectPersistenceState
 
         return TryGetDefaultLayout(out var defaultLayout)
             && (defaultLayout.Objects.Count > 0
-                || defaultLayout.Folders.Count > 0
-                || defaultLayout.FolderColors.Count > 0);
+                || defaultLayout.Folders.Count > 0);
     }
 
     public bool HasPersistedObjects()

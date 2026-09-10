@@ -22,8 +22,7 @@ internal readonly record struct ObjectPasteDestination(ObjectPasteDestinationKin
 
 internal sealed record ObjectTransferImport(
     IReadOnlyList<ObjectSnapshot> Objects,
-    IReadOnlyList<string> Folders,
-    IReadOnlyDictionary<string, string> FolderColors,
+    IReadOnlyList<ObjectFolderSnapshot> Folders,
     bool IsFolderTransfer);
 
 /// <summary> maps scene object transfers and persistent snapshots </summary>
@@ -31,16 +30,14 @@ internal static class ObjectTransferMapper
 {
     public static bool TryCreateDocument(
         IReadOnlyList<ObjectSnapshot> snapshots,
-        IReadOnlyList<string> folders,
-        IReadOnlyDictionary<string, string> folderColors,
+        IReadOnlyList<ObjectFolderSnapshot> folders,
         out ObjectTransferDocument document)
-        => TryCreateDocument(snapshots, folders, folderColors, folderName: null, out document);
+        => TryCreateDocument(snapshots, folders, folderName: null, out document);
 
     public static bool TryCreateFolderDocument(
         IReadOnlyList<ObjectSnapshot> snapshots,
         string folderPath,
-        IReadOnlyList<string> folders,
-        IReadOnlyDictionary<string, string> folderColors,
+        IReadOnlyList<ObjectFolderSnapshot> folders,
         out ObjectTransferDocument document)
     {
         string normalizedFolder = ObjectFolderUtility.SanitizeFolderPath(folderPath);
@@ -53,15 +50,12 @@ internal static class ObjectTransferMapper
             return false;
         }
 
-        IReadOnlyList<string> subtreeFolders = ObjectFolderUtility.OrderFolders(
-            folders
-                .Where(folder => ObjectFolderUtility.IsSameOrDescendant(folder, normalizedFolder))
-                .Concat(snapshots.Select(static snapshot => snapshot.FolderPath))
-                .Append(normalizedFolder));
-        IReadOnlyDictionary<string, string> subtreeColors = ObjectFolderUtility.OrderFolderColorMap(
-            folderColors,
-            subtreeFolders);
-        return TryCreateDocument(snapshots, subtreeFolders, subtreeColors, normalizedFolder, out document);
+        return TryCreateDocument(
+            snapshots,
+            folders.Where(folder => ObjectFolderUtility.IsSameOrDescendant(folder.Path, normalizedFolder))
+                .Append(new ObjectFolderSnapshot(normalizedFolder)),
+            normalizedFolder,
+            out document);
     }
 
     public static bool TryPrepareImport(
@@ -85,24 +79,15 @@ internal static class ObjectTransferMapper
             || source.Folders is null
             || source.FolderColors is null
             || source.Objects.Count > ObjectTransferCodec.MaximumObjectCount
-            || (transfer.FolderName is null && source.Objects.Count == 0))
+            || (transfer.FolderName is null && source.Objects.Count == 0)
+            || (transfer.FolderName is { } folderName
+                && source.Folders.Any(folder => !ObjectFolderUtility.IsSameOrDescendant(folder, folderName))))
         {
             return false;
         }
 
-        Dictionary<Guid, Guid> importedIds = new(source.Objects.Count);
-        foreach (PersistentObject? entry in source.Objects)
-        {
-            if (entry?.Object is null
-                || entry.Object.Id == Guid.Empty
-                || !importedIds.TryAdd(entry.Object.Id, Guid.NewGuid()))
-            {
-                return false;
-            }
-        }
-
         DateTime createdAtUtc = DateTime.UtcNow;
-        List<ObjectSnapshot> snapshots = new(source.Objects.Count);
+        List<ObjectSnapshot> sourceSnapshots = new(source.Objects.Count);
         foreach (PersistentObject? entry in source.Objects)
         {
             if (entry is null || !ObjectApiMapper.TryToPersistentSnapshot(entry, out ObjectSnapshot snapshot))
@@ -110,48 +95,39 @@ internal static class ObjectTransferMapper
                 return false;
             }
 
-            ObjectData model = snapshot.Model;
-            if (model is FurnitureModel furniture)
+            sourceSnapshots.Add(snapshot with
             {
-                model = furniture with
-                {
-                    AttachmentParentId = furniture.AttachmentParentId is { } parentId
-                        && importedIds.TryGetValue(parentId, out Guid importedParentId)
-                            ? importedParentId
-                            : null,
-                };
-            }
-
-            snapshots.Add(snapshot with
-            {
-                Id = importedIds[snapshot.Id],
                 LayoutId = layoutId,
                 CreatedAtUtc = createdAtUtc,
                 CreatedIn = createdIn,
-                Model = model,
             });
         }
 
-        if (!TryApplyDestination(
-                transfer,
-                source,
-                snapshots,
-                existingFolders,
-                destination,
-                out IReadOnlyList<string> folders,
-                out IReadOnlyDictionary<string, string> colors))
+        if (!ObjectSnapshotUtility.TryCopyWithNewIds(sourceSnapshots, out List<ObjectSnapshot> snapshots))
         {
             return false;
         }
 
-        import = new ObjectTransferImport(snapshots, folders, colors, transfer.FolderName is not null);
+        if (!TryApplyDestination(
+                transfer,
+                ObjectFolderUtility.FromFolderColorMap(
+                    source.Folders.Concat(sourceSnapshots.Select(static snapshot => snapshot.FolderPath)).Append(transfer.FolderName ?? string.Empty),
+                    source.FolderColors),
+                snapshots,
+                existingFolders,
+                destination,
+                out IReadOnlyList<ObjectFolderSnapshot> folders))
+        {
+            return false;
+        }
+
+        import = new ObjectTransferImport(snapshots, folders, transfer.FolderName is not null);
         return true;
     }
 
     private static bool TryCreateDocument(
         IReadOnlyList<ObjectSnapshot> snapshots,
-        IReadOnlyList<string> folders,
-        IReadOnlyDictionary<string, string> folderColors,
+        IEnumerable<ObjectFolderSnapshot> folders,
         string? folderName,
         out ObjectTransferDocument document)
     {
@@ -175,40 +151,34 @@ internal static class ObjectTransferMapper
             }
         }
 
-        IReadOnlyList<string> orderedFolders = ObjectFolderUtility.OrderFolders(
-            folders.Concat(snapshots.Select(static snapshot => snapshot.FolderPath)));
-        IReadOnlyDictionary<string, string> orderedColors = ObjectFolderUtility.OrderFolderColorMap(
-            folderColors,
-            orderedFolders);
+        IReadOnlyList<ObjectFolderSnapshot> orderedFolders = ObjectFolderUtility.OrderFolderEntries(
+            folders.Concat(snapshots.Select(static snapshot => new ObjectFolderSnapshot(snapshot.FolderPath))));
         document = new ObjectTransferDocument(
             ObjectTransferKind.SceneObjects,
             SceneObjects: new SceneObjectTransfer(
-                ObjectApiMapper.ToPersistentSet(snapshots, orderedFolders, orderedColors),
+                ObjectApiMapper.ToPersistentSet(snapshots, orderedFolders),
                 folderName));
         return true;
     }
 
     private static bool TryApplyDestination(
         SceneObjectTransfer transfer,
-        PersistentObjectSet source,
+        IReadOnlyList<ObjectFolderSnapshot> sourceFolders,
         List<ObjectSnapshot> snapshots,
         IReadOnlyList<string> existingFolders,
         ObjectPasteDestination destination,
-        out IReadOnlyList<string> folders,
-        out IReadOnlyDictionary<string, string> colors)
+        out IReadOnlyList<ObjectFolderSnapshot> folders)
     {
         folders = [];
-        colors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         if (transfer.FolderName is not null)
         {
             return TryApplyFolderDestination(
                 transfer,
-                source,
+                sourceFolders,
                 snapshots,
                 existingFolders,
                 destination,
-                out folders,
-                out colors);
+                out folders);
         }
 
         switch (destination.Kind)
@@ -224,12 +194,10 @@ internal static class ObjectTransferMapper
                 }
 
                 ReplaceFolder(snapshots, targetFolder);
-                folders = [targetFolder];
+                folders = [new ObjectFolderSnapshot(targetFolder)];
                 return true;
             case ObjectPasteDestinationKind.KeepOrganization:
-                folders = ObjectFolderUtility.OrderFolders(
-                    source.Folders.Concat(snapshots.Select(static snapshot => snapshot.FolderPath)));
-                colors = ObjectFolderUtility.OrderFolderColorMap(source.FolderColors, folders);
+                folders = sourceFolders;
                 return true;
             default:
                 return false;
@@ -238,18 +206,15 @@ internal static class ObjectTransferMapper
 
     private static bool TryApplyFolderDestination(
         SceneObjectTransfer transfer,
-        PersistentObjectSet source,
+        IReadOnlyList<ObjectFolderSnapshot> sourceFolders,
         List<ObjectSnapshot> snapshots,
         IReadOnlyList<string> existingFolders,
         ObjectPasteDestination destination,
-        out IReadOnlyList<string> folders,
-        out IReadOnlyDictionary<string, string> colors)
+        out IReadOnlyList<ObjectFolderSnapshot> folders)
     {
         folders = [];
-        colors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         string sourceRoot = ObjectFolderUtility.SanitizeFolderPath(transfer.FolderName);
         if (sourceRoot.Length == 0
-         || source.Folders.Any(folder => !ObjectFolderUtility.IsSameOrDescendant(folder, sourceRoot))
          || snapshots.Any(snapshot => !ObjectFolderUtility.IsSameOrDescendant(snapshot.FolderPath, sourceRoot)))
         {
             return false;
@@ -289,22 +254,10 @@ internal static class ObjectTransferMapper
             };
         }
 
-        folders = ObjectFolderUtility.OrderFolders(
-            source.Folders
-                .Select(folder => ObjectFolderUtility.RebaseFolderPath(folder, sourceRoot, destinationRoot))
-                .Concat(snapshots.Select(static snapshot => snapshot.FolderPath))
-                .Append(destinationRoot));
-        Dictionary<string, string> rebasedColors = new(StringComparer.OrdinalIgnoreCase);
-        foreach ((string path, string color) in source.FolderColors)
-        {
-            string rebasedPath = ObjectFolderUtility.RebaseFolderPath(path, sourceRoot, destinationRoot);
-            if (rebasedPath.Length > 0)
-            {
-                rebasedColors[rebasedPath] = color;
-            }
-        }
-
-        colors = ObjectFolderUtility.OrderFolderColorMap(rebasedColors, folders);
+        folders = ObjectFolderUtility.OrderFolderEntries(
+            sourceFolders
+                .Select(folder => folder with { Path = ObjectFolderUtility.RebaseFolderPath(folder.Path, sourceRoot, destinationRoot) })
+                .Append(new ObjectFolderSnapshot(destinationRoot)));
         return true;
     }
 

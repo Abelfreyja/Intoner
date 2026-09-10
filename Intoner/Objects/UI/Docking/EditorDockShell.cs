@@ -133,7 +133,11 @@ internal static class EditorDockShell
         if (layout.Left > 0f)
         {
             ImGui.TableNextColumn();
-            DrawSlotPanels(panels, panelSizes, EditorDockSlot.Left, new Vector2(layout.Left, layout.CenterSize.Y));
+            using (ImRaii.PushStyle(ImGuiStyleVar.CellPadding, contentCellPadding))
+            {
+                DrawSlotPanels(panels, panelSizes, EditorDockSlot.Left, new Vector2(layout.Left, layout.CenterSize.Y));
+            }
+
             ImGui.TableNextColumn();
         }
 
@@ -147,7 +151,10 @@ internal static class EditorDockShell
         {
             ImGui.TableNextColumn();
             ImGui.TableNextColumn();
-            DrawSlotPanels(panels, panelSizes, EditorDockSlot.Right, new Vector2(layout.Right, layout.CenterSize.Y));
+            using (ImRaii.PushStyle(ImGuiStyleVar.CellPadding, contentCellPadding))
+            {
+                DrawSlotPanels(panels, panelSizes, EditorDockSlot.Right, new Vector2(layout.Right, layout.CenterSize.Y));
+            }
         }
     }
 
