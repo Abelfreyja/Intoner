@@ -24,7 +24,7 @@ internal interface IPenumbraDependency : IDependency, IDisposable
 internal sealed class PenumbraDependency : IPenumbraDependency
 {
     private const string InternalName = "Penumbra";
-    private static readonly DependencyApiVersion RequiredApiVersion = new(5, 17);
+    private static readonly DependencyApiVersion RequiredApiVersion = new(5, 19);
     private static readonly DependencyDefinition DependencyDefinition = new(
         IPenumbraDependency.Id,
         "Penumbra",
