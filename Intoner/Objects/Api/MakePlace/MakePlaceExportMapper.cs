@@ -24,7 +24,7 @@ internal sealed class MakePlaceExportMapper(
             return false;
         }
 
-        List<MakePlaceFurnitureDocument> furniture = BuildFurnitureTree(layout.Objects, areaContext, out int exportedFurnitureCount, out int skippedFurnitureCount);
+        List<MakePlaceFurnitureDocument> furniture = BuildFurnitureList(layout.Objects, areaContext, out int skippedFurnitureCount);
         if (furniture.Count == 0)
         {
             errorMessage = $"The selected layout does not contain any {areaContext.AreaLabel} furniture that can be exported to MakePlace.";
@@ -39,24 +39,23 @@ internal sealed class MakePlaceExportMapper(
             ExteriorScale = 1f,
             ExteriorFurniture = areaContext.Area == ObjectHousingArea.Outdoor ? furniture : [],
         };
-        successMessage = BuildExportStatus(layout.Name, exportedFurnitureCount, skippedFurnitureCount, areaContext);
+        successMessage = BuildExportStatus(layout.Name, furniture.Count, skippedFurnitureCount, areaContext);
         errorMessage = string.Empty;
         return true;
     }
 
-    private List<MakePlaceFurnitureDocument> BuildFurnitureTree(
+    private List<MakePlaceFurnitureDocument> BuildFurnitureList(
         IReadOnlyList<ObjectSnapshot> snapshots,
         LayoutTransferContext areaContext,
-        out int exportedFurnitureCount,
         out int skippedFurnitureCount)
     {
-        Dictionary<Guid, ExportedFurnitureNode> exportedById = [];
+        List<MakePlaceFurnitureDocument> furniture = new(snapshots.Count);
         skippedFurnitureCount = 0;
         foreach (ObjectSnapshot snapshot in snapshots)
         {
-            if (TryCreateFurnitureDocument(snapshot, areaContext, out FurnitureModel? furnitureModel, out MakePlaceFurnitureDocument document))
+            if (TryCreateFurnitureDocument(snapshot, areaContext, out MakePlaceFurnitureDocument document))
             {
-                exportedById[snapshot.Id] = new ExportedFurnitureNode(furnitureModel, document);
+                furniture.Add(document);
                 continue;
             }
 
@@ -66,42 +65,20 @@ internal sealed class MakePlaceExportMapper(
             }
         }
 
-        exportedFurnitureCount = exportedById.Count;
-        List<MakePlaceFurnitureDocument> roots = [];
-        foreach (ObjectSnapshot snapshot in snapshots)
-        {
-            if (!exportedById.TryGetValue(snapshot.Id, out ExportedFurnitureNode? node))
-            {
-                continue;
-            }
-
-            if (node.Furniture.AttachmentParentId is { } parentId
-                && exportedById.TryGetValue(parentId, out ExportedFurnitureNode? parentNode))
-            {
-                parentNode.Document.Attachments.Add(node.Document);
-                continue;
-            }
-
-            roots.Add(node.Document);
-        }
-
-        return roots;
+        return furniture;
     }
 
     private bool TryCreateFurnitureDocument(
         ObjectSnapshot snapshot,
         LayoutTransferContext areaContext,
-        out FurnitureModel furnitureModel,
         out MakePlaceFurnitureDocument document)
     {
         document = null!;
-        if (!furnitureCatalog.TryResolve(snapshot, areaContext.FurnitureArea, out FurnitureModel? resolvedFurnitureModel, out FurnitureCatalogMatch? match))
+        if (!furnitureCatalog.TryResolve(snapshot, areaContext.FurnitureArea, out FurnitureModel? furnitureModel, out FurnitureCatalogMatch? match))
         {
-            furnitureModel = null!;
             return false;
         }
 
-        furnitureModel = resolvedFurnitureModel;
         document = new MakePlaceFurnitureDocument
         {
             Name = match.DisplayName,
@@ -138,6 +115,4 @@ internal sealed class MakePlaceExportMapper(
 
         return message;
     }
-
-    private sealed record ExportedFurnitureNode(FurnitureModel Furniture, MakePlaceFurnitureDocument Document);
 }
