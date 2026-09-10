@@ -28,7 +28,7 @@ internal interface IIntonerConfigurationService
 
 internal sealed class IntonerConfigurationService : IIntonerConfigurationService
 {
-    private static readonly JsonSerializerOptions JsonOptions = JsonSerializerOptionsUtility.CreateStrictIndented(JsonNamingPolicy.CamelCase);
+    private static readonly JsonSerializerOptions JsonOptions = JsonSerializerOptionsUtility.CreateLenientIndented(JsonNamingPolicy.CamelCase);
 
     private readonly ILogger<IntonerConfigurationService> _logger;
     private readonly IPluginStoragePaths                  _pathService;

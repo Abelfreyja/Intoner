@@ -6,7 +6,6 @@ internal sealed class IntonerConfiguration
 
     public required int Version { get; set; }
     public required AssetCaptureConfiguration AssetCapture { get; set; }
-    public required HousingCullingConfiguration HousingCulling { get; set; }
     public required HousingModeConfiguration HousingMode { get; set; }
     public required LayoutConfiguration Layouts { get; set; }
     public required LayoutAutoSaveConfiguration LayoutAutoSave { get; set; }
@@ -19,7 +18,6 @@ internal sealed class IntonerConfiguration
         {
             Version = CurrentVersion,
             AssetCapture = AssetCaptureConfiguration.CreateDefault(),
-            HousingCulling = HousingCullingConfiguration.CreateDefault(),
             HousingMode = HousingModeConfiguration.CreateDefault(),
             Layouts = LayoutConfiguration.CreateDefault(),
             LayoutAutoSave = LayoutAutoSaveConfiguration.CreateDefault(),
@@ -33,7 +31,6 @@ internal sealed class IntonerConfiguration
         {
             Version = Version,
             AssetCapture = AssetCapture.Copy(),
-            HousingCulling = HousingCulling.Copy(),
             HousingMode = HousingMode.Copy(),
             Layouts = Layouts.Copy(),
             LayoutAutoSave = LayoutAutoSave.Copy(),

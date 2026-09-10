@@ -1,4 +1,3 @@
-using Intoner.Objects.Interop;
 using Intoner.Objects.Runtime;
 using Intoner.Objects.UI.Settings.Components;
 using Intoner.Services.Configuration;
@@ -10,7 +9,6 @@ namespace Intoner.Objects.UI.Settings;
 internal sealed class CoreSettingFactory
 {
     private readonly IIntonerConfigurationService _configuration;
-    private readonly IObjectHousingCullingService  _housingCulling;
     private readonly IObjectHousingModePolicy      _housingMode;
     private readonly IntonerThemeStyle             _themeStyle;
 
@@ -133,12 +131,10 @@ internal sealed class CoreSettingFactory
 
     public CoreSettingFactory(
         IIntonerConfigurationService configuration,
-        IObjectHousingCullingService housingCulling,
         IObjectHousingModePolicy housingMode,
         IntonerThemeStyle themeStyle)
     {
         _configuration = configuration;
-        _housingCulling = housingCulling;
         _housingMode    = housingMode;
         _themeStyle     = themeStyle;
     }
@@ -206,18 +202,6 @@ internal sealed class CoreSettingFactory
             value => _configuration.TryUpdate(
                 configuration => configuration.AssetCapture.EnableRuntimeCapture = value),
             static () => new SettingStatus("Startup", ThemeColors.TextDisabled));
-
-    public ISettingEntry CreateHousingCulling()
-        => new ToggleSettingEntry(
-            new SettingDefinition(
-                "disableFurnitureRenderCulling",
-                "Disable Furniture Render Culling",
-                "Keeps loaded housing furniture slots visible after the client loads them. (Doesn't affect furniture spawned by Intoner, since culling doesn't affect them at all)",
-                "housing furniture culling visibility display cap hidden"),
-            () => _housingCulling.DisableFurnitureDisplayCulling,
-            value => _housingCulling.SetDisableFurnitureDisplayCulling(value),
-            ResolveHousingCullingStatus,
-            () => _housingCulling.IsHookAvailable);
 
     public ISettingEntry CreateLayoutAutosaveEnabled()
         => new ToggleSettingEntry(
@@ -459,14 +443,6 @@ internal sealed class CoreSettingFactory
                 configuration => configuration.Rendering.DrawOverGameUi = value),
             ResolveDrawOverGameUiStatus,
             () => _configuration.Current.Rendering.DrawMode != DrawMode.ImGui);
-
-    private SettingStatus ResolveHousingCullingStatus()
-        => (_housingCulling.IsHookAvailable, _housingCulling.DisableFurnitureDisplayCulling) switch
-        {
-            (false, _) => new SettingStatus("Unavailable", ThemeColors.DimRed),
-            (_, true)  => new SettingStatus("Active", ThemeColors.AccentGreen),
-            _          => new SettingStatus("Ready", ThemeColors.TextDisabled),
-        };
 
     private SettingStatus ResolveLayoutAutosaveStatus()
         => _configuration.Current.LayoutAutoSave.Enabled

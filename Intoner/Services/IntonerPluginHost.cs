@@ -151,7 +151,7 @@ internal sealed class IntonerPluginHost : IAsyncDisposable
                 return;
             }
 
-            IntonerSessionHost host = await IntonerSessionHost.CreateAsync(_provider!, cancellationToken).ConfigureAwait(false);
+            IntonerSessionHost host = await IntonerSessionHost.CreateAsync(_provider!).ConfigureAwait(false);
             if (!IsGameSessionActive)
             {
                 await host.DisposeAsync().ConfigureAwait(false);

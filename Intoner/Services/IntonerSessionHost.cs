@@ -1,6 +1,5 @@
 using Dalamud.Plugin.Services;
 using Intoner.Objects.Filesystem.Layouts;
-using Intoner.Objects.Interop;
 using Intoner.Objects.Interop.Ipc;
 using Intoner.Objects.UI;
 using Intoner.Services.Interop;
@@ -16,26 +15,21 @@ internal sealed class IntonerSessionHost : IAsyncDisposable
     private readonly ILogger<IntonerSessionHost> _logger;
     private readonly IIntonerMediator _mediator;
     private readonly IntonerWindowService _windowService;
-    private readonly ObjectHousingCullingService _housingCullingService;
     private int _disposed;
 
     private IntonerSessionHost(
         AsyncServiceScope scope,
         ILogger<IntonerSessionHost> logger,
         IIntonerMediator mediator,
-        IntonerWindowService windowService,
-        ObjectHousingCullingService housingCullingService)
+        IntonerWindowService windowService)
     {
         _scope = scope;
         _logger = logger;
         _mediator = mediator;
         _windowService = windowService;
-        _housingCullingService = housingCullingService;
     }
 
-    public static async Task<IntonerSessionHost> CreateAsync(
-        IServiceProvider provider,
-        CancellationToken cancellationToken)
+    public static async Task<IntonerSessionHost> CreateAsync(IServiceProvider provider)
     {
         AsyncServiceScope scope = provider.CreateAsyncScope();
         IntonerSessionHost? host = null;
@@ -53,14 +47,12 @@ internal sealed class IntonerSessionHost : IAsyncDisposable
                 scope,
                 logger,
                 scopedProvider.GetRequiredService<IIntonerMediator>(),
-                windowService,
-                scopedProvider.GetRequiredService<ObjectHousingCullingService>());
+                windowService);
 
             windowService.AddWindow(editorWindow);
             windowService.AddWindow(editorBackgroundWindow);
             _ = scopedProvider.GetRequiredService<IntonerIpcHost>();
             windowService.Start();
-            await host._housingCullingService.StartAsync(cancellationToken).ConfigureAwait(false);
             host._logger.LogInformation("Intoner session services initialized");
             return host;
         }
@@ -87,14 +79,7 @@ internal sealed class IntonerSessionHost : IAsyncDisposable
         await using (_scope.ConfigureAwait(false))
         {
             _logger.LogInformation("Intoner session services shutting down");
-            try
-            {
-                _windowService.Stop();
-            }
-            finally
-            {
-                await _housingCullingService.StopAsync(CancellationToken.None).ConfigureAwait(false);
-            }
+            _windowService.Stop();
         }
     }
 }

@@ -10,7 +10,6 @@ internal static class IntonerConfigurationNormalizer
         ValidateVersion(configuration.Version);
 
         ValidateSection(configuration.AssetCapture, nameof(configuration.AssetCapture));
-        ValidateSection(configuration.HousingCulling, nameof(configuration.HousingCulling));
         ValidateSection(configuration.HousingMode, nameof(configuration.HousingMode));
         ValidateSection(configuration.Layouts, nameof(configuration.Layouts));
         ValidateSection(configuration.LayoutAutoSave, nameof(configuration.LayoutAutoSave));

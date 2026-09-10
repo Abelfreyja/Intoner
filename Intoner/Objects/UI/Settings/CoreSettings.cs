@@ -36,7 +36,7 @@ internal sealed class CoreSettings : ISettingsProvider
                 new SettingsTabDefinition(
                     "housing",
                     "Housing",
-                    "housing house furniture furnishing culling display visibility mode limit",
+                    "housing house furniture furnishing mode limit",
                     FontAwesomeIcon.Home,
                     static () => ThemeColors.AccentOrange),
                 [
@@ -50,15 +50,6 @@ internal sealed class CoreSettings : ISettingsProvider
                             entries.CreateWorkspaceMode(),
                             entries.CreateHousingSize(),
                             entries.CreateHousingArea(),
-                        ]),
-                    new SettingsSection(
-                        "housingCulling",
-                        FontAwesomeIcon.Eye,
-                        "Furniture Culling",
-                        "Fix for housing furniture render culling.",
-                        "fix housing furniture culling render",
-                        [
-                            entries.CreateHousingCulling(),
                         ]),
                 ]),
             new SettingsModule(

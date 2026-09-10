@@ -84,9 +84,6 @@ internal static unsafe class IntonerSignatures
     public const string FurnitureApplyState =
         "E8 ?? ?? ?? ?? 48 8B 8F ?? ?? ?? ?? 0F B6 47";
 
-    public const string HousingFurnitureCullingUpdate =
-        "48 8B C4 53 56 41 56 48 81 EC ?? ?? ?? ?? 48 89 68 ?? 48 8B D9 48 89 78 ?? 4C 89 68 ?? 4C 89 78 ?? 0F 29 70 ?? 0F 29 78 ?? 44 0F 29 40 ?? 48 8B 05 ?? ?? ?? ?? 48 8B 90 ?? ?? ?? ?? 48 85 D2";
-
     public const string HousingPlacementRaycast =
         "48 89 5C 24 ?? 48 89 74 24 ?? 48 89 7C 24 ?? 4C 89 74 24 ?? 55 48 8D 6C 24 ?? 48 81 EC ?? ?? ?? ?? 48 8B 05 ?? ?? ?? ?? 48 8D 55 ?? 48 8B F1 C7 44 24 ?? 01 00 00 00";
 
@@ -185,8 +182,6 @@ internal static unsafe class IntonerSignatures
     public static readonly NativeDirectSignatureTarget NativeVfxSetSpeed =
         new(VfxSetSpeed, "VFX playback speed");
     // furniture and housing targets
-    public static readonly NativeDirectSignatureTarget HousingFurnitureCulling =
-        new(HousingFurnitureCullingUpdate, "object housing furniture culling update");
     public static readonly NativeRelativeBranchTarget FurnitureSnapZero =
         new(FurnitureSnapVariantZero, "object furniture snap variant zero");
     public static readonly NativeRelativeBranchTarget FurnitureSnapOne =
@@ -224,9 +219,6 @@ internal static unsafe class IntonerSignatures
         // asset discovery
         AssetStaticVfxRemove,
         AssetActorVfxCreate,
-
-        // furniture and housing
-        HousingFurnitureCulling,
 
         // resource delegates
         ResourceReadFile,

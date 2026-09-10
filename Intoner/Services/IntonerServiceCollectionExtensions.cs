@@ -236,8 +236,6 @@ internal static class IntonerServiceCollectionExtensions
         services.AddScoped<IObjectRuntimeLocationService>(provider => provider.GetRequiredService<ObjectRuntimeLocationService>());
         services.AddScoped<IObjectRuntimeFactory, ObjectRuntimeFactory>();
         services.AddScoped<Func<IObjectRuntimeFactory>>(provider => () => provider.GetRequiredService<IObjectRuntimeFactory>());
-        services.AddSingleton<ObjectHousingCullingService>();
-        services.AddSingleton<IObjectHousingCullingService>(provider => provider.GetRequiredService<ObjectHousingCullingService>());
         return services;
     }
 
