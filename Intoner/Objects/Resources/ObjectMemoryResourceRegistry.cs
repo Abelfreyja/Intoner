@@ -1,5 +1,6 @@
 using Intoner.Objects.Assets;
 using Intoner.Objects.Utils;
+using Microsoft.Extensions.Logging;
 using System.Collections.Immutable;
 
 namespace Intoner.Objects.Resources;
@@ -8,6 +9,7 @@ internal readonly record struct ObjectMemoryResource(string MemoryPath, string G
 
 internal sealed class ObjectMemoryResourceRegistry
 {
+    private readonly ILogger<ObjectMemoryResourceRegistry> _logger;
     private readonly Lock _stateLock = new();
 
     private ImmutableDictionary<string, ObjectMemoryResource> _resourcesByPath
@@ -15,6 +17,11 @@ internal sealed class ObjectMemoryResourceRegistry
     private readonly Dictionary<string, HashSet<string>> _pathsByOwner = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, int> _ownerCountByPath = new(StringComparer.OrdinalIgnoreCase);
     private long _nextResourceId;
+
+    public ObjectMemoryResourceRegistry(ILogger<ObjectMemoryResourceRegistry> logger)
+    {
+        _logger = logger;
+    }
 
     public ObjectResolvedPath RegisterResource(string ownerId, string gamePath, byte[] data)
     {
@@ -41,10 +48,14 @@ internal sealed class ObjectMemoryResourceRegistry
             normalizedGamePath,
             data.ToArray());
 
+        using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferWrites();
         lock (_stateLock)
         {
             AddOwnerPath(normalizedOwnerId, memoryPath);
             Volatile.Write(ref _resourcesByPath, _resourcesByPath.SetItem(memoryPath, resource));
+            int bytes = resource.Data.Length;
+            ObjectResourceLog.Write(() => _logger.LogDebug("object memory resource registered; owner={OwnerId}; path={Path}; gamePath={GamePath}; bytes={Bytes}",
+                normalizedOwnerId, memoryPath, normalizedGamePath, bytes));
         }
 
         return ObjectResolvedPath.FromMemory(memoryPath);
@@ -58,6 +69,7 @@ internal sealed class ObjectMemoryResourceRegistry
             return;
         }
 
+        using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferWrites();
         lock (_stateLock)
         {
             if (!_pathsByOwner.Remove(normalizedOwnerId, out HashSet<string>? ownerPaths))
@@ -69,6 +81,9 @@ internal sealed class ObjectMemoryResourceRegistry
             foreach (string path in ownerPaths)
             {
                 int remainingOwners = _ownerCountByPath[path] - 1;
+                int bytes = _resourcesByPath[path].Data.Length;
+                ObjectResourceLog.Write(() => _logger.LogDebug("object memory resource owner released; owner={OwnerId}; path={Path}; remainingOwners={RemainingOwners}; payloadReleased={PayloadReleased}; bytes={Bytes}",
+                    normalizedOwnerId, path, remainingOwners, remainingOwners == 0, bytes));
                 if (remainingOwners > 0)
                 {
                     _ownerCountByPath[path] = remainingOwners;
@@ -93,6 +108,7 @@ internal sealed class ObjectMemoryResourceRegistry
             return false;
         }
 
+        using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferWrites();
         lock (_stateLock)
         {
             if (!_resourcesByPath.TryGetValue(memoryPath.Path, out resource))
@@ -114,8 +130,17 @@ internal sealed class ObjectMemoryResourceRegistry
 
     public void Clear()
     {
+        using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferWrites();
         lock (_stateLock)
         {
+            foreach (ObjectMemoryResource resource in _resourcesByPath.Values)
+            {
+                string path = resource.MemoryPath;
+                int bytes = resource.Data.Length;
+                ObjectResourceLog.Write(() => _logger.LogDebug("object memory resource released; reason=registry cleared; path={Path}; bytes={Bytes}",
+                    path, bytes));
+            }
+
             _pathsByOwner.Clear();
             _ownerCountByPath.Clear();
             Volatile.Write(
@@ -134,7 +159,10 @@ internal sealed class ObjectMemoryResourceRegistry
 
         if (ownerPaths.Add(memoryPath))
         {
-            _ownerCountByPath[memoryPath] = _ownerCountByPath.GetValueOrDefault(memoryPath) + 1;
+            int owners = _ownerCountByPath.GetValueOrDefault(memoryPath) + 1;
+            _ownerCountByPath[memoryPath] = owners;
+            ObjectResourceLog.Write(() => _logger.LogDebug("object memory resource owner retained; owner={OwnerId}; path={Path}; owners={OwnerCount}",
+                ownerId, memoryPath, owners));
         }
     }
 }

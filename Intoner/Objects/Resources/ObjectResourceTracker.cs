@@ -32,14 +32,6 @@ internal struct ObjectResourceRegistration
     private ObjectResourceScope _scope;
     private ObjectResourceRegistrationKind _kind;
 
-    public ObjectResourceRegistration(Guid ownerId)
-    {
-        _address = nint.Zero;
-        _ownerId = ownerId;
-        _scope = default;
-        _kind = default;
-    }
-
     public bool IsRegistered
         => _address != nint.Zero;
 
@@ -153,10 +145,30 @@ internal sealed class ObjectResourceTracker : IDisposable
     public void RegisterOrUpdateRootInstance(nint instanceAddress, Guid ownerId, ObjectResourceScope instanceScope)
         => RegisterOrUpdateRootScope(_instanceScopes, instanceAddress, ownerId, instanceScope);
 
+    public ObjectResourceLoadScopeToken EnterHandleScope(nint resourceHandleAddress, ObjectScopedResourcePath path)
+    {
+        ObjectResourceLoadScopeToken scope = _loadScope.EnterResourceScope(path.ResourceScopeId);
+        try
+        {
+            if (scope.Collection is { } collection)
+            {
+                RegisterOrUpdateHandleScope(resourceHandleAddress, new ObjectResourceScope(collection.CollectionId, path.Path, path.ResourceScopeId));
+            }
+
+            return scope;
+        }
+        catch
+        {
+            scope.Dispose();
+            throw;
+        }
+    }
+
     public void RegisterOrUpdateHandleScope(nint resourceHandleAddress, ObjectResourceScope handleScope)
     {
         ValidateRegistration(resourceHandleAddress, handleScope);
 
+        using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferWrites();
         lock (_lock)
         {
             if (_disposed)
@@ -171,16 +183,25 @@ internal sealed class ObjectResourceTracker : IDisposable
                 return;
             }
 
-            trackedScopes.RedirectedScopes.Add(retainedScope);
-            _ = TryResolveSingleScope(resourceHandleAddress, trackedScopes, out _);
+            if (trackedScopes.RedirectedScopes.Add(retainedScope))
+            {
+                LogRegistration("registered", "handle", resourceHandleAddress, Guid.Empty, retainedScope);
+                LogScopeConflict(resourceHandleAddress, trackedScopes);
+            }
         }
     }
 
     public bool TryGetHandleScope(nint resourceHandleAddress, out ObjectResourceScope handleScope)
-        => TryGetScope(_handleScopes, resourceHandleAddress, out handleScope);
+        => TryGetScope(_handleScopes, resourceHandleAddress, out handleScope, out _);
+
+    public bool TryGetHandleScope(nint resourceHandleAddress, out ObjectResourceScope handleScope, out bool isTracked)
+        => TryGetScope(_handleScopes, resourceHandleAddress, out handleScope, out isTracked);
 
     public bool TryGetInstanceScope(nint instanceAddress, out ObjectResourceScope instanceScope)
-        => TryGetScope(_instanceScopes, instanceAddress, out instanceScope);
+        => TryGetScope(_instanceScopes, instanceAddress, out instanceScope, out _);
+
+    public bool TryGetInstanceScope(nint instanceAddress, out ObjectResourceScope instanceScope, out bool isTracked)
+        => TryGetScope(_instanceScopes, instanceAddress, out instanceScope, out isTracked);
 
     public bool RemoveRootHandle(nint resourceHandleAddress, Guid ownerId)
         => RemoveRootScope(_handleScopes, resourceHandleAddress, ownerId);
@@ -188,16 +209,25 @@ internal sealed class ObjectResourceTracker : IDisposable
     public bool RemoveRootInstance(nint instanceAddress, Guid ownerId)
         => RemoveRootScope(_instanceScopes, instanceAddress, ownerId);
 
-    public bool RemoveTrackedHandle(nint resourceHandleAddress)
-        => RemoveTrackedScope(_handleScopes, resourceHandleAddress);
+    public bool RemoveTrackedHandle(nint resourceHandleAddress, string reason = "removed")
+        => RemoveTrackedScope(_handleScopes, resourceHandleAddress, reason);
 
-    public bool RemoveTrackedInstance(nint instanceAddress)
-        => RemoveTrackedScope(_instanceScopes, instanceAddress);
+    public bool RemoveTrackedInstance(nint instanceAddress, string reason = "removed")
+        => RemoveTrackedScope(_instanceScopes, instanceAddress, reason);
 
     public void Dispose()
     {
+        using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferWrites();
         lock (_lock)
         {
+            if (!_disposed)
+            {
+                int handleCount = _handleScopes.Count;
+                int instanceCount = _instanceScopes.Count;
+                ObjectResourceLog.Write(() => _logger.LogDebug("object resource tracker disposed; handles={HandleCount}; instances={InstanceCount}",
+                    handleCount, instanceCount));
+            }
+
             _disposed = true;
             foreach (TrackedResourceScopes scopes in _handleScopes.Values.Concat(_instanceScopes.Values))
             {
@@ -221,6 +251,7 @@ internal sealed class ObjectResourceTracker : IDisposable
             throw new ArgumentException("root scope owner id must not be empty", nameof(ownerId));
         }
 
+        using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferWrites();
         lock (_lock)
         {
             if (_disposed)
@@ -229,18 +260,40 @@ internal sealed class ObjectResourceTracker : IDisposable
             }
 
             TrackedResourceScopes trackedScopes = GetOrAddTrackedScopes(scopesByAddress, address);
+            string kind = ReferenceEquals(scopesByAddress, _handleScopes) ? "root handle" : "root instance";
+            bool hadScope = trackedScopes.RootScopes.TryGetValue(ownerId, out ObjectResourceScope previousScope);
+            bool changed;
             if (TryRetainScope(trackedScopes, scope, out ObjectResourceScope retainedScope))
             {
                 trackedScopes.RootScopes[ownerId] = retainedScope;
+                changed = !hadScope || previousScope != retainedScope;
+                if (changed)
+                {
+                    if (hadScope)
+                    {
+                        LogRegistration("replaced", kind, address, ownerId, previousScope);
+                    }
+
+                    LogRegistration("registered", kind, address, ownerId, retainedScope);
+                }
             }
             else
             {
-                trackedScopes.RootScopes.Remove(ownerId);
+                changed = trackedScopes.RootScopes.Remove(ownerId);
+                ObjectResourceLog.Write(() => _logger.LogWarning("object resource registration rejected; reason=collection unavailable; address=0x{Address:X}; owner={OwnerId}; collection={CollectionId}; generation={ResourceScopeId}; path={Path}",
+                    (ulong)address, ownerId, scope.ResourceCollectionId, scope.ResourceScopeId, scope.ResolvedPath));
+                if (changed)
+                {
+                    LogRegistration("removed", kind, address, ownerId, previousScope);
+                }
             }
 
             ReleaseUnusedScopes(trackedScopes);
             RemoveAddressIfEmpty(scopesByAddress, address, trackedScopes);
-            _ = TryResolveSingleScope(address, trackedScopes, out _);
+            if (changed)
+            {
+                LogScopeConflict(address, trackedScopes);
+            }
         }
     }
 
@@ -302,17 +355,19 @@ internal sealed class ObjectResourceTracker : IDisposable
     private bool TryGetScope(
         Dictionary<nint, TrackedResourceScopes> scopesByAddress,
         nint address,
-        out ObjectResourceScope scope)
+        out ObjectResourceScope scope,
+        out bool isTracked)
     {
         scope = default;
         lock (_lock)
         {
-            if (!scopesByAddress.TryGetValue(address, out TrackedResourceScopes? trackedScopes))
+            isTracked = scopesByAddress.TryGetValue(address, out TrackedResourceScopes? trackedScopes);
+            if (!isTracked)
             {
                 return false;
             }
 
-            return TryResolveSingleScope(address, trackedScopes, out scope);
+            return TryResolveSingleScope(trackedScopes!, out scope);
         }
     }
 
@@ -323,6 +378,7 @@ internal sealed class ObjectResourceTracker : IDisposable
             return false;
         }
 
+        using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferWrites();
         lock (_lock)
         {
             if (!scopesByAddress.TryGetValue(address, out TrackedResourceScopes? trackedScopes))
@@ -330,20 +386,26 @@ internal sealed class ObjectResourceTracker : IDisposable
                 return false;
             }
 
-            bool removed = trackedScopes.RootScopes.Remove(ownerId);
+            bool removed = trackedScopes.RootScopes.Remove(ownerId, out ObjectResourceScope scope);
+            if (removed)
+            {
+                LogRegistration("removed", ReferenceEquals(scopesByAddress, _handleScopes) ? "root handle" : "root instance", address, ownerId, scope);
+            }
+
             ReleaseUnusedScopes(trackedScopes);
             RemoveAddressIfEmpty(scopesByAddress, address, trackedScopes);
             return removed;
         }
     }
 
-    private bool RemoveTrackedScope(Dictionary<nint, TrackedResourceScopes> scopesByAddress, nint address)
+    private bool RemoveTrackedScope(Dictionary<nint, TrackedResourceScopes> scopesByAddress, nint address, string reason)
     {
         if (address == nint.Zero)
         {
             return false;
         }
 
+        using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferWrites();
         lock (_lock)
         {
             if (!scopesByAddress.Remove(address, out TrackedResourceScopes? trackedScopes))
@@ -351,6 +413,12 @@ internal sealed class ObjectResourceTracker : IDisposable
                 return false;
             }
 
+            string kind = ReferenceEquals(scopesByAddress, _handleScopes) ? "handle" : "instance";
+            int rootCount = trackedScopes.RootScopes.Count;
+            int redirectCount = trackedScopes.RedirectedScopes.Count;
+            string generations = string.Join(",", trackedScopes.Leases.Keys);
+            ObjectResourceLog.Write(() => _logger.LogDebug("object resource tracking removed; reason={Reason}; kind={Kind}; address=0x{Address:X}; roots={RootCount}; redirects={RedirectCount}; generations={Generations}",
+                reason, kind, (ulong)address, rootCount, redirectCount, generations));
             trackedScopes.Dispose();
             return true;
         }
@@ -394,8 +462,7 @@ internal sealed class ObjectResourceTracker : IDisposable
         }
     }
 
-    private bool TryResolveSingleScope(
-        nint address,
+    private static bool TryResolveSingleScope(
         TrackedResourceScopes trackedScopes,
         out ObjectResourceScope resolvedScope)
     {
@@ -403,7 +470,7 @@ internal sealed class ObjectResourceTracker : IDisposable
         bool hasScope = false;
         foreach (ObjectResourceScope scope in trackedScopes.RootScopes.Values)
         {
-            if (!TryAcceptScope(address, scope, ref resolvedScope, ref hasScope))
+            if (!TryAcceptScope(scope, ref resolvedScope, ref hasScope))
             {
                 return false;
             }
@@ -411,7 +478,7 @@ internal sealed class ObjectResourceTracker : IDisposable
 
         foreach (ObjectResourceScope scope in trackedScopes.RedirectedScopes)
         {
-            if (!TryAcceptScope(address, scope, ref resolvedScope, ref hasScope))
+            if (!TryAcceptScope(scope, ref resolvedScope, ref hasScope))
             {
                 return false;
             }
@@ -420,8 +487,7 @@ internal sealed class ObjectResourceTracker : IDisposable
         return hasScope;
     }
 
-    private bool TryAcceptScope(
-        nint address,
+    private static bool TryAcceptScope(
         ObjectResourceScope scope,
         ref ObjectResourceScope currentScope,
         ref bool hasScope)
@@ -438,11 +504,22 @@ internal sealed class ObjectResourceTracker : IDisposable
             return true;
         }
 
-        // we don't skip
-        _logger.LogDebug(
-            "object resource address 0x{Address:X} has conflicting collection scopes",
-            (ulong)address);
         currentScope = default;
         return false;
+    }
+
+    private void LogRegistration(string action, string kind, nint address, Guid ownerId, ObjectResourceScope scope)
+        => ObjectResourceLog.Write(() => _logger.LogDebug("object resource registration {Action}; kind={Kind}; address=0x{Address:X}; owner={OwnerId}; collection={CollectionId}; generation={ResourceScopeId}; path={Path}",
+            action, kind, (ulong)address, ownerId, scope.ResourceCollectionId, scope.ResourceScopeId, scope.ResolvedPath));
+
+    private void LogScopeConflict(nint address, TrackedResourceScopes scopes)
+    {
+        if (!TryResolveSingleScope(scopes, out _) && scopes.RootScopes.Count + scopes.RedirectedScopes.Count > 0)
+        {
+            string roots = string.Join("; ", scopes.RootScopes);
+            string redirects = string.Join("; ", scopes.RedirectedScopes);
+            ObjectResourceLog.Write(() => _logger.LogWarning("object resource ownership conflict; address=0x{Address:X}; roots={RootScopes}; redirects={RedirectedScopes}",
+                (ulong)address, roots, redirects));
+        }
     }
 }

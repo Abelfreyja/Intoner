@@ -6,6 +6,7 @@ using Intoner.Objects.Assets;
 using Intoner.Objects.Interop;
 using Intoner.Objects.Models;
 using Intoner.Objects.Resources;
+using Intoner.Objects.Utils;
 using Intoner.Utils;
 using Microsoft.Extensions.Logging;
 using System.Text;
@@ -49,6 +50,7 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
     private readonly ILogger _furnitureLogger;
     private readonly ILogger _vfxLogger;
     private readonly ILogger _lightLogger;
+    private readonly ILogger<ObjectRuntimeFactory> _logger;
     private readonly IFramework _framework;
     private readonly IDataManager _gameData;
     private readonly ObjectNativeBindings _nativeBindings;
@@ -81,21 +83,35 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
         _furnitureLogger = loggerFactory.CreateLogger<FurnitureObjectRuntime>();
         _vfxLogger = loggerFactory.CreateLogger<VfxObjectRuntime>();
         _lightLogger = loggerFactory.CreateLogger<LightObjectRuntime>();
+        _logger = loggerFactory.CreateLogger<ObjectRuntimeFactory>();
     }
 
     public bool TryCreate(ObjectSnapshot snapshot, out IObjectRuntime runtime, out string failureCode)
     {
-        ObjectRuntimeCreateResult result = FrameworkThreadUtility.Run(_framework, () => snapshot.Kind switch
+        ObjectRuntimeCreateResult result = FrameworkThreadUtility.Run(_framework, () =>
         {
-            ObjectKind.BgObject => TryCreateBgObjectUnsafe(snapshot),
-            ObjectKind.Furniture => TryCreateFurnitureUnsafe(snapshot),
-            ObjectKind.Vfx => TryCreateVfxUnsafe(snapshot),
-            ObjectKind.Light => TryCreateLightUnsafe(snapshot),
-            _ => ObjectRuntimeCreateResult.Failed(ObjectRuntimeFailureCodes.ServiceMissing),
+            using IDisposable? scope = _logger.BeginScope("object={ObjectId}; kind={ObjectKind}; collection={CollectionId}; thread={ManagedThreadId}",
+                snapshot.Id, snapshot.Kind, snapshot.CollectionId, Environment.CurrentManagedThreadId);
+            _logger.LogDebug("object root create started; object={ObjectId}; collection={CollectionId}; requested={RequestedPath}",
+                snapshot.Id, snapshot.CollectionId, ObjectSnapshotUtility.GetRootResourcePath(snapshot));
+            return snapshot.Kind switch
+            {
+                ObjectKind.BgObject => TryCreateBgObjectUnsafe(snapshot),
+                ObjectKind.Furniture => TryCreateFurnitureUnsafe(snapshot),
+                ObjectKind.Vfx => TryCreateVfxUnsafe(snapshot),
+                ObjectKind.Light => TryCreateLightUnsafe(snapshot),
+                _ => ObjectRuntimeCreateResult.Failed(ObjectRuntimeFailureCodes.ServiceMissing),
+            };
         });
 
         runtime = result.Runtime!;
         failureCode = result.FailureCode;
+        if (result.Runtime is null)
+        {
+            _logger.LogWarning("object root create rejected; object={ObjectId}; kind={ObjectKind}; collection={CollectionId}; requested={RequestedPath}; failure={FailureCode}",
+                snapshot.Id, snapshot.Kind, snapshot.CollectionId, ObjectSnapshotUtility.GetRootResourcePath(snapshot), failureCode);
+        }
+
         return result.Runtime is not null;
     }
 
@@ -127,7 +143,7 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
 
         if (bgObject == null)
         {
-            _bgObjectLogger.LogWarning("bgobject create returned null for model path {ModelPath}", bgObjectModel.ModelPath);
+            _bgObjectLogger.LogDebug("bgobject create returned null for model path {ModelPath}", bgObjectModel.ModelPath);
             return ObjectRuntimeCreateResult.Failed(ObjectRuntimeFailureCodes.CreateFailed);
         }
 
@@ -137,9 +153,6 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
                 _bgObjectLogger,
                 snapshot with { Model = new BgObjectModel { ModelPath = bgObjectModel.ModelPath } },
                 bgObject,
-                _gameData,
-                _pathResolver,
-                _resourceLoader,
                 _resourceTracker,
                 resolvedResource.ResolvedPath),
             () => BgObjectSceneInterop.Destroy(bgObject),
@@ -162,7 +175,7 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
 
         if (!ObjectAssetPathRules.IsCatalogSharedGroupPath(furnitureModel.SharedGroupPath))
         {
-            _furnitureLogger.LogWarning("furniture create rejected invalid shared group path {SharedGroupPath}", furnitureModel.SharedGroupPath);
+            _furnitureLogger.LogDebug("furniture create rejected invalid shared group path {SharedGroupPath}", furnitureModel.SharedGroupPath);
             return ObjectRuntimeCreateResult.Failed(ObjectRuntimeFailureCodes.InvalidAssetPath);
         }
 
@@ -203,7 +216,7 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
 
         if (instance == null)
         {
-            _furnitureLogger.LogWarning("furniture shared group create failed for path {SharedGroupPath}", furnitureModel.SharedGroupPath);
+            _furnitureLogger.LogDebug("furniture shared group create failed for path {SharedGroupPath}", furnitureModel.SharedGroupPath);
             return ObjectRuntimeCreateResult.Failed(ObjectRuntimeFailureCodes.CreateFailed);
         }
 
@@ -211,7 +224,7 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
         {
             try
             {
-                _furnitureLogger.LogError(
+                _furnitureLogger.LogDebug(
                     "furniture create returned native layout type {InstanceType} for path {SharedGroupPath}, destroying rejected instance",
                     instanceType,
                     furnitureModel.SharedGroupPath);
@@ -276,7 +289,7 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
 
         if (light == null)
         {
-            _lightLogger.LogWarning("light create returned null for type {LightType}", lightModel.LightType);
+            _lightLogger.LogDebug("light create returned null for type {LightType}", lightModel.LightType);
             return ObjectRuntimeCreateResult.Failed(ObjectRuntimeFailureCodes.CreateFailed);
         }
 
@@ -302,7 +315,7 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
 
         if (!GameAssetPathRules.IsFileKind(vfxModel.VfxPath, GameAssetFileKind.Avfx))
         {
-            _vfxLogger.LogWarning("vfx create rejected invalid path {VfxPath}", vfxModel.VfxPath);
+            _vfxLogger.LogDebug("vfx create rejected invalid path {VfxPath}", vfxModel.VfxPath);
             return ObjectRuntimeCreateResult.Failed(ObjectRuntimeFailureCodes.InvalidAssetPath);
         }
 
@@ -336,7 +349,7 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
 
         if (vfxObject == null)
         {
-            _vfxLogger.LogWarning("vfx create returned null for path {VfxPath}", vfxModel.VfxPath);
+            _vfxLogger.LogDebug("vfx create returned null for path {VfxPath}", vfxModel.VfxPath);
             return ObjectRuntimeCreateResult.Failed(ObjectRuntimeFailureCodes.CreateFailed);
         }
 
@@ -431,7 +444,7 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
     {
         if (!resolvedResource.IsReady)
         {
-            logger.LogWarning(
+            logger.LogDebug(
                 "{ObjectType} create rejected {PathLabel} {Path} with status {Status}",
                 objectType,
                 pathLabel,
@@ -440,7 +453,7 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
             return;
         }
 
-        logger.LogWarning(
+        logger.LogDebug(
             "{ObjectType} create rejected missing {PathLabel} {Path}",
             objectType,
             pathLabel,
@@ -473,6 +486,9 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
         out ObjectRuntimeCreateResult failure)
     {
         resolvedResource = _pathResolver.ResolveRootPath(snapshot, kind, requestedPath);
+        logger.LogDebug("object root path resolved; object={ObjectId}; collection={CollectionId}; requested={RequestedPath}; resolved={ResolvedPath}; resolvedKind={ResolvedKind}; status={Status}",
+            snapshot.Id, resolvedResource.ResourceCollectionId, resolvedResource.RequestedPath,
+            resolvedResource.ResolvedPath, resolvedResource.ResolvedPathKind, resolvedResource.Status);
         if (RootResourceExists(resolvedResource))
         {
             failure = default;

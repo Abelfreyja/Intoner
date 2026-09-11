@@ -51,6 +51,7 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
     private readonly ILogger<ObjectFileReadService> _logger;
     private readonly IObjectResolvedCollectionStore _collectionStore;
     private readonly ObjectResourceLoadScope _loadScope;
+    private readonly ObjectResourceTracker _resourceTracker;
     private readonly IObjectMemoryResourceService _memoryResourceService;
     private readonly ObjectTextureLodService _lodService;
 
@@ -76,6 +77,7 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
         ILogger<ObjectFileReadService> logger,
         IObjectResolvedCollectionStore collectionStore,
         ObjectResourceLoadScope loadScope,
+        ObjectResourceTracker resourceTracker,
         IObjectMemoryResourceService memoryResourceService,
         ObjectTextureLodService lodService,
         IGameInteropProvider gameInteropProvider,
@@ -84,6 +86,7 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
         _logger = logger;
         _collectionStore = collectionStore;
         _loadScope = loadScope;
+        _resourceTracker = resourceTracker;
         _memoryResourceService = memoryResourceService;
         _lodService = lodService;
         _createFileHook = new ObjectResourceCreateFileHook(gameInteropProvider);
@@ -207,6 +210,7 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
 
     internal byte FileJobDetour(ClientFileThread* fileThread, ClientFileDescriptor* fileDescriptor, int priority, bool isSync)
     {
+        nint resourceHandleAddress = nint.Zero;
         try
         {
             if (IsDisposing
@@ -217,6 +221,7 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
                 return CallFileJobOriginal(fileThread, fileDescriptor, priority, isSync);
             }
 
+            resourceHandleAddress = (nint)fileDescriptor->ResourceHandle;
             if (!ObjectResourcePathEncoding.TryReadHandlePath(fileDescriptor->ResourceHandle, out string handlePath))
             {
                 return CallFileJobOriginal(fileThread, fileDescriptor, priority, isSync);
@@ -224,14 +229,19 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
 
             if (ObjectScopedResourcePathUtility.TryParse(handlePath, out ObjectScopedResourcePath scopedPath))
             {
-                using ObjectResourceLoadScopeToken scope = _loadScope.EnterResourceScope(scopedPath.ResourceScopeId);
-                return scope.IsActive
-                    ? RouteFileJobPath(fileThread, fileDescriptor, priority, isSync, scopedPath.Path, restoreScopedPath: true)
-                    : RejectFileJob(fileDescriptor);
+                using ObjectResourceLoadScopeToken scope = _resourceTracker.EnterHandleScope((nint)fileDescriptor->ResourceHandle, scopedPath);
+                if (scope.IsActive)
+                {
+                    return RouteFileJobPath(fileThread, fileDescriptor, priority, isSync, scopedPath.Path, restoreScopedPath: true);
+                }
+
+                LogRejectedFileJob("generation unavailable", resourceHandleAddress, handlePath, scopedPath.ResourceScopeId);
+                return RejectFileJob(fileDescriptor);
             }
 
             if (ObjectScopedResourcePathUtility.IsObjectScopedPath(handlePath))
             {
+                LogRejectedFileJob("malformed private path", resourceHandleAddress, handlePath);
                 return RejectFileJob(fileDescriptor);
             }
 
@@ -251,7 +261,7 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
         }
         catch (Exception ex)
         {
-            LogFileHookFailure(ex, "file job", fileDescriptor == null ? null : fileDescriptor->ResourceHandle);
+            LogFileHookFailure(ex, "file job", (ResourceHandle*)resourceHandleAddress);
             return ShouldFailClosedFileJob(fileDescriptor)
                 ? RejectFileJob(fileDescriptor)
                 : CallFileJobOriginal(fileThread, fileDescriptor, priority, isSync);
@@ -271,15 +281,27 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
             return CallFileJobOriginal(fileThread, fileDescriptor, priority, isSync);
         }
 
+        nint resourceHandleAddress = (nint)fileDescriptor->ResourceHandle;
         if (ObjectMemoryResourcePathUtility.IsMemoryResourcePath(normalizedPath))
         {
-            if (!_memoryResourceService.TryGetResource(normalizedPath, out ObjectMemoryResource memoryResource)
-             || !CanLoadMemoryResource(memoryResource))
+            if (!_memoryResourceService.TryGetResource(normalizedPath, out ObjectMemoryResource memoryResource))
             {
+                LogRejectedFileJob("memory payload unavailable", resourceHandleAddress, normalizedPath);
+                return RejectFileJob(fileDescriptor);
+            }
+
+            if (!CanLoadMemoryResource(memoryResource))
+            {
+                LogRejectedFileJob("memory resource unsupported", resourceHandleAddress, normalizedPath);
                 return RejectFileJob(fileDescriptor);
             }
 
             byte result = _memoryResourceService.ReadResource(fileDescriptor, memoryResource);
+            if (result == 0)
+            {
+                LogRejectedFileJob("memory read failed", resourceHandleAddress, normalizedPath);
+            }
+
             return result == 0 ? RejectFileJob(fileDescriptor) : result;
         }
 
@@ -299,9 +321,13 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
             return ReadLocalFile(fileThread, fileDescriptor, priority, isSync, normalizedPath, restoreScopedPath);
         }
 
-        return restoreScopedPath
-            ? RejectFileJob(fileDescriptor)
-            : CallFileJobOriginal(fileThread, fileDescriptor, priority, isSync);
+        if (restoreScopedPath)
+        {
+            LogRejectedFileJob("local reader unavailable", resourceHandleAddress, normalizedPath);
+            return RejectFileJob(fileDescriptor);
+        }
+
+        return CallFileJobOriginal(fileThread, fileDescriptor, priority, isSync);
     }
 
     internal static byte RejectFileJob(ClientFileDescriptor* fileDescriptor)
@@ -334,7 +360,11 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
     }
 
     private byte CallFileJobOriginal(ClientFileThread* fileThread, ClientFileDescriptor* fileDescriptor, int priority, bool isSync)
-        => _fileJobHook!.Original(fileThread, fileDescriptor, priority, isSync);
+    {
+        using ObjectResourceLoadScopeToken scope = _loadScope.Suspend();
+        using ActiveLocalFileJobToken job = SuspendActiveLocalFileJob();
+        return _fileJobHook!.Original(fileThread, fileDescriptor, priority, isSync);
+    }
 
     private byte RunFileJobWithTemporaryResourcePath(
         ClientFileThread* fileThread,
@@ -609,6 +639,13 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
             : default(ActiveLocalFileJobToken);
     }
 
+    private ActiveLocalFileJobToken SuspendActiveLocalFileJob()
+        => !IsDisposing
+         && ObjectThreadLocalUtility.TryRead(_activeLocalFileJob, null, out ActiveLocalFileJob? previousJob)
+         && ObjectThreadLocalUtility.TryWrite(_activeLocalFileJob, null)
+            ? new ActiveLocalFileJobToken(this, previousJob)
+            : default;
+
     private bool TryGetActiveLocalFileJob(ulong crc64, out ActiveLocalFileJob activeJob)
     {
         activeJob = default;
@@ -687,13 +724,15 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
     private void RestoreActiveLocalFileJob(ActiveLocalFileJob? previousJob)
         => _ = ObjectThreadLocalUtility.TryWrite(_activeLocalFileJob, previousJob);
 
-    private void LogFileHookFailure(Exception exception, string hook, ResourceHandle* handle)
+    private void LogRejectedFileJob(string reason, nint address, string path, long resourceScopeId = 0)
     {
-        string path = ObjectResourcePathEncoding.TryReadHandlePath(handle, out string handlePath)
-            ? handlePath
-            : string.Empty;
-        _logger.LogError(exception, "object resource {Hook} hook failed; path={Path}", hook, path);
+        _resourceTracker.TryGetHandleScope(address, out ObjectResourceScope scope);
+        _logger.LogWarning("object resource file job rejected; reason={Reason}; address=0x{Address:X}; path={Path}; collection={CollectionId}; generation={ResourceScopeId}",
+            reason, (ulong)address, path, scope.ResourceCollectionId, resourceScopeId != 0 ? resourceScopeId : scope.ResourceScopeId);
     }
+
+    internal void LogFileHookFailure(Exception exception, string hook, ResourceHandle* handle)
+        => ObjectResourceLog.LogHookFailure(_logger, _resourceTracker, exception, hook, (nint)handle);
 
     private static char* GetFilePathPointer(ClientFileDescriptor* fileDescriptor)
         => (char*)((byte*)fileDescriptor + FileDescriptorFilePathOffset);

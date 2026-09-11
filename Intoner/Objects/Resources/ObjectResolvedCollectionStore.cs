@@ -219,6 +219,7 @@ internal sealed class ObjectResolvedCollectionStore : IObjectResolvedCollectionS
 
         ObjectCollectionResolveData snapshot;
         bool changed;
+        using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferWrites();
         lock (_mutationLock)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
@@ -253,6 +254,7 @@ internal sealed class ObjectResolvedCollectionStore : IObjectResolvedCollectionS
         ArgumentNullException.ThrowIfNull(removedCollectionIds);
 
         List<ObjectResolvedCollectionChangedInfo> changes = [];
+        using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferWrites();
         lock (_mutationLock)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
@@ -376,6 +378,7 @@ internal sealed class ObjectResolvedCollectionStore : IObjectResolvedCollectionS
         }
 
         ObjectCollectionResolveData? removedSnapshot;
+        using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferWrites();
         lock (_mutationLock)
         {
             StoreState current = Volatile.Read(ref _state);
@@ -422,6 +425,7 @@ internal sealed class ObjectResolvedCollectionStore : IObjectResolvedCollectionS
 
     internal void ReleaseResourceScope(long resourceScopeId)
     {
+        using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferWrites();
         lock (_mutationLock)
         {
             if (!_scopeLeaseCounts.TryGetValue(resourceScopeId, out int count))
@@ -457,6 +461,7 @@ internal sealed class ObjectResolvedCollectionStore : IObjectResolvedCollectionS
 
     public void Dispose()
     {
+        using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferWrites();
         lock (_mutationLock)
         {
             if (_disposed)

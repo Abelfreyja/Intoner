@@ -15,8 +15,6 @@ internal sealed unsafe class VfxObjectRuntime : DrawObjectRuntime
 {
     private const float NativeDurationUnitsPerSecond = 60f;
     private const byte SomeFlagsClearBit3Mask = 0xF7;
-    private const int VfxResourceInstanceUnkOffset = 0x08;
-    private const int VfxResourceUnkApricotHandleOffset = 0x18;
 
     private SceneVfxObject* _vfxObject;
     private string _vfxPath;
@@ -25,7 +23,7 @@ internal sealed unsafe class VfxObjectRuntime : DrawObjectRuntime
     private bool _needsPlaybackApply;
     private bool _needsVisualReplay = true;
     private long _nextLoopReplayMilliseconds;
-    private ObjectResourceRegistration _rootHandleRegistration;
+    private ObjectResourceRegistration _rootHandleRegistration = new();
 
     public override ObjectKind Kind
         => ObjectKind.Vfx;
@@ -56,7 +54,6 @@ internal sealed unsafe class VfxObjectRuntime : DrawObjectRuntime
         _vfxPath = vfxPath;
         _nativeBinding = nativeBinding;
         _resourceTracker = resourceTracker;
-        _rootHandleRegistration = new ObjectResourceRegistration(snapshot.Id);
     }
 
     internal override void Initialize()
@@ -342,19 +339,13 @@ internal sealed unsafe class VfxObjectRuntime : DrawObjectRuntime
 
     private static nint ResolveRootHandleAddress(SceneVfxObject* vfxObject)
     {
-        if (vfxObject == null || vfxObject->VfxResourceInstance == null)
+        if (vfxObject == null || vfxObject->VfxResourceInstance == null
+         || vfxObject->VfxResourceInstance->VfxResourceObject == null)
         {
             return nint.Zero;
         }
 
-        var vfxResourceInstanceAddress = (byte*)vfxObject->VfxResourceInstance;
-        var vfxResourceUnkAddress = *(nint*)(vfxResourceInstanceAddress + VfxResourceInstanceUnkOffset);
-        if (vfxResourceUnkAddress == nint.Zero)
-        {
-            return nint.Zero;
-        }
-
-        return *(nint*)(vfxResourceUnkAddress + VfxResourceUnkApricotHandleOffset);
+        return (nint)vfxObject->VfxResourceInstance->VfxResourceObject->ApricotResourceHandle;
     }
 }
 

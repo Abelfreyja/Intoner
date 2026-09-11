@@ -86,7 +86,6 @@ internal sealed class ObjectPathResolver
         string requestedCollectionId = ObjectCollectionKeyUtility.NormalizeCollectionId(snapshot.CollectionId);
         string resourceCollectionId = string.Empty;
         ObjectResolvedPath resolvedPath = ObjectResolvedPath.FromGamePath(normalizedRequestedPath);
-        string createPath = normalizedRequestedPath;
         var status = ObjectResolvedRootPathStatus.Ready;
         if (requestedCollectionId.Length > 0
          && _collectionStore.TryGetCollection(requestedCollectionId, out ObjectCollectionResolveData collection)
@@ -103,10 +102,6 @@ internal sealed class ObjectPathResolver
                 if (!CanUseRootPath(kind, normalizedRequestedPath, redirectedPath))
                 {
                     status = ObjectResolvedRootPathStatus.InvalidRedirectKind;
-                }
-                else if (redirectedPath.Kind == ObjectResolvedPathKind.GamePath)
-                {
-                    createPath = redirectedPath.Path;
                 }
             }
         }
@@ -126,7 +121,7 @@ internal sealed class ObjectPathResolver
 
         return new ObjectResolvedRootPath(
             normalizedRequestedPath,
-            createPath,
+            normalizedRequestedPath,
             resolvedPath.Path,
             resourceCollectionId,
             resolvedPath.Kind,

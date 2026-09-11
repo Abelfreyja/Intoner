@@ -1157,8 +1157,14 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
         out ObjectSnapshot appliedSnapshot)
     {
         appliedSnapshot = default!;
+        nint previousAddress = entry.Runtime.Address;
+        using IDisposable? scope = _logger.BeginScope("object={ObjectId}; operation=runtime replacement", nextSnapshot.Id);
+        _logger.LogDebug("object runtime replacement started; object={ObjectId}; oldAddress=0x{OldAddress:X}; oldCollection={OldCollectionId}; newCollection={NewCollectionId}; oldRevision={OldRevision}",
+            nextSnapshot.Id, (ulong)previousAddress, previousSnapshot.CollectionId, nextSnapshot.CollectionId, entry.ResourceCollection.Revision);
         if (!_objectKindService.CanCreate(nextSnapshot.Kind))
         {
+            _logger.LogWarning("object runtime replacement rejected; object={ObjectId}; retainedAddress=0x{Address:X}; failure={FailureCode}",
+                nextSnapshot.Id, (ulong)previousAddress, ObjectRuntimeFailureCodes.ServiceMissing);
             _sceneState.SetRuntimeFailure(nextSnapshot.Id, ObjectRuntimeFailureCodes.ServiceMissing);
             return ActiveEntryUpdateStatus.RecreateFailed;
         }
@@ -1167,13 +1173,21 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
         SceneResourceCollectionState resourceCollection = GetResourceCollectionState(nextSnapshot);
         if (!_runtimeFactory.Value.TryCreate(nextSnapshot, out IObjectRuntime replacement, out string failureCode))
         {
+            _logger.LogDebug("object runtime replacement rejected; object={ObjectId}; retainedAddress=0x{Address:X}; failure={FailureCode}",
+                nextSnapshot.Id, (ulong)previousAddress, failureCode);
             _sceneState.SetRuntimeFailure(nextSnapshot.Id, failureCode);
             return ActiveEntryUpdateStatus.RecreateFailed;
         }
 
+        nint replacementAddress = replacement.Address;
+        _logger.LogDebug("object runtime replacement created; object={ObjectId}; oldAddress=0x{OldAddress:X}; newAddress=0x{NewAddress:X}; revision={Revision}",
+            nextSnapshot.Id, (ulong)previousAddress, (ulong)replacementAddress, resourceCollection.Revision);
         if (persistSnapshot && !_persistenceState.TryReplacePersistedSnapshot(previousSnapshot, nextSnapshot))
         {
-            return TryDisposeRuntime(replacement, nextSnapshot.Id)
+            bool disposed = TryDisposeRuntime(replacement, nextSnapshot.Id);
+            _logger.LogWarning("object runtime replacement rolled back; reason=storage failed; object={ObjectId}; retainedAddress=0x{OldAddress:X}; rejectedAddress=0x{NewAddress:X}; cleanupSucceeded={CleanupSucceeded}",
+                nextSnapshot.Id, (ulong)previousAddress, (ulong)replacementAddress, disposed);
+            return disposed
                 ? ActiveEntryUpdateStatus.StorageFailed
                 : ActiveEntryUpdateStatus.RecoveryRequired;
         }
@@ -1197,6 +1211,9 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
 
         _sceneState.ClearRuntimeFailure(nextSnapshot.Id);
         appliedSnapshot = nextSnapshot;
+        _logger.Log(runtimeApplied ? LogLevel.Debug : LogLevel.Warning,
+            "object runtime replacement completed; object={ObjectId}; oldAddress=0x{OldAddress:X}; newAddress=0x{NewAddress:X}; cleanupAndUsageSucceeded={Succeeded}",
+            nextSnapshot.Id, (ulong)previousAddress, (ulong)replacementAddress, runtimeApplied);
         return runtimeApplied
             ? ActiveEntryUpdateStatus.Applied
             : ActiveEntryUpdateStatus.AppliedWithRuntimeFailure;

@@ -1,9 +1,7 @@
 using Dalamud.Plugin.Services;
-using FFXIVClientStructs.FFXIV.Client.System.Resource;
 using Intoner.Objects.Interop;
 using Intoner.Objects.Models;
 using Intoner.Objects.Resources;
-using Intoner.Objects.Utils;
 using Intoner.Scene;
 using Microsoft.Extensions.Logging;
 using DrawObject = FFXIVClientStructs.FFXIV.Client.Graphics.Scene.DrawObject;
@@ -15,12 +13,9 @@ internal sealed unsafe class BgObjectRuntime : DrawObjectRuntime
 {
     private SceneBgObject* _bgObject;
     private DeferredVisualState _deferredVisualState;
-    private readonly IDataManager _gameData;
-    private readonly ObjectPathResolver _pathResolver;
-    private readonly IObjectResourceLoader _resourceLoader;
     private readonly ObjectResourceTracker _resourceTracker;
     private string _modelPath;
-    private ObjectResourceRegistration _rootHandleRegistration;
+    private ObjectResourceRegistration _rootHandleRegistration = new();
 
     public override ObjectKind Kind
         => ObjectKind.BgObject;
@@ -39,21 +34,14 @@ internal sealed unsafe class BgObjectRuntime : DrawObjectRuntime
         ILogger logger,
         ObjectSnapshot snapshot,
         SceneBgObject* bgObject,
-        IDataManager gameData,
-        ObjectPathResolver pathResolver,
-        IObjectResourceLoader resourceLoader,
         ObjectResourceTracker resourceTracker,
         string modelPath)
         : base(framework, logger, snapshot)
     {
         _bgObject = bgObject;
-        _gameData = gameData;
-        _pathResolver = pathResolver;
-        _resourceLoader = resourceLoader;
         _resourceTracker = resourceTracker;
         _modelPath = modelPath;
         _deferredVisualState = new DeferredVisualState();
-        _rootHandleRegistration = new ObjectResourceRegistration(snapshot.Id);
     }
 
     internal override void Initialize()
@@ -88,20 +76,13 @@ internal sealed unsafe class BgObjectRuntime : DrawObjectRuntime
             return ObjectRuntimeUpdateResult.Rejected;
         }
 
-        return ObjectRuntimeUpdateResult.Applied;
+        return NeedsModelReload(snapshot, Snapshot)
+            ? ObjectRuntimeUpdateResult.RequiresRecreate
+            : ObjectRuntimeUpdateResult.Applied;
     }
 
     protected override ObjectRuntimeUpdateResult ApplySnapshotUnsafe(ObjectSnapshot snapshot, ObjectSnapshot previousSnapshot)
     {
-        if (NeedsModelReload(snapshot, previousSnapshot))
-        {
-            ObjectRuntimeUpdateResult modelUpdateResult = SetModelUnsafe(snapshot);
-            if (modelUpdateResult != ObjectRuntimeUpdateResult.Applied)
-            {
-                return modelUpdateResult;
-            }
-        }
-
         var applyResult = _deferredVisualState.Apply<BgObjectModel>(
             snapshot,
             previousSnapshot,
@@ -113,20 +94,7 @@ internal sealed unsafe class BgObjectRuntime : DrawObjectRuntime
     }
 
     protected override ObjectRuntimeUpdateResult RefreshResourcesUnsafe(ObjectSnapshot snapshot)
-    {
-        ObjectRuntimeUpdateResult modelUpdateResult = SetModelUnsafe(snapshot);
-        if (modelUpdateResult != ObjectRuntimeUpdateResult.Applied)
-        {
-            return modelUpdateResult;
-        }
-
-        return _deferredVisualState.Apply<BgObjectModel>(
-            snapshot,
-            Snapshot,
-            ApplyRuntimeStateUnsafe,
-            static (model, _) => model.NeedsVisualState(null),
-            TryApplyVisualStateUnsafe);
-    }
+        => ObjectRuntimeUpdateResult.RequiresRecreate;
 
     protected override bool CanResolveDrawObjectBounds(DrawObject* drawObject)
         => drawObject != null && HasLoadedGraphics();
@@ -170,78 +138,8 @@ internal sealed unsafe class BgObjectRuntime : DrawObjectRuntime
     private bool TryApplyVisualStateUnsafe(BgObjectModel bgObjectModel)
         => BgObjectSceneInterop.TryApplyVisualState(_bgObject, bgObjectModel);
 
-    private ObjectRuntimeUpdateResult SetModelUnsafe(ObjectSnapshot snapshot)
-    {
-        if (_bgObject == null)
-        {
-            return ObjectRuntimeUpdateResult.RequiresRecreate;
-        }
-
-        var bgObjectModel = (BgObjectModel)snapshot.Model;
-        ObjectResolvedRootPath resolvedResource = _pathResolver.ResolveRootPath(snapshot, ObjectRootPathKind.BgModel, bgObjectModel.ModelPath);
-        if (!ObjectResourceCategoryUtility.TryResolveBgModelResourceCategory(resolvedResource.CreatePath, out uint resourceCategoryValue)
-         || !RootResourceExists(resolvedResource))
-        {
-            LogRejectedModel(resolvedResource);
-            return ObjectRuntimeUpdateResult.Rejected;
-        }
-
-        var resourceCategory = (ResourceCategory)resourceCategoryValue;
-
-        using (EnterRootLoadScope(resolvedResource))
-        {
-            if (!BgObjectSceneInterop.SetModel(_bgObject, resourceCategory, resolvedResource.CreatePath))
-            {
-                Logger.LogWarning("bgobject set model rejected by native SetModel for path {ModelPath}", resolvedResource.ResolvedPath);
-                return ObjectRuntimeUpdateResult.Rejected;
-            }
-        }
-
-        if (!CurrentModelMatches(resolvedResource))
-        {
-            Logger.LogWarning(
-                "bgobject set model rejected because assigned handle did not match requested path {ModelPath}",
-                resolvedResource.ResolvedPath);
-            return ObjectRuntimeUpdateResult.Rejected;
-        }
-
-        _modelPath = resolvedResource.ResolvedPath;
-        UpdateRegisteredRootHandle(snapshot);
-        return ObjectRuntimeUpdateResult.Applied;
-    }
-
-    private bool RootResourceExists(ObjectResolvedRootPath resolvedResource)
-        => ObjectResourcePathUtility.Exists(_gameData, resolvedResource);
-
-    private void LogRejectedModel(ObjectResolvedRootPath resolvedResource)
-    {
-        if (!resolvedResource.IsReady)
-        {
-            Logger.LogWarning(
-                "bgobject set model rejected path {ModelPath} with status {Status}",
-                resolvedResource.ResolvedPath,
-                resolvedResource.Status);
-            return;
-        }
-
-        Logger.LogWarning("bgobject set model rejected missing or invalid model path {ModelPath}", resolvedResource.ResolvedPath);
-    }
-
-    private bool CurrentModelMatches(ObjectResolvedRootPath resolvedResource)
-    {
-        string currentPath = BgObjectSceneInterop.GetCurrentModelPath(_bgObject);
-        string expectedPath = ObjectResourcePathUtility.NormalizeTrackedPath(resolvedResource.ResolvedPath);
-        return currentPath.Length > 0
-            && string.Equals(currentPath, expectedPath, StringComparison.OrdinalIgnoreCase);
-    }
-
     private bool HasLoadedGraphics()
         => BgObjectSceneInterop.IsModelLoaded(_bgObject);
-
-    private IDisposable EnterRootLoadScope(ObjectResolvedRootPath resolvedResource)
-        => resolvedResource.ResourceCollectionId.Length == 0
-            ? default(ObjectResourceLoadScopeToken)
-            : _resourceLoader.EnterRootLoadScope(resolvedResource.ResourceCollectionId);
 
     private static bool NeedsModelReload(ObjectSnapshot snapshot, ObjectSnapshot previousSnapshot)
     {

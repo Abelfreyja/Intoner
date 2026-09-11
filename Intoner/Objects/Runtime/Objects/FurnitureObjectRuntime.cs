@@ -21,8 +21,8 @@ internal sealed unsafe class FurnitureObjectRuntime : LayoutObjectRuntime
     private SharedGroupChildState _visualChildState;
     private bool _visualChildReady;
     private string _sharedGroupPath;
-    private ObjectResourceRegistration _rootHandleRegistration;
-    private ObjectResourceRegistration _rootInstanceRegistration;
+    private ObjectResourceRegistration _rootHandleRegistration = new();
+    private ObjectResourceRegistration _rootInstanceRegistration = new();
 
     public override ObjectKind Kind
         => ObjectKind.Furniture;
@@ -53,8 +53,6 @@ internal sealed unsafe class FurnitureObjectRuntime : LayoutObjectRuntime
         _emoteGuard = emoteGuard;
         _destroySharedGroup = destroySharedGroup;
         _deferredVisualState = new DeferredVisualState();
-        _rootHandleRegistration = new ObjectResourceRegistration(snapshot.Id);
-        _rootInstanceRegistration = new ObjectResourceRegistration(snapshot.Id);
     }
 
     internal override void Initialize()

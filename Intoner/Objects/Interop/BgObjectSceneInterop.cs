@@ -1,7 +1,4 @@
-using FFXIVClientStructs.FFXIV.Client.System.Resource;
-using FFXIVClientStructs.FFXIV.Client.System.Resource.Handle;
 using Intoner.Objects.Models;
-using Intoner.Objects.Resources;
 using Intoner.Objects.Utils;
 using Intoner.Scene;
 using System.Numerics;
@@ -30,23 +27,6 @@ internal static unsafe class BgObjectSceneInterop
         fixed (byte* poolPtr = PoolName)
         {
             return SceneBgObject.Create(pathPtr, poolPtr);
-        }
-    }
-
-    public static bool SetModel(SceneBgObject* bgObject, ResourceCategory resourceCategory, string modelPath)
-    {
-        if (bgObject == null)
-        {
-            return false;
-        }
-
-        Span<byte> pathBytes = stackalloc byte[Encoding.UTF8.GetByteCount(modelPath) + 1];
-        Encoding.UTF8.GetBytes(modelPath, pathBytes);
-        pathBytes[^1] = 0;
-
-        fixed (byte* pathPtr = pathBytes)
-        {
-            return bgObject->SetModel(&resourceCategory, pathPtr);
         }
     }
 
@@ -105,18 +85,6 @@ internal static unsafe class BgObjectSceneInterop
         => bgObject != null
             && bgObject->ModelResourceHandle != null
             && bgObject->ModelResourceHandle->LoadState >= ModelResourceLoadedState;
-
-    public static string GetCurrentModelPath(SceneBgObject* bgObject)
-    {
-        if (bgObject == null
-            || bgObject->ModelResourceHandle == null
-            || !ObjectResourcePathEncoding.TryReadHandlePath((ResourceHandle*)bgObject->ModelResourceHandle, out string handlePath))
-        {
-            return string.Empty;
-        }
-
-        return ObjectResourcePathUtility.NormalizeTrackedPath(handlePath);
-    }
 
     private static void ApplyDyeColor(SceneBgObject* bgObject, Vector4 dyeColor)
     {

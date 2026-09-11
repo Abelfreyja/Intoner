@@ -143,6 +143,7 @@ internal sealed class TemporaryCollectionService : ITemporaryCollectionService
     public void Publish(string sourceKey, PreparedTemporaryCollections prepared)
     {
         string normalizedSourceKey = TemporarySourceUtility.NormalizeKey(sourceKey);
+        using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferWrites();
         lock (_publicationLock)
         {
             IReadOnlySet<string> previousIds = _publishedCollectionIds.GetValueOrDefault(normalizedSourceKey)
@@ -157,6 +158,7 @@ internal sealed class TemporaryCollectionService : ITemporaryCollectionService
     public void Remove(string sourceKey)
     {
         string normalizedSourceKey = TemporarySourceUtility.NormalizeKey(sourceKey);
+        using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferWrites();
         lock (_publicationLock)
         {
             if (!_publishedCollectionIds.TryGetValue(normalizedSourceKey, out IReadOnlySet<string>? publishedIds))

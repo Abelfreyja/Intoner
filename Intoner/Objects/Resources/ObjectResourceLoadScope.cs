@@ -20,18 +20,16 @@ internal sealed class ObjectResourceLoadScope : IDisposable
     public ObjectResourceLoadScopeToken EnterResourceScope(long resourceScopeId)
         => EnterScope(_collectionStore.AcquireResourceScope(resourceScopeId));
 
+    public ObjectResourceLoadScopeToken Suspend()
+        => EnterScope(null);
+
     private ObjectResourceLoadScopeToken EnterScope(ObjectResourceCollectionLease? lease)
     {
-        if (lease is null)
-        {
-            return default;
-        }
-
         if (_disposeState.IsDisposing
          || !ObjectThreadLocalUtility.TryRead(_activeCollection, null, out ObjectCollectionResolveData? previousCollection)
-         || !TryWriteActiveCollection(lease.Snapshot))
+         || !TryWriteActiveCollection(lease?.Snapshot))
         {
-            lease.Dispose();
+            lease?.Dispose();
             return default;
         }
 
@@ -102,7 +100,7 @@ internal readonly struct ObjectResourceLoadScopeToken : IDisposable
     public ObjectResourceLoadScopeToken(
         ObjectResourceLoadScope owner,
         ObjectCollectionResolveData? previousCollection,
-        ObjectResourceCollectionLease lease)
+        ObjectResourceCollectionLease? lease)
     {
         _owner = owner;
         _previousCollection = previousCollection;
@@ -113,7 +111,7 @@ internal readonly struct ObjectResourceLoadScopeToken : IDisposable
         => _lease?.Snapshot;
 
     public bool IsActive
-        => _owner != null;
+        => _lease != null;
 
     public void Dispose()
     {

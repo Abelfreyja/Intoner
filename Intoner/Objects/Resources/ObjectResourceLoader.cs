@@ -69,7 +69,7 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         string RequestedPath,
         bool WasScoped);
 
-    private readonly record struct ResolvedResourceLoad(
+    internal readonly record struct ResolvedResourceLoad(
         ObjectCollectionResolveData Collection,
         string HandlePath,
         string TrackedPath);
@@ -233,9 +233,12 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         }
 
         string normalizedCollectionId = ObjectCollectionKeyUtility.NormalizeCollectionId(resourceCollectionId);
-        return normalizedCollectionId.Length == 0
-            ? default(ObjectResourceLoadScopeToken)
+        ObjectResourceLoadScopeToken scope = normalizedCollectionId.Length == 0
+            ? _loadScope.Suspend()
             : EnterCollectionScopeToken(normalizedCollectionId);
+        _logger.LogDebug("object resource root scope entered; collection={CollectionId}; generation={ResourceScopeId}; revision={Revision}; active={Active}",
+            normalizedCollectionId, scope.Collection?.ResourceScopeId ?? 0, scope.Collection?.Revision ?? 0, scope.IsActive);
+        return scope;
     }
 
     public IDisposable EnterRootCacheIsolation(string rootPath)
@@ -316,7 +319,12 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         TState state,
         ObjectResourcePathEncoding.TemporaryHandlePathAction<TState, TResult> callOriginal)
     {
-        using var scope = EnterRegisteredHandleScopeToken((nint)handle);
+        using var scope = EnterRegisteredHandleScopeToken((nint)handle, out bool canLoad);
+        if (!canLoad)
+        {
+            return default!;
+        }
+
         if (!ObjectResourcePathEncoding.TryReadActualScopedHandlePath(handle, out string actualPath))
         {
             return callOriginal(state);
@@ -334,7 +342,12 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         try
         {
             var resourceHandle = (ResourceHandle*)handle;
-            using var scope = EnterRegisteredHandleScopeToken((nint)resourceHandle);
+            using var scope = EnterRegisteredHandleScopeToken((nint)resourceHandle, out bool canLoad);
+            if (!canLoad)
+            {
+                return ObjectModelResourceLoadGuard.FailureResult;
+            }
+
             bool hasScopedPath = ObjectResourcePathEncoding.TryReadActualScopedHandlePath(resourceHandle, out string actualPath);
             if ((scope.IsActive || hasScopedPath) && !TryValidateModelResource(handle, resourceHandle, actualPath))
             {
@@ -406,8 +419,8 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
     {
         try
         {
-            using var scope = EnterBgObjectModelScopeToken(bgObject);
-            return _hooks.BgObjectLoadAnimationDataHook!.Original(bgObject, modelPath);
+            using var scope = EnterBgObjectModelScopeToken(bgObject, out bool canLoad);
+            return canLoad && _hooks.BgObjectLoadAnimationDataHook!.Original(bgObject, modelPath);
         }
         catch (Exception ex)
         {
@@ -457,7 +470,12 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         try
         {
             SharedGroupLayoutInstance* sharedGroup = ResolveSharedGroupInstance(listener);
-            using ObjectResourceLoadScopeToken scope = EnterSharedGroupResourceLoadScopeToken(sharedGroup, handle);
+            using ObjectResourceLoadScopeToken scope = EnterSharedGroupResourceLoadScopeToken(sharedGroup, handle, out bool canLoad);
+            if (!canLoad)
+            {
+                return;
+            }
+
             if (!ObjectResourcePathEncoding.TryReadActualScopedHandlePath(handle, out string actualPath))
             {
                 _hooks.SharedGroupLayoutResourceLoadHook!.Original(listener, handle);
@@ -491,8 +509,11 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         try
         {
             SharedGroupLayoutInstance* sharedGroup = instance != null ? instance->Instance : null;
-            using ObjectResourceLoadScopeToken scope = EnterSharedGroupInstanceScopeToken(sharedGroup);
-            _hooks.LayoutSharedGroupInsertObjectHook!.Original(instance, layoutInstance);
+            using ObjectResourceLoadScopeToken scope = EnterSharedGroupInstanceScopeToken(sharedGroup, out bool canLoad);
+            if (canLoad)
+            {
+                _hooks.LayoutSharedGroupInsertObjectHook!.Original(instance, layoutInstance);
+            }
         }
         catch (Exception ex)
         {
@@ -505,7 +526,7 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
     {
         try
         {
-            _resourceTracker.RemoveTrackedHandle((nint)handle);
+            _resourceTracker.RemoveTrackedHandle((nint)handle, "native destruction");
         }
         catch (Exception ex)
         {
@@ -538,32 +559,24 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
     {
         try
         {
-            if (IsDisposing || !TryReadActiveCollectionId(out string activeCollectionId))
+            if (IsDisposing)
             {
                 return _hooks.SchedulerTimelineLoadResourcesHook!.Original(timeline);
             }
 
-            ObjectResourceLoadScopeToken scope = default;
-            if (activeCollectionId.Length == 0)
+            using ObjectResourceLoadScopeToken scope = EnterSchedulerTimelineResourceScopeToken(timeline, out bool canLoad);
+            if (!canLoad)
             {
-                scope = EnterSchedulerTimelineResourceScopeToken(timeline);
-                _ = TryReadActiveCollectionId(out activeCollectionId);
+                return 0;
             }
 
-            try
+            ulong result = CallSchedulerTimelineLoadResourcesOriginal(timeline);
+            if (!IsDisposing && scope.Collection is { } collection)
             {
-                ulong result = CallSchedulerTimelineLoadResourcesOriginal(timeline);
-                if (!IsDisposing)
-                {
-                    TryRegisterSchedulerTimelineResource(timeline, activeCollectionId);
-                }
+                TryRegisterSchedulerTimelineResource(timeline, collection);
+            }
 
-                return result;
-            }
-            finally
-            {
-                scope.Dispose();
-            }
+            return result;
         }
         catch (Exception ex)
         {
@@ -648,7 +661,7 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
             return ObjectResourcePathEncoding.TryReadNativePath(request.Path, out string requestedPath)
                 && ObjectScopedResourcePathUtility.IsObjectScopedPath(requestedPath)
                 ? null
-                : CallOriginal(request);
+                : CallUnscopedOriginal(request);
         }
     }
 
@@ -664,13 +677,13 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
                 request.Parameters,
                 request.HasLockedHandle))
         {
-            return CallOriginal(request);
+            return CallUnscopedOriginal(request);
         }
 
         if (!ObjectResourcePathEncoding.TryReadNativePath(request.Path, out string requestedPath)
             || ObjectScopedResourcePathUtility.IsForeignScopedPath(requestedPath))
         {
-            return CallOriginal(request);
+            return CallUnscopedOriginal(request);
         }
 
         if (TryResolveRootCacheIsolation(requestedPath, request, out uint cacheIsolationHash))
@@ -684,13 +697,13 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         {
             return ObjectScopedResourcePathUtility.IsObjectScopedPath(requestedPath)
                 ? null
-                : CallOriginal(request);
+                : CallUnscopedOriginal(request);
         }
 
         RedirectResolution redirect = ResolveResourceLoad(scopedRequest, request.Type);
         if (redirect.Status == RedirectResolutionStatus.NotFound)
         {
-            return CallOriginal(request);
+            return CallUnscopedOriginal(request);
         }
 
         if (redirect.Status == RedirectResolutionStatus.Rejected)
@@ -700,8 +713,21 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         }
 
         ResourceHandle* resourceHandle = CallOriginalWithPath(request, redirect.ResolvedLoad.HandlePath);
+        if (resourceHandle == null)
+        {
+            _logger.LogWarning("object resource request returned null; collection={CollectionId}; generation={ResourceScopeId}; requested={RequestedPath}; resolved={ResolvedPath}; resourceType=0x{ResourceType:X8}",
+                scopedRequest.Collection.CollectionId, scopedRequest.Collection.ResourceScopeId, scopedRequest.RequestedPath,
+                redirect.ResolvedLoad.TrackedPath, request.Type);
+        }
+
         RegisterLoadedHandle(resourceHandle, redirect.ResolvedLoad, request.Type);
         return resourceHandle;
+    }
+
+    private ResourceHandle* CallUnscopedOriginal(ResourceRequest request)
+    {
+        using ObjectResourceLoadScopeToken scope = _loadScope.Suspend();
+        return CallOriginal(request);
     }
 
     private RedirectResolution ResolveResourceLoad(ScopedResourceRequest request, uint resourceType)
@@ -818,8 +844,9 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         return true;
     }
 
-    private ObjectResourceLoadScopeToken EnterRegisteredHandleScopeToken(nint resourceHandleAddress)
+    internal ObjectResourceLoadScopeToken EnterRegisteredHandleScopeToken(nint resourceHandleAddress, out bool canLoad)
     {
+        canLoad = true;
         if (IsDisposing)
         {
             return default;
@@ -827,64 +854,99 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
 
         if (resourceHandleAddress == nint.Zero)
         {
-            return EnterActiveCollectionScopeToken();
+            return _loadScope.Suspend();
         }
 
-        if (TryEnterScopedHandleScope(resourceHandleAddress, out ObjectResourceLoadScopeToken scopedHandleScope))
+        var resourceHandle = (ResourceHandle*)resourceHandleAddress;
+        if (ObjectResourcePathEncoding.TryReadHandlePath(resourceHandle, out string handlePath))
         {
-            return scopedHandleScope;
+            if (ObjectScopedResourcePathUtility.TryParse(handlePath, out ObjectScopedResourcePath scopedPath))
+            {
+                ObjectResourceLoadScopeToken scopedHandleScope = _resourceTracker.EnterHandleScope(resourceHandleAddress, scopedPath);
+                canLoad = scopedHandleScope.IsActive;
+                if (!canLoad)
+                {
+                    LogRejectedHandleScope("generation unavailable", resourceHandleAddress, handlePath, new(string.Empty, scopedPath.Path, scopedPath.ResourceScopeId));
+                }
+
+                return scopedHandleScope;
+            }
+
+            if (ObjectScopedResourcePathUtility.IsObjectScopedPath(handlePath))
+            {
+                canLoad = false;
+                LogRejectedHandleScope("malformed private path", resourceHandleAddress, handlePath);
+                return _loadScope.Suspend();
+            }
+
+            if (ObjectScopedResourcePathUtility.IsForeignScopedPath(handlePath))
+            {
+                return _loadScope.Suspend();
+            }
         }
 
-        if (!_resourceTracker.TryGetHandleScope(resourceHandleAddress, out var handleScope))
+        if (!_resourceTracker.TryGetHandleScope(resourceHandleAddress, out var handleScope, out bool isTracked))
         {
-            return EnterActiveCollectionScopeToken();
+            canLoad = !isTracked;
+            if (!canLoad)
+            {
+                LogRejectedHandleScope("conflicting ownership", resourceHandleAddress, handlePath);
+            }
+
+            return _loadScope.Suspend();
         }
 
         if (!DoesTrackedHandleMatch(resourceHandleAddress, handleScope.ResolvedPath))
         {
-            _resourceTracker.RemoveTrackedHandle(resourceHandleAddress);
-            return default;
+            LogRejectedHandleScope("path mismatch", resourceHandleAddress, handlePath, handleScope);
+            _resourceTracker.RemoveTrackedHandle(resourceHandleAddress, "path mismatch");
+            canLoad = false;
+            return _loadScope.Suspend();
         }
 
-        return _loadScope.EnterResourceScope(handleScope.ResourceScopeId);
-    }
-
-    private bool TryEnterScopedHandleScope(nint resourceHandleAddress, out ObjectResourceLoadScopeToken scope)
-    {
-        scope = default;
-        var resourceHandle = (ResourceHandle*)resourceHandleAddress;
-        if (resourceHandle == null
-            || !ObjectResourcePathEncoding.TryReadHandlePath(resourceHandle, out string handlePath)
-            || !ObjectScopedResourcePathUtility.TryParse(handlePath, out ObjectScopedResourcePath scopedPath))
+        ObjectResourceLoadScopeToken scope = _loadScope.EnterResourceScope(handleScope.ResourceScopeId);
+        canLoad = scope.IsActive;
+        if (!canLoad)
         {
-            return false;
+            LogRejectedHandleScope("generation unavailable", resourceHandleAddress, handlePath, handleScope);
         }
 
-        scope = _loadScope.EnterResourceScope(scopedPath.ResourceScopeId);
-        return true;
+        return scope;
     }
 
-    private ObjectResourceLoadScopeToken EnterSharedGroupInstanceScopeToken(SharedGroupLayoutInstance* instance)
+    private ObjectResourceLoadScopeToken EnterSharedGroupInstanceScopeToken(SharedGroupLayoutInstance* instance, out bool canLoad)
     {
+        canLoad = true;
         if (instance == null)
         {
-            return EnterActiveCollectionScopeToken();
+            return _loadScope.Suspend();
         }
 
-        if (TryEnterTrackedSharedGroupInstanceScope(instance, out ObjectResourceLoadScopeToken instanceScope))
+        if (TryEnterTrackedSharedGroupInstanceScope(instance, out ObjectResourceLoadScopeToken instanceScope, out canLoad))
         {
             return instanceScope;
         }
 
-        return EnterRegisteredHandleScopeToken((nint)instance->ResourceHandle);
+        return EnterRegisteredHandleScopeToken((nint)instance->ResourceHandle, out canLoad);
     }
 
-    private ObjectResourceLoadScopeToken EnterSharedGroupResourceLoadScopeToken(SharedGroupLayoutInstance* instance, ResourceHandle* handle)
+    internal ObjectResourceLoadScopeToken EnterSharedGroupResourceLoadScopeToken(SharedGroupLayoutInstance* instance, ResourceHandle* handle, out bool canLoad)
     {
-        ObjectResourceLoadScopeToken scope = EnterSharedGroupInstanceScopeToken(instance);
-        return scope.IsActive
-            ? scope
-            : EnterRegisteredHandleScopeToken((nint)handle);
+        if (instance == null || (ObjectResourcePathEncoding.TryReadHandlePath(handle, out string handlePath)
+         && (ObjectScopedResourcePathUtility.IsObjectScopedPath(handlePath)
+             || ObjectScopedResourcePathUtility.IsForeignScopedPath(handlePath))))
+        {
+            return EnterRegisteredHandleScopeToken((nint)handle, out canLoad);
+        }
+
+        ObjectResourceLoadScopeToken scope = EnterSharedGroupInstanceScopeToken(instance, out canLoad);
+        if (scope.IsActive || !canLoad)
+        {
+            return scope;
+        }
+
+        scope.Dispose();
+        return EnterRegisteredHandleScopeToken((nint)handle, out canLoad);
     }
 
     private static SharedGroupLayoutInstance* ResolveSharedGroupInstance(ResourceEventListener* listener)
@@ -894,35 +956,67 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
 
     private bool TryEnterTrackedSharedGroupInstanceScope(
         SharedGroupLayoutInstance* instance,
-        out ObjectResourceLoadScopeToken scope)
+        out ObjectResourceLoadScopeToken scope,
+        out bool canLoad)
     {
         scope = default;
-        if (instance == null || !_resourceTracker.TryGetInstanceScope((nint)instance, out var instanceScope))
+        canLoad = true;
+        if (instance == null)
         {
             return false;
+        }
+
+        if (!_resourceTracker.TryGetInstanceScope((nint)instance, out var instanceScope, out bool isTracked))
+        {
+            if (isTracked)
+            {
+                LogRejectedHandleScope("conflicting instance ownership", (nint)instance, string.Empty);
+                scope = _loadScope.Suspend();
+                canLoad = false;
+            }
+
+            return isTracked;
         }
 
         if (!DoesTrackedSharedGroupInstanceMatch(instance, instanceScope.ResolvedPath))
         {
-            _resourceTracker.RemoveTrackedInstance((nint)instance);
-            return false;
+            LogRejectedHandleScope("instance path mismatch", (nint)instance, string.Empty, instanceScope);
+            _resourceTracker.RemoveTrackedInstance((nint)instance, "path mismatch");
+            scope = _loadScope.Suspend();
+            canLoad = false;
+            return true;
         }
 
         scope = _loadScope.EnterResourceScope(instanceScope.ResourceScopeId);
-        return scope.IsActive;
+        canLoad = scope.IsActive;
+        if (!canLoad)
+        {
+            LogRejectedHandleScope("instance generation unavailable", (nint)instance, string.Empty, instanceScope);
+        }
+
+        return true;
     }
 
-    private ObjectResourceLoadScopeToken EnterBgObjectModelScopeToken(SceneBgObject* bgObject)
-        => bgObject == null
-            ? EnterActiveCollectionScopeToken()
-            : EnterRegisteredHandleScopeToken((nint)bgObject->ModelResourceHandle);
-
-    private ObjectResourceLoadScopeToken EnterSchedulerTimelineResourceScopeToken(SchedulerTimeline* timeline)
+    private ObjectResourceLoadScopeToken EnterBgObjectModelScopeToken(SceneBgObject* bgObject, out bool canLoad)
     {
+        canLoad = true;
+        return bgObject == null
+            ? _loadScope.Suspend()
+            : EnterRegisteredHandleScopeToken((nint)bgObject->ModelResourceHandle, out canLoad);
+    }
+
+    internal ObjectResourceLoadScopeToken EnterSchedulerTimelineResourceScopeToken(SchedulerTimeline* timeline, out bool canLoad)
+    {
+        canLoad = true;
+        if (timeline == null)
+        {
+            return _loadScope.Suspend();
+        }
+
         ResourceHandle* resourceHandle = ResolveSchedulerTimelineResourceHandle(timeline);
         return resourceHandle == null
             ? EnterActiveCollectionScopeToken()
-            : EnterRegisteredHandleScopeToken((nint)resourceHandle);
+            : EnterRegisteredHandleScopeToken((nint)resourceHandle, out canLoad);
     }
 
     private ObjectResourceLoadScopeToken EnterActiveCollectionScopeToken()
@@ -1113,11 +1207,11 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         return resolvedHandleType.Value != uint.MaxValue;
     }
 
-    private void RegisterLoadedHandle(ResourceHandle* resourceHandle, ResolvedResourceLoad resolvedLoad, uint resourceType)
+    internal void RegisterLoadedHandle(ResourceHandle* resourceHandle, ResolvedResourceLoad resolvedLoad, uint resourceType)
     {
         if (IsDisposing
             || resourceHandle == null
-            || !ShouldIsolateResourceCache(resourceType)
+            || (!ShouldIsolateResourceCache(resourceType) && !ObjectMemoryResourcePathUtility.IsMemoryResourcePath(resolvedLoad.TrackedPath))
             || resolvedLoad.Collection.CollectionId.Length == 0
             || resolvedLoad.TrackedPath.Length == 0)
         {
@@ -1136,11 +1230,11 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         }
     }
 
-    private void TryRegisterSchedulerTimelineResource(SchedulerTimeline* timeline, string resourceCollectionId)
+    private void TryRegisterSchedulerTimelineResource(SchedulerTimeline* timeline, ObjectCollectionResolveData collection)
     {
         try
         {
-            RegisterSchedulerTimelineResource(timeline, resourceCollectionId);
+            RegisterSchedulerTimelineResource(timeline, collection);
         }
         catch (Exception ex)
         {
@@ -1148,10 +1242,9 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         }
     }
 
-    private void RegisterSchedulerTimelineResource(SchedulerTimeline* timeline, string resourceCollectionId)
+    private void RegisterSchedulerTimelineResource(SchedulerTimeline* timeline, ObjectCollectionResolveData collection)
     {
-        if (IsDisposing || resourceCollectionId.Length == 0
-         || !_loadScope.TryReadActiveCollection(out ObjectCollectionResolveData collection))
+        if (IsDisposing)
         {
             return;
         }
@@ -1162,7 +1255,15 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
             return;
         }
 
-        if (!ObjectResourcePathEncoding.TryReadHandlePath(resourceHandle, out string handlePath))
+        if (!ObjectResourcePathEncoding.TryReadHandlePath(resourceHandle, out string handlePath)
+         || ObjectScopedResourcePathUtility.IsForeignScopedPath(handlePath))
+        {
+            return;
+        }
+
+        if (ObjectScopedResourcePathUtility.IsObjectScopedPath(handlePath)
+         && (!ObjectScopedResourcePathUtility.TryParse(handlePath, out ObjectScopedResourcePath scopedPath)
+             || scopedPath.ResourceScopeId != collection.ResourceScopeId))
         {
             return;
         }
@@ -1175,7 +1276,7 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
 
         _resourceTracker.RegisterOrUpdateHandleScope(
             (nint)resourceHandle,
-            new ObjectResourceScope(resourceCollectionId, resourcePath, collection.ResourceScopeId));
+            new ObjectResourceScope(collection.CollectionId, resourcePath, collection.ResourceScopeId));
     }
 
     private static ResourceHandle* ResolveSchedulerTimelineResourceHandle(SchedulerTimeline* timeline)
@@ -1196,9 +1297,16 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
             return false;
         }
 
-        var currentPath = ObjectResourcePathUtility.NormalizeTrackedPath(handlePath);
-        return currentPath.Length > 0
-            && string.Equals(currentPath, ObjectResourcePathUtility.NormalizeTrackedPath(resolvedPath), StringComparison.OrdinalIgnoreCase);
+        string currentPath = ObjectResourcePathUtility.NormalizeTrackedPath(handlePath);
+        string trackedPath = ObjectResourcePathUtility.NormalizeTrackedPath(resolvedPath);
+        if (currentPath.Length == 0)
+        {
+            return false;
+        }
+
+        return string.Equals(currentPath, trackedPath, StringComparison.OrdinalIgnoreCase)
+            || (ObjectMemoryResourcePathUtility.TryParse(trackedPath, out ObjectMemoryResourcePath memoryPath)
+                && string.Equals(currentPath, memoryPath.GamePath, StringComparison.OrdinalIgnoreCase));
     }
 
     private static bool DoesTrackedSharedGroupInstanceMatch(SharedGroupLayoutInstance* instance, string resolvedPath)
@@ -1240,20 +1348,16 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
             request.WasScoped);
     }
 
-    private void LogNativeHookFailure(Exception exception, string hook, ResourceHandle* handle)
-    {
-        string path = ObjectResourcePathEncoding.TryReadHandlePath(handle, out string handlePath)
-            ? handlePath
-            : string.Empty;
-        _logger.LogError(exception, "object resource {Hook} hook failed; path={Path}", hook, path);
-    }
+    private void LogRejectedHandleScope(string reason, nint address, string path, ObjectResourceScope scope = default)
+        => _logger.LogWarning("object resource callback rejected; reason={Reason}; address=0x{Address:X}; path={Path}; collection={CollectionId}; generation={ResourceScopeId}; expectedPath={ExpectedPath}",
+            reason, (ulong)address, path, scope.ResourceCollectionId, scope.ResourceScopeId, scope.ResolvedPath);
+
+    internal void LogNativeHookFailure(Exception exception, string hook, ResourceHandle* handle)
+        => ObjectResourceLog.LogHookFailure(_logger, _resourceTracker, exception, hook, (nint)handle);
 
     private void LogNativePathHookFailure(Exception exception, string hook, byte* path)
     {
-        string requestedPath = ObjectResourcePathEncoding.TryReadNativePath(path, out string nativePath)
-            ? nativePath
-            : string.Empty;
-        _logger.LogError(exception, "object resource {Hook} hook failed; path={Path}", hook, requestedPath);
+        _logger.LogError(exception, "object resource {Hook} hook failed; pathAddress=0x{PathAddress:X}", hook, (ulong)path);
     }
 
     private ResourceHandle* CallOriginal(ResourceRequest request)
