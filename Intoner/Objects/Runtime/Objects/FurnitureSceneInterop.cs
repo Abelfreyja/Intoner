@@ -91,8 +91,14 @@ internal static unsafe class FurnitureSceneInterop
 
     private static bool TryApplyNativeStainColor(ILogger logger, SharedGroupLayoutInstance* instance, byte chosenStainId)
     {
-        var sharedGroupChildCount = GetSharedGroupChildCount(instance);
         var stainInfo = instance->StainInfo;
+        
+        if (chosenStainId == 0 && (stainInfo == null || stainInfo->DefaultStainIndex is 0 or byte.MaxValue))
+        {
+            return true;
+        }
+
+        var sharedGroupChildCount = GetSharedGroupChildCount(instance);
         if (stainInfo == null)
         {
             logger.LogInformation(

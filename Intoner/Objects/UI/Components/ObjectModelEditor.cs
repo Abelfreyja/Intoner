@@ -42,7 +42,7 @@ internal static class ObjectModelEditor
         string id,
         ref FurnitureModel model,
         IReadOnlyList<FurnitureStainOption> stains,
-        ref string stainFilter,
+        FurnitureStainSelector stainSelector,
         Action<string, string, FurnitureModel, bool>? onChanged = null)
     {
         float transparency = model.Transparency;
@@ -81,7 +81,7 @@ internal static class ObjectModelEditor
         else
         {
             byte stainId = model.Color.StainId;
-            if (FurnitureStainSelector.Draw("Color", id, stains, ref stainId, ref stainFilter))
+            if (stainSelector.Draw("Color", id, stains, ref stainId))
             {
                 model = model with { Color = model.Color with { StainId = stainId } };
                 onChanged?.Invoke("FurnitureStain", "Change Furniture Stain", model, true);

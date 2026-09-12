@@ -78,7 +78,7 @@ internal sealed class FurnitureStainService : IFurnitureStainService, IDisposabl
         int bestDistance = int.MaxValue;
         foreach (FurnitureStainOption stain in GetStains())
         {
-            if (stain.Id == 0)
+            if (stain.Id == 0 || !stain.IsAvailable)
             {
                 continue;
             }
@@ -137,29 +137,51 @@ internal sealed class FurnitureStainService : IFurnitureStainService, IDisposabl
         cancellationToken.ThrowIfCancellationRequested();
         IReadOnlyList<SheetFurnitureStainOption> sheetStains = BuildSheetFurnitureStains(gameData, cancellationToken);
         sheetProgress.Report(1d);
+        return BuildOptions(nativeStainColors, sheetStains, optionProgress);
+    }
+
+    internal static IReadOnlyList<FurnitureStainOption> BuildOptions(
+        IReadOnlyList<FurnitureStainColor> nativeStainColors,
+        IReadOnlyList<SheetFurnitureStainOption> sheetStains,
+        LoadProgress progress)
+    {
         List<FurnitureStainOption> stains = new(nativeStainColors.Count + 1)
         {
             new(0, "Default", new Vector4(0f, 0f, 0f, 1f), false),
         };
 
-        for (var index = 0; index < nativeStainColors.Count; ++index)
+        Dictionary<(byte R, byte G, byte B), SheetFurnitureStainOption> sheetColors = new(sheetStains.Count);
+        foreach (SheetFurnitureStainOption stain in sheetStains)
         {
-            FurnitureStainColor nativeStainColor = nativeStainColors[index];
-            cancellationToken.ThrowIfCancellationRequested();
-            SheetFurnitureStainOption? match = FindSheetFurnitureStain(nativeStainColor.Color, sheetStains);
-            stains.Add(new FurnitureStainOption(
-                nativeStainColor.StainId,
-                match?.Name ?? $"Object Stain {nativeStainColor.StainId}",
-                ColorUtility.ToOpaqueNormalizedColor(nativeStainColor.Color),
-                match?.IsMetallic ?? false));
-            optionProgress.ReportItems(index + 1, nativeStainColors.Count);
+            progress.CancellationToken.ThrowIfCancellationRequested();
+            sheetColors.TryAdd((stain.Color.R, stain.Color.G, stain.Color.B), stain);
         }
 
-        optionProgress.Report(1d);
+        Dictionary<uint, byte> uniqueColors = [];
+        foreach (FurnitureStainColor nativeStainColor in nativeStainColors.OrderBy(static stain => stain.StainId))
+        {
+            progress.CancellationToken.ThrowIfCancellationRequested();
+            ByteColor color = nativeStainColor.Color;
+            bool matched = sheetColors.TryGetValue((color.R, color.G, color.B), out SheetFurnitureStainOption match);
+            byte? duplicateOf = null;
+            if (matched && !uniqueColors.TryAdd(color.RGBA, nativeStainColor.StainId))
+            {
+                duplicateOf = uniqueColors[color.RGBA];
+            }
 
-        return stains
-            .OrderBy(static stain => stain.Id)
-            .ToArray();
+            stains.Add(new FurnitureStainOption(
+                nativeStainColor.StainId,
+                matched ? match.Name : $"Object Stain {nativeStainColor.StainId}",
+                ColorUtility.ToOpaqueNormalizedColor(color),
+                matched && match.IsMetallic,
+                matched && !duplicateOf.HasValue,
+                duplicateOf));
+            progress.ReportItems(stains.Count - 1, nativeStainColors.Count);
+        }
+
+        progress.Report(1d);
+
+        return stains.ToArray();
     }
 
     private static IReadOnlyList<SheetFurnitureStainOption> BuildSheetFurnitureStains(
@@ -176,7 +198,7 @@ internal sealed class FurnitureStainService : IFurnitureStainService, IDisposabl
         foreach (var row in sheet)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (row.RowId == 0 || !row.IsHousingApplicable)
+            if (row.RowId == 0 || row.Color == 0 || !row.IsHousingApplicable)
             {
                 continue;
             }
@@ -195,24 +217,6 @@ internal sealed class FurnitureStainService : IFurnitureStainService, IDisposabl
         }
 
         return stains;
-    }
-
-    private static SheetFurnitureStainOption? FindSheetFurnitureStain(
-        ByteColor nativeColor,
-        IReadOnlyList<SheetFurnitureStainOption> sheetStains)
-    {
-        for (int i = 0; i < sheetStains.Count; i++)
-        {
-            SheetFurnitureStainOption stain = sheetStains[i];
-            if (stain.Color.R == nativeColor.R
-             && stain.Color.G == nativeColor.G
-             && stain.Color.B == nativeColor.B)
-            {
-                return stain;
-            }
-        }
-
-        return null;
     }
 }
 

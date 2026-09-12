@@ -39,7 +39,7 @@ internal sealed partial class SceneItemInspector
     private readonly SceneItemControls            _sceneItems;
     private readonly ObjectEditorCatalog          _catalogInfo;
     private InspectorMetadata? _inspectorMetadata;
-    private string _inspectorFurnitureStainFilter = string.Empty;
+    private readonly FurnitureStainSelector _inspectorFurnitureStains = new();
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = true,
@@ -781,7 +781,7 @@ internal sealed partial class SceneItemInspector
             "inspector",
             ref furnitureModel,
             _furnitureStainService.GetStains(),
-            ref _inspectorFurnitureStainFilter,
+            _inspectorFurnitureStains,
             onChanged: (editId, title, updatedModel, recordImmediately) =>
                 _historyCoordinator.ApplyInspectorSnapshotEdit(
                     editId,

@@ -59,30 +59,7 @@ internal static class FolderColorPicker
         Vector2 min = ImGui.GetItemRectMin();
         Vector2 max = ImGui.GetItemRectMax();
         ImDrawListPtr drawList = ImGui.GetWindowDrawList();
-        Vector4 fill = string.IsNullOrEmpty(colorValue)
-            ? ThemeColors.ButtonDefault with { W = 0.96f }
-            : ResolveAccent(colorValue) with { W = 0.96f };
-        Vector4 border = selected
-            ? ThemeColors.Text
-            : ThemeColors.Border with { W = 0.78f };
-        float rounding = 3f * scale;
-
-        drawList.AddRectFilled(min, max, ImGui.GetColorU32(fill), rounding);
-        drawList.AddRect(
-            min,
-            max,
-            ImGui.GetColorU32(border),
-            rounding,
-            ImDrawFlags.None,
-            selected ? 2f * scale : scale);
-        if (string.IsNullOrEmpty(colorValue))
-        {
-            drawList.AddLine(
-                new Vector2(min.X + (3f * scale), max.Y - (3f * scale)),
-                new Vector2(max.X - (3f * scale), min.Y + (3f * scale)),
-                ImGui.GetColorU32(ResolveDefaultAccent()),
-                1.25f * scale);
-        }
+        EditorColorSwatch.Draw(drawList, min, max, ResolveAccent(colorValue) with { W = 0.96f }, string.IsNullOrEmpty(colorValue), selected);
 
         if (ImGui.IsItemHovered())
         {

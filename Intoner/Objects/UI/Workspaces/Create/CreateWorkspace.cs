@@ -499,7 +499,7 @@ internal sealed class CreateWorkspace
                     "create",
                     ref _draft.Furniture.Model,
                     _furnitureStainService.GetStains(),
-                    ref _draft.Furniture.StainFilter);
+                    _draft.Furniture.StainSelector);
             }
         }
     }

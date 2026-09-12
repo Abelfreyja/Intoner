@@ -118,6 +118,9 @@ internal struct DeferredVisualState
     public void Reset()
         => _needsReplay = false;
 
+    public void RequestReplay()
+        => _needsReplay = true;
+
     public ObjectRuntimeUpdateResult Apply<TModel>(
         ObjectSnapshot snapshot,
         ObjectSnapshot previousSnapshot,
@@ -130,9 +133,8 @@ internal struct DeferredVisualState
         var previousModel = (TModel)previousSnapshot.Model;
 
         applyRuntimeState(snapshot);
-        if (!needsVisualState(model, previousModel))
+        if (!_needsReplay && !needsVisualState(model, previousModel))
         {
-            _needsReplay = false;
             return ObjectRuntimeUpdateResult.Applied;
         }
 

@@ -53,6 +53,7 @@ internal sealed unsafe class FurnitureObjectRuntime : LayoutObjectRuntime
         _emoteGuard = emoteGuard;
         _destroySharedGroup = destroySharedGroup;
         _deferredVisualState = new DeferredVisualState();
+        _deferredVisualState.RequestReplay();
     }
 
     internal override void Initialize()

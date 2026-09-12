@@ -1,6 +1,7 @@
 using Intoner.Objects.Catalog;
 using Intoner.Objects.Library;
 using Intoner.Objects.Models;
+using Intoner.Objects.UI.Components;
 using Intoner.Objects.Utils;
 using System.Numerics;
 
@@ -151,7 +152,7 @@ internal sealed class ObjectCreationDraft
     internal sealed class FurnitureCreateState
     {
         public FurnitureModel Model = new();
-        public string StainFilter = string.Empty;
+        public readonly FurnitureStainSelector StainSelector = new();
         public ObjectPreviewRenderer.PreviewState Preview = new();
         public Vector3 Scale = Vector3.One;
         public bool Visible = true;
