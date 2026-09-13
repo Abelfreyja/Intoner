@@ -16,7 +16,7 @@ internal sealed partial class CollectionsWorkspace
 {
     private void DrawObjectCollectionModsSection(ObjectCollectionSnapshot collection, float width, float height)
     {
-        DependencyStatus penumbraStatus = _dependencies.GetStatus(IPenumbraDependency.Id);
+        DependencyStatus penumbraStatus = _penumbra.Status;
         string filter = _objectCollectionAssignedModFilter.Trim();
         int visibleModCount = CountVisibleObjectCollectionMods(collection, filter);
         string subtitle = penumbraStatus.IsAvailable
@@ -159,6 +159,7 @@ internal sealed partial class CollectionsWorkspace
         ObjectCollectionModSettingsView? settingsView = expanded || ImGui.IsItemVisible()
             ? _objectModDataSource.GetModSettings(entry)
             : null;
+        DrawObjectCollectionModContextMenu($"##objectCollectionModContext:{rowKey}", entry.ModDirectory);
 
         Vector2 cursorAfterRow = ImGui.GetCursorPos();
         ImGui.SetCursorPos(new Vector2(startPos.X, cursorAfterRow.Y));
@@ -350,6 +351,21 @@ internal sealed partial class CollectionsWorkspace
         }
 
         return changed;
+    }
+
+    private void DrawObjectCollectionModContextMenu(string id, string modDirectory)
+    {
+        using EditorContextMenu.PopupScope menu = EditorContextMenu.BeginForLastItem(id);
+        if (!menu)
+        {
+            return;
+        }
+
+        bool enabled = _penumbra.CanOpenWindow && !string.IsNullOrWhiteSpace(modDirectory);
+        if (EditorContextMenu.DrawItem(FontAwesomeIcon.ExternalLinkAlt, "Open in Penumbra", enabled: enabled))
+        {
+            _penumbra.TryOpenWindow(modDirectory);
+        }
     }
 
     private float DrawObjectCollectionModBadges(

@@ -21,7 +21,7 @@ internal sealed partial class CollectionsWorkspace
     private readonly IObjectSceneView _sceneView;
     private readonly IObjectCollectionManager _objectCollectionManager;
     private readonly IObjectModDataSource _objectModDataSource;
-    private readonly IDependencyService _dependencies;
+    private readonly IPenumbraDependency _penumbra;
     private readonly EditorInteraction _interaction;
     private readonly SceneEditorCommands _sceneCommands;
     private readonly EditorOverlayLayer _editorOverlayLayer;
@@ -48,7 +48,7 @@ internal sealed partial class CollectionsWorkspace
         IObjectSceneView sceneView,
         IObjectCollectionManager objectCollectionManager,
         IObjectModDataSource objectModDataSource,
-        IDependencyService dependencies,
+        IPenumbraDependency penumbra,
         EditorInteraction interaction,
         SceneEditorCommands sceneCommands,
         EditorOverlayLayer editorOverlayLayer,
@@ -61,7 +61,7 @@ internal sealed partial class CollectionsWorkspace
         _sceneView                 = sceneView;
         _objectCollectionManager   = objectCollectionManager;
         _objectModDataSource       = objectModDataSource;
-        _dependencies              = dependencies;
+        _penumbra                  = penumbra;
         _interaction               = interaction;
         _sceneCommands             = sceneCommands;
         _editorOverlayLayer        = editorOverlayLayer;
@@ -354,6 +354,11 @@ internal sealed partial class CollectionsWorkspace
         if (EditorContextMenu.DrawItem(FontAwesomeIcon.Redo, "Reresolve Collection"))
         {
             RecompileObjectCollection(collection);
+        }
+
+        if (EditorContextMenu.DrawItem(FontAwesomeIcon.ExternalLinkAlt, "Open Penumbra", enabled: _penumbra.CanOpenWindow))
+        {
+            _penumbra.TryOpenWindow();
         }
 
         EditorContextMenu.DrawSeparator();

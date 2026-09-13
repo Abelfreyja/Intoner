@@ -1,6 +1,7 @@
 using Dalamud.Plugin;
 using Dalamud.Plugin.Ipc.Exceptions;
 using Microsoft.Extensions.Logging;
+using Penumbra.Api.Enums;
 using Penumbra.Api.IpcSubscribers;
 
 namespace Intoner.Services.Dependencies;
@@ -19,6 +20,14 @@ internal interface IPenumbraDependency : IDependency, IDisposable
 
     /// <summary> refreshes the current Penumbra mod root directory </summary>
     void RefreshModDirectory();
+
+    /// <summary> whether the Penumbra window can be opened </summary>
+    bool CanOpenWindow { get; }
+
+    /// <summary> opens penumbra, optionally selecting a mod by its directory </summary>
+    /// <param name="modDirectory"> the mod directory, or empty to keep the current tab and state </param>
+    /// <returns> true when penumbra accepts the request </returns>
+    bool TryOpenWindow(string modDirectory = "");
 }
 
 internal sealed class PenumbraDependency : IPenumbraDependency
@@ -37,6 +46,7 @@ internal sealed class PenumbraDependency : IPenumbraDependency
     private readonly ApiVersion _apiVersion;
     private readonly GetEnabledState _getEnabledState;
     private readonly GetModDirectory _getModDirectory;
+    private readonly OpenMainWindow _openMainWindow;
     private readonly Luna.EventSubscriber _initialized;
     private readonly Luna.EventSubscriber _disposed;
     private readonly Luna.EventSubscriber<bool> _enabledChanged;
@@ -56,6 +66,7 @@ internal sealed class PenumbraDependency : IPenumbraDependency
         _apiVersion = new ApiVersion(pluginInterface);
         _getEnabledState = new GetEnabledState(pluginInterface);
         _getModDirectory = new GetModDirectory(pluginInterface);
+        _openMainWindow = new OpenMainWindow(pluginInterface);
         _initialized = Initialized.Subscriber(pluginInterface, HandleInitialized);
         _disposed = Disposed.Subscriber(pluginInterface, HandleDisposed);
         _enabledChanged = EnabledChange.Subscriber(pluginInterface, HandleEnabledChanged);
@@ -76,6 +87,9 @@ internal sealed class PenumbraDependency : IPenumbraDependency
 
     public DependencyStatus Status
         => Volatile.Read(ref _status);
+
+    public bool CanOpenWindow
+        => !_isDisposed && Status.State is DependencyState.Available or DependencyState.FeatureDisabled;
 
     public string ModDirectory
     {
@@ -117,6 +131,36 @@ internal sealed class PenumbraDependency : IPenumbraDependency
             ModDirectory = string.Empty;
             _logger.LogWarning(ex, "failed to resolve Penumbra mod directory");
         }
+    }
+
+    public bool TryOpenWindow(string modDirectory = "")
+    {
+        if (!CanOpenWindow)
+        {
+            return false;
+        }
+
+        modDirectory = modDirectory.Trim();
+        try
+        {
+            PenumbraApiEc result = _openMainWindow.Invoke(modDirectory.Length == 0 ? TabType.None : TabType.Mods, modDirectory);
+            if (result == PenumbraApiEc.Success)
+            {
+                return true;
+            }
+
+            _logger.LogWarning("failed to open Penumbra window for {ModDirectory}: {Result}", modDirectory, result);
+        }
+        catch (IpcNotReadyError ex)
+        {
+            _logger.LogDebug(ex, "Penumbra window IPC is not ready");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "failed to open Penumbra window");
+        }
+
+        return false;
     }
 
     public void Dispose()
