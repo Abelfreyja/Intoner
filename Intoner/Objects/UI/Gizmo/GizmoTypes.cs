@@ -117,6 +117,9 @@ internal readonly struct GizmoSelectionEntry
 }
 
 [StructLayout(LayoutKind.Auto)]
+internal readonly record struct GizmoAxisProjectionState(int DirectionSign, Vector2? ScreenDirection);
+
+[StructLayout(LayoutKind.Auto)]
 internal readonly record struct GizmoAxisVisualState(
     GizmoAxis Axis,
     Vector2 ScreenStart,
@@ -167,24 +170,6 @@ internal enum GizmoInteractionPhase
     RadialMenu,
 }
 
-internal static class GizmoInteractionPhaseExtensions
-{
-    public static bool IsFocused(this GizmoInteractionPhase phase)
-        => phase != GizmoInteractionPhase.Idle;
-
-    public static bool IsTransformDrag(this GizmoInteractionPhase phase)
-        => phase == GizmoInteractionPhase.TransformDrag;
-
-    public static bool IsSurfaceDrag(this GizmoInteractionPhase phase)
-        => phase == GizmoInteractionPhase.SurfaceDrag;
-
-    public static bool ShouldCaptureMouse(this GizmoInteractionPhase phase)
-        => phase is GizmoInteractionPhase.HoverAxis or GizmoInteractionPhase.HoverCenter or GizmoInteractionPhase.TransformDrag;
-
-    public static bool CanStartSurfaceDrag(this GizmoInteractionPhase phase, bool centerHovered)
-        => phase == GizmoInteractionPhase.HoverCenter && centerHovered;
-}
-
 [StructLayout(LayoutKind.Auto)]
 internal readonly record struct GizmoInteractionAvailability(
     bool PointerInRegion,
@@ -231,87 +216,70 @@ internal readonly record struct GizmoInteractionState(
     GizmoAxis ActiveAxis)
 {
     public bool IsFocused
-        => Phase.IsFocused();
+        => Phase != GizmoInteractionPhase.Idle;
 
     public bool DragActive
-        => Phase.IsTransformDrag();
+        => Phase == GizmoInteractionPhase.TransformDrag;
 
     public bool SurfaceDragActive
-        => Phase.IsSurfaceDrag();
+        => Phase == GizmoInteractionPhase.SurfaceDrag;
+
+    public bool IsHovering
+        => Phase is GizmoInteractionPhase.HoverAxis or GizmoInteractionPhase.HoverCenter;
 
     public bool ShouldCaptureMouse
-        => Phase.ShouldCaptureMouse();
+        => Phase is GizmoInteractionPhase.HoverAxis or GizmoInteractionPhase.HoverCenter or GizmoInteractionPhase.TransformDrag;
 
     public bool CanStartSurfaceDrag
-        => Phase.CanStartSurfaceDrag(CenterHovered);
+        => Phase == GizmoInteractionPhase.HoverCenter && CenterHovered;
 }
 
 [StructLayout(LayoutKind.Auto)]
-internal readonly record struct GizmoLinearInteractionState(
-    GizmoInteractionState Common,
-    GizmoAxis HoveredAxis,
-    GizmoAxisVisualState HoveredAxisState,
-    bool AxisHovered)
+internal readonly record struct GizmoHandleHit(
+    GizmoTransformMode Operation,
+    GizmoAxisVisualState LinearAxis,
+    RotationHoverState Rotation,
+    float Distance,
+    bool IsEndpoint)
 {
-    public bool CanStartAxisDrag
-        => Common.Phase == GizmoInteractionPhase.HoverAxis && HoveredAxisState.IsValid;
+    public bool IsValid => Operation != GizmoTransformMode.None;
+
+    public GizmoAxis Axis => Operation == GizmoTransformMode.Rotation ? Rotation.Axis : LinearAxis.Axis;
+
+    public bool IsCloserThan(in GizmoHandleHit other)
+        => IsValid && (!other.IsValid
+            || (IsEndpoint != other.IsEndpoint ? IsEndpoint : Distance < other.Distance));
 }
 
 [StructLayout(LayoutKind.Auto)]
-internal readonly record struct GizmoRotationInteractionState(
-    GizmoInteractionState Common,
-    RotationHoverState HoverState,
-    bool AxisHovered)
+internal readonly record struct GizmoFrame(
+    GizmoContext Context,
+    GizmoTransformMode Modes,
+    int TranslationAxisCount,
+    int ScaleAxisCount,
+    RotationProjectionContext RotationProjection,
+    GizmoInteractionState Interaction,
+    GizmoHandleHit HoveredHandle,
+    GizmoTransformMode ActiveOperation)
 {
-    public bool CanStartRotationDrag
-        => Common.Phase == GizmoInteractionPhase.HoverAxis && HoverState.IsValid && HoverState.HasPoint;
-}
+    public bool IsCombined => Modes.IsCombined();
 
-[StructLayout(LayoutKind.Auto)]
-internal readonly struct GizmoFrame
-{
-    public GizmoFrame(
-        in GizmoContext context,
-        int axisCount,
-        in GizmoLinearInteractionState linearInteraction)
-    {
-        Context = context;
-        AxisCount = axisCount;
-        LinearInteraction = linearInteraction;
-        RotationProjection = default;
-        RotationInteraction = default;
-        HasRotationFrame = false;
-    }
-
-    public GizmoFrame(
-        in GizmoContext context,
-        in RotationProjectionContext rotationProjection,
-        in GizmoRotationInteractionState rotationInteraction)
-    {
-        Context = context;
-        AxisCount = 0;
-        LinearInteraction = default;
-        RotationProjection = rotationProjection;
-        RotationInteraction = rotationInteraction;
-        HasRotationFrame = true;
-    }
-
-    public GizmoContext Context { get; }
-
-    public int AxisCount { get; }
-
-    public GizmoLinearInteractionState LinearInteraction { get; }
-
-    public RotationProjectionContext RotationProjection { get; }
-
-    public GizmoRotationInteractionState RotationInteraction { get; }
-
-    public bool HasRotationFrame { get; }
+    public bool HasMode(GizmoTransformMode mode) => (Modes & mode) != GizmoTransformMode.None;
 
     public bool BlocksSelection
-        => HasRotationFrame
-            ? RotationInteraction.Common.Phase is GizmoInteractionPhase.HoverAxis or GizmoInteractionPhase.HoverCenter
-            : LinearInteraction.Common.Phase is GizmoInteractionPhase.HoverAxis or GizmoInteractionPhase.HoverCenter;
+        => Interaction.Phase is GizmoInteractionPhase.HoverAxis or GizmoInteractionPhase.HoverCenter;
+
+    public GizmoInteractionState ForOperation(GizmoTransformMode operation)
+    {
+        GizmoInteractionState interaction = Interaction;
+        if ((interaction.DragActive && ActiveOperation != operation)
+         || (interaction.Phase == GizmoInteractionPhase.HoverAxis && HoveredHandle.Operation != operation))
+        {
+            return interaction with { Phase = GizmoInteractionPhase.Idle, ActiveAxis = GizmoAxis.None };
+        }
+
+        return interaction;
+    }
 }
 
 [StructLayout(LayoutKind.Auto)]
@@ -445,14 +413,32 @@ internal readonly struct GizmoTransformSnapPolicy
             : SceneTransformSnapUtility.SnapScale(scale, ScaleStep);
 }
 
+internal enum GizmoWheelAction
+{
+    Universal,
+    Move,
+    Rotate,
+    Scale,
+    LocalSpace,
+    WorldSpace,
+    Bounds,
+    Duplicate,
+    MoveToPlayer,
+    Visibility,
+    ResetTransform,
+    Remove,
+    Hide,
+}
+
 [StructLayout(LayoutKind.Auto)]
 internal readonly record struct GizmoWheelSegment(
+    GizmoWheelAction Action,
     FontAwesomeIcon Icon,
     string Tooltip,
     Vector4 Color,
-    bool IsActive,
-    bool IsEnabled,
-    Action OnClick);
+    bool IsActive = false,
+    bool IsEnabled = true,
+    GizmoTransformMode Mode = GizmoTransformMode.None);
 
 [StructLayout(LayoutKind.Auto)]
 internal readonly record struct GizmoRadialTooltipInfo(

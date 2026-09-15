@@ -8,15 +8,16 @@ using Intoner.Objects.UI.Bounds;
 using Intoner.Objects.UI.Components;
 using Intoner.Objects.UI.Services;
 using Intoner.Scene;
+using Intoner.Services.Input;
 using Intoner.UI;
 using System.Numerics;
-using System.Runtime.InteropServices;
 
 namespace Intoner.Objects.UI;
 
 internal sealed class EditorSceneOverlay
 {
-    private readonly ISceneSelectionService _sceneSelectionService;
+    private readonly EditorSceneSelection _sceneSelection;
+    private readonly IViewportMouseInputService _viewportMouseInput;
     private readonly ISceneInputService _sceneInputService;
     private readonly DrawManager _drawManager;
     private readonly Gizmo _gizmo;
@@ -30,10 +31,10 @@ internal sealed class EditorSceneOverlay
     private IReadOnlyList<SceneItemBoundsSnapshot>? _editorBoundsSource;
     private IReadOnlyDictionary<Guid, SceneItemSnapshot>? _editorBoundsItems;
     private IReadOnlyList<SceneItemBoundsSnapshot> _editorBoundsSnapshots = [];
-    private bool _objectSelectionLeftMouseWasDown;
 
     public EditorSceneOverlay(
         ISceneSelectionService sceneSelectionService,
+        IViewportMouseInputService viewportMouseInput,
         ISceneInputService sceneInputService,
         DrawManager drawManager,
         Gizmo gizmo,
@@ -42,7 +43,8 @@ internal sealed class EditorSceneOverlay
         IObjectSceneView sceneView,
         ISceneItemService sceneItemService)
     {
-        _sceneSelectionService = sceneSelectionService;
+        _sceneSelection        = new EditorSceneSelection(sceneSelectionService, interaction);
+        _viewportMouseInput    = viewportMouseInput;
         _sceneInputService     = sceneInputService;
         _drawManager           = drawManager;
         _gizmo                 = gizmo;
@@ -110,7 +112,7 @@ internal sealed class EditorSceneOverlay
         _boundsAnnotations.Clear();
         _placementBoundsAnnotationProvider.Append(placementEvaluations, _boundsAnnotations);
 
-        if (!_drawManager.HasPendingLayer(DrawLayer.CurrentWindow) && _boundsAnnotations.Count == 0)
+        if (!_drawManager.HasPendingLayer(DrawLayer.CurrentWindow) && _boundsAnnotations.Count == 0 && !_sceneSelection.IsDragging)
         {
             return;
         }
@@ -130,12 +132,13 @@ internal sealed class EditorSceneOverlay
           | ImGuiWindowFlags.NoSavedSettings
           | ImGuiWindowFlags.NoBackground;
 
-        using ImRaiiScope.WindowScope overlay = BeginEditorOverlayWindow("##objectEditorOverlay", overlayFlags);
+        using ImRaiiScope.WindowScope overlay = ImRaiiScope.Window("##objectEditorOverlay", overlayFlags);
         if (!overlay.Success)
         {
             return;
         }
 
+        _sceneSelection.Draw(ImGui.GetWindowDrawList());
         if (!DrawContext.TryCaptureEditor(viewport.Pos, viewport.Size, DrawLayer.CurrentWindow, 1f, out DrawContext context))
         {
             return;
@@ -156,14 +159,12 @@ internal sealed class EditorSceneOverlay
         float thickness,
         bool selected)
     {
+        SceneBoundsInteractionSettings settings = _gizmo.Settings.BoundsInteractionSettings;
+        float opacity = selected ? settings.SelectedBoundsOpacity : settings.InactiveBoundsOpacity;
         foreach (SceneItemBoundsSnapshot boundsSnapshot in boundsSnapshots)
         {
-            if (!_gizmo.Settings.BoundsInteractionSettings.ShouldDraw(boundsSnapshot.Category, _interaction.Selection.Contains(boundsSnapshot.Id)))
-            {
-                continue;
-            }
-
-            if (_interaction.Selection.Contains(boundsSnapshot.Id) != selected)
+            bool isSelected = _interaction.Selection.Contains(boundsSnapshot.Id);
+            if (isSelected != selected || !settings.ShouldDraw(boundsSnapshot.Category, isSelected))
             {
                 continue;
             }
@@ -171,13 +172,10 @@ internal sealed class EditorSceneOverlay
             AddBoundsOverlayBox(
                 batch,
                 boundsSnapshot,
-                ResolveBoundsOverlayColor(boundsSnapshot.Category, selected),
+                EditorColors.BoundsOverlay(boundsSnapshot.Category, opacity),
                 thickness);
         }
     }
-
-    private static ImRaiiScope.WindowScope BeginEditorOverlayWindow(string name, ImGuiWindowFlags flags)
-        => ImRaiiScope.Window(name, flags);
 
     private void AddBoundsOverlayBox(
         DrawBatch batch,
@@ -204,44 +202,6 @@ internal sealed class EditorSceneOverlay
         ShapeBuilder.AddBox(batch, worldCorners, color, thickness);
     }
 
-    private Vector4 ResolveBoundsOverlayColor(SceneBoundsCategory category, bool selected)
-    {
-        Vector4 color = selected
-            ? ResolveSelectedBoundsOverlayColor(category)
-            : ResolveBoundsOverlayColor(category);
-        return ThemeColors.WithAlpha(color, ResolveBoundsOverlayOpacity(selected));
-    }
-
-    private static Vector4 ResolveSelectedBoundsOverlayColor(SceneBoundsCategory category)
-        => category switch
-        {
-            SceneBoundsCategory.BgObject => ThemeColors.AccentOrange,
-            SceneBoundsCategory.Furniture => ThemeColors.AccentBlue,
-            SceneBoundsCategory.Light => ThemeColors.AccentGreen,
-            SceneBoundsCategory.Vfx => ThemeColors.AccentYellow,
-            SceneBoundsCategory.Display => ThemeColors.AccentPrimary,
-            _ => ThemeColors.AccentPrimary,
-        };
-
-    private static Vector4 ResolveBoundsOverlayColor(SceneBoundsCategory category)
-        => category switch
-        {
-            SceneBoundsCategory.BgObject => EditorColors.BoundsOverlay(ObjectKind.BgObject),
-            SceneBoundsCategory.Furniture => EditorColors.BoundsOverlay(ObjectKind.Furniture),
-            SceneBoundsCategory.Light => EditorColors.BoundsOverlay(ObjectKind.Light),
-            SceneBoundsCategory.Vfx => EditorColors.BoundsOverlay(ObjectKind.Vfx),
-            SceneBoundsCategory.Display => ThemeColors.AccentPrimary,
-            _ => ThemeColors.AccentPrimary,
-        };
-
-    private float ResolveBoundsOverlayOpacity(bool selected)
-        => Math.Clamp(
-            selected
-                ? _gizmo.Settings.BoundsInteractionSettings.SelectedBoundsOpacity
-                : _gizmo.Settings.BoundsInteractionSettings.InactiveBoundsOpacity,
-            0f,
-            1f);
-
     private static void AddOverlayShape(DrawBatch batch, ObjectOverlayShapeSnapshot overlayShape, Vector4 color, float thickness)
     {
         switch (overlayShape.Kind)
@@ -258,6 +218,8 @@ internal sealed class EditorSceneOverlay
         }
     }
 
+    public bool IsSelecting => _sceneSelection.IsActive || _viewportMouseInput.IsCapturing;
+
     public EditorSceneFrame PrepareFrame(bool allowSceneInteraction, bool processPointer = true)
     {
         EditorSceneState.EditorSceneData scene = _sceneState.GetEditorSceneData();
@@ -269,14 +231,15 @@ internal sealed class EditorSceneOverlay
         IReadOnlyList<SceneItemSnapshot> activeSelection = _interaction.Selection.ResolveSelectedItems(scene.ActiveItemLookup);
         if (processPointer)
         {
-            ScenePointerButtons pointerButtons = EditorInputUtility.CaptureScenePointerButtons(_sceneInputService.IsActive);
-            bool inputActive = ProcessScenePointerInput(pointerButtons, allowSceneInteraction);
-            if (allowSceneInteraction)
-            {
-                HandleSceneSelectionInput(activeSelection, sceneBounds, pointerButtons, inputActive);
-            }
+            ScenePointerButtons pointerButtons = EditorInputUtility.CaptureScenePointerButtons(includeAuxiliaryButtons: true);
+            bool inputActive = ProcessScenePointerInput(pointerButtons, allowSceneInteraction && !IsSelecting);
+            HandleSceneSelectionInput(activeSelection, sceneBounds, allowSceneInteraction, inputActive);
 
             activeSelection = _interaction.Selection.ResolveSelectedItems(scene.ActiveItemLookup);
+        }
+        else
+        {
+            CancelSceneSelection();
         }
 
         _gizmo.NormalizeMode(activeSelection);
@@ -289,8 +252,15 @@ internal sealed class EditorSceneOverlay
 
     public void Deactivate()
     {
+        CancelSceneSelection();
         _gizmo.CancelInteractions();
         _sceneInputService.Deactivate();
+    }
+
+    private void CancelSceneSelection()
+    {
+        _sceneSelection.Cancel();
+        _viewportMouseInput.Cancel();
     }
 
     private void DrawSceneTools(
@@ -310,59 +280,46 @@ internal sealed class EditorSceneOverlay
         }
     }
 
-    private static GizmoDrawOptions CreateGizmoDrawOptions(EditorScreenArea? obscuredArea)
-        => new(IsSceneInputBlockedByUi(), obscuredArea);
-
-    [StructLayout(LayoutKind.Auto)]
-    internal readonly record struct SceneSelectionClick(Vector2 ViewportPos, Vector2 ViewportSize, Vector2 MousePos, bool ToggleSelection);
+    private GizmoDrawOptions CreateGizmoDrawOptions(EditorScreenArea? obscuredArea)
+        => new(IsSelecting || IsSceneInputBlockedByUi(), obscuredArea);
 
     private void HandleSceneSelectionInput(
         IReadOnlyList<SceneItemSnapshot> activeSelectedItems,
         IReadOnlyList<SceneItemBoundsSnapshot> boundsSnapshots,
-        ScenePointerButtons pointerButtons,
+        bool allowSceneInteraction,
         bool sceneInputActive)
     {
-        if (!_gizmo.Settings.BoundsInteractionSettings.SelectionEnabled
-            || !TryGetSceneSelectionClick(pointerButtons, out var click)
-            || sceneInputActive)
+        ImGuiViewportPtr viewport = ImGui.GetMainViewport();
+        ImGuiIOPtr io = ImGui.GetIO();
+        bool cancel = !allowSceneInteraction || !_gizmo.Settings.BoundsInteractionSettings.SelectionEnabled
+            || sceneInputActive || _sceneInputService.IsActive || !DesktopInputGuard.CanRoutePointerToCurrentProcess()
+            || !ImGui.IsMousePosValid() || ImGui.IsAnyItemActive() || ImGui.IsKeyPressed(ImGuiKey.Escape, false);
+        if (cancel)
         {
+            CancelSceneSelection();
             return;
         }
 
-        if (IsSceneSelectionBlocked(activeSelectedItems, boundsSnapshots, click.MousePos))
+        bool boxSelectionEnabled = _gizmo.Settings.BoundsInteractionSettings.BoxSelectionEnabled;
+        if (!boxSelectionEnabled)
         {
-            return;
+            _sceneSelection.Cancel();
         }
 
-        TryApplySceneSelection(click);
-    }
-
-    private bool TryGetSceneSelectionClick(ScenePointerButtons pointerButtons, out SceneSelectionClick click)
-    {
-        click = default;
-
-        var viewport = ImGui.GetMainViewport();
-        var io = ImGui.GetIO();
-        var mousePos = io.MousePos;
-
-        bool isLeftMouseDown = (pointerButtons & ScenePointerButtons.Left) != ScenePointerButtons.None;
-        var isLeftMouseClicked = isLeftMouseDown && !_objectSelectionLeftMouseWasDown;
-        _objectSelectionLeftMouseWasDown = isLeftMouseDown;
-        if (!isLeftMouseClicked)
+        _viewportMouseInput.Configure(viewport.Pos, viewport.Size, !IsSceneSelectionBlockedByUi(), boxSelectionEnabled);
+        for (int sample = 0; sample < 2 && _viewportMouseInput.TryRead(out ViewportMouseInput input); ++sample)
         {
-            return false;
-        }
+            if (input.Pressed && (IsSceneSelectionBlockedByUi()
+                || _gizmo.IsSelectionBlocked(activeSelectedItems, boundsSnapshots, input.Position)))
+            {
+                CancelSceneSelection();
+                break;
+            }
 
-        if (mousePos.X < viewport.Pos.X
-            || mousePos.X >= viewport.Pos.X + viewport.Size.X
-            || mousePos.Y < viewport.Pos.Y
-            || mousePos.Y >= viewport.Pos.Y + viewport.Size.Y)
-        {
-            return false;
+            _sceneSelection.ProcessPointer(new(
+                new EditorScreenArea(viewport.Pos, viewport.Pos + viewport.Size), input.Position, input.Buttons,
+                input.Pressed, input.Cancelled, input.Control, io.MouseDragThreshold * ImGuiHelpers.GlobalScale, boxSelectionEnabled));
         }
-
-        click = new SceneSelectionClick(viewport.Pos, viewport.Size, mousePos, io.KeyCtrl);
-        return true;
     }
 
     private bool ProcessScenePointerInput(ScenePointerButtons pointerButtons, bool allowNewInput)
@@ -395,42 +352,16 @@ internal sealed class EditorSceneOverlay
         return ownsPointer;
     }
 
-    private bool IsSceneSelectionBlocked(
-        IReadOnlyList<SceneItemSnapshot> activeSelectedItems,
-        IReadOnlyList<SceneItemBoundsSnapshot> boundsSnapshots,
-        Vector2 mousePos)
-        => IsSceneSelectionBlockedByUi()
-            || IsSceneSelectionBlockedByGizmo(activeSelectedItems, boundsSnapshots, mousePos);
-
     private static bool IsSceneSelectionBlockedByUi()
     {
         var io = ImGui.GetIO();
-        return ImGui.IsAnyItemActive() || io.WantCaptureMouse;
+        return IsSceneInputBlockedByUi() || io.WantCaptureMouse;
     }
 
     private static bool IsSceneInputBlockedByUi()
         => ImGui.IsAnyItemActive()
            || ImGui.IsWindowHovered(ImGuiHoveredFlags.AnyWindow);
 
-    private bool IsSceneSelectionBlockedByGizmo(
-        IReadOnlyList<SceneItemSnapshot> activeSelectedItems,
-        IReadOnlyList<SceneItemBoundsSnapshot> boundsSnapshots,
-        Vector2 mousePos)
-        => _gizmo.IsSelectionBlocked(activeSelectedItems, boundsSnapshots, mousePos);
-
-    private void TryApplySceneSelection(SceneSelectionClick click)
-    {
-        if (!_sceneSelectionService.TrySelectActiveItem(click.ViewportPos, click.ViewportSize, click.MousePos, out var selectedSnapshot)
-            || selectedSnapshot.Locked)
-        {
-            return;
-        }
-
-        ApplySceneSelection(selectedSnapshot.Id, click.ToggleSelection);
-    }
-
-    private void ApplySceneSelection(Guid itemId, bool toggleSelection)
-        => _interaction.SelectionChanged(_interaction.Selection.TrySelect(itemId, toggleSelection));
 }
 
 internal readonly record struct EditorSceneFrame(

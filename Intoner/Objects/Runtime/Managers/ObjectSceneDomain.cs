@@ -55,6 +55,22 @@ internal sealed class ObjectSceneDomain : ISceneItemDomain
     public SceneMutationStatus ApplyChanges(IReadOnlyList<SceneItemSnapshotChange> changes)
         => _mutationService.ApplySnapshotChanges(changes);
 
+    public SceneMutationStatus PreviewChange(SceneItemSnapshot before, SceneItemSnapshot after, out SceneItemSnapshot applied)
+    {
+        applied = before;
+        if (before is not ObjectSnapshot previous || after is not ObjectSnapshot next)
+        {
+            return SceneMutationStatus.Rejected;
+        }
+
+        SceneMutationStatus status = _mutationService.PreviewChange(previous, next, out ObjectSnapshot result);
+        applied = result;
+        return status;
+    }
+
+    public void RequestPreviewRecovery()
+        => _sceneState.MarkNeedsRefresh();
+
     public bool TryCreateDuplicates(
         IReadOnlyList<SceneItemSnapshot> snapshots,
         out IReadOnlyList<SceneItemSnapshot> duplicates)

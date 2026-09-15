@@ -34,6 +34,16 @@ internal interface ISceneItemDomain
     /// <summary> applies ordered create, update, and remove transitions and reports failed recovery separately </summary>
     SceneMutationStatus ApplyChanges(IReadOnlyList<SceneItemSnapshotChange> changes);
 
+    /// <summary> applies a reversible manipulation to an unchanged active runtime without persistence or recreation </summary>
+    /// <param name="before"> the expected active snapshot </param>
+    /// <param name="after"> the requested transform or supported surface attachment change </param>
+    /// <param name="applied"> the sanitized snapshot on success </param>
+    /// <returns> applied on success, rejected without changing the prior runtime, or recovery required </returns>
+    SceneMutationStatus PreviewChange(SceneItemSnapshot before, SceneItemSnapshot after, out SceneItemSnapshot applied);
+
+    /// <summary> requests runtime reconciliation from persisted state after an unrecovered or superseded preview </summary>
+    void RequestPreviewRecovery();
+
     /// <summary> prepares duplicates without mutating persisted or active scene state </summary>
     bool TryCreateDuplicates(
         IReadOnlyList<SceneItemSnapshot> snapshots,

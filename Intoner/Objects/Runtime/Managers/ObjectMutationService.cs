@@ -78,6 +78,13 @@ internal interface IObjectSceneMutationService
     /// <returns>The applied, rejected, or recovery required batch status.</returns>
     SceneMutationStatus ApplySnapshotChanges(IReadOnlyList<SceneItemSnapshotChange> changes);
 
+    /// <summary> previews transform and surface attachment changes without persistence or replacement </summary>
+    /// <param name="before"> the expected active snapshot </param>
+    /// <param name="after"> the requested transform or furniture attachment change </param>
+    /// <param name="applied"> the sanitized snapshot on success </param>
+    /// <returns> applied on success, rejected with the prior runtime preserved, or recovery required </returns>
+    SceneMutationStatus PreviewChange(ObjectSnapshot before, ObjectSnapshot after, out ObjectSnapshot applied);
+
     /// <summary> creates one active object entry from the given snapshot </summary>
     bool TryCreateObject(
         ObjectSnapshot snapshot,
@@ -109,15 +116,32 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
         Remove,
     }
 
-    private enum ActiveEntryUpdateStatus
+    private enum ObjectUpdateStatus
     {
         Applied,
+        Deferred,
         RecreateFailed,
         Rejected,
         StorageFailed,
         RecoveryRequired,
         AppliedWithRuntimeFailure,
     }
+
+    private enum ObjectUpdateMode
+    {
+        Persist,
+        PrepareBatch,
+        RuntimeOnly,
+    }
+
+    private static PersistentMutationStatus ToPersistentMutationStatus(ObjectUpdateStatus status)
+        => status switch
+        {
+            ObjectUpdateStatus.Applied or ObjectUpdateStatus.Deferred => PersistentMutationStatus.Success,
+            ObjectUpdateStatus.StorageFailed => PersistentMutationStatus.StorageFailed,
+            ObjectUpdateStatus.RecoveryRequired => PersistentMutationStatus.RecoveryRequired,
+            _ => PersistentMutationStatus.RuntimeApplyFailed,
+        };
 
     private static SceneMutationStatus ToSceneMutationStatus(PersistentMutationStatus status)
         => status switch
@@ -126,6 +150,9 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
             PersistentMutationStatus.RuntimeApplyFailed => SceneMutationStatus.AppliedWithRuntimeFailure,
             _ => SceneMutationStatus.RecoveryRequired,
         };
+
+    private static SceneMutationStatus ToSceneMutationStatus(ObjectUpdateStatus status)
+        => ToSceneMutationStatus(ToPersistentMutationStatus(status));
 
     private static SceneMutationStatus ResolveFailure(
         PersistentMutationStatus status,
@@ -140,6 +167,7 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
         public Guid ObjectId => NextSnapshot.Id;
         public bool HasChange => PreviousSnapshot != NextSnapshot;
         public bool IsPersistedOnly => Entry is null;
+        public bool ChangesWorld => PreviousSnapshot.CreatedIn.WorldId != NextSnapshot.CreatedIn.WorldId;
     }
 
     private interface IObjectMutationBatchStep
@@ -232,29 +260,59 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
 
     private sealed class UpdateBatchStep(IReadOnlyList<PreparedObjectUpdate> updates) : IObjectMutationBatchStep
     {
-        private readonly PreparedObjectUpdate[] _updates = [.. updates];
         private readonly List<PreparedObjectUpdate> _appliedUpdates = new(updates.Count);
+        private bool _persistenceApplied;
 
         public SceneMutationStatus Apply(ObjectMutationService service)
         {
             _appliedUpdates.Clear();
+            _persistenceApplied = false;
+            List<ObjectSnapshot> snapshots = new(updates.Count);
+            List<PreparedObjectUpdate>? deferredUpdates = null;
             SceneMutationStatus result = SceneMutationStatus.Applied;
-            foreach (var update in _updates)
+            foreach (PreparedObjectUpdate update in updates)
             {
-                bool accepted = service.TryApplyPreparedObjectUpdate(
-                    update,
-                    out _,
-                    out PersistentMutationStatus status);
-                if (!accepted)
+                ObjectUpdateStatus status = service.ApplyPreparedObjectUpdate(update, out ObjectSnapshot appliedSnapshot, ObjectUpdateMode.PrepareBatch);
+                if (status == ObjectUpdateStatus.Deferred)
                 {
-                    SceneMutationStatus rollbackStatus = Rollback(service);
-                    return ResolveFailure(status, rollbackStatus);
+                    (deferredUpdates ??= []).Add(update);
+                }
+                else if (status is not (ObjectUpdateStatus.Applied or ObjectUpdateStatus.AppliedWithRuntimeFailure))
+                {
+                    return Fail(service, ToPersistentMutationStatus(status));
                 }
 
                 result = result.MergeApplied(ToSceneMutationStatus(status));
                 if (update.HasChange)
                 {
                     _appliedUpdates.Add(update);
+                    snapshots.Add(appliedSnapshot);
+                }
+            }
+
+            if (snapshots.Count == 0)
+            {
+                return result;
+            }
+
+            PersistentMutationStatus storageStatus = Persist(service, snapshots);
+            if (storageStatus != PersistentMutationStatus.Success)
+            {
+                return Fail(service, storageStatus);
+            }
+
+            _persistenceApplied = true;
+            if (deferredUpdates is not null)
+            {
+                foreach (PreparedObjectUpdate update in deferredUpdates.OrderBy(static update => update.ChangesWorld))
+                {
+                    ObjectUpdateStatus status = service.ApplyPreparedObjectUpdate(update, out _, ObjectUpdateMode.RuntimeOnly);
+                    if (status is not (ObjectUpdateStatus.Applied or ObjectUpdateStatus.AppliedWithRuntimeFailure))
+                    {
+                        return Fail(service, ToPersistentMutationStatus(status));
+                    }
+
+                    result = result.MergeApplied(ToSceneMutationStatus(status));
                 }
             }
 
@@ -269,7 +327,38 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
             }
 
             SceneMutationStatus status = service.RestorePreparedObjectUpdates(_appliedUpdates);
+            if (_persistenceApplied && Persist(service, _appliedUpdates.Select(static update => update.PreviousSnapshot).ToArray())
+                != PersistentMutationStatus.Success)
+            {
+                service._logger.LogError("could not restore persisted objects after batch update failure");
+                service._sceneState.MarkNeedsRefresh();
+                status = SceneMutationStatus.RecoveryRequired;
+            }
+
+            _persistenceApplied = false;
             _appliedUpdates.Clear();
+            return status;
+        }
+
+        private SceneMutationStatus Fail(ObjectMutationService service, PersistentMutationStatus status)
+        {
+            SceneMutationStatus result = ResolveFailure(status, Rollback(service));
+            if (result == SceneMutationStatus.RecoveryRequired)
+            {
+                service._sceneState.MarkNeedsRefresh();
+            }
+
+            return result;
+        }
+
+        private static PersistentMutationStatus Persist(ObjectMutationService service, IReadOnlyList<ObjectSnapshot> snapshots)
+        {
+            PersistentMutationStatus status = service._persistenceState.UpsertPersistedSnapshots(snapshots);
+            if (status == PersistentMutationStatus.Success)
+            {
+                service._revisionTracker.Increment(persistentChanged: true);
+            }
+
             return status;
         }
     }
@@ -547,7 +636,8 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
         ObjectSnapshot snapshot,
         out ObjectSnapshot appliedSnapshot,
         out PersistentMutationStatus failureStatus,
-        bool allowWorldChange = false)
+        bool allowWorldChange = false,
+        ObjectUpdateMode mode = ObjectUpdateMode.Persist)
     {
         appliedSnapshot = default!;
         if (!TryPrepareObjectUpdate(snapshot, out var preparedUpdate, allowWorldChange))
@@ -556,7 +646,9 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
             return false;
         }
 
-        return TryApplyPreparedObjectUpdate(preparedUpdate, out appliedSnapshot, out failureStatus);
+        ObjectUpdateStatus status = ApplyPreparedObjectUpdate(preparedUpdate, out appliedSnapshot, mode);
+        failureStatus = ToPersistentMutationStatus(status);
+        return status is ObjectUpdateStatus.Applied or ObjectUpdateStatus.AppliedWithRuntimeFailure;
     }
 
     public bool TryCreateDuplicates(
@@ -588,6 +680,70 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
             return !TryBuildSnapshotChangeBatch(changes, out var batch)
                 ? SceneMutationStatus.Rejected
                 : batch.Execute(this);
+        }
+    }
+
+    public SceneMutationStatus PreviewChange(ObjectSnapshot before, ObjectSnapshot after, out ObjectSnapshot applied)
+    {
+        lock (_stateLock)
+        {
+            applied = before;
+            ObjectData model = after.Model;
+            if (model is FurnitureModel furniture && before.Model is FurnitureModel previousFurniture)
+            {
+                model = furniture with { AttachmentParentId = previousFurniture.AttachmentParentId };
+            }
+
+            if (after with { Transform = before.Transform, Model = model } != before
+                || !_sceneState.TryGetEntry(before.Id, out ObjectSceneEntry entry)
+                || entry.Source.IsRuntimeOnly)
+            {
+                return SceneMutationStatus.Rejected;
+            }
+
+            if (entry.Snapshot == after)
+            {
+                applied = after;
+                return SceneMutationStatus.Applied;
+            }
+
+            if (entry.Snapshot != before
+                || !TrySanitizeUpdatedSnapshot(after, before, out ObjectSnapshot sanitized, allowWorldChange: false)
+                || !_housingModePolicy.TryValidateSnapshot(sanitized, out _))
+            {
+                return SceneMutationStatus.Rejected;
+            }
+
+            try
+            {
+                if (entry.Runtime.TryUpdate(sanitized) == ObjectRuntimeUpdateResult.Applied)
+                {
+                    applied = entry.Snapshot;
+                    _revisionTracker.Increment();
+                    return SceneMutationStatus.Applied;
+                }
+            }
+            catch (Exception exception)
+            {
+                _logger.LogError(exception, "object edit preview failed for {ObjectId}", before.Id);
+            }
+
+            try
+            {
+                if (entry.Runtime.TryUpdate(before) == ObjectRuntimeUpdateResult.Applied)
+                {
+                    _revisionTracker.Increment();
+                    return SceneMutationStatus.Rejected;
+                }
+            }
+            catch (Exception exception)
+            {
+                _logger.LogError(exception, "object edit preview restoration failed for {ObjectId}", before.Id);
+            }
+
+            _sceneState.MarkNeedsRefresh();
+            _revisionTracker.Increment();
+            return SceneMutationStatus.RecoveryRequired;
         }
     }
 
@@ -778,7 +934,7 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
 
             return TryReplaceEntryRuntime(entry, entry.Snapshot, sanitizedSnapshot,
                 persistSnapshot: false, sourceOverride: source, updateCollectionUsage: true, out _)
-                == ActiveEntryUpdateStatus.Applied;
+                == ObjectUpdateStatus.Applied;
         }
     }
 
@@ -885,66 +1041,59 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
         return true;
     }
 
-    private bool TryApplyPreparedObjectUpdate(
+    private ObjectUpdateStatus ApplyPreparedObjectUpdate(
         PreparedObjectUpdate preparedUpdate,
         out ObjectSnapshot appliedSnapshot,
-        out PersistentMutationStatus failureStatus)
+        ObjectUpdateMode mode)
     {
-        if (preparedUpdate.PreviousSnapshot.CreatedIn.WorldId != preparedUpdate.NextSnapshot.CreatedIn.WorldId)
-        {
-            return TryApplyObjectWorldUpdate(preparedUpdate, out appliedSnapshot, out failureStatus);
-        }
-
-        if (preparedUpdate.IsPersistedOnly)
-        {
-            if (!preparedUpdate.HasChange)
-            {
-                appliedSnapshot = preparedUpdate.PreviousSnapshot;
-                failureStatus = PersistentMutationStatus.Success;
-                return true;
-            }
-
-            if (!_persistenceState.TryUpsertPersistedSnapshot(preparedUpdate.NextSnapshot))
-            {
-                appliedSnapshot = default!;
-                failureStatus = PersistentMutationStatus.StorageFailed;
-                return false;
-            }
-
-            _revisionTracker.Increment(persistentChanged: true);
-            appliedSnapshot = preparedUpdate.NextSnapshot;
-            failureStatus = PersistentMutationStatus.Success;
-            return true;
-        }
-
+        appliedSnapshot = preparedUpdate.NextSnapshot;
         if (!preparedUpdate.HasChange)
         {
-            appliedSnapshot = preparedUpdate.NextSnapshot;
-            failureStatus = PersistentMutationStatus.Success;
-            return true;
+            return ObjectUpdateStatus.Applied;
         }
 
-        ActiveEntryUpdateStatus status = ApplyActiveEntryUpdate(
+        if (preparedUpdate.ChangesWorld && mode == ObjectUpdateMode.PrepareBatch)
+        {
+            return ObjectUpdateStatus.Deferred;
+        }
+
+        if (preparedUpdate.IsPersistedOnly || preparedUpdate.ChangesWorld)
+        {
+            if (mode == ObjectUpdateMode.Persist)
+            {
+                if (!_persistenceState.TryReplacePersistedSnapshot(preparedUpdate.PreviousSnapshot, preparedUpdate.NextSnapshot))
+                {
+                    appliedSnapshot = default!;
+                    return ObjectUpdateStatus.StorageFailed;
+                }
+
+                _revisionTracker.Increment(persistentChanged: true);
+            }
+
+            if (preparedUpdate.ChangesWorld)
+            {
+                bool removed = preparedUpdate.Entry is null || TryRemoveActiveEntry(preparedUpdate.Entry, releaseCollectionUsage: true);
+                _sceneState.ClearRuntimeFailure(preparedUpdate.ObjectId);
+                _sceneState.MarkNeedsRefresh();
+                return removed ? ObjectUpdateStatus.Applied : ObjectUpdateStatus.AppliedWithRuntimeFailure;
+            }
+
+            return ObjectUpdateStatus.Applied;
+        }
+
+        ObjectUpdateStatus status = ApplyActiveEntryUpdate(
             preparedUpdate.Entry!,
             preparedUpdate.PreviousSnapshot,
             preparedUpdate.NextSnapshot,
-            persistSnapshot: true,
+            mode,
             sourceOverride: null,
             out appliedSnapshot);
-        failureStatus = status switch
-        {
-            ActiveEntryUpdateStatus.Applied => PersistentMutationStatus.Success,
-            ActiveEntryUpdateStatus.AppliedWithRuntimeFailure => PersistentMutationStatus.RuntimeApplyFailed,
-            ActiveEntryUpdateStatus.StorageFailed => PersistentMutationStatus.StorageFailed,
-            ActiveEntryUpdateStatus.RecoveryRequired => PersistentMutationStatus.RecoveryRequired,
-            _ => PersistentMutationStatus.RuntimeApplyFailed,
-        };
-        if (status == ActiveEntryUpdateStatus.RecoveryRequired)
+        if (status == ObjectUpdateStatus.RecoveryRequired)
         {
             _revisionTracker.Increment();
         }
 
-        return status is ActiveEntryUpdateStatus.Applied or ActiveEntryUpdateStatus.AppliedWithRuntimeFailure;
+        return status;
     }
 
     private IReadOnlyList<ObjectSnapshot> GetHousingPolicySceneSnapshots()
@@ -989,27 +1138,6 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
         return true;
     }
 
-    private bool TryApplyObjectWorldUpdate(
-        PreparedObjectUpdate update,
-        out ObjectSnapshot appliedSnapshot,
-        out PersistentMutationStatus failureStatus)
-    {
-        appliedSnapshot = default!;
-        if (!_persistenceState.TryReplacePersistedSnapshot(update.PreviousSnapshot, update.NextSnapshot))
-        {
-            failureStatus = PersistentMutationStatus.StorageFailed;
-            return false;
-        }
-
-        _revisionTracker.Increment(persistentChanged: true);
-        bool runtimeApplied = update.Entry is null || TryRemoveActiveEntry(update.Entry, releaseCollectionUsage: true);
-        _sceneState.ClearRuntimeFailure(update.NextSnapshot.Id);
-        _sceneState.MarkNeedsRefresh();
-        appliedSnapshot = update.NextSnapshot;
-        failureStatus = runtimeApplied ? PersistentMutationStatus.Success : PersistentMutationStatus.RuntimeApplyFailed;
-        return true;
-    }
-
     private bool TrySanitizeUpdatedSnapshot(ObjectSnapshot snapshot, ObjectSnapshot currentSnapshot, out ObjectSnapshot sanitizedSnapshot, bool allowWorldChange)
     {
         SceneCreationContext location = currentSnapshot.CreatedIn;
@@ -1037,14 +1165,15 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
             out sanitizedSnapshot);
     }
 
-    private ActiveEntryUpdateStatus ApplyActiveEntryUpdate(
+    private ObjectUpdateStatus ApplyActiveEntryUpdate(
         ObjectSceneEntry entry,
         ObjectSnapshot previousSnapshot,
         ObjectSnapshot nextSnapshot,
-        bool persistSnapshot,
+        ObjectUpdateMode mode,
         ObjectSceneSource? sourceOverride,
         out ObjectSnapshot appliedSnapshot)
     {
+        bool persistSnapshot = mode == ObjectUpdateMode.Persist;
         ObjectCollectionMaterializationState collectionState = _objectCollectionManager.EnsureCollectionMaterialized(nextSnapshot.CollectionId, [nextSnapshot]);
         if (ShouldStorePendingCollectionAssignment(collectionState, previousSnapshot, nextSnapshot))
         {
@@ -1069,6 +1198,12 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
                     out appliedSnapshot);
 
             case ObjectRuntimeUpdateResult.RequiresRecreate:
+                if (mode == ObjectUpdateMode.PrepareBatch)
+                {
+                    appliedSnapshot = nextSnapshot;
+                    return ObjectUpdateStatus.Deferred;
+                }
+
                 return TryReplaceEntryRuntime(
                     entry,
                     previousSnapshot,
@@ -1080,7 +1215,7 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
 
             default:
                 appliedSnapshot = default!;
-                return ActiveEntryUpdateStatus.Rejected;
+                return ObjectUpdateStatus.Rejected;
         }
     }
 
@@ -1095,7 +1230,7 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
                 ObjectSnapshotUtility.GetRootResourcePath(nextSnapshot),
                 out _);
 
-    private ActiveEntryUpdateStatus ApplyPendingCollectionAssignment(
+    private ObjectUpdateStatus ApplyPendingCollectionAssignment(
         ObjectSceneEntry entry,
         ObjectSnapshot previousSnapshot,
         ObjectSnapshot nextSnapshot,
@@ -1106,7 +1241,7 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
         if (entry.Runtime.TryUpdateCollectionAssignment(nextSnapshot) != ObjectRuntimeUpdateResult.Applied)
         {
             appliedSnapshot = default!;
-            return ActiveEntryUpdateStatus.Rejected;
+            return ObjectUpdateStatus.Rejected;
         }
 
         UpsertActiveEntryMetadata(
@@ -1121,7 +1256,7 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
             out appliedSnapshot);
     }
 
-    private ActiveEntryUpdateStatus CompleteActiveEntryUpdate(
+    private ObjectUpdateStatus CompleteActiveEntryUpdate(
         ObjectSceneEntry entry,
         ObjectSnapshot previousSnapshot,
         bool persistSnapshot,
@@ -1133,8 +1268,8 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
             {
                 appliedSnapshot = default!;
                 return TryRestoreEntryRuntime(entry, previousSnapshot)
-                    ? ActiveEntryUpdateStatus.StorageFailed
-                    : ActiveEntryUpdateStatus.RecoveryRequired;
+                    ? ObjectUpdateStatus.StorageFailed
+                    : ObjectUpdateStatus.RecoveryRequired;
             }
 
             _revisionTracker.Increment(persistentChanged: true);
@@ -1143,11 +1278,11 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
         bool runtimeApplied = TryRefreshCollectionUsage(previousSnapshot, entry.Snapshot);
         appliedSnapshot = entry.Snapshot;
         return runtimeApplied
-            ? ActiveEntryUpdateStatus.Applied
-            : ActiveEntryUpdateStatus.AppliedWithRuntimeFailure;
+            ? ObjectUpdateStatus.Applied
+            : ObjectUpdateStatus.AppliedWithRuntimeFailure;
     }
 
-    private ActiveEntryUpdateStatus TryReplaceEntryRuntime(
+    private ObjectUpdateStatus TryReplaceEntryRuntime(
         ObjectSceneEntry entry,
         ObjectSnapshot previousSnapshot,
         ObjectSnapshot nextSnapshot,
@@ -1166,7 +1301,7 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
             _logger.LogWarning("object runtime replacement rejected; object={ObjectId}; retainedAddress=0x{Address:X}; failure={FailureCode}",
                 nextSnapshot.Id, (ulong)previousAddress, ObjectRuntimeFailureCodes.ServiceMissing);
             _sceneState.SetRuntimeFailure(nextSnapshot.Id, ObjectRuntimeFailureCodes.ServiceMissing);
-            return ActiveEntryUpdateStatus.RecreateFailed;
+            return ObjectUpdateStatus.RecreateFailed;
         }
 
         _objectCollectionManager.EnsureCollectionMaterialized(nextSnapshot.CollectionId, [nextSnapshot]);
@@ -1176,7 +1311,7 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
             _logger.LogDebug("object runtime replacement rejected; object={ObjectId}; retainedAddress=0x{Address:X}; failure={FailureCode}",
                 nextSnapshot.Id, (ulong)previousAddress, failureCode);
             _sceneState.SetRuntimeFailure(nextSnapshot.Id, failureCode);
-            return ActiveEntryUpdateStatus.RecreateFailed;
+            return ObjectUpdateStatus.RecreateFailed;
         }
 
         nint replacementAddress = replacement.Address;
@@ -1188,8 +1323,8 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
             _logger.LogWarning("object runtime replacement rolled back; reason=storage failed; object={ObjectId}; retainedAddress=0x{OldAddress:X}; rejectedAddress=0x{NewAddress:X}; cleanupSucceeded={CleanupSucceeded}",
                 nextSnapshot.Id, (ulong)previousAddress, (ulong)replacementAddress, disposed);
             return disposed
-                ? ActiveEntryUpdateStatus.StorageFailed
-                : ActiveEntryUpdateStatus.RecoveryRequired;
+                ? ObjectUpdateStatus.StorageFailed
+                : ObjectUpdateStatus.RecoveryRequired;
         }
 
         if (persistSnapshot)
@@ -1215,8 +1350,8 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
             "object runtime replacement completed; object={ObjectId}; oldAddress=0x{OldAddress:X}; newAddress=0x{NewAddress:X}; cleanupAndUsageSucceeded={Succeeded}",
             nextSnapshot.Id, (ulong)previousAddress, (ulong)replacementAddress, runtimeApplied);
         return runtimeApplied
-            ? ActiveEntryUpdateStatus.Applied
-            : ActiveEntryUpdateStatus.AppliedWithRuntimeFailure;
+            ? ObjectUpdateStatus.Applied
+            : ObjectUpdateStatus.AppliedWithRuntimeFailure;
     }
 
     private bool TryRestoreEntryRuntime(ObjectSceneEntry entry, ObjectSnapshot previousSnapshot)
@@ -1236,7 +1371,7 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
                         sourceOverride: entry.Source,
                         updateCollectionUsage: false,
                         out _)
-                    == ActiveEntryUpdateStatus.Applied;
+                    == ObjectUpdateStatus.Applied;
             default:
                 _sceneState.MarkNeedsRefresh();
                 return false;
@@ -1276,7 +1411,8 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
                 appliedUpdates[i].PreviousSnapshot,
                 out _,
                 out PersistentMutationStatus status,
-                allowWorldChange: true);
+                allowWorldChange: true,
+                mode: ObjectUpdateMode.RuntimeOnly);
             if (accepted)
             {
                 result = result.MergeApplied(ToSceneMutationStatus(status));

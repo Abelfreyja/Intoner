@@ -1,4 +1,3 @@
-using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility;
 using Intoner.Objects.Models;
 using Intoner.Objects.Utils;
@@ -10,146 +9,168 @@ namespace Intoner.Objects.UI;
 
 internal sealed partial class Gizmo
 {
+    private GizmoFrame BuildGizmoFrame(in GizmoContext context, Vector2 mousePos, float scale, bool pointerAvailable)
+    {
+        GizmoTransformMode modes = Settings.GetAvailableModes(context.ScaleSupported);
+        bool combined = modes.IsCombined();
+        int translationAxisCount = (modes & GizmoTransformMode.Translation) != GizmoTransformMode.None
+            ? BuildLinearGizmoAxisVisualStates(context, context.UseWorldSpace, State.TranslationAxes)
+            : 0;
+        int scaleAxisCount = 0;
+        if ((modes & GizmoTransformMode.Scale) != GizmoTransformMode.None)
+        {
+            if (translationAxisCount > 0 && !context.UseWorldSpace)
+            {
+                scaleAxisCount = translationAxisCount;
+                State.TranslationAxes.AsSpan(0, translationAxisCount).CopyTo(State.ScaleAxes);
+            }
+            else
+            {
+                scaleAxisCount = BuildLinearGizmoAxisVisualStates(context, false, State.ScaleAxes);
+            }
+
+            if (combined)
+            {
+                for (int index = 0; index < scaleAxisCount; ++index)
+                {
+                    GizmoAxisVisualState axis = State.ScaleAxes[index];
+                    float length = axis.ScreenLength * GizmoConstants.CombinedScaleReach;
+                    State.ScaleAxes[index] = axis with
+                    {
+                        ScreenLength = length,
+                        ScreenEnd = axis.ScreenStart + axis.ScreenDirection * length,
+                    };
+                }
+            }
+        }
+        RotationProjectionContext projection = default;
+        if ((modes & GizmoTransformMode.Rotation) != GizmoTransformMode.None)
+        {
+            float radius = ResolveWorldScaledScreenSize(GizmoConstants.RotationRingBaseRadius, context.AxisWorldLength, scale);
+            if (combined)
+            {
+                radius *= GizmoConstants.CombinedRotationRadius;
+            }
+
+            projection = RotationDragState.IsDragging && RotationDragState.RotationProjection.HasValue
+                ? RotationDragState.RotationProjection.Value
+                : CreateRotationProjectionContext(context, radius);
+        }
+
+        return ResolveGizmoInteraction(context, modes, translationAxisCount, scaleAxisCount, projection, mousePos, scale, pointerAvailable);
+    }
+
     private static float ResolveCenterInteractionRadius(float scale)
         => GizmoConstants.CenterInteractionRadius * scale;
 
-    private int BuildLinearGizmoAxisVisualStates(in GizmoContext context, bool useWorldSpace)
+    private int BuildLinearGizmoAxisVisualStates(in GizmoContext context, bool useWorldSpace, Span<GizmoAxisVisualState> axes)
     {
-        var axisCount = 0;
-        for (var index = 0; index < GizmoAxisUtility.AxisCount; ++index)
+        int count = 0;
+        for (int index = 0; index < GizmoAxisUtility.AxisCount; ++index)
         {
-            var axis = GizmoAxisUtility.FromIndex(index);
-            if (!TryBuildGizmoAxisVisual(context, axis, useWorldSpace, out var state))
+            if (!TryBuildGizmoAxisVisual(context, GizmoAxisUtility.FromIndex(index), useWorldSpace, out GizmoAxisVisualState axis))
             {
                 continue;
             }
 
-            AxisVisualStates[axisCount++] = state;
+            axes[count++] = axis;
         }
 
-        return axisCount;
+        return count;
     }
 
-    private GizmoLinearInteractionState ResolveLinearInteractionState(
+    private GizmoFrame ResolveGizmoInteraction(
         in GizmoContext context,
-        GizmoTransformMode mode,
-        int axisCount,
-        Vector2 mousePos,
-        float scale,
-        bool pointerAvailable)
-    {
-        TryGetGizmoInteractionBounds(axisCount, context.ScreenPos, scale, out var boundsMin, out var boundsMax);
-        var availability = new GizmoInteractionAvailability(
-            pointerAvailable && IsMouseWithinRect(boundsMin, boundsMax),
-            IsGizmoDragActive(context.PrimarySnapshot.Id, mode),
-            IsGizmoSurfaceDragActive(context.PrimarySnapshot.Id),
-            IsGizmoWheelOpen());
-
-        var hoveredAxis = GizmoAxis.None;
-        var hoveredState = GizmoAxisVisualState.None;
-        if (availability.CanResolveHover)
-        {
-            hoveredAxis = TryFindHoveredLinearAxis(axisCount, mousePos, scale, mode, out hoveredState)
-                ? hoveredState.Axis
-                : GizmoAxis.None;
-        }
-
-        var centerHovered = context.SurfaceDragSupported
-                            && availability.CanResolveHover
-                            && IsMouseWithinCircle(context.ScreenPos, ResolveCenterInteractionRadius(scale));
-        if (centerHovered)
-        {
-            hoveredAxis = GizmoAxis.None;
-            hoveredState = GizmoAxisVisualState.None;
-        }
-
-        var phase = availability.ResolvePhase(centerHovered, hoveredAxis != GizmoAxis.None);
-        var common = new GizmoInteractionState(
-            phase,
-            availability.PointerInRegion,
-            centerHovered,
-            ResolveCurrentLinearActiveAxis(mode));
-
-        return new GizmoLinearInteractionState(
-            common,
-            hoveredAxis,
-            hoveredState,
-            hoveredAxis != GizmoAxis.None);
-    }
-
-    private GizmoRotationInteractionState ResolveRotationInteractionState(
-        in GizmoContext context,
+        GizmoTransformMode modes,
+        int translationAxisCount,
+        int scaleAxisCount,
         in RotationProjectionContext projection,
         Vector2 mousePos,
         float scale,
         bool pointerAvailable)
     {
-        var padding = new Vector2(ResolveRotationInteractionRadius(projection, scale));
-        var availability = new GizmoInteractionAvailability(
-            pointerAvailable && IsMouseWithinRect(context.ScreenPos - padding, context.ScreenPos + padding),
-            IsGizmoDragActive(context.PrimarySnapshot.Id, GizmoTransformMode.Rotation),
-            IsGizmoSurfaceDragActive(context.PrimarySnapshot.Id),
-            IsGizmoWheelOpen());
-
-        var hoverState = RotationHoverState.None(float.MaxValue);
-        if (availability.CanResolveHover)
+        ReadOnlySpan<GizmoAxisVisualState> translationAxes = State.TranslationAxes.AsSpan(0, translationAxisCount);
+        ReadOnlySpan<GizmoAxisVisualState> scaleAxes = State.ScaleAxes.AsSpan(0, scaleAxisCount);
+        GetGizmoInteractionBounds(translationAxes, context.ScreenPos, scale, out Vector2 min, out Vector2 max);
+        GetGizmoInteractionBounds(scaleAxes, context.ScreenPos, scale, out Vector2 scaleMin, out Vector2 scaleMax);
+        min = Vector2.Min(min, scaleMin);
+        max = Vector2.Max(max, scaleMax);
+        if ((modes & GizmoTransformMode.Rotation) != GizmoTransformMode.None)
         {
-            hoverState = FindRotationHoverState(projection, mousePos, scale);
+            Vector2 padding = new(ResolveRotationInteractionRadius(projection, scale));
+            min = Vector2.Min(min, context.ScreenPos - padding);
+            max = Vector2.Max(max, context.ScreenPos + padding);
         }
 
-        var centerHovered = context.SurfaceDragSupported
-                            && availability.CanResolveHover
-                            && IsMouseWithinCircle(context.ScreenPos, ResolveCenterInteractionRadius(scale));
-        if (centerHovered)
+        bool pointerInRegion = pointerAvailable && mousePos.X >= min.X && mousePos.Y >= min.Y
+            && mousePos.X <= max.X && mousePos.Y <= max.Y;
+        bool dragging = TryGetActiveTransformDragState(out GizmoTransformDragSession? drag);
+        GizmoInteractionAvailability availability = new(pointerInRegion, dragging,
+            IsGizmoSurfaceDragActive(context.PrimarySnapshot.Id), IsGizmoWheelOpen());
+        float centerRadius = ResolveCenterInteractionRadius(scale);
+        bool centerHovered = availability.CanResolveHover && context.SurfaceDragSupported
+            && Vector2.DistanceSquared(mousePos, context.ScreenPos) <= centerRadius * centerRadius;
+        GizmoHandleHit hit = default;
+        if (availability.CanResolveHover && !centerHovered)
         {
-            hoverState = RotationHoverState.None(float.MaxValue);
+            FindLinearHandle(translationAxes, GizmoTransformMode.Translation, modes, context.UseWorldSpace, mousePos, scale, ref hit);
+            if (!hit.IsValid)
+            {
+                FindLinearHandle(scaleAxes, GizmoTransformMode.Scale, modes, context.UseWorldSpace, mousePos, scale, ref hit);
+            }
+            if ((modes & GizmoTransformMode.Rotation) != GizmoTransformMode.None)
+            {
+                RotationHoverState rotation = FindRotationHoverState(projection, mousePos, scale);
+                GizmoHandleHit candidate = new(GizmoTransformMode.Rotation, default, rotation, rotation.Distance, false);
+                if (rotation.IsValid && candidate.IsCloserThan(hit))
+                {
+                    hit = candidate;
+                }
+            }
         }
 
-        var phase = availability.ResolvePhase(centerHovered, hoverState.Axis != GizmoAxis.None);
-        var common = new GizmoInteractionState(
-            phase,
-            availability.PointerInRegion,
-            centerHovered,
-            RotationDragState.ActiveAxis);
-
-        return new GizmoRotationInteractionState(
-            common,
-            hoverState,
-            hoverState.Axis != GizmoAxis.None);
+        GizmoInteractionState interaction = new(availability.ResolvePhase(centerHovered, hit.IsValid),
+            pointerInRegion, centerHovered, drag?.ActiveAxis ?? GizmoAxis.None);
+        return new(context, modes, translationAxisCount, scaleAxisCount, projection, interaction, hit,
+            drag?.Mode ?? GizmoTransformMode.None);
     }
 
-    private GizmoAxis ResolveCurrentLinearActiveAxis(GizmoTransformMode mode)
-        => mode switch
-        {
-            GizmoTransformMode.Translation => TranslationDragState.ActiveAxis,
-            GizmoTransformMode.Scale => ScaleDragState.ActiveAxis,
-            _ => GizmoAxis.None,
-        };
-
-    private bool TryFindHoveredLinearAxis(
-        int axisCount,
+    private static void FindLinearHandle(
+        ReadOnlySpan<GizmoAxisVisualState> axes,
+        GizmoTransformMode operation,
+        GizmoTransformMode modes,
+        bool useWorldSpace,
         Vector2 mousePos,
         float scale,
-        GizmoTransformMode mode,
-        out GizmoAxisVisualState hoveredState)
+        ref GizmoHandleHit hit)
     {
-        hoveredState = GizmoAxisVisualState.None;
-        var bestDistance = float.MaxValue;
-        for (var index = 0; index < axisCount; ++index)
+        foreach (GizmoAxisVisualState axis in axes)
         {
-            var state = AxisVisualStates[index];
-            if (!TryGetLinearGizmoAxisHoverDistance(state, mousePos, scale, mode, out var distance)
-                || distance >= bestDistance)
+            bool endpoint = operation == GizmoTransformMode.Scale
+                ? TryGetScaleHandleHitDistance(mousePos, axis.ScreenEnd, axis.VisualScale, out float distance)
+                : TryGetTranslationArrowHitDistance(mousePos, axis, axis.VisualScale, out distance);
+            Vector2 start = operation == GizmoTransformMode.Scale && modes.IsCombined()
+                ? axis.ScreenStart + axis.ScreenDirection * GetCombinedScaleStemStart(axis, modes, useWorldSpace, scale)
+                : GetLinearGizmoInteractionStart(axis, scale);
+            if (!endpoint && !TryGetSegmentHitDistance(mousePos, start,
+                    GetLinearGizmoInteractionEnd(axis, operation, axis.VisualScale),
+                    ResolveLinearGizmoAxisLineHitRadius(operation, axis.VisualScale), out distance))
             {
                 continue;
             }
 
-            hoveredState = state;
-            bestDistance = distance;
+            GizmoHandleHit candidate = new(operation, axis, default, distance, endpoint);
+            if (candidate.IsCloserThan(hit))
+            {
+                hit = candidate;
+            }
         }
-
-        return hoveredState.Axis != GizmoAxis.None;
     }
+
+    private static float GetCombinedScaleStemStart(GizmoAxisVisualState axis, GizmoTransformMode modes, bool useWorldSpace, float scale)
+        => (modes & GizmoTransformMode.Translation) != GizmoTransformMode.None && !useWorldSpace
+            ? axis.ScreenLength / GizmoConstants.CombinedScaleReach + 5f * axis.VisualScale
+            : ResolveCenterInteractionRadius(scale) + 5f * axis.VisualScale;
 
     private static RotationHoverState FindRotationHoverState(
         in RotationProjectionContext projection,
@@ -199,16 +220,40 @@ internal sealed partial class Gizmo
             return false;
         }
 
+        ref GizmoAxisProjectionState cached = ref (useWorldSpace
+            ? ref State.WorldAxisProjections[GizmoAxisUtility.ToIndex(axis)]
+            : ref State.LocalAxisProjections[GizmoAxisUtility.ToIndex(axis)]);
+        bool positiveVisible = SceneViewportProjection.TryProjectWorldPointToViewport(context.ViewProjection,
+            context.PivotPosition + worldDirection * targetLength, context.ViewportPos, context.ViewportSize, out Vector2 positiveEnd);
+        bool negativeVisible = SceneViewportProjection.TryProjectWorldPointToViewport(context.ViewProjection,
+            context.PivotPosition - worldDirection * targetLength, context.ViewportPos, context.ViewportSize, out Vector2 negativeEnd);
+        int directionSign = cached.DirectionSign == 0 ? 1 : cached.DirectionSign;
+        if (cached.DirectionSign == 0 || !HasActiveTransformDrag && !SurfaceDragState.IsDragging)
+        {
+            float lengthDifference = Vector2.DistanceSquared(positiveEnd, context.ScreenPos)
+                - Vector2.DistanceSquared(negativeEnd, context.ScreenPos);
+            if (positiveVisible != negativeVisible)
+            {
+                directionSign = positiveVisible ? 1 : -1;
+            }
+            else if (positiveVisible && !NumericsUtility.IsNearlyZero(lengthDifference))
+            {
+                directionSign = lengthDifference > 0f ? 1 : -1;
+            }
+        }
+
+        worldDirection *= directionSign;
+        Vector2? previousScreenDirection = cached.ScreenDirection;
+        if (cached.DirectionSign != 0 && cached.DirectionSign != directionSign)
+        {
+            previousScreenDirection = -previousScreenDirection;
+        }
+
         Vector2? projectedScreenDirection = null;
         var projectedScreenLength = 0f;
-        var axisWorldEnd = context.PivotPosition + (worldDirection * targetLength);
-        if (SceneViewportProjection.TryProjectWorldPointToViewport(
-                context.ViewProjection,
-                axisWorldEnd,
-                context.ViewportPos,
-                context.ViewportSize,
-                out var projectedScreenEnd))
+        if (directionSign > 0 ? positiveVisible : negativeVisible)
         {
+            Vector2 projectedScreenEnd = directionSign > 0 ? positiveEnd : negativeEnd;
             var projectedScreenVector = projectedScreenEnd - context.ScreenPos;
             projectedScreenLength = projectedScreenVector.Length();
             if (NumericsUtility.HasLength(projectedScreenLength))
@@ -217,9 +262,6 @@ internal sealed partial class Gizmo
             }
         }
 
-        var previousScreenDirection = TryGetCachedAxisScreenDirection(axis, out var storedScreenDirection)
-            ? storedScreenDirection
-            : (Vector2?)null;
         var fallbackScreenDirection = ResolveAxisFallbackScreenDirection(context, axis, projectedScreenDirection, previousScreenDirection);
         if (!NumericsUtility.HasLength(fallbackScreenDirection))
         {
@@ -272,7 +314,7 @@ internal sealed partial class Gizmo
             drawScreenDirection,
             drawScreenLength,
             visualScale);
-        CacheAxisScreenDirection(axis, drawScreenDirection);
+        cached = new(directionSign, drawScreenDirection);
         return true;
     }
 
@@ -285,69 +327,6 @@ internal sealed partial class Gizmo
 
         var ratio = drawScreenLength / MathF.Max(projectedScreenLength, 1f * scale);
         return scale * Math.Clamp(ratio, 1f, GizmoConstants.AxisMaxCompensatedHandleScale);
-    }
-
-    private static bool TryGetLinearGizmoAxisHoverDistance(
-        in GizmoAxisVisualState state,
-        Vector2 mousePos,
-        float scale,
-        GizmoTransformMode mode,
-        out float distance)
-    {
-        distance = float.MaxValue;
-        var interactionStart = GetLinearGizmoInteractionStart(state, scale);
-        var interactionEnd = GetLinearGizmoInteractionEnd(state, mode, state.VisualScale);
-        var lineHitRadius = ResolveLinearGizmoAxisLineHitRadius(mode, state.VisualScale);
-
-        if (TryGetSegmentHitDistance(mousePos, interactionStart, interactionEnd, lineHitRadius, out var lineDistance))
-        {
-            distance = lineDistance;
-        }
-
-        if (mode == GizmoTransformMode.Scale)
-        {
-            if (TryGetScaleHandleHitDistance(mousePos, state.ScreenEnd, state.VisualScale, out var handleDistance))
-            {
-                distance = MathF.Min(distance, handleDistance);
-            }
-        }
-        else if (TryGetTranslationArrowHitDistance(mousePos, state, state.VisualScale, out var arrowDistance))
-        {
-            distance = MathF.Min(distance, arrowDistance);
-        }
-
-        return distance < float.MaxValue;
-    }
-
-    private bool TryGetCachedAxisScreenDirection(GizmoAxis axis, out Vector2 screenDirection)
-    {
-        var index = GizmoAxisUtility.ToIndex(axis);
-        if (index < 0)
-        {
-            screenDirection = default;
-            return false;
-        }
-
-        var cachedScreenDirection = State.PreviousAxisScreenDirections[index];
-        if (!cachedScreenDirection.HasValue
-            || !NumericsUtility.TryNormalize(cachedScreenDirection.Value, out screenDirection))
-        {
-            screenDirection = default;
-            return false;
-        }
-
-        return true;
-    }
-
-    private void CacheAxisScreenDirection(GizmoAxis axis, Vector2 screenDirection)
-    {
-        var index = GizmoAxisUtility.ToIndex(axis);
-        if (index < 0 || !NumericsUtility.TryNormalize(screenDirection, out var normalizedScreenDirection))
-        {
-            return;
-        }
-
-        State.PreviousAxisScreenDirections[index] = normalizedScreenDirection;
     }
 
     private static bool TryResolveClosestRotationRingPoint(
@@ -368,20 +347,18 @@ internal sealed partial class Gizmo
         var rotationMathProjection = CreateRotationMathProjection(projection);
         Vector2? previousPos = null;
         var previousVisible = false;
-        var hasPrevious = false;
 
         for (var index = 0; index <= GizmoConstants.RotationRingSegments; ++index)
         {
             var currentAngle = (index / (float)GizmoConstants.RotationRingSegments) * (MathF.PI * 2f);
             if (!GizmoRotationMath.TryProjectAxisPoint(rotationMathProjection, axisDirection, currentAngle, out var currentPos, out var isVisible))
             {
-                hasPrevious = false;
                 previousPos = null;
                 previousVisible = false;
                 continue;
             }
 
-            if (hasPrevious && previousPos.HasValue && previousVisible && isVisible)
+            if (previousPos.HasValue && previousVisible && isVisible)
             {
                 var fromPos = previousPos.Value;
                 var segment = currentPos - fromPos;
@@ -405,7 +382,6 @@ internal sealed partial class Gizmo
                 }
             }
 
-            hasPrevious = true;
             previousPos = currentPos;
             previousVisible = isVisible;
         }
@@ -481,29 +457,27 @@ internal sealed partial class Gizmo
             : normalizedScreenVector;
     }
 
-    private void TryGetGizmoInteractionBounds(int axisCount, Vector2 screenPos, float scale, out Vector2 min, out Vector2 max)
+    private static void GetGizmoInteractionBounds(ReadOnlySpan<GizmoAxisVisualState> axes, Vector2 screenPos, float scale, out Vector2 min, out Vector2 max)
     {
         min = screenPos;
         max = screenPos;
 
-        if (axisCount <= 0)
+        if (axes.Length == 0)
         {
             return;
         }
 
-        min = new Vector2(float.MaxValue, float.MaxValue);
-        max = new Vector2(float.MinValue, float.MinValue);
         var paddingScale = scale;
-        for (var index = 0; index < axisCount; ++index)
+        foreach (GizmoAxisVisualState state in axes)
         {
-            var state = AxisVisualStates[index];
             min = Vector2.Min(min, Vector2.Min(state.ScreenStart, state.ScreenEnd));
             max = Vector2.Max(max, Vector2.Max(state.ScreenStart, state.ScreenEnd));
             paddingScale = MathF.Max(paddingScale, state.VisualScale);
         }
 
-        min = Vector2.Min(min, screenPos) - new Vector2(35f * paddingScale);
-        max = Vector2.Max(max, screenPos) + new Vector2(35f * paddingScale);
+        Vector2 padding = new(35f * paddingScale);
+        min -= padding;
+        max += padding;
     }
 
     private static Vector3 ResolveAxisWorldDirection(GizmoAxis axis, Quaternion rotation, bool useWorldSpace)
@@ -651,15 +625,6 @@ internal sealed partial class Gizmo
         var projection = start + (segment * t);
         return (point - projection).Length();
     }
-
-    private static bool IsMouseWithinRect(Vector2 min, Vector2 max)
-    {
-        var mouse = ImGui.GetIO().MousePos;
-        return mouse.X >= min.X && mouse.X <= max.X && mouse.Y >= min.Y && mouse.Y <= max.Y;
-    }
-
-    private static bool IsMouseWithinCircle(Vector2 center, float radius)
-        => Vector2.DistanceSquared(ImGui.GetIO().MousePos, center) <= (radius * radius);
 
     private static Vector2 GetTrimmedGizmoEndpoint(GizmoAxisVisualState state, float scale)
     {

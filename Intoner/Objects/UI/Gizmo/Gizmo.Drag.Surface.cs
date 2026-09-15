@@ -1,6 +1,5 @@
-using Intoner.Scene;
 using FFXIVClientStructs.FFXIV.Client.System.Input;
-using Intoner.Objects.Utils;
+using Intoner.Scene;
 using System.Numerics;
 
 namespace Intoner.Objects.UI;
@@ -10,6 +9,13 @@ internal sealed partial class Gizmo
     private void BeginGizmoSurfaceDrag(in GizmoContext context)
     {
         _host.PrepareHistoryMutation();
+        ResetGizmoSurfaceDrag();
+        _surfaceEdit = _sceneItemService.BeginEdit(context.SelectedSnapshots);
+        if (_surfaceEdit is null)
+        {
+            return;
+        }
+
         bool itemTargetsEnabled = Settings.SurfaceItemTargetsEnabled;
         SceneSurfaceTargetShape targetShape = Settings.SurfaceTargetShape;
         HashSet<Guid> selectedItemIds = context.SelectedSnapshots
@@ -25,23 +31,7 @@ internal sealed partial class Gizmo
             surfaceTargets,
             itemTargetsEnabled,
             targetShape);
-        DisposeSurfaceDragKeyboardInputLease();
         SurfaceDragKeyboardInputLease = _keyboardInput.BeginSuppression(GizmoConstants.SurfaceDragSuppressedKeys);
-    }
-
-    private void HandleGizmoSurfaceDragLifecycle(in GizmoContext context)
-    {
-        var matchesCurrentTarget = SurfaceDragState.Matches(context.PrimarySnapshot.Id);
-        var currentContext = context;
-        HandleActiveGizmoDragLifecycle(
-            matchesCurrentTarget,
-            true,
-            () =>
-            {
-                HandleGizmoSurfaceDragKeyboardShortcuts(currentContext);
-                UpdateGizmoSurfaceDrag(currentContext);
-            },
-            CompleteGizmoSurfaceDrag);
     }
 
     private void UpdateGizmoSurfaceDrag(in GizmoContext context)
@@ -232,12 +222,14 @@ internal sealed partial class Gizmo
             hit);
 
         if (Equals(nextSnapshot, SurfaceDragState.CurrentSingleSnapshot)
-            || !_sceneItemService.Update(nextSnapshot, out appliedSnapshot).IsApplied())
+            || _surfaceEdit is null
+            || !_surfaceEdit.Update([nextSnapshot], out IReadOnlyList<SceneItemSnapshot> appliedSnapshots).IsApplied())
         {
             appliedSnapshot = null!;
             return false;
         }
 
+        appliedSnapshot = appliedSnapshots[0];
         return true;
     }
 
@@ -269,7 +261,7 @@ internal sealed partial class Gizmo
             snapshots[index] = manipulation.ApplySurfaceState(transformed, hit);
         }
 
-        if (!_sceneItemService.UpdateMany(snapshots, out IReadOnlyList<SceneItemSnapshot> appliedSnapshots).IsApplied())
+        if (_surfaceEdit is null || !_surfaceEdit.Update(snapshots, out IReadOnlyList<SceneItemSnapshot> appliedSnapshots).IsApplied())
         {
             return false;
         }

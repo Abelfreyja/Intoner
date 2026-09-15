@@ -176,7 +176,10 @@ internal sealed class EditorWindow : IntonerWindow, IDisposable
     }
 
     public override void Update()
-        => _editorContentDrawnThisFrame = false;
+    {
+        _editorContentDrawnThisFrame = false;
+        RespectCloseHotkey = !_sceneOverlay.IsSelecting;
+    }
 
     public override void PreDraw()
     {
@@ -232,6 +235,7 @@ internal sealed class EditorWindow : IntonerWindow, IDisposable
         _editorLoad.EnsureLoaded();
         if (!_editorLoad.TryGetData(out EditorLoadData? loadData, out var loadStatus))
         {
+            _sceneOverlay.Deactivate();
             _shortcuts.DeactivateAll();
             DrawWindowBackgroundGlass();
             _startupView.DrawEditorLoadingScreen(loadStatus);

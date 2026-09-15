@@ -66,6 +66,10 @@ internal static class IntonerConfigurationNormalizer
         ValidateEnum(configuration.DrawMode, nameof(configuration.DrawMode));
         ValidateEnum(configuration.DepthMode, nameof(configuration.DepthMode));
         configuration.AntiAliasing = RenderingConfiguration.ClampAntiAliasing(configuration.AntiAliasing);
+        ValidateSection(configuration.GizmoAppearance, nameof(configuration.GizmoAppearance));
+        ValidateEnum(configuration.GizmoAppearance.Preset, nameof(configuration.GizmoAppearance.Preset));
+        configuration.GizmoAppearance.Opacity = Math.Clamp(configuration.GizmoAppearance.Opacity,
+            GizmoAppearanceConfiguration.MinimumOpacity, GizmoAppearanceConfiguration.MaximumOpacity);
     }
 
     private static void NormalizeUi(UiConfiguration configuration)

@@ -9,6 +9,7 @@ using Intoner.Objects.UI.Docking;
 using Intoner.Objects.UI.Services.EdgeGlow;
 using Intoner.Scene;
 using Intoner.Services.Configuration;
+using Intoner.Services.Input;
 using System.Globalization;
 using System.Numerics;
 using System.Runtime.InteropServices;
@@ -308,7 +309,7 @@ internal sealed partial class EditorToolbar
 
         return selected is not null && !_gizmo.CanUseScaleGizmo(selected)
             ? "This item does not support scaling."
-            : "Toggle the scale gizmo.";
+            : "Toggle the local scale gizmo.";
     }
 
     private static Dictionary<ObjectKind, int> BuildToolbarObjectCountsByKind(IReadOnlyList<ObjectSnapshot> objects)
@@ -447,12 +448,13 @@ internal sealed partial class EditorToolbar
         return (buttonEdge * rows) + (ResolveToolbarRailItemGap() * Math.Max(0, rows - 1));
     }
 
-    private static void DrawToolbarTextTooltip(FontAwesomeIcon icon, string title, string text, Vector4 accent)
-        => IntonerTooltip.DrawDescription(
-            icon,
-            title,
-            text,
-            new IntonerTooltipOptions { Accent = accent });
+    private static void DrawToolbarTextTooltip(
+        FontAwesomeIcon icon,
+        string title,
+        string text,
+        Vector4 accent,
+        EditorToolbarTooltipKeyHint? keyHint = null)
+        => EditorToolbarTooltip.Draw(icon, title, accent, [], [], keyHint, text);
 
     [StructLayout(LayoutKind.Auto)]
     internal readonly record struct ToolbarButtonContentMetrics(
@@ -675,7 +677,8 @@ internal sealed partial class EditorToolbar
         Vector4? hoverBorderColor = null,
         Action<ImDrawListPtr, Vector2, Vector2, bool, bool>? drawBackground = null,
         Action? drawTooltip = null,
-        ToolbarSurfaceMode mode = ToolbarSurfaceMode.Strip)
+        ToolbarSurfaceMode mode = ToolbarSurfaceMode.Strip,
+        EditorToolbarTooltipKeyHint? keyHint = null)
     {
         var buttonEdge = ResolveToolbarButtonEdge(mode);
         var buttonSize = new Vector2(buttonEdge, buttonEdge);
@@ -729,11 +732,11 @@ internal sealed partial class EditorToolbar
             }
             else if (!string.IsNullOrWhiteSpace(tooltip))
             {
-                DrawToolbarTextTooltip(icon, label, tooltip, accentColor ?? hoverBorderColor ?? ThemeColors.AccentPrimary);
+                DrawToolbarTextTooltip(icon, label, tooltip, accentColor ?? hoverBorderColor ?? ThemeColors.AccentPrimary, keyHint);
             }
             else if (mode == ToolbarSurfaceMode.Rail)
             {
-                DrawToolbarTextTooltip(icon, label, string.Empty, accentColor ?? hoverBorderColor ?? ThemeColors.AccentPrimary);
+                DrawToolbarTextTooltip(icon, label, string.Empty, accentColor ?? hoverBorderColor ?? ThemeColors.AccentPrimary, keyHint);
             }
         }
     }
@@ -891,7 +894,7 @@ internal sealed partial class EditorToolbar
         ToolbarSurfaceMode surfaceMode = ToolbarSurfaceMode.Strip)
     {
         var accentColor = GetGizmoModeAccentColor(mode);
-        var isActive = _gizmo.Settings.Mode == mode;
+        var isActive = (_gizmo.Settings.Mode & mode) != GizmoTransformMode.None;
         Vector4? buttonAccentColor = enabled && isActive ? accentColor : null;
         Vector4? buttonHoverBorderColor = enabled ? accentColor : null;
 
@@ -910,7 +913,8 @@ internal sealed partial class EditorToolbar
                 useAccentFill: false,
                 useNeutralHoverFill: true,
                 hoverBorderColor: buttonHoverBorderColor,
-                mode: surfaceMode);
+                mode: surfaceMode,
+                keyHint: new EditorToolbarTooltipKeyHint(KeyboardModifiers.Shift, "and click to toggle independently"));
         }
     }
 
@@ -918,7 +922,5 @@ internal sealed partial class EditorToolbar
         => EditorColors.TransformModeAccent(mode);
 
     private void ToggleGizmoMode(GizmoTransformMode mode)
-        => _gizmo.Settings.Mode = _gizmo.Settings.Mode == mode
-            ? GizmoTransformMode.None
-            : mode;
+        => _gizmo.Settings.ToggleMode(mode, ImGui.GetIO().KeyShift);
 }

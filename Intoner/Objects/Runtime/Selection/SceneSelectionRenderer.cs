@@ -59,7 +59,7 @@ internal sealed class SceneSelectionRenderer : IDisposable
             IsDepthClipEnabled = true,
             IsMultisampleEnabled = false,
             IsFrontCounterClockwise = false,
-            IsScissorEnabled = false,
+            IsScissorEnabled = true,
         });
         _forwardDepthStencilState = new DepthStencilState(device, new DepthStencilStateDescription
         {
@@ -82,23 +82,20 @@ internal sealed class SceneSelectionRenderer : IDisposable
     public DeviceContext Context { get; }
     public Buffer ConstantBuffer { get; }
 
-    public bool TryRenderSelectionId(
+    public void RenderSelectionIds(
         SceneSelectionCollector collector,
         Matrix4x4 viewProjection,
         bool useReverseDepth,
-        int viewportWidth,
-        int viewportHeight,
-        int pixelX,
-        int pixelY,
-        out uint selectionId)
+        in SceneSelectionQuery query,
+        HashSet<uint> selectionIds)
     {
-        selectionId = 0;
-
+        selectionIds.Clear();
         _meshCache.TrimExpired();
-        _viewportTargets.Ensure(viewportWidth, viewportHeight);
-        PrepareFrame(viewportWidth, viewportHeight, useReverseDepth);
+        _viewportTargets.Ensure(query.ViewportWidth, query.ViewportHeight);
+        _viewportTargets.EnsureReadback(query.Width, query.Height);
+        PrepareFrame(query, useReverseDepth);
         DrawCollector(collector, viewProjection);
-        return TryReadbackSelectionId(pixelX, pixelY, out selectionId);
+        ReadbackSelectionIds(query, selectionIds);
     }
 
     public void TouchSelectionPaths(SceneSelectionCollector collector, uint selectionId)
@@ -125,10 +122,11 @@ internal sealed class SceneSelectionRenderer : IDisposable
         _device.Dispose();
     }
 
-    private void PrepareFrame(int width, int height, bool useReverseDepth)
+    private void PrepareFrame(in SceneSelectionQuery query, bool useReverseDepth)
     {
         Context.OutputMerger.SetTargets(_viewportTargets.DepthStencilView, _viewportTargets.RenderTargetView);
-        Context.Rasterizer.SetViewport(0, 0, width, height);
+        Context.Rasterizer.SetViewport(0, 0, query.ViewportWidth, query.ViewportHeight);
+        Context.Rasterizer.SetScissorRectangle(query.Left, query.Top, query.Right, query.Bottom);
         Context.Rasterizer.State = _rasterizerState;
         Context.OutputMerger.DepthStencilState = useReverseDepth ? _reverseDepthStencilState : _forwardDepthStencilState;
         Context.InputAssembler.InputLayout = _inputLayout;
@@ -174,14 +172,12 @@ internal sealed class SceneSelectionRenderer : IDisposable
         Context.DrawIndexed(mesh.IndexCount, 0, 0);
     }
 
-    private bool TryReadbackSelectionId(int pixelX, int pixelY, out uint selectionId)
+    private unsafe void ReadbackSelectionIds(in SceneSelectionQuery query, HashSet<uint> selectionIds)
     {
-        selectionId = 0;
-
         Context.CopySubresourceRegion(
             _viewportTargets.IdTexture,
             0,
-            new ResourceRegion(pixelX, pixelY, 0, pixelX + 1, pixelY + 1, 1),
+            new ResourceRegion(query.Left, query.Top, 0, query.Right, query.Bottom, 1),
             _viewportTargets.ReadbackTexture,
             0,
             0,
@@ -192,8 +188,17 @@ internal sealed class SceneSelectionRenderer : IDisposable
         var mapped = Context.MapSubresource(_viewportTargets.ReadbackTexture, 0, MapMode.Read, SharpDX.Direct3D11.MapFlags.None);
         try
         {
-            selectionId = unchecked((uint)Marshal.ReadInt32(mapped.DataPointer));
-            return true;
+            for (int y = 0; y < query.Height; ++y)
+            {
+                ReadOnlySpan<uint> row = new((byte*)mapped.DataPointer + y * mapped.RowPitch, query.Width);
+                foreach (uint selectionId in row)
+                {
+                    if (selectionId != 0)
+                    {
+                        selectionIds.Add(selectionId);
+                    }
+                }
+            }
         }
         finally
         {
@@ -364,6 +369,8 @@ internal sealed class SceneSelectionRenderer : IDisposable
         private Texture2D? _readbackTexture;
         private int _viewportWidth;
         private int _viewportHeight;
+        private int _readbackWidth;
+        private int _readbackHeight;
 
         public SelectionViewportTargets(Device device)
         {
@@ -414,10 +421,25 @@ internal sealed class SceneSelectionRenderer : IDisposable
             });
             _depthStencilView = new DepthStencilView(_device, _depthTexture);
 
+            _viewportWidth = width;
+            _viewportHeight = height;
+        }
+
+        public void EnsureReadback(int width, int height)
+        {
+            if (_readbackTexture is not null && _readbackWidth >= width && _readbackHeight >= height)
+            {
+                return;
+            }
+
+            _readbackTexture?.Dispose();
+            _readbackTexture = null;
+            _readbackWidth = Math.Max(_readbackWidth, width);
+            _readbackHeight = Math.Max(_readbackHeight, height);
             _readbackTexture = new Texture2D(_device, new Texture2DDescription
             {
-                Width = 1,
-                Height = 1,
+                Width = _readbackWidth,
+                Height = _readbackHeight,
                 MipLevels = 1,
                 ArraySize = 1,
                 Format = Format.R32_UInt,
@@ -428,8 +450,6 @@ internal sealed class SceneSelectionRenderer : IDisposable
                 OptionFlags = ResourceOptionFlags.None,
             });
 
-            _viewportWidth = width;
-            _viewportHeight = height;
         }
 
         public void Dispose()
@@ -449,6 +469,8 @@ internal sealed class SceneSelectionRenderer : IDisposable
             _idTexture = null;
             _viewportWidth = 0;
             _viewportHeight = 0;
+            _readbackWidth = 0;
+            _readbackHeight = 0;
         }
     }
 

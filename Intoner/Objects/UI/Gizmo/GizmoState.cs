@@ -8,9 +8,13 @@ namespace Intoner.Objects.UI;
 /// <summary> transient gizmo runtime state for active interaction and drawing </summary>
 internal sealed class GizmoState
 {
-    public GizmoAxisVisualState[] AxisVisualStates { get; } = new GizmoAxisVisualState[GizmoAxisUtility.AxisCount];
+    public GizmoAxisVisualState[] TranslationAxes { get; } = new GizmoAxisVisualState[GizmoAxisUtility.AxisCount];
 
-    public Vector2?[] PreviousAxisScreenDirections { get; } = new Vector2?[GizmoAxisUtility.AxisCount];
+    public GizmoAxisVisualState[] ScaleAxes { get; } = new GizmoAxisVisualState[GizmoAxisUtility.AxisCount];
+
+    public GizmoAxisProjectionState[] LocalAxisProjections { get; } = new GizmoAxisProjectionState[GizmoAxisUtility.AxisCount];
+
+    public GizmoAxisProjectionState[] WorldAxisProjections { get; } = new GizmoAxisProjectionState[GizmoAxisUtility.AxisCount];
 
     public int InteractionRevision { get; private set; }
 

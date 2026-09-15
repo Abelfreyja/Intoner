@@ -87,7 +87,10 @@ internal static class SectionPanel
                 color: accent));
         }
 
-        ImGui.TextDisabled(section.Description);
+        if (!string.IsNullOrEmpty(section.Description))
+        {
+            ImGui.TextDisabled(section.Description);
+        }
     }
 
     private static void DrawSectionDivider(Vector4 accent)

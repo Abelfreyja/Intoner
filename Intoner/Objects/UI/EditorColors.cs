@@ -9,8 +9,8 @@ internal static class EditorColors
 {
     public static Vector4 BoundsOverlayAccent => ThemeColors.AccentPrimary;
     public static Vector4 HousingPlacementInvalid => ThemeColors.Color(1f, 0.16f, 0.14f, 0.82f);
-    public static Vector4 GizmoTranslationDragActive => ThemeColors.Color(1f, 0.65f, 0.2f, 1f);
-    public static Vector4 GizmoTranslationDragSuppressed => ThemeColors.Color(0.55f, 0.55f, 0.58f, 0.25f);
+    public static Vector4 GizmoDragActive => ThemeColors.Color(1f, 0.65f, 0.2f, 1f);
+    public static Vector4 GizmoDragSuppressed => ThemeColors.Color(0.55f, 0.55f, 0.58f, 0.25f);
     public static Vector4 GizmoTranslationDragPath => ThemeColors.Color(0.75f, 0.75f, 0.80f, 0.90f);
     public static Vector4 GizmoRotationDragHighlight => ThemeColors.Color(1f, 0.70f, 0.30f, 0.75f);
 
@@ -32,6 +32,7 @@ internal static class EditorColors
             GizmoTransformMode.Translation => ThemeColors.Color(0.95f, 0.55f, 0.35f, 1f),
             GizmoTransformMode.Rotation => ThemeColors.Color(0.50f, 0.80f, 1.00f, 1f),
             GizmoTransformMode.Scale => ThemeColors.Color(0.50f, 0.90f, 0.60f, 1f),
+            GizmoTransformMode.Universal => ThemeColors.AccentYellow,
             _ => ThemeColors.Text,
         };
 
@@ -44,6 +45,19 @@ internal static class EditorColors
             ObjectKind.Light => ThemeColors.WithAlpha(ThemeColors.AccentGreen, 0.95f),
             _ => ThemeColors.WithAlpha(ThemeColors.Text, 0.90f),
         };
+
+    public static Vector4 BoundsOverlay(SceneBoundsCategory category, float opacity)
+    {
+        Vector4 color = category switch
+        {
+            SceneBoundsCategory.BgObject => BoundsOverlay(ObjectKind.BgObject),
+            SceneBoundsCategory.Furniture => BoundsOverlay(ObjectKind.Furniture),
+            SceneBoundsCategory.Light => BoundsOverlay(ObjectKind.Light),
+            SceneBoundsCategory.Vfx => BoundsOverlay(ObjectKind.Vfx),
+            _ => ThemeColors.AccentPrimary,
+        };
+        return ThemeColors.WithAlpha(color, Math.Clamp(opacity, 0f, 1f));
+    }
 
     public static Vector4 CatalogAccent(ObjectCatalogKind kind)
         => kind switch

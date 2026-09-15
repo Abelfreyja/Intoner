@@ -47,7 +47,7 @@ internal static class ToggleRow
         float rowHeight,
         bool enabled)
     {
-        RowChrome.AlignControl(rowHeight, metrics.Height, metrics.Width, alignRight: true);
+        RowChrome.AlignControl(rowHeight, metrics.Height, metrics.Width);
         float controlY = ImGui.GetCursorPosY();
         ImGui.SetCursorPosY(controlY + (metrics.Height - metrics.BadgeSize.Y) * 0.5f);
         EditorBadgeRenderer.Draw(EditorBadge.Label(status.Text, color: status.Color));

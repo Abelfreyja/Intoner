@@ -62,12 +62,10 @@ internal static class RowChrome
         return MathF.Max(1f, MathF.Min(availableWidth, targetWidth));
     }
 
-    public static void AlignControl(float rowHeight, float controlHeight, float controlWidth, bool alignRight = false)
+    public static void AlignControl(float rowHeight, float controlHeight, float controlWidth)
     {
         Vector2 cursor = ImGui.GetCursorPos();
-        float offsetX = alignRight
-            ? MathF.Max(0f, ImGui.GetContentRegionAvail().X - controlWidth)
-            : 0f;
+        float offsetX = MathF.Max(0f, ImGui.GetContentRegionAvail().X - controlWidth);
 
         ImGui.SetCursorPos(new Vector2(
             cursor.X + offsetX,

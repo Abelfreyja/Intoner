@@ -6,7 +6,7 @@ using System.Runtime.InteropServices;
 
 namespace Intoner.Objects.UI.Settings;
 
-internal sealed class CoreSettingFactory
+internal sealed partial class CoreSettingFactory
 {
     private readonly IIntonerConfigurationService _configuration;
     private readonly IObjectHousingModePolicy      _housingMode;

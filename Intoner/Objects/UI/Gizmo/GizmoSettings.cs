@@ -12,6 +12,7 @@ internal sealed class GizmoSettings
     public static readonly SceneBoundsInteractionSettings DefaultBoundsInteractionSettings =
         new(
             SelectionEnabled: true,
+            BoxSelectionEnabled: true,
             BoundsEnabled: false,
             BoundsFilter: SceneBoundsCategory.All,
             ShowSelectedOnly: false,
@@ -21,6 +22,20 @@ internal sealed class GizmoSettings
     public BoundsOverlaySpace BoundsOverlaySpace { get; set; } = BoundsOverlaySpace.World;
 
     public GizmoTransformMode Mode { get; set; } = GizmoTransformMode.Translation;
+
+    public void ToggleMode(GizmoTransformMode mode, bool combine)
+    {
+        if (combine)
+        {
+            Mode ^= mode;
+            return;
+        }
+
+        Mode = Mode == mode ? GizmoTransformMode.None : mode;
+    }
+
+    public GizmoTransformMode GetAvailableModes(bool scaleSupported)
+        => scaleSupported ? Mode : Mode & ~GizmoTransformMode.Scale;
 
     public bool SurfaceAlignToNormal { get; set; }
 
@@ -36,6 +51,7 @@ internal sealed class GizmoSettings
 [StructLayout(LayoutKind.Auto)]
 internal readonly record struct SceneBoundsInteractionSettings(
     bool SelectionEnabled,
+    bool BoxSelectionEnabled,
     bool BoundsEnabled,
     SceneBoundsCategory BoundsFilter,
     bool ShowSelectedOnly,

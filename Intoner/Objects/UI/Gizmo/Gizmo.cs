@@ -3,10 +3,10 @@ using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using Intoner.Objects.Models;
 using Intoner.Objects.Rendering.Drawing;
-using Intoner.Objects.UI.Services;
-using Intoner.Services.Input;
 using Intoner.Objects.Utils;
 using Intoner.Scene;
+using Intoner.Services.Configuration;
+using Intoner.Services.Input;
 using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 
@@ -60,15 +60,16 @@ internal sealed partial class Gizmo : IDisposable
     private readonly ISceneItemService _sceneItemService;
     private readonly ISceneSurfaceService _surfaceService;
     private readonly DrawManager _drawManager;
+    private readonly IIntonerConfigurationService _configuration;
+    private GizmoAppearanceConfiguration _appearance;
     private IReadOnlyList<SceneItemBoundsSnapshot>? _boundsLookupSource;
     private SceneItemBoundsLookup _boundsLookup = new([]);
+    private SceneEditSession? _transformEdit;
+    private SceneEditSession? _surfaceEdit;
 
     public GizmoSettings Settings { get; } = new();
 
     private GizmoState State { get; } = new();
-
-    private GizmoAxisVisualState[] AxisVisualStates
-        => State.AxisVisualStates;
 
     private GizmoTranslationDragSession TranslationDragState
         => State.TranslationDrag;
@@ -83,7 +84,7 @@ internal sealed partial class Gizmo : IDisposable
         => State.SurfaceDrag;
 
     private bool HasActiveTransformDrag
-        => TranslationDragState.IsDragging || RotationDragState.IsDragging || ScaleDragState.IsDragging;
+        => TryGetActiveTransformDragState(out _);
 
     private IKeyboardInputLease? SurfaceDragKeyboardInputLease
     {
@@ -171,17 +172,28 @@ internal sealed partial class Gizmo : IDisposable
         DrawManager drawManager,
         IKeyboardInputService keyboardInput,
         ISceneItemService sceneItemService,
-        ISceneSurfaceService surfaceService)
+        ISceneSurfaceService surfaceService,
+        IIntonerConfigurationService configuration)
     {
         _host = host;
         _drawManager = drawManager;
         _keyboardInput = keyboardInput;
         _sceneItemService = sceneItemService;
         _surfaceService = surfaceService;
+        _configuration = configuration;
+        _appearance = configuration.Current.Rendering.GizmoAppearance;
+        _configuration.ConfigurationChanged += OnGizmoConfigurationChanged;
     }
 
     public void Dispose()
-        => DisposeSurfaceDragKeyboardInputLease();
+    {
+        _configuration.ConfigurationChanged -= OnGizmoConfigurationChanged;
+        ResetGizmoDrag();
+        ResetGizmoSurfaceDrag();
+    }
+
+    private void OnGizmoConfigurationChanged()
+        => _appearance = _configuration.Current.Rendering.GizmoAppearance;
 
     public void NormalizeMode(IReadOnlyList<SceneItemSnapshot> selectedItems)
     {
@@ -259,32 +271,7 @@ internal sealed partial class Gizmo : IDisposable
             return false;
         }
 
-        var scale = ImGuiHelpers.GlobalScale;
-        if (Mode == GizmoTransformMode.Rotation)
-        {
-            var radius = ResolveWorldScaledScreenSize(GizmoConstants.RotationRingBaseRadius, context.AxisWorldLength, scale);
-            var rotationProjection = IsGizmoDragActive(context.PrimarySnapshot.Id, GizmoTransformMode.Rotation) && RotationDragState.RotationProjection.HasValue
-                ? RotationDragState.RotationProjection.Value
-                : CreateRotationProjectionContext(context, radius);
-            frame = new GizmoFrame(
-                context,
-                rotationProjection,
-                ResolveRotationInteractionState(context, rotationProjection, mousePos, scale, pointerAvailable));
-            State.StoreCachedFrame(request, frame);
-            return true;
-        }
-
-        var worldSpace = Mode == GizmoTransformMode.Translation && context.UseWorldSpace;
-        var axisCount = BuildLinearGizmoAxisVisualStates(context, worldSpace);
-        if (axisCount <= 0)
-        {
-            return false;
-        }
-
-        frame = new GizmoFrame(
-            context,
-            axisCount,
-            ResolveLinearInteractionState(context, Mode, axisCount, mousePos, scale, pointerAvailable));
+        frame = BuildGizmoFrame(context, mousePos, ImGuiHelpers.GlobalScale, pointerAvailable);
         State.StoreCachedFrame(request, frame);
         return true;
     }
@@ -319,7 +306,8 @@ internal sealed partial class Gizmo : IDisposable
     private void ValidateActiveDragTargets(in GizmoContext context)
     {
         if (TryGetActiveTransformDragState(out var activeTransformDrag)
-            && !activeTransformDrag.Matches(context.PrimarySnapshot.Id, Mode))
+            && (activeTransformDrag.ItemId != context.PrimarySnapshot.Id
+                || (Settings.GetAvailableModes(context.ScaleSupported) & activeTransformDrag.Mode) == GizmoTransformMode.None))
         {
             CompleteGizmoDrag();
         }
@@ -514,21 +502,96 @@ internal sealed partial class Gizmo : IDisposable
 
     private void DrawGizmoFrame(in GizmoFrame frame, in GizmoDrawOptions options)
     {
-        switch (Mode)
+        GizmoContext context = frame.Context;
+        GizmoInteractionState common = frame.Interaction;
+        GizmoHandleHit hit = frame.HoveredHandle;
+        ImDrawListPtr drawList = ImGui.GetForegroundDrawList();
+        DrawBatch batch = _drawManager.BeginPass(DrawPassKind.Gizmo, "Gizmo", DrawLayer.Foreground);
+        float scale = ImGuiHelpers.GlobalScale;
+        if (common.ShouldCaptureMouse)
         {
-            case GizmoTransformMode.Translation:
-                DrawLinearGizmo(frame, GizmoTransformMode.Translation, options);
-                break;
-            case GizmoTransformMode.Rotation:
-                DrawRotationGizmo(frame, options);
-                break;
-            case GizmoTransformMode.Scale:
-                if (frame.Context.ScaleSupported)
-                {
-                    DrawLinearGizmo(frame, GizmoTransformMode.Scale, options);
-                }
-                break;
+            ImGui.SetNextFrameWantCaptureMouse(true);
         }
+
+        using var alpha = ImRaii.PushStyle(ImGuiStyleVar.Alpha, ClampGizmoAlpha(ImGui.GetStyle().Alpha * ResolveGizmoAlpha(common.IsFocused) * GizmoOpacity));
+        if (common.SurfaceDragActive || frame.HasMode(GizmoTransformMode.Translation)
+            && (!common.DragActive || frame.ActiveOperation == GizmoTransformMode.Translation)
+            && hit.Operation is GizmoTransformMode.None or GizmoTransformMode.Translation)
+        {
+            GizmoAxis gridAxis = common.DragActive ? common.ActiveAxis : hit.Axis;
+            DrawTranslationSnapGrid(context, scale, gridAxis);
+        }
+
+        GizmoTransformMode visibleModes = frame.Modes;
+        if (common.DragActive)
+        {
+            visibleModes &= frame.ActiveOperation;
+        }
+        else if (common.SurfaceDragActive)
+        {
+            visibleModes &= GizmoTransformMode.Translation;
+        }
+
+        if ((visibleModes & GizmoTransformMode.Rotation) != GizmoTransformMode.None)
+        {
+            DrawRotationGizmo(frame, batch, scale);
+        }
+
+        ReadOnlySpan<GizmoAxisVisualState> moveAxes = (visibleModes & GizmoTransformMode.Translation) != GizmoTransformMode.None
+            ? State.TranslationAxes.AsSpan(0, frame.TranslationAxisCount) : [];
+        ReadOnlySpan<GizmoAxisVisualState> scaleAxes = (visibleModes & GizmoTransformMode.Scale) != GizmoTransformMode.None
+            ? State.ScaleAxes.AsSpan(0, frame.ScaleAxisCount) : [];
+        if (!moveAxes.IsEmpty || !scaleAxes.IsEmpty)
+        {
+            batch.AddScreenCircleFilled(context.ScreenPos,
+                GizmoConstants.CenterPointRadius * GizmoConstants.CenterGlowRadiusMultiplier * scale,
+                ThemeColors.Color(0f, 0f, 0f, GizmoConstants.CenterGlowOpacity * ResolveGizmoHoverOpacity(common, common.CenterHovered)), 64);
+            bool scaleHovered = common.Phase == GizmoInteractionPhase.HoverAxis && hit.Operation == GizmoTransformMode.Scale;
+            DrawLinearGizmo(frame, scaleHovered ? GizmoTransformMode.Translation : GizmoTransformMode.Scale,
+                scaleHovered ? moveAxes : scaleAxes, batch, drawList, options);
+            DrawLinearGizmo(frame, scaleHovered ? GizmoTransformMode.Scale : GizmoTransformMode.Translation,
+                scaleHovered ? scaleAxes : moveAxes, batch, drawList, options);
+        }
+
+        DrawCircularCenterHandle(batch, context.ScreenPos, scale, common.CenterHovered, common.SurfaceDragActive, SurfaceAlignToNormal,
+            ResolveGizmoHoverOpacity(common, common.CenterHovered));
+        if (common.CenterHovered)
+        {
+            IntonerTooltip.DrawText(GizmoConstants.SurfaceDragTooltip);
+        }
+        else if (hit.IsValid)
+        {
+            DrawGizmoHandleLabel(drawList, frame, scale, options);
+        }
+        else if (!common.DragActive)
+        {
+            DrawGizmoLabel(drawList, context, scale, options);
+        }
+
+        if (hit.IsValid || common.CanStartSurfaceDrag)
+        {
+            ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
+        }
+
+        if (ImGui.IsMouseClicked(ImGuiMouseButton.Left))
+        {
+            if (common.CanStartSurfaceDrag)
+            {
+                BeginGizmoSurfaceDrag(context);
+            }
+            else if (hit.Operation == GizmoTransformMode.Rotation)
+            {
+                BeginRotationGizmoDrag(context, hit.Axis, hit.Rotation, frame.RotationProjection);
+            }
+            else if (hit.IsValid)
+            {
+                BeginLinearGizmoDrag(context, hit.Axis, hit.LinearAxis, hit.Operation);
+            }
+        }
+
+        HandleGizmoDragLifecycle(context);
+        HandleGizmoRadialInput(common.PointerInRegion || hit.IsValid || common.CenterHovered || common.SurfaceDragActive);
+        _drawManager.DrawLayer(context.ViewportPos, context.ViewportSize, DrawLayer.Foreground, ImGui.GetStyle().Alpha);
     }
 
     public bool IsSelectionBlocked(
@@ -562,312 +625,8 @@ internal sealed partial class Gizmo : IDisposable
             out frame);
     }
 
-    private void DrawLinearGizmo(
-        in GizmoFrame frame,
-        GizmoTransformMode mode,
-        in GizmoDrawOptions options)
-    {
-        var context = frame.Context;
-        var drawList = ImGui.GetForegroundDrawList();
-        var batch = _drawManager.BeginPass(DrawPassKind.Gizmo, "Gizmo", DrawLayer.Foreground);
-        var scale = ImGuiHelpers.GlobalScale;
-        var axisCount = frame.AxisCount;
-        var interaction = frame.LinearInteraction;
-        var common = interaction.Common;
-        if (common.ShouldCaptureMouse)
-        {
-            ImGui.SetNextFrameWantCaptureMouse(true);
-        }
-
-        using var alpha = ImRaii.PushStyle(ImGuiStyleVar.Alpha, ClampGizmoAlpha(ImGui.GetStyle().Alpha * ResolveGizmoAlpha(common.IsFocused)));
-
-        if (mode == GizmoTransformMode.Translation || common.SurfaceDragActive)
-        {
-            GizmoAxis preferredAxis = GizmoAxis.None;
-            if (mode == GizmoTransformMode.Translation)
-            {
-                preferredAxis = common.DragActive
-                    ? common.ActiveAxis
-                    : interaction.HoveredAxis;
-            }
-
-            DrawTranslationSnapGrid(context, scale, preferredAxis);
-        }
-
-        var centerGlowRadius = GizmoConstants.CenterPointRadius * GizmoConstants.CenterGlowRadiusMultiplier * scale;
-        batch.AddScreenCircleFilled(
-            context.ScreenPos,
-            centerGlowRadius,
-            ThemeColors.Color(0f, 0f, 0f, GizmoConstants.CenterGlowOpacity),
-            64);
-
-        if (common.DragActive && mode == GizmoTransformMode.Translation)
-        {
-            for (var index = 0; index < axisCount; ++index)
-            {
-                var suppressedState = AxisVisualStates[index];
-                if (suppressedState.Axis == common.ActiveAxis)
-                {
-                    continue;
-                }
-
-                DrawSuppressedGizmoAxis(batch, suppressedState);
-            }
-        }
-
-        for (var index = 0; index < axisCount; ++index)
-        {
-            var state = AxisVisualStates[index];
-            if (common.DragActive && state.Axis != common.ActiveAxis)
-            {
-                continue;
-            }
-
-            var isActive = common.DragActive && state.Axis == common.ActiveAxis;
-            var isHovered = common.Phase == GizmoInteractionPhase.HoverAxis
-                            && state.Axis == interaction.HoveredAxis;
-
-            var axisColor = common.DragActive && isActive
-                ? EditorColors.GizmoTranslationDragActive
-                : GetAxisColorVector(state.Axis, isActive, isHovered);
-            var glowColor = common.DragActive && isActive
-                ? ThemeColors.Color(axisColor.X, axisColor.Y, axisColor.Z, 0.45f)
-                : GetAxisGlowColorVector(state.Axis, isActive);
-            var visualScale = state.VisualScale;
-            var trimmedEnd = mode == GizmoTransformMode.Translation
-                ? GetTrimmedGizmoEndpoint(state, visualScale)
-                : state.ScreenEnd;
-
-            batch.AddScreenLine(
-                state.ScreenStart,
-                trimmedEnd,
-                glowColor,
-                GizmoConstants.AxisLineThickness * visualScale * GizmoConstants.AxisGlowThicknessMultiplier);
-            batch.AddScreenLine(
-                state.ScreenStart,
-                trimmedEnd,
-                axisColor,
-                GizmoConstants.AxisLineThickness * visualScale);
-
-            if (mode == GizmoTransformMode.Scale)
-            {
-                DrawScaleHandle(batch, state.ScreenEnd, visualScale, axisColor, isActive, isHovered);
-            }
-            else
-            {
-                DrawAxisArrowhead(batch, state, visualScale, axisColor);
-            }
-
-            DrawAxisLabel(
-                drawList,
-                state,
-                visualScale,
-                axisColor,
-                AxisLabel(state.Axis),
-                isActive,
-                isHovered,
-                options);
-        }
-
-        DrawCommonModeElements(batch, drawList, context, scale, common.CenterHovered, common.SurfaceDragActive, options);
-
-        if (interaction.CanStartAxisDrag || common.CanStartSurfaceDrag)
-        {
-            ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
-        }
-
-        if (!TryStartSurfaceDragIfRequested(context, common.CanStartSurfaceDrag)
-            && interaction.CanStartAxisDrag
-            && ImGui.IsMouseClicked(ImGuiMouseButton.Left))
-        {
-            ImGui.SetNextFrameWantCaptureMouse(true);
-            BeginLinearGizmoDrag(context, interaction.HoveredAxis, interaction.HoveredAxisState, mode);
-        }
-
-        if (HandleGizmoDragLifecycle(context, mode)
-            && mode == GizmoTransformMode.Translation)
-        {
-            DrawTranslationDragPath(context, scale);
-        }
-
-        HandleCommonModeTail(context, common.PointerInRegion, interaction.AxisHovered, common.CenterHovered, common.SurfaceDragActive);
-
-        _drawManager.DrawLayer(context.ViewportPos, context.ViewportSize, DrawLayer.Foreground, ImGui.GetStyle().Alpha);
-    }
-
-    private void DrawRotationGizmo(in GizmoFrame frame, in GizmoDrawOptions options)
-    {
-        var context = frame.Context;
-        var drawList = ImGui.GetForegroundDrawList();
-        var batch = _drawManager.BeginPass(DrawPassKind.Gizmo, "Gizmo", DrawLayer.Foreground);
-        var scale = ImGuiHelpers.GlobalScale;
-        var rotationProjection = frame.RotationProjection;
-        var interaction = frame.RotationInteraction;
-        var common = interaction.Common;
-        if (common.ShouldCaptureMouse)
-        {
-            ImGui.SetNextFrameWantCaptureMouse(true);
-        }
-
-        using var alpha = ImRaii.PushStyle(ImGuiStyleVar.Alpha, ClampGizmoAlpha(ImGui.GetStyle().Alpha * ResolveGizmoAlpha(common.IsFocused)));
-
-        if (common.SurfaceDragActive)
-        {
-            DrawTranslationSnapGrid(context, scale, GizmoAxis.None);
-        }
-
-        DrawRotationAxes(batch, rotationProjection, scale, common, interaction.HoverState, RotationAxisSegmentPass.Hidden);
-
-        var radius = rotationProjection.VisualRadius + (GizmoConstants.RotationRingThickness * scale);
-        batch.AddScreenCircleFilled(
-            context.ScreenPos,
-            radius,
-            ThemeColors.Color(0f, 0f, 0f, GizmoConstants.RotationBackgroundAlpha),
-            96);
-
-        DrawRotationAxes(batch, rotationProjection, scale, common, interaction.HoverState, RotationAxisSegmentPass.Visible);
-
-        if (common.DragActive)
-        {
-            DrawRotationDragHighlight(batch, rotationProjection, scale);
-        }
-
-        var snapPolicy = ResolveActiveTransformSnapPolicy(context);
-        if (snapPolicy.RotationEnabled && snapPolicy.RotationStepDegrees > 0f)
-        {
-            GizmoAxis tickAxis = GizmoAxis.None;
-            if (common.DragActive)
-            {
-                tickAxis = common.ActiveAxis;
-            }
-            else if (common.Phase == GizmoInteractionPhase.HoverAxis)
-            {
-                tickAxis = interaction.HoverState.Axis;
-            }
-
-            if (tickAxis != GizmoAxis.None)
-            {
-                var tickAngleOffset = common.DragActive && RotationDragState.RotationDragStartAngle.HasValue
-                    ? RotationDragState.RotationDragStartAngle.Value
-                    : 0f;
-                DrawRotationSnapTicks(batch, rotationProjection, scale, tickAxis, snapPolicy.RotationStepDegrees, tickAngleOffset);
-            }
-        }
-
-        if (common.Phase == GizmoInteractionPhase.HoverAxis && interaction.HoverState.HasPoint)
-        {
-            batch.AddScreenCircle(
-                interaction.HoverState.ScreenPoint,
-                GizmoConstants.RotationHoverIndicatorRadius * scale,
-                GetAxisColorVector(interaction.HoverState.Axis, false, true),
-                GizmoConstants.RotationHoverIndicatorThickness * scale,
-                48);
-        }
-        else if (common.DragActive && RotationDragState.RotationDragStartAngle.HasValue)
-        {
-            var axisDirection = ResolveAxisWorldDirection(RotationDragState.ActiveAxis, rotationProjection.Rotation, rotationProjection.UseWorldSpace);
-            var dragIndicator = GizmoRotationMath.ProjectAxisPoint(
-                CreateRotationMathProjection(rotationProjection),
-                axisDirection,
-                GizmoRotationMath.NormalizeAngle(RotationDragState.RotationDragStartAngle.Value));
-            batch.AddScreenCircleFilled(
-                dragIndicator,
-                GizmoConstants.RotationDragIndicatorRadius * scale,
-                GetAxisColorVector(RotationDragState.ActiveAxis, true, false),
-                48);
-        }
-
-        DrawCommonModeElements(batch, drawList, context, scale, common.CenterHovered, common.SurfaceDragActive, options);
-
-        if (interaction.CanStartRotationDrag || common.CanStartSurfaceDrag)
-        {
-            ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
-        }
-
-        if (!TryStartSurfaceDragIfRequested(context, common.CanStartSurfaceDrag)
-            && interaction.CanStartRotationDrag
-            && ImGui.IsMouseClicked(ImGuiMouseButton.Left))
-        {
-            ImGui.SetNextFrameWantCaptureMouse(true);
-            BeginRotationGizmoDrag(context, interaction.HoverState.Axis, interaction.HoverState, rotationProjection);
-        }
-
-        HandleGizmoDragLifecycle(context, GizmoTransformMode.Rotation);
-        HandleCommonModeTail(context, common.PointerInRegion, interaction.AxisHovered, common.CenterHovered, common.SurfaceDragActive);
-
-        _drawManager.DrawLayer(context.ViewportPos, context.ViewportSize, DrawLayer.Foreground, ImGui.GetStyle().Alpha);
-    }
-
-    private void DrawCommonModeElements(
-        DrawBatch batch,
-        ImDrawListPtr drawList,
-        in GizmoContext context,
-        float scale,
-        bool centerHovered,
-        bool surfaceDragActive,
-        in GizmoDrawOptions options)
-    {
-        DrawCircularCenterHandle(batch, context.ScreenPos, scale, centerHovered, surfaceDragActive, SurfaceAlignToNormal);
-        if (!centerHovered)
-        {
-            DrawGizmoLabel(drawList, context, scale, options);
-        }
-
-        if (centerHovered)
-        {
-            IntonerTooltip.DrawText(GizmoConstants.SurfaceDragTooltip);
-        }
-    }
-
-    private bool TryStartSurfaceDragIfRequested(in GizmoContext context, bool canStartSurfaceDrag)
-    {
-        if (!canStartSurfaceDrag
-            || !ImGui.IsMouseClicked(ImGuiMouseButton.Left))
-        {
-            return false;
-        }
-
-        ImGui.SetNextFrameWantCaptureMouse(true);
-        BeginGizmoSurfaceDrag(context);
-        return true;
-    }
-
-    private void HandleCommonModeTail(
-        in GizmoContext context,
-        bool pointerInRegion,
-        bool hasHoveredModeTarget,
-        bool centerHovered,
-        bool surfaceDragActive)
-    {
-        HandleGizmoSurfaceDragLifecycle(context);
-        HandleGizmoRadialInput(pointerInRegion || hasHoveredModeTarget || centerHovered || surfaceDragActive);
-    }
-
     private static bool IsGizmoWheelOpen()
         => ImGui.IsPopupOpen(GizmoConstants.WheelPopupId);
-
-    private bool IsGizmoDragActive(Guid itemId, GizmoTransformMode mode)
-        => mode switch
-        {
-            GizmoTransformMode.Translation => TranslationDragState.Matches(itemId, mode),
-            GizmoTransformMode.Rotation => RotationDragState.Matches(itemId, mode),
-            GizmoTransformMode.Scale => ScaleDragState.Matches(itemId, mode),
-            _ => false,
-        };
-
-    private bool TryGetMatchingTransformDragState(
-        Guid itemId,
-        GizmoTransformMode mode,
-        [NotNullWhen(true)] out GizmoTransformDragSession? dragState)
-    {
-        if (TryGetActiveTransformDragState(out dragState) && dragState.Matches(itemId, mode))
-        {
-            return true;
-        }
-
-        dragState = null;
-        return false;
-    }
 
     private bool IsGizmoSurfaceDragActive(Guid itemId)
         => SurfaceDragState.IsDragging

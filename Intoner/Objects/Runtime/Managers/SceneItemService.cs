@@ -61,6 +61,11 @@ internal interface ISceneItemService
         IReadOnlyList<SceneItemSnapshot> snapshots,
         out IReadOnlyList<SceneItemSnapshot> appliedSnapshots);
 
+    /// <summary> captures an manipulation session. disposal restores uncommitted previews </summary>
+    /// <param name="snapshots"> unique persisted snapshots in the order required for each preview update </param>
+    /// <returns> an edit session, or null for empty, duplicate, missing, or stale snapshots; preview updates require active runtimes </returns>
+    SceneEditSession? BeginEdit(IReadOnlyList<SceneItemSnapshot> snapshots);
+
     /// <summary> applies ordered scene item create, update, and remove changes </summary>
     SceneMutationStatus ApplyChanges(IReadOnlyList<SceneItemSnapshotChange> changes);
 
@@ -189,6 +194,31 @@ internal sealed class SceneItemService : ISceneItemService
         lock (_mutationLock)
         {
             return _mutations.UpdateMany(snapshots, out appliedSnapshots);
+        }
+    }
+
+    public SceneEditSession? BeginEdit(IReadOnlyList<SceneItemSnapshot> snapshots)
+    {
+        lock (_mutationLock)
+        {
+            if (snapshots.Count == 0 || !_domains.TryCapturePlacedItems(out Dictionary<Guid, SceneItemOwnership> placed))
+            {
+                return null;
+            }
+
+            var items = new SceneItemOwnership[snapshots.Count];
+            var ids = new HashSet<Guid>();
+            for (int index = 0; index < snapshots.Count; ++index)
+            {
+                SceneItemSnapshot snapshot = snapshots[index];
+                if (!ids.Add(snapshot.Id) || !placed.TryGetValue(snapshot.Id, out items[index])
+                    || !Equals(items[index].Snapshot, snapshot))
+                {
+                    return null;
+                }
+            }
+
+            return new SceneEditSession(_logger, _mutationLock, _mutations, items);
         }
     }
 

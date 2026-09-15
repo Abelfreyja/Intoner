@@ -1,4 +1,5 @@
 using Dalamud.Plugin.Services;
+using Intoner.Objects.Utils;
 using Intoner.Services.Gpu;
 using Intoner.Utils;
 using Microsoft.Extensions.Logging;
@@ -8,20 +9,56 @@ using Device = SharpDX.Direct3D11.Device;
 
 namespace Intoner.Scene;
 
-/// <summary>
-/// Performs one click selection query against active scene items using an offscreen GPU id pass.
-/// </summary>
+/// <summary> queries active placed items using the offscreen GPU id pass </summary>
 internal interface ISceneSelectionService
 {
-    /// <summary>
-    /// Tries to resolve the nearest visible active item under the given viewport cursor for selection.
-    /// </summary>
-    /// <param name="viewportPos">The top left viewport position in screen space.</param>
-    /// <param name="viewportSize">The viewport size in pixels.</param>
-    /// <param name="mousePos">The current cursor position in screen space.</param>
-    /// <param name="snapshot">The selected active item snapshot when one was resolved.</param>
-    /// <returns>true when one active item was resolved for selection.</returns>
-    bool TrySelectActiveItem(Vector2 viewportPos, Vector2 viewportSize, Vector2 mousePos, out SceneItemSnapshot snapshot);
+    /// <summary> resolves items covering pixels in a screen rectangle, with depth tested between selectable items </summary>
+    /// <param name="viewportPos"> the top left viewport position in screen space </param>
+    /// <param name="viewportSize"> the viewport size in pixels </param>
+    /// <param name="start"> one rectangle corner, equal corners query one pixel </param>
+    /// <param name="end"> the opposite corner, both corners are included and clipped to the viewport </param>
+    /// <param name="snapshots"> distinct hits in scene item order, including locked items that can occlude other items </param>
+    /// <returns> true for a completed query, including an empty result; false leaves selection unchanged </returns>
+    bool TrySelectActiveItems(Vector2 viewportPos, Vector2 viewportSize, Vector2 start, Vector2 end,
+        out IReadOnlyList<SceneItemSnapshot> snapshots);
+}
+
+/// <summary> describes a selection rectangle clipped to the viewport, with specific right and bottom pixel bounds </summary>
+[StructLayout(LayoutKind.Auto)]
+internal readonly record struct SceneSelectionQuery(int ViewportWidth, int ViewportHeight, int Left, int Top, int Right, int Bottom)
+{
+    public int Width => Right - Left;
+    public int Height => Bottom - Top;
+
+    public static bool TryCreate(Vector2 viewportPos, Vector2 viewportSize, Vector2 start, Vector2 end, out SceneSelectionQuery query)
+    {
+        query = default;
+        Vector2 viewportMax = viewportPos + viewportSize;
+        if (!NumericsUtility.IsFinite(viewportPos) || !NumericsUtility.IsFinite(viewportSize)
+            || !NumericsUtility.IsFinite(viewportMax) || !NumericsUtility.IsFinite(start) || !NumericsUtility.IsFinite(end)
+            || viewportSize.X < 1f || viewportSize.Y < 1f || viewportSize.X >= int.MaxValue || viewportSize.Y >= int.MaxValue)
+        {
+            return false;
+        }
+
+        Vector2 min = Vector2.Min(start, end);
+        Vector2 max = Vector2.Max(start, end);
+        if (min.X >= viewportMax.X || min.Y >= viewportMax.Y || max.X < viewportPos.X || max.Y < viewportPos.Y)
+        {
+            return false;
+        }
+
+        min = Vector2.Max(min, viewportPos) - viewportPos;
+        max = Vector2.Min(max, viewportMax) - viewportPos;
+        int width = Math.Max(1, (int)MathF.Round(viewportSize.X));
+        int height = Math.Max(1, (int)MathF.Round(viewportSize.Y));
+        int left = Math.Clamp((int)MathF.Floor(min.X), 0, width - 1);
+        int top = Math.Clamp((int)MathF.Floor(min.Y), 0, height - 1);
+        query = new SceneSelectionQuery(width, height, left, top,
+            Math.Clamp((int)MathF.Floor(max.X) + 1, left + 1, width),
+            Math.Clamp((int)MathF.Floor(max.Y) + 1, top + 1, height));
+        return true;
+    }
 }
 
 internal sealed class SceneSelectionService : ISceneSelectionService, IDisposable
@@ -50,15 +87,21 @@ internal sealed class SceneSelectionService : ISceneSelectionService, IDisposabl
         _geometryProvider = geometryProvider;
     }
 
-    public bool TrySelectActiveItem(Vector2 viewportPos, Vector2 viewportSize, Vector2 mousePos, out SceneItemSnapshot snapshot)
+    public bool TrySelectActiveItems(Vector2 viewportPos, Vector2 viewportSize, Vector2 start, Vector2 end,
+        out IReadOnlyList<SceneItemSnapshot> snapshots)
     {
-        snapshot = default!;
+        snapshots = [];
 
         if (_disposed
-            || !TryCreateSelectionQuery(viewportPos, viewportSize, mousePos, out var query)
+            || !SceneSelectionQuery.TryCreate(viewportPos, viewportSize, start, end, out var query)
             || !TryCollectSelectionContext(out var context))
         {
             return false;
+        }
+
+        if (!context.Collector.HasDraws)
+        {
+            return true;
         }
 
         if (!_gpuProcessingService.TryEnterOperationScope(CancellationToken.None, GpuJobOptions.None, out var operationScope)
@@ -71,7 +114,7 @@ internal sealed class SceneSelectionService : ISceneSelectionService, IDisposabl
         {
             lock (_rendererLock)
             {
-                return TryExecuteSelectionQuery(context, query, out snapshot);
+                return !_disposed && TryExecuteSelectionQuery(context, query, out snapshots);
             }
         }
     }
@@ -90,33 +133,10 @@ internal sealed class SceneSelectionService : ISceneSelectionService, IDisposabl
         }
     }
 
-    private static bool TryCreateSelectionQuery(Vector2 viewportPos, Vector2 viewportSize, Vector2 mousePos, out SelectionQuery query)
-    {
-        query = default;
-        if (viewportSize.X < 1f
-            || viewportSize.Y < 1f
-            || mousePos.X < viewportPos.X
-            || mousePos.X >= viewportPos.X + viewportSize.X
-            || mousePos.Y < viewportPos.Y
-            || mousePos.Y >= viewportPos.Y + viewportSize.Y)
-        {
-            return false;
-        }
-
-        var viewportWidth = Math.Max(1, (int)MathF.Round(viewportSize.X));
-        var viewportHeight = Math.Max(1, (int)MathF.Round(viewportSize.Y));
-        query = new SelectionQuery(
-            viewportWidth,
-            viewportHeight,
-            Math.Clamp((int)MathF.Floor(mousePos.X - viewportPos.X), 0, viewportWidth - 1),
-            Math.Clamp((int)MathF.Floor(mousePos.Y - viewportPos.Y), 0, viewportHeight - 1));
-        return true;
-    }
-
     private bool TryCollectSelectionContext(out SelectionContext context)
     {
         context = FrameworkThreadUtility.Run(_framework, CollectSelectionContextUnsafe);
-        return context.IsValid && context.Collector.HasDraws;
+        return context.IsValid;
     }
 
     private SelectionContext CollectSelectionContextUnsafe()
@@ -156,9 +176,10 @@ internal sealed class SceneSelectionService : ISceneSelectionService, IDisposabl
         }
     }
 
-    private bool TryExecuteSelectionQuery(SelectionContext context, SelectionQuery query, out SceneItemSnapshot snapshot)
+    private bool TryExecuteSelectionQuery(SelectionContext context, SceneSelectionQuery query,
+        out IReadOnlyList<SceneItemSnapshot> snapshots)
     {
-        snapshot = default!;
+        snapshots = [];
 
         try
         {
@@ -167,23 +188,19 @@ internal sealed class SceneSelectionService : ISceneSelectionService, IDisposabl
                 return false;
             }
 
-            if (!renderer.TryRenderSelectionId(
-                    context.Collector,
-                    context.ViewProjection,
-                    context.UseReverseDepth,
-                    query.ViewportWidth,
-                    query.ViewportHeight,
-                    query.PixelX,
-                    query.PixelY,
-                    out var selectionId)
-                || selectionId == 0
-                || !context.Collector.TryGetSnapshot(selectionId, out snapshot))
+            HashSet<uint> selectionIds = [];
+            renderer.RenderSelectionIds(context.Collector, context.ViewProjection, context.UseReverseDepth, query, selectionIds);
+            List<SceneItemSnapshot> hits = new(selectionIds.Count);
+            foreach (uint selectionId in selectionIds.Order())
             {
-                snapshot = default!;
-                return false;
+                if (context.Collector.TryGetSnapshot(selectionId, out SceneItemSnapshot snapshot))
+                {
+                    hits.Add(snapshot);
+                    renderer.TouchSelectionPaths(context.Collector, selectionId);
+                }
             }
 
-            renderer.TouchSelectionPaths(context.Collector, selectionId);
+            snapshots = hits;
             return true;
         }
         catch (Exception ex)
@@ -191,7 +208,7 @@ internal sealed class SceneSelectionService : ISceneSelectionService, IDisposabl
             _gpuProcessingService.NotifyOperationFailure(ex);
             ResetRendererUnsafe();
             _logger.LogWarning(ex, "scene item gpu selection failed");
-            snapshot = default!;
+            snapshots = [];
             return false;
         }
     }
@@ -239,13 +256,6 @@ internal sealed class SceneSelectionService : ISceneSelectionService, IDisposabl
         _renderer?.Dispose();
         _renderer = null;
     }
-
-    [StructLayout(LayoutKind.Auto)]
-    private readonly record struct SelectionQuery(
-        int ViewportWidth,
-        int ViewportHeight,
-        int PixelX,
-        int PixelY);
 
     [StructLayout(LayoutKind.Auto)]
     private readonly record struct SelectionContext(

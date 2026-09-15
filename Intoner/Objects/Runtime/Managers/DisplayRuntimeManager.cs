@@ -84,6 +84,54 @@ internal sealed class DisplayRuntimeManager : IDisposable
         }
     }
 
+    public SceneMutationStatus PreviewChange(DisplaySnapshot before, DisplaySnapshot after, out DisplaySnapshot applied)
+    {
+        lock (_stateLock)
+        {
+            applied = before;
+            if (_disposed || !_runtimes.TryGetValue(before.Id, out DisplayRuntime? runtime))
+            {
+                return SceneMutationStatus.Rejected;
+            }
+
+            if (runtime.Snapshot == after)
+            {
+                applied = after;
+                return SceneMutationStatus.Applied;
+            }
+
+            if (runtime.Snapshot != before)
+            {
+                return SceneMutationStatus.Rejected;
+            }
+
+            try
+            {
+                if (runtime.TryUpdate(after))
+                {
+                    applied = runtime.Snapshot;
+                    return SceneMutationStatus.Applied;
+                }
+
+                return runtime.TryUpdate(before) ? SceneMutationStatus.Rejected : SceneMutationStatus.RecoveryRequired;
+            }
+            catch (Exception exception)
+            {
+                _logger.LogError(exception, "display edit preview failed for {ItemId}", before.Id);
+                MarkReconciliationPendingLocked();
+                return SceneMutationStatus.RecoveryRequired;
+            }
+            finally
+            {
+                Interlocked.Increment(ref _activeRevision);
+                Interlocked.Increment(ref _boundsRevision);
+            }
+        }
+    }
+
+    public void RequestPreviewRecovery()
+        => MarkReconciliationPending(delayRetry: false);
+
     public bool ReconcileAfterMutation()
     {
         if (_disposed)

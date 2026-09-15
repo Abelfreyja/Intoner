@@ -358,6 +358,7 @@ internal static class IntonerServiceCollectionExtensions
         services.AddScoped<IntonerThemeStyle>();
         services.AddScoped<IntonerUiPerformanceService>();
         services.AddScoped<IntonerWindowService>();
+        services.AddSingleton<IViewportMouseInputService, ViewportMouseInputService>();
 
         services.AddScoped<IHistoryCoordinator, HistoryCoordinator>();
         services.AddScoped<EditorSelectionService>();

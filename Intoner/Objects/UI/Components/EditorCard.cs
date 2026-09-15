@@ -128,7 +128,11 @@ internal static class EditorCard
         var columnCount = drawActions is null ? 1 : 2;
         var tableFlags = drawActions is null
             ? ImGuiTableFlags.SizingStretchSame
-            : ImGuiTableFlags.SizingStretchProp;
+            : ImGuiTableFlags.SizingStretchProp | ImGuiTableFlags.PadOuterX;
+        using var cellPadding = drawActions is null
+            ? default
+            : ImRaii.PushStyle(ImGuiStyleVar.CellPadding,
+                Vector2.Max(ImGui.GetStyle().CellPadding, EditorLayout.ScaledVector(2f, 2f)));
         using var table = ImRaii.Table($"##{id}", columnCount, tableFlags);
         if (!table)
         {

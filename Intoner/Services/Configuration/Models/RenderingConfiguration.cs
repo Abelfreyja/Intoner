@@ -26,6 +26,7 @@ internal sealed class RenderingConfiguration
     public required DrawDepthMode DepthMode { get; set; }
     public required int AntiAliasing { get; set; }
     public required bool DrawOverGameUi { get; set; }
+    public GizmoAppearanceConfiguration GizmoAppearance { get; set; } = new();
 
     public static int ClampAntiAliasing(int value)
         => Math.Clamp(value, MinimumAntiAliasing, MaximumAntiAliasing);
@@ -49,6 +50,7 @@ internal sealed class RenderingConfiguration
             DepthMode = DepthMode,
             AntiAliasing = AntiAliasing,
             DrawOverGameUi = DrawOverGameUi,
+            GizmoAppearance = GizmoAppearance.Copy(),
         };
 }
 

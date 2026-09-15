@@ -8,14 +8,14 @@ internal static class GizmoConstants
     public const float AxisMinScreenLength = 30f;
     public const float AxisBaseScreenLength = 100f;
     public const float AxisMaxScreenLength = 220f;
-    public const float AxisMaxCompensatedHandleScale = 1.75f;
+    public const float AxisMaxCompensatedHandleScale = 1.25f;
     public const float AxisLineThickness = 2.5f;
     public const float AxisArrowLength = 18f;
     public const float AxisArrowWidth = 6.5f;
     public const float AxisLabelDistance = 26f;
     public const float AxisLabelPadding = 4f;
     public const float AxisLabelRoundness = 3.5f;
-    public const float AxisGlowThicknessMultiplier = 3f;
+    public const float AxisGlowThicknessMultiplier = 2.5f;
     public const float AxisCameraShiftStartAlignment = 0.80f;
     public const float AxisCameraShiftEndAlignment = 0.97f;
 
@@ -30,14 +30,16 @@ internal static class GizmoConstants
 
     public const float ScaleHandleSize = 8f;
     public const float ScaleUnitsPerPixel = 0.003f;
+    public const float CombinedRotationRadius = 1.2f;
+    public const float CombinedScaleReach = 1.5f;
 
     public const float RotationRingBaseRadius = 100f;
     public const float RotationProjectionMinReferenceWorldRadius = 0.1f;
     public const float RotationRingThickness = 2.6f;
     public const float RotationInteractionPadding = 30f;
     public const float RotationHoverTolerance = 14f;
-    public const float RotationHoverIndicatorRadius = 10f;
-    public const float RotationHoverIndicatorThickness = 2.2f;
+    public const float RotationHoverIndicatorRadius = 4f;
+    public const float RotationHoverIndicatorThickness = 1.5f;
     public const float RotationDragIndicatorRadius = 4f;
     public const float RotationBackgroundAlpha = 0.31f;
     public const float RotationHighlightThicknessMultiplier = 1.75f;
@@ -57,7 +59,7 @@ internal static class GizmoConstants
     public const float TranslationDragStartMarkerRadius = 3.5f;
     public const float SlowDragMultiplier = 1f / 5f;
 
-    public const float IdleAlpha = 0.45f;
+    public const float IdleAlpha = 0.6f;
     public const float ActiveAlpha = 1f;
 
     public const float OptionWheelBaseRadius = 76f;

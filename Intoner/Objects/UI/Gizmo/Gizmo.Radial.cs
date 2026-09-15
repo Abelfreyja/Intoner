@@ -5,13 +5,17 @@ using Dalamud.Interface.Utility.Raii;
 using Intoner.Objects.Models;
 using Intoner.Objects.Utils;
 using Intoner.Scene;
-using Intoner.UI.Components;
 using System.Numerics;
 
 namespace Intoner.Objects.UI;
 
 internal sealed partial class Gizmo
 {
+    private static readonly GizmoWheelAction[] PrimaryWheelActions = [GizmoWheelAction.Universal, GizmoWheelAction.Move,
+        GizmoWheelAction.Rotate, GizmoWheelAction.Scale, GizmoWheelAction.LocalSpace, GizmoWheelAction.WorldSpace, GizmoWheelAction.Bounds];
+    private static readonly GizmoWheelAction[] SecondaryWheelActions = [GizmoWheelAction.Duplicate, GizmoWheelAction.MoveToPlayer,
+        GizmoWheelAction.Visibility, GizmoWheelAction.ResetTransform, GizmoWheelAction.Remove, GizmoWheelAction.Hide];
+
     private void DrawGizmoWheel(in GizmoContext context)
     {
         var scale = ImGuiHelpers.GlobalScale;
@@ -44,35 +48,33 @@ internal sealed partial class Gizmo
             var mousePos = ImGui.GetIO().MousePos;
 
             drawList.AddCircleFilled(center, radius, ImGui.GetColorU32(ThemeColors.Color(0.11f, 0.11f, 0.11f, 1f)), 96);
-            drawList.AddCircleFilled(center, innerRadius, ImGui.GetColorU32(ThemeColors.Color(0.11f, 0.11f, 0.11f, 1f)), 72);
             drawList.AddCircle(center, radius, ImGui.GetColorU32(ThemeColors.Color(0.10f, 0.10f, 0.10f, 1f)), 96, 3.5f * scale);
             drawList.AddCircle(center, innerRadius, ImGui.GetColorU32(ThemeColors.Color(0.10f, 0.10f, 0.10f, 1f)), 72, 3f * scale);
 
             var ringInner = innerRadius * 0.92f;
             var ringOuter = radius * 0.98f;
-            var segments = RadialActionsPage
-                ? BuildSecondaryWheelSegments(context)
-                : BuildPrimaryWheelSegments(context);
+            ReadOnlySpan<GizmoWheelAction> actions = GetWheelActions(RadialActionsPage, ImGui.GetIO().KeyShift);
 
-            var segmentSweep = (MathF.PI * 2f) / segments.Length;
+            var segmentSweep = (MathF.PI * 2f) / actions.Length;
             var baseAngle = (-MathF.PI / 2f) - (segmentSweep * 0.5f);
             var hoveredIndex = -1;
+            GizmoWheelSegment hoveredSegment = default;
 
-            for (var index = 0; index < segments.Length; ++index)
+            for (var index = 0; index < actions.Length; ++index)
             {
-                var segment = segments[index];
+                GizmoWheelSegment segment = GetWheelSegment(actions[index], context);
                 var startAngle = baseAngle + (segmentSweep * index);
                 var endAngle = startAngle + segmentSweep;
                 var isHovered = GizmoRotationMath.IsPointInRingSegment(mousePos, center, ringInner, ringOuter, startAngle, endAngle);
                 if (isHovered)
                 {
                     hoveredIndex = index;
+                    hoveredSegment = segment;
                 }
 
                 DrawRingSegment(
                     drawList,
                     center,
-                    ringInner,
                     ringOuter,
                     startAngle,
                     endAngle,
@@ -92,6 +94,7 @@ internal sealed partial class Gizmo
                     iconColor);
             }
 
+            drawList.AddCircleFilled(center, ringInner, ImGui.GetColorU32(ThemeColors.Color(0.11f, 0.11f, 0.11f, 1f)), 96);
             var centerButtonRadius = innerRadius * 0.42f;
             var centerHovered = Vector2.Distance(mousePos, center) <= centerButtonRadius;
             var centerColor = RadialActionsPage
@@ -120,7 +123,7 @@ internal sealed partial class Gizmo
             }
             else if (hoveredIndex >= 0)
             {
-                PendingRadialTooltip = new GizmoRadialTooltipInfo(mousePos, segments[hoveredIndex].Tooltip);
+                PendingRadialTooltip = new GizmoRadialTooltipInfo(mousePos, hoveredSegment.Tooltip);
             }
 
             var activated = ImGui.IsMouseClicked(ImGuiMouseButton.Left);
@@ -131,10 +134,9 @@ internal sealed partial class Gizmo
             }
             else if (activated && hoveredIndex >= 0)
             {
-                var segment = segments[hoveredIndex];
-                if (segment.IsEnabled)
+                if (hoveredSegment.IsEnabled)
                 {
-                    segment.OnClick();
+                    ExecuteWheelAction(hoveredSegment, context);
                     ImGui.CloseCurrentPopup();
                 }
             }
@@ -151,156 +153,144 @@ internal sealed partial class Gizmo
 
     }
 
-    private GizmoWheelSegment[] BuildPrimaryWheelSegments(in GizmoContext context)
+    private ReadOnlySpan<GizmoWheelAction> GetWheelActions(bool secondary, bool combine)
     {
-        var scaleEnabled = context.ScaleSupported;
-        string scaleLabel;
-        if (scaleEnabled)
+        if (secondary)
         {
-            scaleLabel = "Scale Gizmo";
-        }
-        else if (context.SelectionCount > 1)
-        {
-            scaleLabel = "Select one scalable item to use the scale gizmo";
-        }
-        else
-        {
-            scaleLabel = "This item does not support scaling";
+            return SecondaryWheelActions;
         }
 
-        return
-        [
-            new GizmoWheelSegment(
-                FontAwesomeIcon.ArrowsAlt,
-                "Move Gizmo",
-                EditorColors.TransformModeAccent(GizmoTransformMode.Translation),
-                Mode == GizmoTransformMode.Translation,
-                true,
-                () => Mode = GizmoTransformMode.Translation),
-            new GizmoWheelSegment(
-                FontAwesomeIcon.SyncAlt,
-                "Rotate Gizmo",
-                EditorColors.TransformModeAccent(GizmoTransformMode.Rotation),
-                Mode == GizmoTransformMode.Rotation,
-                true,
-                () => Mode = GizmoTransformMode.Rotation),
-            new GizmoWheelSegment(
-                FontAwesomeIcon.CompressArrowsAlt,
-                scaleLabel,
-                EditorColors.TransformModeAccent(GizmoTransformMode.Scale),
-                Mode == GizmoTransformMode.Scale,
-                scaleEnabled,
-                () => Mode = GizmoTransformMode.Scale),
-            new GizmoWheelSegment(
-                FontAwesomeIcon.Cube,
-                "Local Space",
-                ThemeColors.AccentOrange,
-                CurrentBoundsOverlaySpace == BoundsOverlaySpace.Local,
-                true,
-                () => CurrentBoundsOverlaySpace = BoundsOverlaySpace.Local),
-            new GizmoWheelSegment(
-                FontAwesomeIcon.Globe,
-                "World Space",
-                ThemeColors.AccentBlue,
-                CurrentBoundsOverlaySpace == BoundsOverlaySpace.World,
-                true,
-                () => CurrentBoundsOverlaySpace = BoundsOverlaySpace.World),
-            new GizmoWheelSegment(
-                FontAwesomeIcon.BorderAll,
-                Settings.BoundsInteractionSettings.BoundsEnabled ? "Hide Bounds Overlay" : "Show Bounds Overlay",
-                EditorColors.BoundsOverlayAccent,
-                Settings.BoundsInteractionSettings.BoundsEnabled,
-                true,
-                ToggleBoundsOverlayEnabled),
-        ];
+        return PrimaryWheelActions.AsSpan(combine || Mode == GizmoTransformMode.Universal ? 0 : 1);
     }
 
-    private GizmoWheelSegment[] BuildSecondaryWheelSegments(in GizmoContext context)
+    private GizmoWheelSegment GetWheelSegment(GizmoWheelAction action, in GizmoContext context)
     {
-        var snapshot = context.PrimarySnapshot;
-        var selectedSnapshots = context.SelectedSnapshots;
-        var selectionCount = context.SelectionCount;
-        var canMoveToPlayer = context.SelectionCount == 1;
-        var anyVisible = false;
-        for (var index = 0; index < selectedSnapshots.Count; ++index)
+        bool singleSelection = context.SelectionCount == 1;
+        switch (action)
         {
-            if (!selectedSnapshots[index].Visible)
-            {
-                continue;
-            }
+            case GizmoWheelAction.Universal:
+                return CreateTransformWheelSegment(action, GizmoTransformMode.Universal, FontAwesomeIcon.Shapes, "Universal Gizmo");
+            case GizmoWheelAction.Move:
+                return CreateTransformWheelSegment(action, GizmoTransformMode.Translation, FontAwesomeIcon.ArrowsAlt, "Move Gizmo");
+            case GizmoWheelAction.Rotate:
+                return CreateTransformWheelSegment(action, GizmoTransformMode.Rotation, FontAwesomeIcon.SyncAlt, "Rotate Gizmo");
+            case GizmoWheelAction.Scale:
+                string scaleLabel = "Scale Gizmo";
+                if (!context.ScaleSupported)
+                {
+                    scaleLabel = context.SelectionCount > 1
+                        ? "Select one scalable item to use the scale gizmo"
+                        : "This item does not support scaling";
+                }
+                return CreateTransformWheelSegment(action, GizmoTransformMode.Scale, FontAwesomeIcon.CompressArrowsAlt, scaleLabel, context.ScaleSupported);
+            case GizmoWheelAction.LocalSpace:
+                return new(action, FontAwesomeIcon.Cube, "Local Space", ThemeColors.AccentOrange, CurrentBoundsOverlaySpace == BoundsOverlaySpace.Local);
+            case GizmoWheelAction.WorldSpace:
+                return new(action, FontAwesomeIcon.Globe, "World Space", ThemeColors.AccentBlue, CurrentBoundsOverlaySpace == BoundsOverlaySpace.World);
+            case GizmoWheelAction.Bounds:
+                return new(action, FontAwesomeIcon.BorderAll,
+                    Settings.BoundsInteractionSettings.BoundsEnabled ? "Hide Bounds Overlay" : "Show Bounds Overlay",
+                    EditorColors.BoundsOverlayAccent, Settings.BoundsInteractionSettings.BoundsEnabled);
+            case GizmoWheelAction.Duplicate:
+                return new(action, FontAwesomeIcon.Copy, singleSelection ? "Duplicate Selected Item" : "Duplicate Selected Items",
+                    ThemeColors.Color(0.35f, 0.75f, 0.95f, 1f));
+            case GizmoWheelAction.MoveToPlayer:
+                return new(action, FontAwesomeIcon.Running,
+                    singleSelection ? "Move Selected Item To Player" : "Move to player is only available for one selected item",
+                    ThemeColors.Color(0.50f, 0.90f, 0.60f, 1f), IsEnabled: singleSelection);
+            case GizmoWheelAction.Visibility:
+                bool anyVisible = false;
+                for (int index = 0; index < context.SelectedSnapshots.Count; ++index)
+                {
+                    if (context.SelectedSnapshots[index].Visible)
+                    {
+                        anyVisible = true;
+                        break;
+                    }
+                }
+                string visibilityLabel = (anyVisible, singleSelection) switch
+                {
+                    (true, true) => "Hide Selected Item",
+                    (true, false) => "Hide Selected Items",
+                    (false, true) => "Show Selected Item",
+                    (false, false) => "Show Selected Items",
+                };
+                return new(action, anyVisible ? FontAwesomeIcon.Eye : FontAwesomeIcon.EyeSlash, visibilityLabel,
+                    ThemeColors.Color(0.75f, 0.75f, 0.90f, 1f), anyVisible);
+            case GizmoWheelAction.ResetTransform:
+                return new(action, FontAwesomeIcon.Recycle, singleSelection ? "Reset Rotation and Scale" : "Reset Rotation and Scale For Selected Items",
+                    ThemeColors.Color(0.50f, 0.70f, 0.95f, 1f));
+            case GizmoWheelAction.Remove:
+                return new(action, FontAwesomeIcon.Trash, singleSelection ? "Remove Selected Item" : "Remove Selected Items",
+                    ThemeColors.Color(0.95f, 0.40f, 0.40f, 1f));
+            case GizmoWheelAction.Hide:
+                return new(action, FontAwesomeIcon.TimesCircle, "Hide Gizmo", ThemeColors.Color(0.65f, 0.55f, 0.95f, 1f),
+                    Mode == GizmoTransformMode.None);
+            default:
+                throw new ArgumentOutOfRangeException(nameof(action));
+        }
+    }
 
-            anyVisible = true;
-            break;
+    private GizmoWheelSegment CreateTransformWheelSegment(
+        GizmoWheelAction action, GizmoTransformMode mode, FontAwesomeIcon icon, string tooltip, bool enabled = true)
+        => new(action, icon, tooltip, EditorColors.TransformModeAccent(mode), (Mode & mode) == mode, enabled, mode);
+
+    private void ExecuteWheelAction(in GizmoWheelSegment segment, in GizmoContext context)
+    {
+        if (segment.Mode != GizmoTransformMode.None)
+        {
+            if (ImGui.GetIO().KeyShift && segment.Mode != GizmoTransformMode.Universal)
+            {
+                Settings.ToggleMode(segment.Mode, true);
+            }
+            else
+            {
+                Mode = segment.Mode;
+            }
+            return;
         }
 
-        bool singleSelection = selectionCount == 1;
-        string visibilityAction = anyVisible ? "Hide" : "Show";
-        var duplicateLabel = singleSelection ? "Duplicate Selected Item" : "Duplicate Selected Items";
-        var visibilityLabel = $"{visibilityAction} Selected {(singleSelection ? "Item" : "Items")}";
-        var visibilityHistoryTitle = $"{visibilityAction} {(singleSelection ? "Item" : "Items")}";
-        var resetLabel = singleSelection ? "Reset Rotation and Scale" : "Reset Rotation and Scale For Selected Items";
-        var removeLabel = singleSelection ? "Remove Selected Item" : "Remove Selected Items";
-        return
-        [
-            new GizmoWheelSegment(
-                FontAwesomeIcon.Copy,
-                duplicateLabel,
-                ThemeColors.Color(0.35f, 0.75f, 0.95f, 1f),
-                false,
-                true,
-                () => _host.TryDuplicateSelectedItems(selectedSnapshots)),
-            new GizmoWheelSegment(
-                FontAwesomeIcon.Running,
-                canMoveToPlayer ? "Move Selected Item To Player" : "Move to player is only available for one selected item",
-                ThemeColors.Color(0.50f, 0.90f, 0.60f, 1f),
-                false,
-                canMoveToPlayer,
-                () => _host.TryMoveItemToPlayerWithHistory(snapshot.Id)),
-            new GizmoWheelSegment(
-                anyVisible ? FontAwesomeIcon.Eye : FontAwesomeIcon.EyeSlash,
-                visibilityLabel,
-                ThemeColors.Color(0.75f, 0.75f, 0.90f, 1f),
-                anyVisible,
-                true,
-                () => _host.TryApplySelectedSnapshotUpdateWithHistory(
-                    SceneHistoryKind.Visibility,
-                    visibilityHistoryTitle,
-                    selectedSnapshots,
-                    entry => entry with { Visible = !anyVisible })),
-            new GizmoWheelSegment(
-                FontAwesomeIcon.Recycle,
-                resetLabel,
-                ThemeColors.Color(0.50f, 0.70f, 0.95f, 1f),
-                false,
-                true,
-                () => _host.TryApplySelectedSnapshotUpdateWithHistory(
-                    SceneHistoryKind.Transform,
-                    resetLabel,
-                    selectedSnapshots,
-                    entry =>
+        switch (segment.Action)
+        {
+            case GizmoWheelAction.LocalSpace:
+                CurrentBoundsOverlaySpace = BoundsOverlaySpace.Local;
+                break;
+            case GizmoWheelAction.WorldSpace:
+                CurrentBoundsOverlaySpace = BoundsOverlaySpace.World;
+                break;
+            case GizmoWheelAction.Bounds:
+                ToggleBoundsOverlayEnabled();
+                break;
+            case GizmoWheelAction.Duplicate:
+                _host.TryDuplicateSelectedItems(context.SelectedSnapshots);
+                break;
+            case GizmoWheelAction.MoveToPlayer:
+                _host.TryMoveItemToPlayerWithHistory(context.PrimarySnapshot.Id);
+                break;
+            case GizmoWheelAction.Visibility:
+                bool visible = !segment.IsActive;
+                string title = $"{(visible ? "Show" : "Hide")} {(context.SelectionCount == 1 ? "Item" : "Items")}";
+                _host.TryApplySelectedSnapshotUpdateWithHistory(SceneHistoryKind.Visibility, title,
+                    context.SelectedSnapshots, entry => entry with { Visible = visible });
+                break;
+            case GizmoWheelAction.ResetTransform:
+                _host.TryApplySelectedSnapshotUpdateWithHistory(SceneHistoryKind.Transform, segment.Tooltip,
+                    context.SelectedSnapshots, entry => entry with
                     {
-                        var transform = entry.Transform with
+                        Transform = entry.Transform with
                         {
                             RotationDegrees = Vector3.Zero,
                             Scale = CanUseScaleGizmo(entry) ? Vector3.One : entry.Transform.Scale,
-                        };
-                        return entry with { Transform = transform };
-                    })),
-            new GizmoWheelSegment(
-                FontAwesomeIcon.Trash,
-                removeLabel,
-                ThemeColors.Color(0.95f, 0.40f, 0.40f, 1f),
-                false,
-                true,
-                () => _host.TryRemoveSelectedItems(selectedSnapshots)),
-            new GizmoWheelSegment(
-                FontAwesomeIcon.TimesCircle,
-                "Hide Gizmo",
-                ThemeColors.Color(0.65f, 0.55f, 0.95f, 1f),
-                Mode == GizmoTransformMode.None,
-                true,
-                () => Mode = GizmoTransformMode.None),
-        ];
+                        },
+                    });
+                break;
+            case GizmoWheelAction.Remove:
+                _host.TryRemoveSelectedItems(context.SelectedSnapshots);
+                break;
+            case GizmoWheelAction.Hide:
+                Mode = GizmoTransformMode.None;
+                break;
+        }
     }
 
     private void HandleGizmoRadialInput(bool pointerInRegion)
@@ -325,7 +315,6 @@ internal sealed partial class Gizmo
     private static void DrawRingSegment(
         ImDrawListPtr drawList,
         Vector2 center,
-        float innerRadius,
         float outerRadius,
         float startAngle,
         float endAngle,
@@ -333,8 +322,8 @@ internal sealed partial class Gizmo
     {
         const int steps = 48;
         drawList.PathClear();
+        drawList.PathLineTo(center);
         drawList.PathArcTo(center, outerRadius, startAngle, endAngle, steps);
-        drawList.PathArcTo(center, innerRadius, endAngle, startAngle, steps);
         drawList.PathFillConvex(fillColor);
     }
 

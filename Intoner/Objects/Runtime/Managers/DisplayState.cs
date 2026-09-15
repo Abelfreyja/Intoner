@@ -376,7 +376,7 @@ internal sealed class DisplayState : IDisposable
         }
     }
 
-    private static DisplaySnapshot Sanitize(DisplaySnapshot snapshot)
+    internal static DisplaySnapshot Sanitize(DisplaySnapshot snapshot)
     {
         DisplaySettings settings = snapshot.Settings;
         return snapshot with

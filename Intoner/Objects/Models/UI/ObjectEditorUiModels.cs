@@ -27,12 +27,20 @@ internal enum BoundsOverlaySpace
     Local,
 }
 
+[Flags]
 internal enum GizmoTransformMode
 {
-    None,
-    Translation,
-    Rotation,
-    Scale,
+    None = 0,
+    Translation = 1,
+    Rotation = 2,
+    Scale = 4,
+    Universal = Translation | Rotation | Scale,
+}
+
+internal static class GizmoTransformModeExtensions
+{
+    public static bool IsCombined(this GizmoTransformMode mode)
+        => mode != GizmoTransformMode.None && (mode & (mode - 1)) != GizmoTransformMode.None;
 }
 
 internal enum GizmoAxis

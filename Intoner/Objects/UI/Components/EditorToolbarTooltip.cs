@@ -39,23 +39,36 @@ internal static class EditorToolbarTooltip
         Vector4 accent,
         IReadOnlyList<EditorToolbarTooltipAction> actions,
         IReadOnlyList<EditorToolbarTooltipStatus> statuses,
-        EditorToolbarTooltipKeyHint? keyHint = null)
+        EditorToolbarTooltipKeyHint? keyHint = null,
+        string description = "")
     {
         ArgumentNullException.ThrowIfNull(actions);
         ArgumentNullException.ThrowIfNull(statuses);
 
-        LayoutMetrics metrics = MeasureLayout(icon, title, actions, statuses, keyHint);
+        if (IntonerTooltip.IsSuppressed || string.IsNullOrWhiteSpace(title))
+        {
+            return;
+        }
+
+        description ??= string.Empty;
+        bool hasSections = actions.Count > 0 || statuses.Count > 0;
+        LayoutMetrics metrics = MeasureLayout(icon, title, description, actions, statuses, keyHint);
         IntonerTooltip.DrawContentSized(
             () =>
             {
-                IntonerTooltipContent.Heading(
-                    icon,
-                    title,
-                    accentOverride: accent,
-                    separatorTopSpacing: 4f);
-                DrawActions(actions, accent, metrics.ActionGestureWidth);
-                IntonerTooltipContent.Separator();
-                DrawStatuses(statuses, accent, metrics.StatusValueWidth);
+                IntonerTooltipContent.Header(icon, title, description, accent);
+                if (actions.Count > 0)
+                {
+                    IntonerTooltipContent.Separator(4f);
+                    DrawActions(actions, accent, metrics.ActionGestureWidth);
+                }
+
+                if (statuses.Count > 0)
+                {
+                    IntonerTooltipContent.Separator(actions.Count > 0 ? 0f : 4f);
+                    DrawStatuses(statuses, accent, metrics.StatusValueWidth);
+                }
+
                 if (keyHint is { } hint)
                 {
                     IntonerTooltipContent.Separator();
@@ -66,8 +79,8 @@ internal static class EditorToolbarTooltip
             new IntonerTooltipOptions
             {
                 Accent = accent,
-                MaxWidth = MaxWidth,
-                ItemSpacing = new Vector2(6f, 5f),
+                MaxWidth = hasSections ? MaxWidth : null,
+                ItemSpacing = hasSections ? new Vector2(6f, 5f) : null,
             });
     }
 
@@ -76,11 +89,6 @@ internal static class EditorToolbarTooltip
         Vector4 accent,
         float gestureWidth)
     {
-        if (actions.Count == 0)
-        {
-            return;
-        }
-
         using var table = ImRaii.Table(
             "##toolbarTooltipActions",
             2,
@@ -114,11 +122,6 @@ internal static class EditorToolbarTooltip
         Vector4 accent,
         float valueWidth)
     {
-        if (statuses.Count == 0)
-        {
-            return;
-        }
-
         using var table = ImRaii.Table(
             "##toolbarTooltipStatuses",
             3,
@@ -171,11 +174,12 @@ internal static class EditorToolbarTooltip
     private static LayoutMetrics MeasureLayout(
         FontAwesomeIcon icon,
         string title,
+        string description,
         IReadOnlyList<EditorToolbarTooltipAction> actions,
         IReadOnlyList<EditorToolbarTooltipStatus> statuses,
         EditorToolbarTooltipKeyHint? keyHint)
     {
-        float contentWidth = IntonerTooltipContent.MeasureHeaderWidth(icon, title);
+        float contentWidth = IntonerTooltipContent.MeasureHeaderWidth(icon, title, description);
         float actionGestureWidth = 0f;
         float actionDescriptionWidth = 0f;
         foreach (EditorToolbarTooltipAction action in actions)

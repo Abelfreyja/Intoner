@@ -2,6 +2,7 @@ using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
+using Intoner.Objects.Models;
 using Intoner.Objects.UI.Components;
 using Intoner.Scene;
 using System.Numerics;
@@ -12,15 +13,24 @@ internal sealed partial class EditorToolbar
 {
     private const FontAwesomeIcon BoundsToolbarIcon = FontAwesomeIcon.Bullseye;
     private const string BoundsOptionsPopupId = "##sceneBoundsOptionsPopup";
+    private static readonly (SceneBoundsCategory Category, string Label, FontAwesomeIcon Icon)[] BoundsFilterOptions =
+    [
+        (SceneBoundsCategory.Furniture, "Furniture", SceneItemPresentation.ResolveObjectKindIcon(ObjectKind.Furniture)),
+        (SceneBoundsCategory.BgObject, "Bg Object", SceneItemPresentation.ResolveObjectKindIcon(ObjectKind.BgObject)),
+        (SceneBoundsCategory.Vfx, "VFX", SceneItemPresentation.ResolveObjectKindIcon(ObjectKind.Vfx)),
+        (SceneBoundsCategory.Light, "Light", SceneItemPresentation.ResolveObjectKindIcon(ObjectKind.Light)),
+        (SceneBoundsCategory.Display, "Display", FontAwesomeIcon.Desktop),
+    ];
 
     private void DrawBoundsToolbarButton(ToolbarSurfaceMode mode)
     {
+        SceneBoundsInteractionSettings settings = _gizmo.Settings.BoundsInteractionSettings;
         Vector4? accent = null;
-        if (_gizmo.Settings.BoundsInteractionSettings.BoundsEnabled)
+        if (settings.BoundsEnabled)
         {
             accent = EditorColors.BoundsOverlayAccent;
         }
-        else if (_gizmo.Settings.BoundsInteractionSettings.SelectionEnabled)
+        else if (settings.SelectionEnabled)
         {
             accent = ThemeColors.AccentBlue;
         }
@@ -45,13 +55,12 @@ internal sealed partial class EditorToolbar
             ImGui.OpenPopup(BoundsOptionsPopupId);
         }
 
-        var anchorMin = ImGui.GetItemRectMin();
-        var anchorMax = ImGui.GetItemRectMax();
-        DrawBoundsOptionsPopup(anchorMin, anchorMax);
+        DrawBoundsOptionsPopup();
     }
 
     private void DrawBoundsToolbarButtonBackground(ImDrawListPtr drawList, Vector2 min, Vector2 max, bool hovered, bool active)
     {
+        SceneBoundsInteractionSettings settings = _gizmo.Settings.BoundsInteractionSettings;
         var scale = ImGuiHelpers.GlobalScale;
         var inset = 3f * scale;
         var innerMin = min + new Vector2(inset, inset);
@@ -80,7 +89,7 @@ internal sealed partial class EditorToolbar
             new Vector2(innerMin.X, innerMin.Y),
             new Vector2(innerMin.X + bandWidth, innerMax.Y),
             ThemeColors.AccentBlue,
-            _gizmo.Settings.BoundsInteractionSettings.SelectionEnabled,
+            settings.SelectionEnabled,
             alpha);
 
         var rightMinX = innerMin.X + bandWidth + bandGap;
@@ -89,12 +98,14 @@ internal sealed partial class EditorToolbar
             new Vector2(rightMinX, innerMin.Y),
             new Vector2(innerMax.X, innerMax.Y),
             EditorColors.BoundsOverlayAccent,
-            _gizmo.Settings.BoundsInteractionSettings.BoundsEnabled,
+            settings.BoundsEnabled,
             alpha);
     }
 
     private void DrawBoundsToolbarTooltip()
-        => EditorToolbarTooltip.Draw(
+    {
+        SceneBoundsInteractionSettings settings = _gizmo.Settings.BoundsInteractionSettings;
+        EditorToolbarTooltip.Draw(
             BoundsToolbarIcon,
             "Target and Bounds",
             EditorColors.BoundsOverlayAccent,
@@ -103,89 +114,129 @@ internal sealed partial class EditorToolbar
                 new("Right click", "Open options"),
             ],
             [
-                new(FontAwesomeIcon.MousePointer, "Selection", _gizmo.Settings.BoundsInteractionSettings.SelectionEnabled),
-                new(FontAwesomeIcon.BorderAll, "Bounds", _gizmo.Settings.BoundsInteractionSettings.BoundsEnabled),
-                new(
-                    FontAwesomeIcon.SlidersH,
-                    "Filter",
-                    null,
-                    BuildBoundsFilterSummary(_gizmo.Settings.BoundsInteractionSettings.BoundsFilter)),
-                new(FontAwesomeIcon.Bullseye, "Selected only", _gizmo.Settings.BoundsInteractionSettings.ShowSelectedOnly),
+                new(FontAwesomeIcon.MousePointer, "Selection", settings.SelectionEnabled),
+                new(FontAwesomeIcon.BorderNone, "Box selection", settings.SelectionEnabled && settings.BoxSelectionEnabled),
+                new(FontAwesomeIcon.BorderAll, "Bounds", settings.BoundsEnabled),
+                new(FontAwesomeIcon.SlidersH, "Filter", null, BuildBoundsFilterSummary(settings.BoundsFilter)),
+                new(FontAwesomeIcon.Bullseye, "Selected only", settings.ShowSelectedOnly),
             ]);
+    }
 
-    private void DrawBoundsOptionsPopup(Vector2 anchorMin, Vector2 anchorMax)
+    private void DrawBoundsOptionsPopup()
     {
         var scale = ImGuiHelpers.GlobalScale;
         var accent = EditorColors.BoundsOverlayAccent;
-        var popupWidth = 320f * scale;
-        ImGui.SetNextWindowPos(new Vector2(anchorMin.X, anchorMax.Y + (8f * scale)), ImGuiCond.Appearing);
+        ImGuiViewportPtr viewport = ImGui.GetMainViewport();
+        Vector2 margin = new(8f * scale);
+        Vector2 availableSize = Vector2.Max(Vector2.One, viewport.WorkSize - margin * 2f);
+        float popupWidth = MathF.Min(320f * scale, availableSize.X);
         ImGui.SetNextWindowSize(new Vector2(popupWidth, 0f), ImGuiCond.Appearing);
-        ImGui.SetNextWindowSizeConstraints(new Vector2(popupWidth, 0f), new Vector2(popupWidth, float.MaxValue));
+        ImGui.SetNextWindowSizeConstraints(new Vector2(popupWidth, 0f), new Vector2(popupWidth, availableSize.Y));
 
         using var windowPadding = ImRaii.PushStyle(ImGuiStyleVar.WindowPadding, new Vector2(10f * scale, 10f * scale));
         using var windowRounding = ImRaii.PushStyle(ImGuiStyleVar.WindowRounding, 12f * scale);
         using var popupBg = ImRaii.PushColor(ImGuiCol.PopupBg, ThemeColors.WithAlpha(_editorOverlayLayer.BackgroundColor, 0.98f));
         using var popupBorder = ImRaii.PushColor(ImGuiCol.Border, ThemeColors.WithAlpha(accent, 0.42f));
 
-        using var popup = ImRaii.Popup(BoundsOptionsPopupId, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
+        using var popup = ImRaii.Popup(BoundsOptionsPopupId);
         if (!popup)
         {
             return;
         }
 
         ImGui.TextColored(accent, "Target and Bounds");
-        ImGui.TextDisabled("Settings to change selection and bounds behavior.");
         ImGuiHelpers.ScaledDummy(4f);
 
         using (var settingsTable = EditorPropertyTable.Begin("##boundsOptionsSettings"))
         {
             if (settingsTable)
             {
-                var selectionEnabled = _gizmo.Settings.BoundsInteractionSettings.SelectionEnabled;
-                if (EditorPropertyTable.Checkbox("boundsSelectionEnabled", "Selection Enabled", ref selectionEnabled))
+                SceneBoundsInteractionSettings settings = _gizmo.Settings.BoundsInteractionSettings;
+                bool selectionEnabled = DrawBoundsOption("boundsSelectionEnabled", "Selection Enabled", settings.SelectionEnabled,
+                    "Select scene items with a click. Hold Ctrl to add or remove an item.");
+                _gizmo.Settings.BoundsInteractionSettings = settings with
                 {
-                    _gizmo.Settings.BoundsInteractionSettings = _gizmo.Settings.BoundsInteractionSettings with { SelectionEnabled = selectionEnabled };
-                }
-
-                var boundsEnabled = _gizmo.Settings.BoundsInteractionSettings.BoundsEnabled;
-                if (EditorPropertyTable.Checkbox("boundsOverlayEnabled", "Bounds Enabled", ref boundsEnabled))
-                {
-                    _gizmo.Settings.BoundsInteractionSettings = _gizmo.Settings.BoundsInteractionSettings with { BoundsEnabled = boundsEnabled };
-                }
-
-                var showSelectedOnly = _gizmo.Settings.BoundsInteractionSettings.ShowSelectedOnly;
-                if (EditorPropertyTable.Checkbox("boundsSelectedOnly", "Show Selected Only", ref showSelectedOnly))
-                {
-                    _gizmo.Settings.BoundsInteractionSettings = _gizmo.Settings.BoundsInteractionSettings with { ShowSelectedOnly = showSelectedOnly };
-                }
+                    SelectionEnabled = selectionEnabled,
+                    BoxSelectionEnabled = DrawBoundsOption("boundsBoxSelectionEnabled", "Box Selection", settings.BoxSelectionEnabled,
+                        selectionEnabled ? "Drag empty space to select multiple items. Hold Ctrl to add or remove them."
+                            : "Enable selection to use box selection.", selectionEnabled),
+                    BoundsEnabled = DrawBoundsOption("boundsOverlayEnabled", "Bounds Enabled", settings.BoundsEnabled,
+                        "Show bounds for the item types enabled below. Does not change which items can be selected."),
+                    ShowSelectedOnly = DrawBoundsOption("boundsSelectedOnly", "Show Selected Only", settings.ShowSelectedOnly,
+                        "Limit bounds to selected items. The type filter still applies."),
+                };
             }
         }
 
         ImGuiHelpers.ScaledDummy(6f);
-        ImGui.TextDisabled("Bounds Filter");
-        ImGuiHelpers.ScaledDummy(2f);
-
-        DrawBoundsFilterCheckbox("boundsFilterFurniture", "Furniture", SceneBoundsCategory.Furniture);
-        DrawBoundsFilterCheckbox("boundsFilterBgObject", "Bg Object", SceneBoundsCategory.BgObject);
-        DrawBoundsFilterCheckbox("boundsFilterVfx", "VFX", SceneBoundsCategory.Vfx);
-        DrawBoundsFilterCheckbox("boundsFilterLight", "Light", SceneBoundsCategory.Light);
-        DrawBoundsFilterCheckbox("boundsFilterDisplay", "Display", SceneBoundsCategory.Display);
+        DrawBoundsFilter();
     }
 
-    private void DrawBoundsFilterCheckbox(string id, string label, SceneBoundsCategory category)
+    private static bool DrawBoundsOption(string id, string label, bool value, string tooltip, bool enabled = true)
     {
-        var enabled = _gizmo.Settings.BoundsInteractionSettings.Includes(category);
-        if (!ImGui.Checkbox($"{label}##{id}", ref enabled))
+        using (ImRaii.Disabled(!enabled))
+        {
+            EditorPropertyTable.Checkbox(id, label, ref value);
+        }
+
+        if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+        {
+            IntonerTooltip.DrawText(tooltip);
+        }
+
+        return value;
+    }
+
+    private void DrawBoundsFilter()
+    {
+        SceneBoundsInteractionSettings settings = _gizmo.Settings.BoundsInteractionSettings;
+        float scale = ImGuiHelpers.GlobalScale;
+        float right = ImGui.GetCursorScreenPos().X + ImGui.GetContentRegionAvail().X;
+        int enabledCount = BitOperations.PopCount((uint)(settings.BoundsFilter & SceneBoundsCategory.All));
+        string count = $"{enabledCount} / {BoundsFilterOptions.Length}";
+        ImGui.TextDisabled("Bounds Filter");
+        if (ImGui.IsItemHovered())
+        {
+            IntonerTooltip.DrawText("Choose which item types show bounds. This does not filter scene selection.");
+        }
+
+        ImGui.SameLine();
+        ImGui.SetCursorPosX(right - ImGui.GetWindowPos().X - ImGui.CalcTextSize(count).X);
+        ImGui.TextDisabled(count);
+
+        float minimumCellWidth = ImGui.GetFrameHeight() + ImGui.CalcTextSize("Furniture").X
+            + ImGui.GetStyle().ItemInnerSpacing.X + 36f * scale;
+        int columns = ImGui.GetContentRegionAvail().X >= minimumCellWidth * 2f ? 2 : 1;
+        using var cellPadding = ImRaii.PushStyle(ImGuiStyleVar.CellPadding, new Vector2(4f, 3f) * scale);
+        using var table = ImRaii.Table("##boundsFilter", columns,
+            ImGuiTableFlags.SizingStretchSame | ImGuiTableFlags.NoPadOuterX | ImGuiTableFlags.NoSavedSettings);
+        if (!table)
         {
             return;
         }
 
-        _gizmo.Settings.BoundsInteractionSettings = _gizmo.Settings.BoundsInteractionSettings with
+        foreach ((SceneBoundsCategory category, string label, FontAwesomeIcon icon) in BoundsFilterOptions)
         {
-            BoundsFilter = enabled
-                ? _gizmo.Settings.BoundsInteractionSettings.BoundsFilter | category
-                : _gizmo.Settings.BoundsInteractionSettings.BoundsFilter & ~category,
-        };
+            ImGui.TableNextColumn();
+            float cellRight = ImGui.GetCursorScreenPos().X + ImGui.GetContentRegionAvail().X;
+            bool enabled = settings.Includes(category);
+            if (ImGui.Checkbox($"{label}##boundsFilter{category}", ref enabled))
+            {
+                settings = settings with
+                {
+                    BoundsFilter = enabled
+                        ? settings.BoundsFilter | category
+                        : settings.BoundsFilter & ~category,
+                };
+            }
+
+            Vector2 min = ImGui.GetItemRectMin();
+            EditorIcon.DrawCentered(ImGui.GetWindowDrawList(), icon,
+                new Vector2(cellRight - 20f * scale, min.Y), new Vector2(cellRight, min.Y + ImGui.GetFrameHeight()),
+                enabled ? ThemeColors.Text : ThemeColors.TextDisabled, 0.85f);
+        }
+
+        _gizmo.Settings.BoundsInteractionSettings = settings;
     }
 
     private static string BuildBoundsFilterSummary(SceneBoundsCategory filter)
@@ -196,29 +247,12 @@ internal sealed partial class EditorToolbar
         }
 
         List<string> enabledKinds = [];
-        if ((filter & SceneBoundsCategory.Furniture) != SceneBoundsCategory.None)
+        foreach ((SceneBoundsCategory category, string label, _) in BoundsFilterOptions)
         {
-            enabledKinds.Add("Furniture");
-        }
-
-        if ((filter & SceneBoundsCategory.BgObject) != SceneBoundsCategory.None)
-        {
-            enabledKinds.Add("Bg Object");
-        }
-
-        if ((filter & SceneBoundsCategory.Vfx) != SceneBoundsCategory.None)
-        {
-            enabledKinds.Add("VFX");
-        }
-
-        if ((filter & SceneBoundsCategory.Light) != SceneBoundsCategory.None)
-        {
-            enabledKinds.Add("Light");
-        }
-
-        if ((filter & SceneBoundsCategory.Display) != SceneBoundsCategory.None)
-        {
-            enabledKinds.Add("Display");
+            if ((filter & category) != SceneBoundsCategory.None)
+            {
+                enabledKinds.Add(label);
+            }
         }
 
         return enabledKinds.Count == 0 ? "None" : string.Join(", ", enabledKinds);

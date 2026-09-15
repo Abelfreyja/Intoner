@@ -117,7 +117,7 @@ internal static class ColorSettingRow
         float rowHeight = RowChrome.ResolveRowHeight(controlHeight);
         RowChrome.BeginRow(definition, rowHeight);
         float controlWidth = RowChrome.ResolveControlWidth(RowChrome.AvailableControlWidth(), layout);
-        RowChrome.AlignControl(rowHeight, controlHeight, controlWidth, alignRight: true);
+        RowChrome.AlignControl(rowHeight, controlHeight, controlWidth);
 
         float swatchSize = controlHeight;
         float spacing = ImGui.GetStyle().ItemInnerSpacing.X;

@@ -42,7 +42,7 @@ internal static class ChoiceRow
             Scaled(ComboMinWidth),
             RowChrome.ResolveControlWidth(availableControlWidth, layout));
 
-        RowChrome.AlignControl(rowHeight, controlHeight, controlWidth, alignRight: true);
+        RowChrome.AlignControl(rowHeight, controlHeight, controlWidth);
 
         bool changed = false;
         using (ImRaii.ItemWidth(controlWidth))

@@ -93,6 +93,26 @@ internal sealed class EditorSelectionService
         return TryApplySelection(ids);
     }
 
+    /// <summary> toggles distinct ids in one selection update while retaining the order of unaffected items </summary>
+    /// <param name="itemIds"> the ids to toggle, in selection order </param>
+    /// <returns> true when the selection changed </returns>
+    public bool TryToggleSelection(IEnumerable<Guid> itemIds)
+    {
+        List<Guid> toggledIds = BuildDistinctSelectionOrder(itemIds);
+        if (toggledIds.Count == 0)
+        {
+            return false;
+        }
+
+        HashSet<Guid> toggledSet = new(toggledIds);
+        List<Guid> nextIds = new(_selectionOrder.Count + toggledIds.Count);
+        nextIds.AddRange(_selectionOrder.Where(id => !toggledSet.Contains(id)));
+        nextIds.AddRange(toggledIds.Where(id => !_selectedIds.Contains(id)));
+
+        _rangeAnchorId = nextIds.Count > 0 ? nextIds[^1] : null;
+        return TryApplySelection(nextIds);
+    }
+
     /// <summary> clears the current selection </summary>
     /// <returns>true when the selection changed</returns>
     public bool TryClear()

@@ -96,9 +96,9 @@ internal sealed class ObjectLayoutStore : IObjectLayoutStore
     public bool TrySaveLayout(ObjectLayoutSnapshot layout)
     {
         string path = BuildLayoutPath(layout.Id);
-        string contents = ObjectLayoutJsonSerializer.SerializeLayout(layout);
         try
         {
+            string contents = ObjectLayoutJsonSerializer.SerializeLayout(layout);
             _localChanges.TrackWrite(path, contents);
             _fileSystem.WriteAllTextAtomic(path, contents);
             return true;

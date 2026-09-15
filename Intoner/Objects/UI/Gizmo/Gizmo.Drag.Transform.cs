@@ -1,4 +1,5 @@
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface.Utility;
 using Intoner.Objects.Models;
 using Intoner.Objects.Utils;
 using Intoner.Scene;
@@ -12,53 +13,53 @@ internal sealed partial class Gizmo
     private static float GetGizmoDragSpeedMultiplier()
         => GizmoInputUtility.GetGizmoDragSpeedMultiplier(GizmoConstants.SlowDragMultiplier);
 
-    private static bool HandleActiveGizmoDragLifecycle(
-        bool matchesCurrentTarget,
-        bool captureKeyboard,
-        Action updateDrag,
-        Action completeDrag)
+    private void HandleGizmoDragLifecycle(in GizmoContext context)
     {
-        if (IsGizmoWheelOpen())
+        TryGetActiveTransformDragState(out GizmoTransformDragSession? dragState);
+        if (dragState?.ItemId != context.PrimarySnapshot.Id)
         {
-            if (matchesCurrentTarget)
+            dragState = null;
+        }
+
+        bool surfaceDrag = SurfaceDragState.Matches(context.PrimarySnapshot.Id);
+        if (dragState is null && !surfaceDrag)
+        {
+            return;
+        }
+
+        if (IsGizmoWheelOpen() || !ImGui.IsMouseDown(ImGuiMouseButton.Left))
+        {
+            if (dragState is not null)
             {
-                completeDrag();
+                CompleteGizmoDrag();
             }
 
-            return false;
+            if (surfaceDrag)
+            {
+                CompleteGizmoSurfaceDrag();
+            }
+
+            return;
         }
 
-        if (!matchesCurrentTarget)
+        if (dragState is not null)
         {
-            return false;
+            UpdateGizmoDrag(dragState);
+            DrawGizmoDragMetrics(context.ScreenPos);
+            if (TranslationDragState.IsDragging)
+            {
+                DrawTranslationDragPath(context, ImGuiHelpers.GlobalScale);
+            }
         }
 
-        if (!ImGui.IsMouseDown(ImGuiMouseButton.Left))
+        if (surfaceDrag)
         {
-            completeDrag();
-            return false;
-        }
-
-        updateDrag();
-        ImGui.SetNextFrameWantCaptureMouse(true);
-        if (captureKeyboard)
-        {
+            HandleGizmoSurfaceDragKeyboardShortcuts(context);
+            UpdateGizmoSurfaceDrag(context);
             ImGui.SetNextFrameWantCaptureKeyboard(true);
         }
 
-        return true;
-    }
-
-    private bool HandleGizmoDragLifecycle(in GizmoContext context, GizmoTransformMode mode)
-    {
-        var matchesCurrentTarget = TryGetMatchingTransformDragState(context.PrimarySnapshot.Id, mode, out var dragState);
-        if (!HandleActiveGizmoDragLifecycle(matchesCurrentTarget, false, () => UpdateGizmoDrag(dragState!), CompleteGizmoDrag))
-        {
-            return false;
-        }
-
-        DrawGizmoDragMetrics(context.ScreenPos);
-        return true;
+        ImGui.SetNextFrameWantCaptureMouse(true);
     }
 
     private void UpdateGizmoDrag(GizmoTransformDragSession dragState)
@@ -188,12 +189,13 @@ internal sealed partial class Gizmo
 
     private bool TryApplyDragTransform(GizmoTransformDragSession dragState, SceneTransform transform)
     {
-        if (!_sceneItemService.Update(dragState.StartSnapshot with { Transform = transform }, out var appliedSnapshot).IsApplied())
+        if (_transformEdit is null
+            || !_transformEdit.Update([dragState.StartSnapshot with { Transform = transform }], out IReadOnlyList<SceneItemSnapshot> appliedSnapshots).IsApplied())
         {
             return false;
         }
 
-        dragState.RecordAppliedSnapshot(appliedSnapshot);
+        dragState.RecordAppliedSnapshot(appliedSnapshots[0]);
         return true;
     }
 
@@ -209,7 +211,7 @@ internal sealed partial class Gizmo
             snapshots[index] = entry.Snapshot with { Transform = transformFactory(entry) };
         }
 
-        if (!_sceneItemService.UpdateMany(snapshots, out var appliedSnapshots).IsApplied())
+        if (_transformEdit is null || !_transformEdit.Update(snapshots, out var appliedSnapshots).IsApplied())
         {
             return false;
         }
@@ -236,7 +238,7 @@ internal sealed partial class Gizmo
 
     private void CompleteGizmoDrag()
     {
-        if (TryGetActiveTransformDragState(out var dragState))
+        if (TryGetActiveTransformDragState(out var dragState) && _transformEdit?.Commit().IsApplied() == true)
         {
             TryCommitGizmoDragHistory(dragState);
         }
@@ -245,16 +247,25 @@ internal sealed partial class Gizmo
     }
 
     private void ResetGizmoDrag()
-        => State.ResetTransformDragSessions();
+    {
+        _transformEdit?.Dispose();
+        _transformEdit = null;
+        State.ResetTransformDragSessions();
+    }
 
     private void CompleteGizmoSurfaceDrag()
     {
-        TryCommitGizmoSurfaceDragHistory();
+        if (_surfaceEdit?.Commit().IsApplied() == true)
+        {
+            TryCommitGizmoSurfaceDragHistory();
+        }
         ResetGizmoSurfaceDrag();
     }
 
     private void ResetGizmoSurfaceDrag()
     {
+        _surfaceEdit?.Dispose();
+        _surfaceEdit = null;
         DisposeSurfaceDragKeyboardInputLease();
         State.ResetSurfaceDrag();
     }
@@ -317,7 +328,13 @@ internal sealed partial class Gizmo
             state.WorldLength,
             state.ScreenLength);
 
-        State.ResetTransformDragSessions();
+        ResetGizmoDrag();
+        _transformEdit = _sceneItemService.BeginEdit(mode == GizmoTransformMode.Scale ? [context.PrimarySnapshot] : context.SelectedSnapshots);
+        if (_transformEdit is null)
+        {
+            return;
+        }
+
         if (mode == GizmoTransformMode.Translation)
         {
             TranslationDragState.Begin(
@@ -442,7 +459,13 @@ internal sealed partial class Gizmo
         in RotationProjectionContext projection)
     {
         _host.PrepareHistoryMutation();
-        State.ResetTransformDragSessions();
+        ResetGizmoDrag();
+        _transformEdit = _sceneItemService.BeginEdit(context.SelectedSnapshots);
+        if (_transformEdit is null)
+        {
+            return;
+        }
+
         RotationDragState.Begin(
             context.SelectedSnapshots,
             context.PrimarySnapshot,

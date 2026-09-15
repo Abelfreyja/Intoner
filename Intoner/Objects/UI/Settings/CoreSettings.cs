@@ -152,6 +152,22 @@ internal sealed class CoreSettings : ISettingsProvider
                             entries.CreateAntiAliasing(),
                             entries.CreateDrawOverGameUi(),
                         ]),
+                    new SettingsSection(
+                        "gizmoAppearance",
+                        FontAwesomeIcon.Palette,
+                        "Gizmo Appearance",
+                        "Colors and opacity for the move, rotate, and scale gizmo handles.",
+                        "gizmo move rotate scale axis color preset imguizmo custom opacity transparency",
+                        [
+                            entries.CreateGizmoColorPreset(),
+                            entries.CreateGizmoOpacity(),
+                            entries.CreateGizmoColor("gizmoXAxis", "X Axis", "Color of the X axis.", static value => value.XAxis, static (value, color) => value.XAxis = color),
+                            entries.CreateGizmoColor("gizmoYAxis", "Y Axis", "Color of the Y axis.", static value => value.YAxis, static (value, color) => value.YAxis = color),
+                            entries.CreateGizmoColor("gizmoZAxis", "Z Axis", "Color of the Z axis.", static value => value.ZAxis, static (value, color) => value.ZAxis = color),
+                            entries.CreateGizmoColor("gizmoHighlight", "Highlight", "Color of the hovered or dragged handle or widget.", static value => value.Highlight, static (value, color) => value.Highlight = color),
+                            entries.CreateGizmoColor("gizmoCenter", "Center", "Color of the center handle.", static value => value.Center, static (value, color) => value.Center = color),
+                            entries.CreateGizmoColor("gizmoInactive", "Inactive", "Color of inactive handles while dragging.", static value => value.Inactive, static (value, color) => value.Inactive = color),
+                        ]),
                 ]),
             new SettingsModule(
                 700,

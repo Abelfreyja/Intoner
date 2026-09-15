@@ -112,6 +112,11 @@ internal interface IObjectPersistenceState
     /// <returns>true when the snapshot was stored.</returns>
     bool TryUpsertPersistedSnapshot(ObjectSnapshot snapshot);
 
+    /// <summary> stores a batch with one write per layout, publishing standalone state only after all files succeed </summary>
+    /// <param name="snapshots"> distinct snapshots whose standalone or layout ownership has not changed </param>
+    /// <returns> success or a failure without published changes; recovery required means file rollback failed </returns>
+    PersistentMutationStatus UpsertPersistedSnapshots(IReadOnlyList<ObjectSnapshot> snapshots);
+
     /// <summary>
     /// Removes one persisted snapshot.
     /// </summary>
@@ -362,18 +367,46 @@ internal sealed class ObjectPersistenceState : IObjectPersistenceState
     }
 
     public bool TryUpsertPersistedSnapshot(ObjectSnapshot snapshot)
-    {
-        if (snapshot.LayoutId.HasValue)
-        {
-            return TryUpsertLayoutSnapshot(snapshot);
-        }
+        => UpsertPersistedSnapshots([snapshot]) == PersistentMutationStatus.Success;
 
+    public PersistentMutationStatus UpsertPersistedSnapshots(IReadOnlyList<ObjectSnapshot> snapshots)
+    {
         lock (_stateLock)
         {
-            _standaloneSnapshots[snapshot.Id] = snapshot;
-        }
+            List<ObjectSnapshot> layoutSnapshots = [];
+            HashSet<Guid> objectIds = [];
+            foreach (ObjectSnapshot snapshot in snapshots)
+            {
+                if (!objectIds.Add(snapshot.Id))
+                {
+                    return PersistentMutationStatus.InvalidRequest;
+                }
 
-        return true;
+                if (snapshot.LayoutId.HasValue)
+                {
+                    layoutSnapshots.Add(snapshot);
+                }
+            }
+
+            if (layoutSnapshots.Count > 0)
+            {
+                PersistentMutationStatus status = _layoutManager.UpsertLayoutObjects(layoutSnapshots);
+                if (status != PersistentMutationStatus.Success)
+                {
+                    return status;
+                }
+            }
+
+            foreach (ObjectSnapshot snapshot in snapshots)
+            {
+                if (!snapshot.LayoutId.HasValue)
+                {
+                    _standaloneSnapshots[snapshot.Id] = snapshot;
+                }
+            }
+
+            return PersistentMutationStatus.Success;
+        }
     }
 
     public bool TryRemovePersistedSnapshot(ObjectSnapshot snapshot)
@@ -420,22 +453,6 @@ internal sealed class ObjectPersistenceState : IObjectPersistenceState
                 _standaloneSnapshots[snapshot.Id] = snapshot with { LayoutId = null };
             }
         }
-    }
-
-    private bool TryUpsertLayoutSnapshot(ObjectSnapshot snapshot)
-    {
-        if (!snapshot.LayoutId.HasValue
-            || !_layoutManager.TryGetLayout(snapshot.LayoutId.Value, out var layout))
-        {
-            return false;
-        }
-
-        var nextObjects = layout.Objects
-            .Where(entry => entry.Id != snapshot.Id)
-            .Append(snapshot)
-            .OrderBy(static entry => entry.CreatedAtUtc)
-            .ToList();
-        return _layoutManager.TryReplaceLayoutObjects(snapshot.LayoutId.Value, nextObjects);
     }
 
     private bool TryRemoveLayoutSnapshot(Guid layoutId, Guid objectId)

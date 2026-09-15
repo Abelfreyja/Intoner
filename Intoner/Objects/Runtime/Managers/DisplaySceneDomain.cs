@@ -52,6 +52,23 @@ internal sealed class DisplaySceneDomain : ISceneItemDomain
             : SceneMutationStatus.AppliedWithRuntimeFailure;
     }
 
+    public SceneMutationStatus PreviewChange(SceneItemSnapshot before, SceneItemSnapshot after, out SceneItemSnapshot applied)
+    {
+        applied = before;
+        if (before is not DisplaySnapshot previous || after is not DisplaySnapshot next
+            || next with { Transform = previous.Transform } != previous)
+        {
+            return SceneMutationStatus.Rejected;
+        }
+
+        SceneMutationStatus status = _runtimes.PreviewChange(previous, DisplayState.Sanitize(next), out DisplaySnapshot result);
+        applied = result;
+        return status;
+    }
+
+    public void RequestPreviewRecovery()
+        => _runtimes.RequestPreviewRecovery();
+
     public bool TryCreateDuplicates(
         IReadOnlyList<SceneItemSnapshot> snapshots,
         out IReadOnlyList<SceneItemSnapshot> duplicates)

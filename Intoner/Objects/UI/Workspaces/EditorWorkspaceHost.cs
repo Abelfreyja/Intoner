@@ -235,7 +235,7 @@ internal sealed class EditorWorkspaceHost
                 _editorOverlayLayer.DrawChildPanel("##objectCreatePanel", Vector2.Zero, false, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse, () => _create.DrawCreatePanel(frame.KindInfos));
                 break;
             case WorkspaceMode.PlacedInspector:
-                _inspector.DrawInspectorPanel(frame.Scene.Objects, frame.Scene.Displays, frame.Scene.ActiveObjectIds);
+                _inspector.DrawInspectorPanel(frame.Scene);
                 break;
             case WorkspaceMode.LayoutManager:
                 _editorOverlayLayer.DrawChildPanel(

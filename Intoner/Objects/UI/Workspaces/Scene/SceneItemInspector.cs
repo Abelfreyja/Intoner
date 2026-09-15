@@ -301,19 +301,13 @@ internal sealed partial class SceneItemInspector
         return changed;
     }
 
-    internal void DrawInspectorPanel(
-        IReadOnlyList<ObjectSnapshot> objects,
-        IReadOnlyList<DisplaySnapshot> displays,
-        IReadOnlySet<Guid> activeObjectIds)
+    internal void DrawInspectorPanel(EditorSceneState.EditorSceneData scene)
     {
-        var selectedObjectId = _interaction.Selection.PrimaryItemId;
-        DisplaySnapshot? selectedDisplay = selectedObjectId.HasValue
-            ? displays.FirstOrDefault(entry => entry.Id == selectedObjectId.Value)
+        SceneItemSnapshot? selectedItem = _interaction.Selection.PrimaryItemId is { } itemId
+            ? scene.FindCurrentItem(itemId)
             : null;
-        var selected = selectedObjectId.HasValue
-            ? objects.FirstOrDefault(entry => entry.Id == selectedObjectId.Value)
-            : null;
-        var selectedActive = selected is not null && activeObjectIds.Contains(selected.Id);
+        ObjectSnapshot? selected = selectedItem as ObjectSnapshot;
+        bool selectedActive = selected is not null && scene.ActiveObjectIds.Contains(selected.Id);
 
         _editorOverlayLayer.DrawChildPanel(
             "##objectInspectorPanel",
@@ -322,7 +316,7 @@ internal sealed partial class SceneItemInspector
             ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse,
             () =>
             {
-                if (selectedDisplay is not null)
+                if (selectedItem is DisplaySnapshot selectedDisplay)
                 {
                     DrawDisplayInspectorHero(selectedDisplay);
                     DrawDisplayInspectorDetails(selectedDisplay);
