@@ -154,7 +154,7 @@ internal sealed unsafe partial class EdgeGlowRenderer : GpuUiDeviceResourceHost
     ];
 
     private readonly ILogger<EdgeGlowRenderer> _logger;
-    private readonly ImGuiDrawCallbackQueue<EdgeGlowRenderJob> _renderJobs = new(ProcessRenderJob, static job => job.Dispose());
+    private readonly ImGuiDrawCallbackQueue<EdgeGlowRenderJob> _renderJobs;
     private readonly D3D11DrawStateSnapshot _drawState = new(
         pixelConstantBufferCount: 2,
         pixelShaderResourceViewCount: 1);
@@ -177,6 +177,7 @@ internal sealed unsafe partial class EdgeGlowRenderer : GpuUiDeviceResourceHost
         : base(logger, uiBuilder, "edge glow renderer initialization failed")
     {
         _logger = logger;
+        _renderJobs = new(logger, ProcessRenderJob, static job => job.Dispose());
     }
 
     /// <summary> draws the edge glow around the last submitted item </summary>

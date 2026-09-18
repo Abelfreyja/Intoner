@@ -2,6 +2,7 @@ using Intoner.Objects.Models;
 using Intoner.Objects.Utils;
 using Intoner.Scene;
 using System.Numerics;
+using System.Runtime.InteropServices;
 using System.Text;
 using DrawObject = FFXIVClientStructs.FFXIV.Client.Graphics.Scene.DrawObject;
 using SceneBgObject = FFXIVClientStructs.FFXIV.Client.Graphics.Scene.BgObject;
@@ -71,20 +72,38 @@ internal static unsafe class BgObjectSceneInterop
 
         var drawObject = (DrawObject*)bgObject;
         drawObject->IsCoveredFromRain = model.IsCoveredFromRain;
-        if (!IsModelLoaded(bgObject))
+        if (!ObjectSceneInterop.TryApplyTransparency(drawObject, model.Transparency))
         {
             return false;
         }
 
-        ObjectSceneInterop.ApplyTransparency(drawObject, model.Transparency);
         ApplyDyeColor(bgObject, model.DyeColor);
         return true;
     }
 
     public static bool IsModelLoaded(SceneBgObject* bgObject)
-        => bgObject != null
+        => ObjectSceneInterop.IsDrawObjectLoaded((DrawObject*)bgObject)
             && bgObject->ModelResourceHandle != null
-            && bgObject->ModelResourceHandle->LoadState >= ModelResourceLoadedState;
+            && bgObject->ModelResourceHandle->ReadState == 2
+            && bgObject->ModelResourceHandle->LoadState == ModelResourceLoadedState;
+
+    public static ModelLoadState GetModelLoadState(SceneBgObject* bgObject)
+    {
+        var handle = bgObject->ModelResourceHandle;
+        
+        return new ModelLoadState((nint)handle, bgObject->LoadState,
+            handle != null ? handle->ReadState : byte.MaxValue,
+            handle != null ? handle->LoadState : byte.MaxValue,
+            handle != null ? *(uint*)((byte*)handle + 0x6C) : uint.MaxValue,
+            handle != null ? *((byte*)handle + 0x298) : (byte)0);
+    }
+
+    public static byte GetCurrentLod(SceneBgObject* bgObject)
+        => *((byte*)bgObject + 0xCC);
+
+    [StructLayout(LayoutKind.Auto)]
+    public readonly record struct ModelLoadState(nint Handle, byte DrawState, byte ReadState,
+        byte LoadState, uint ResourceLodBytes, byte LodCount);
 
     private static void ApplyDyeColor(SceneBgObject* bgObject, Vector4 dyeColor)
     {

@@ -28,7 +28,6 @@ internal static unsafe class IntonerSignatures
     public const string TexHandleUpdateCategory = Sigs.TexHandleUpdateCategory;
     public const string SoundOnLoad = Sigs.SoundOnLoad;
     public const string LoadScdFileLocal = Sigs.LoadScdFileLocal;
-    public const string RsfServiceAddress = Sigs.RsfServiceAddress;
     public const string MemoryModelResourceRead =
         "48 89 5C 24 ?? 48 89 6C 24 ?? 57 48 83 EC 20 80 3A 0B";
 
@@ -137,8 +136,6 @@ internal static unsafe class IntonerSignatures
         new(TexHandleUpdateCategory, "object resource texture category update");
     public static readonly NativeDirectSignatureTarget ResourceHandleTypeFromPath =
         new(GetResourceHandleType, "object resource handle type from path");
-    public static readonly NativeStaticAddressTarget ResourceRsfService =
-        new(RsfServiceAddress, 0, "object resource RSF service");
     public static readonly NativeStaticAddressTarget ResourceLodConfig =
         new(LodConfig, 0, "object texture lod config");
     public static readonly NativeResolvedAddressTarget ResourceFileDescriptorRead =
@@ -298,7 +295,6 @@ internal static unsafe class IntonerSignatures
 
     private static readonly NativeStaticAddressTarget[] NativeStaticAddressTargets =
     [
-        ResourceRsfService,
         ResourceLodConfig,
     ];
 

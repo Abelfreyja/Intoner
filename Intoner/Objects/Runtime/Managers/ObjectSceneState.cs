@@ -287,6 +287,12 @@ internal sealed class ObjectSceneState : IObjectSceneState
     {
         lock (_stateLock)
         {
+            if (_entries.TryGetValue(entry.Snapshot.Id, out ObjectSceneEntry? previous)
+                && !ReferenceEquals(previous.Runtime, entry.Runtime))
+            {
+                RemoveBoundsLocked(entry.Snapshot.Id);
+            }
+
             _entries[entry.Snapshot.Id] = entry;
             RebuildEntrySnapshotLocked();
             _runtimeFailureCodes.Remove(entry.Snapshot.Id);
@@ -304,14 +310,7 @@ internal sealed class ObjectSceneState : IObjectSceneState
                 return false;
             }
 
-            ObjectBoundsSnapshot[] retainedBounds = _boundsSnapshots
-                .Where(snapshot => snapshot.Id != id)
-                .ToArray();
-            if (retainedBounds.Length != _boundsSnapshots.Count)
-            {
-                _boundsSnapshots = Array.AsReadOnly(retainedBounds);
-                ++_boundsRevision;
-            }
+            RemoveBoundsLocked(id);
 
             RebuildEntrySnapshotLocked();
 
@@ -380,6 +379,18 @@ internal sealed class ObjectSceneState : IObjectSceneState
 
     private void RebuildEntrySnapshotLocked()
         => _entrySnapshot = Array.AsReadOnly(_entries.Values.ToArray());
+
+    private void RemoveBoundsLocked(Guid id)
+    {
+        ObjectBoundsSnapshot[] retainedBounds = _boundsSnapshots
+            .Where(snapshot => snapshot.Id != id)
+            .ToArray();
+        if (retainedBounds.Length != _boundsSnapshots.Count)
+        {
+            _boundsSnapshots = Array.AsReadOnly(retainedBounds);
+            ++_boundsRevision;
+        }
+    }
 
     public void SetRuntimeFailure(Guid id, string code)
     {

@@ -31,11 +31,12 @@ internal sealed class SurfacePlacementService(
             return true;
         }
 
-        return nativeQuery.TryRaycastMaterialMask(
+        return nativeQuery.TryRaycast(new PlacementSurfaceRaycastRequest(
+            Guid.Empty,
             rayOrigin,
             rayDirection,
             PlacementValidationConstants.NativeRayMaxDistance,
-            PlacementSurfacePolicy.ResolveAllowedMaterialMask(metadata),
+            PlacementSurfacePolicy.ResolveAllowedMaterialMask(metadata)),
             out hit);
     }
 

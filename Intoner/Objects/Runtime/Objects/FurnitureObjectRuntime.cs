@@ -84,6 +84,9 @@ internal sealed unsafe class FurnitureObjectRuntime : LayoutObjectRuntime
     public override bool TryGetPlacementClearance(out ObjectPlacementClearance clearance)
         => ObjectLayoutInterop.TryGetSharedGroupPlacementClearance(_instance, out clearance);
 
+    public override bool ContainsCollider(nint colliderAddress)
+        => ObjectLayoutInterop.SharedGroupContainsCollider((nint)_instance, colliderAddress);
+
     public override void AppendSelectionDraws(SceneSelectionCollector collector)
     {
         if (_instance == null || !Snapshot.Visible)

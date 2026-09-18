@@ -22,13 +22,19 @@ internal sealed class NativePlacementQuery(
     IFramework framework,
     IObjectTable objectTable,
     NativePlacementCollisionQuery collisionQuery,
-    NativePlacementAreaQuery areaQuery)
+    NativePlacementAreaQuery areaQuery,
+    IObjectSceneState sceneState)
 {
-    public bool TryRaycast(Vector3 rayOrigin, Vector3 rayDirection, float maxDistance, out SceneSurfaceHit hit)
+    public bool TryRaycast(PlacementSurfaceRaycastRequest request, out SceneSurfaceHit hit)
     {
         (bool Success, SceneSurfaceHit Hit) result = FrameworkThreadUtility.Run(framework, () =>
         {
-            return collisionQuery.TryRaycast(rayOrigin, rayDirection, maxDistance, out SceneSurfaceHit resolvedHit)
+            SceneSurfaceHit resolvedHit;
+            bool success = request.NativeMaterialMask == 0
+                ? collisionQuery.TryRaycast(request.Origin, request.Direction, request.MaxDistance, out resolvedHit)
+                : collisionQuery.TryRaycastMaterialMask(request.Origin, request.Direction, request.MaxDistance,
+                    request.NativeMaterialMask, out resolvedHit) && resolvedHit.Material != 0;
+            return success && !IsExcludedSurfaceOnFramework(request.ObjectId, resolvedHit)
                 ? (Success: true, Hit: resolvedHit)
                 : (Success: false, Hit: SceneSurfaceHit.Empty);
         });
@@ -98,27 +104,18 @@ internal sealed class NativePlacementQuery(
         });
     }
 
-    public bool TryRaycastMaterialMask(
-        Vector3 rayOrigin,
-        Vector3 rayDirection,
-        float maxDistance,
-        ulong materialMask,
-        out SceneSurfaceHit hit)
+    internal bool IsExcludedSurfaceOnFramework(Guid objectId, SceneSurfaceHit hit)
     {
-        (bool Success, SceneSurfaceHit Hit) result = FrameworkThreadUtility.Run(framework, () =>
+        if (!framework.IsInFrameworkUpdateThread)
         {
-            return collisionQuery.TryRaycastMaterialMask(
-                    rayOrigin,
-                    rayDirection,
-                    maxDistance,
-                    materialMask,
-                    out SceneSurfaceHit resolvedHit)
-                ? (Success: true, Hit: resolvedHit)
-                : (Success: false, Hit: SceneSurfaceHit.Empty);
-        });
+            throw new InvalidOperationException("collider ownership must be checked on the framework thread");
+        }
 
-        hit = result.Hit;
-        return result.Success && hit.Material != 0;
+        return objectId != Guid.Empty
+            && hit.Source == SceneSurfaceHitSource.Native
+            && hit.ColliderAddress != 0
+            && sceneState.TryGetEntry(objectId, out ObjectSceneEntry entry)
+            && entry.Runtime.ContainsCollider(hit.ColliderAddress);
     }
 
     public NativeHousingPlacementState ResolveCurrentHousingState()

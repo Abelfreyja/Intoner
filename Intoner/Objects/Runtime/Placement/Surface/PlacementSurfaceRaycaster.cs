@@ -1,25 +1,12 @@
 using Intoner.Objects.Models;
 using Intoner.Scene;
-using System.Numerics;
 
 namespace Intoner.Objects.Runtime;
 
 internal sealed class PlacementSurfaceRaycaster(NativePlacementQuery nativeQuery)
 {
-    public bool TryRaycastNative(
-        Vector3 origin,
-        Vector3 direction,
-        float maxDistance,
-        out SceneSurfaceHit hit)
-        => nativeQuery.TryRaycast(origin, direction, maxDistance, out hit);
-
-    public bool TryRaycastNativeMaterial(
-        Vector3 origin,
-        Vector3 direction,
-        float maxDistance,
-        ulong materialMask,
-        out SceneSurfaceHit hit)
-        => nativeQuery.TryRaycastMaterialMask(origin, direction, maxDistance, materialMask, out hit);
+    public bool TryRaycastNative(PlacementSurfaceRaycastRequest request, out SceneSurfaceHit hit)
+        => nativeQuery.TryRaycast(request, out hit);
 
     public static bool TryRaycastObjectBounds(
         PlacementValidationContext context,
@@ -37,13 +24,13 @@ internal sealed class PlacementSurfaceRaycaster(NativePlacementQuery nativeQuery
         bool hasHit = false;
 
         if (request.NativeMaterialMask != 0
-            && TryRaycastNativeMaterial(request.Origin, request.Direction, closestDistance, request.NativeMaterialMask, out SceneSurfaceHit filteredHit))
+            && TryRaycastNative(request with { MaxDistance = closestDistance }, out SceneSurfaceHit filteredHit))
         {
             closestDistance = filteredHit.Distance;
             hit = filteredHit;
             hasHit = true;
         }
-        else if (nativeQuery.TryRaycast(request.Origin, request.Direction, closestDistance, out SceneSurfaceHit nativeHit))
+        else if (TryRaycastNative(request with { MaxDistance = closestDistance, NativeMaterialMask = 0 }, out SceneSurfaceHit nativeHit))
         {
             closestDistance = nativeHit.Distance;
             hit = nativeHit;

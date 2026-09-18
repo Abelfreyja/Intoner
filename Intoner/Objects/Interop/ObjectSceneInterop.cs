@@ -19,11 +19,19 @@ internal static unsafe class ObjectSceneInterop
     public static void UpdateMaterials(DrawObject* drawObject)
         => drawObject->UpdateMaterials();
 
-    public static void ApplyTransparency(DrawObject* drawObject, float transparency)
+    public static bool TryApplyTransparency(DrawObject* drawObject, float transparency)
     {
+        if (!IsDrawObjectLoaded(drawObject)
+            || (drawObject->GetObjectType() == ObjectType.BgObject
+                && !BgObjectSceneInterop.IsModelLoaded((BgObject*)drawObject)))
+        {
+            return false;
+        }
+
         drawObject->SetTransparency(transparency);
         drawObject->UpdateMaterials();
         drawObject->UpdateCulling();
+        return true;
     }
 
     public static void ApplyOutlineColor(DrawObject* drawObject, ObjectHighlightColor outlineColor)

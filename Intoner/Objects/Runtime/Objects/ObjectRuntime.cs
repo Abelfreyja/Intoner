@@ -109,6 +109,11 @@ internal interface IObjectRuntime : ISceneSelectableRuntime, IDisposable
     /// gets native placement surfaces exposed by this object runtime
     /// </summary>
     ObjectPlacementSurfaceSupport PlacementSurfaceSupport { get; }
+
+    /// <summary> checks a live collider against this runtime on the framework thread </summary>
+    /// <param name="colliderAddress"> the collider returned by the current native query </param>
+    /// <returns> true when this runtime owns the collider </returns>
+    bool ContainsCollider(nint colliderAddress);
 }
 
 internal struct DeferredVisualState
@@ -179,6 +184,7 @@ internal abstract class ObjectRuntime : IObjectRuntime
     public abstract ObjectKind Kind { get; }
     public virtual bool NeedsFrameworkUpdates => false;
     public virtual ObjectPlacementSurfaceSupport PlacementSurfaceSupport => ObjectPlacementSurfaceSupport.None;
+    public virtual bool ContainsCollider(nint colliderAddress) => false;
     public abstract nint Address { get; }
 
     protected ObjectRuntime(IFramework framework, ILogger logger, ObjectSnapshot snapshot)

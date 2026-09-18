@@ -1,5 +1,4 @@
 using Intoner.Objects.Catalog;
-using Intoner.Objects.Interop;
 using Intoner.Objects.Models;
 using Intoner.Objects.Utils;
 using Intoner.Scene;
@@ -34,7 +33,7 @@ internal sealed class PlacementSurfaceResolver(PlacementSurfaceRaycaster surface
         ulong materialMask = PlacementSurfacePolicy.ResolveAllowedMaterialMask(metadata);
         bool allowSurfaceAboveObject = ShouldAllowSurfaceAboveObject(context, metadata);
         float rayLift = ResolveRayLift(boundsSnapshot, allowSurfaceAboveObject);
-        SurfaceCandidateSelector selector = new(snapshot, boundsSnapshot, metadata, allowSurfaceAboveObject);
+        SurfaceCandidateSelector selector = new(snapshot, metadata, allowSurfaceAboveObject);
 
         for (int index = 0; index < probeCount; ++index)
         {
@@ -45,12 +44,12 @@ internal sealed class PlacementSurfaceResolver(PlacementSurfaceRaycaster surface
                 -Vector3.UnitY,
                 PlacementValidationConstants.NativeRayMaxDistance,
                 materialMask);
-            if (surfaceRaycaster.TryRaycastNative(request.Origin, request.Direction, request.MaxDistance, out SceneSurfaceHit nativeCandidate))
+            if (surfaceRaycaster.TryRaycastNative(request with { NativeMaterialMask = 0 }, out SceneSurfaceHit nativeCandidate))
             {
                 selector.TryUse(nativeCandidate, index);
             }
 
-            if (surfaceRaycaster.TryRaycastNativeMaterial(request.Origin, request.Direction, request.MaxDistance, materialMask, out SceneSurfaceHit filteredCandidate))
+            if (surfaceRaycaster.TryRaycastNative(request, out SceneSurfaceHit filteredCandidate))
             {
                 selector.TryUse(filteredCandidate, index);
             }
@@ -102,7 +101,6 @@ internal sealed class PlacementSurfaceResolver(PlacementSurfaceRaycaster surface
     private ref struct SurfaceCandidateSelector
     {
         private readonly ObjectSnapshot _snapshot;
-        private readonly ObjectBoundsSnapshot? _boundsSnapshot;
         private readonly HousingFurnitureMetadata _metadata;
         private readonly bool _allowSurfaceAboveObject;
         private float _selectedDistance;
@@ -110,12 +108,10 @@ internal sealed class PlacementSurfaceResolver(PlacementSurfaceRaycaster surface
 
         public SurfaceCandidateSelector(
             ObjectSnapshot snapshot,
-            ObjectBoundsSnapshot? boundsSnapshot,
             HousingFurnitureMetadata metadata,
             bool allowSurfaceAboveObject)
         {
             _snapshot = snapshot;
-            _boundsSnapshot = boundsSnapshot;
             _metadata = metadata;
             _allowSurfaceAboveObject = allowSurfaceAboveObject;
             _selectedDistance = float.PositiveInfinity;
@@ -136,11 +132,6 @@ internal sealed class PlacementSurfaceResolver(PlacementSurfaceRaycaster surface
 
         public void TryUse(SceneSurfaceHit candidate, int probeIndex)
         {
-            if (IsCurrentObjectNativeSurface(_boundsSnapshot, candidate))
-            {
-                return;
-            }
-
             if (!PlacementSurfacePolicy.TryValidateSurface(_metadata, candidate, out string candidateError))
             {
                 if (probeIndex == 0)
@@ -170,12 +161,6 @@ internal sealed class PlacementSurfaceResolver(PlacementSurfaceRaycaster surface
             _hit = candidate;
         }
 
-        private static bool IsCurrentObjectNativeSurface(
-            ObjectBoundsSnapshot? boundsSnapshot,
-            SceneSurfaceHit candidate)
-            => candidate.Source == SceneSurfaceHitSource.Native
-               && boundsSnapshot is { Kind: ObjectKind.Furniture, NativeAddress: not 0 }
-               && ObjectLayoutInterop.SharedGroupContainsCollider(boundsSnapshot.NativeAddress, candidate.ColliderAddress);
     }
 
     public static bool TryResolveNativePlacementClearance(

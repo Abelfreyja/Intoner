@@ -49,7 +49,7 @@ internal sealed unsafe class BackdropRenderer : GpuUiDeviceResourceHost
 
     private readonly ILogger<BackdropRenderer> _logger;
     private readonly BackdropEffectRegistry _effects;
-    private readonly ImGuiDrawCallbackQueue<IDrawJob> _callbackJobs = new(static job => job.Process());
+    private readonly ImGuiDrawCallbackQueue<IDrawJob> _callbackJobs;
     private readonly List<GpuColorTarget> _blurFramebuffers = [];
     private readonly D3D11DrawStateSnapshot _drawState = new(
         pixelConstantBufferCount: 2,
@@ -94,6 +94,7 @@ internal sealed unsafe class BackdropRenderer : GpuUiDeviceResourceHost
         : base(logger, uiBuilder, "object window blur renderer initialization failed")
     {
         _logger = logger;
+        _callbackJobs = new(logger, static job => job.Process());
         _effects = effectRegistrations.CreateRegistry(this);
     }
 

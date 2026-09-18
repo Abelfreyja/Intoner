@@ -38,8 +38,7 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
     private delegate byte TextureOnLoadDelegate(TextureResourceHandle* handle, ClientFileDescriptor* descriptor, byte unknown0);
     private delegate byte LoadTexFileLocalDelegate(TextureResourceHandle* handle, int lodLevel, ClientFileDescriptor* descriptor, bool unknown0);
     private delegate void UpdateTextureCategoryDelegate(TextureResourceHandle* handle);
-    private delegate byte SoundOnLoadDelegate(ResourceHandle* handle, ClientFileDescriptor* descriptor, byte unknown0);
-    private delegate byte LoadScdFileLocalDelegate(ResourceHandle* handle, ClientFileDescriptor* descriptor, byte unknown0);
+    private delegate byte SoundReadDelegate(ResourceHandle* handle, ClientFileDescriptor* descriptor, byte unknown0);
 
     private readonly record struct ActiveLocalFileJob(
         nint ResourceHandle,
@@ -63,15 +62,14 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
     private readonly Hook<CheckFileStateDelegate>? _checkFileStateHook;
     private readonly Hook<LoadMdlFileExternDelegate>? _loadMdlFileExternHook;
     private readonly Hook<TextureOnLoadDelegate>? _textureOnLoadHook;
-    private readonly Hook<SoundOnLoadDelegate>? _soundOnLoadHook;
+    private readonly Hook<SoundReadDelegate>? _soundOnLoadHook;
+    private readonly SoundReadDelegate? _soundOnLoadOriginal;
     private readonly ReadFileDelegate? _readFile;
     private readonly LoadMdlFileLocalDelegate? _loadMdlFileLocal;
     private readonly LoadTexFileLocalDelegate? _loadTexFileLocal;
     private readonly UpdateTextureCategoryDelegate? _updateTextureCategory;
-    private readonly LoadScdFileLocalDelegate? _loadScdFileLocal;
-    private readonly nint* _rsfService;
+    private readonly SoundReadDelegate? _loadScdFileLocal;
     private readonly DisposalState _disposeState = new();
-    private bool _loggedUninitializedRsfService;
 
     public ObjectFileReadService(
         ILogger<ObjectFileReadService> logger,
@@ -114,12 +112,13 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
             sigScanner,
             IntonerSignatures.ResourceTextureOnLoad,
             TextureOnLoadDetour);
-        _soundOnLoadHook = InteropHookUtility.CreateHook<SoundOnLoadDelegate>(
+        _soundOnLoadHook = InteropHookUtility.CreateHook<SoundReadDelegate>(
             _logger,
             gameInteropProvider,
             sigScanner,
             IntonerSignatures.ResourceSoundOnLoad,
             SoundOnLoadDetour);
+        _soundOnLoadOriginal = _soundOnLoadHook?.Original;
 
         _readFile = InteropHookUtility.CreateDelegate<ReadFileDelegate>(
             _logger,
@@ -133,7 +132,7 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
             _logger,
             sigScanner,
             IntonerSignatures.ResourceLoadTexFileLocal);
-        _loadScdFileLocal = InteropHookUtility.CreateDelegate<LoadScdFileLocalDelegate>(
+        _loadScdFileLocal = InteropHookUtility.CreateDelegate<SoundReadDelegate>(
             _logger,
             sigScanner,
             IntonerSignatures.ResourceLoadScdFileLocal);
@@ -141,11 +140,6 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
             _logger,
             sigScanner,
             IntonerSignatures.ResourceUpdateTextureCategory);
-        _rsfService = (nint*)NativeAddressResolver.TryResolveStaticAddress(
-            _logger,
-            sigScanner,
-            IntonerSignatures.ResourceRsfService);
-
     }
 
     public void Dispose()
@@ -446,7 +440,6 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
                 {
                     ObjectLocalFileKind.Model when CanLoadLocalModels() => CustomModelFileFlag,
                     ObjectLocalFileKind.Texture when CanLoadLocalTextures() => nint.Zero,
-                    ObjectLocalFileKind.Sound when CanLoadLocalSounds() => nint.Zero,
                     _ => _checkFileStateHook!.Original(service, crc64),
                 };
             }
@@ -541,59 +534,32 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
         }
     }
 
-    private byte SoundOnLoadDetour(ResourceHandle* handle, ClientFileDescriptor* descriptor, byte unknown0)
+    internal byte SoundOnLoadDetour(ResourceHandle* handle, ClientFileDescriptor* descriptor, byte unknown0)
     {
-        byte result = 0;
-        bool calledOriginal = false;
         try
         {
-            if (ObjectMemoryResourceService.IsMemoryFileDescriptor(descriptor)
-             && _memoryResourceService.TryReadSoundResource(handle, descriptor, unknown0 != 0, out byte memoryResult))
+            if (ObjectMemoryResourceService.IsMemoryFileDescriptor(descriptor))
             {
-                return memoryResult;
+                return _memoryResourceService.TryReadSoundResource(handle, descriptor, unknown0 != 0, out byte memoryResult)
+                    ? memoryResult
+                    : (byte)0;
             }
 
-            result = CallSoundOnLoadOriginal(handle, descriptor, unknown0);
-            calledOriginal = true;
-            if (!TryGetMatchingActiveLocalFileJob(ObjectLocalFileKind.Sound, handle, descriptor, out _))
+            if (descriptor != null
+                && descriptor->FileMode == ClientFileMode.LoadUnpackedResource
+                && TryGetMatchingActiveLocalFileJob(ObjectLocalFileKind.Sound, handle, descriptor, out _))
             {
-                return result;
+                return _loadScdFileLocal != null
+                    ? _loadScdFileLocal(handle, descriptor, unknown0)
+                    : (byte)0;
             }
 
-            return _loadScdFileLocal != null
-                ? _loadScdFileLocal(handle, descriptor, unknown0)
-                : (byte)0;
+            return _soundOnLoadOriginal!(handle, descriptor, unknown0);
         }
         catch (Exception ex)
         {
             LogFileHookFailure(ex, "sound on load", handle);
-            return calledOriginal
-                ? result
-                : CallSoundOnLoadOriginal(handle, descriptor, unknown0);
-        }
-    }
-
-    private byte CallSoundOnLoadOriginal(ResourceHandle* handle, ClientFileDescriptor* descriptor, byte unknown0)
-    {
-        if (_rsfService == null || *_rsfService != nint.Zero)
-        {
-            return _soundOnLoadHook!.Original(handle, descriptor, unknown0);
-        }
-
-        if (!_loggedUninitializedRsfService)
-        {
-            _loggedUninitializedRsfService = true;
-            _logger.LogDebug("object local sound resource load reached RSF before service initialization");
-        }
-
-        *_rsfService = 1;
-        try
-        {
-            return _soundOnLoadHook!.Original(handle, descriptor, unknown0);
-        }
-        finally
-        {
-            *_rsfService = nint.Zero;
+            return 0;
         }
     }
 
@@ -756,7 +722,7 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
         => _checkFileStateHook != null && _textureOnLoadHook != null && _loadTexFileLocal != null;
 
     private bool CanLoadLocalSounds()
-        => _checkFileStateHook != null && _soundOnLoadHook != null && _loadScdFileLocal != null && _rsfService != null;
+        => _soundOnLoadHook != null && _loadScdFileLocal != null;
 
     private bool CanLoadLocalFileKind(ObjectLocalFileKind kind)
         => kind switch

@@ -1,10 +1,11 @@
 using Dalamud.Bindings.ImGui;
+using Microsoft.Extensions.Logging;
 using System.Collections.Concurrent;
 
 namespace Intoner.Objects.Rendering.Drawing;
 
 /// <summary> owns ImGui draw callbacks and releases their jobs after the draw command runs </summary>
-internal sealed unsafe class ImGuiDrawCallbackQueue : IDisposable
+internal sealed unsafe class ImGuiDrawCallbackQueue(ILogger logger) : IDisposable
 {
     private static readonly ConcurrentDictionary<long, Entry> Jobs = new();
     private static readonly ImDrawCallback ProcessCallback = ProcessQueuedJob;
@@ -33,35 +34,9 @@ internal sealed unsafe class ImGuiDrawCallbackQueue : IDisposable
         Action<TJob>? releaseJob = null)
         where TJob : class
     {
-        ArgumentNullException.ThrowIfNull(job);
-        ArgumentNullException.ThrowIfNull(processJob);
         ArgumentNullException.ThrowIfNull(drawContent);
 
-        long jobId = 0;
-        bool disposed;
-        bool queued;
-        lock (_stateLock)
-        {
-            disposed = _disposed;
-            if (disposed)
-            {
-                queued = false;
-            }
-            else
-            {
-                jobId = Interlocked.Increment(ref _nextJobId);
-                queued = Jobs.TryAdd(jobId, new Entry(this, new QueuedJob<TJob>(job, processJob, releaseJob)));
-            }
-        }
-
-        if (!queued)
-        {
-            releaseJob?.Invoke(job);
-            throw disposed
-                ? new ObjectDisposedException(nameof(ImGuiDrawCallbackQueue))
-                : new InvalidOperationException("Failed to queue ImGui draw callback.");
-        }
-
+        long jobId = RegisterJob(job, processJob, releaseJob);
         var releaseQueued = false;
         void* jobPtr = (void*)(nint)jobId;
         try
@@ -80,6 +55,35 @@ internal sealed unsafe class ImGuiDrawCallbackQueue : IDisposable
         }
     }
 
+    /// <summary> transfers a job to the queue before its native draw commands are recorded </summary>
+    internal long RegisterJob<TJob>(TJob job, Action<TJob> processJob, Action<TJob>? releaseJob = null)
+        where TJob : class
+    {
+        ArgumentNullException.ThrowIfNull(job);
+        ArgumentNullException.ThrowIfNull(processJob);
+
+        lock (_stateLock)
+        {
+            if (!_disposed)
+            {
+                long jobId = Interlocked.Increment(ref _nextJobId);
+                Jobs[jobId] = new Entry(this, jobId, new QueuedJob<TJob>(job, processJob, releaseJob));
+                return jobId;
+            }
+        }
+
+        try
+        {
+            releaseJob?.Invoke(job);
+        }
+        catch (Exception ex)
+        {
+            LogFailure(ex, "release");
+        }
+
+        throw new ObjectDisposedException(nameof(ImGuiDrawCallbackQueue));
+    }
+
     public void Dispose()
     {
         lock (_stateLock)
@@ -96,8 +100,10 @@ internal sealed unsafe class ImGuiDrawCallbackQueue : IDisposable
     }
 
     private static void ProcessQueuedJob(ImDrawList* _, ImDrawCmd* cmd)
+        => ProcessJob((long)(nint)cmd->UserCallbackData);
+
+    internal static void ProcessJob(long jobId)
     {
-        long jobId = (long)(nint)cmd->UserCallbackData;
         if (!Jobs.TryGetValue(jobId, out Entry? entry))
         {
             return;
@@ -107,41 +113,49 @@ internal sealed unsafe class ImGuiDrawCallbackQueue : IDisposable
         {
             entry.Process();
         }
-        catch
+        catch (Exception ex)
         {
-            ReleaseJob(jobId);
-            throw;
+            entry.Owner.LogFailure(ex, "processing");
         }
     }
 
     private static void ReleaseQueuedJob(ImDrawList* _, ImDrawCmd* cmd)
         => ReleaseJob((long)(nint)cmd->UserCallbackData);
 
-    private static void ReleaseJob(long jobId)
+    internal static void ReleaseJob(long jobId)
     {
-        if (Jobs.TryRemove(jobId, out Entry? entry))
+        if (Jobs.TryGetValue(jobId, out Entry? entry))
         {
-            entry.Release(waitForProcessing: false);
+            entry.Release(waitForCompletion: false);
         }
     }
 
     private void ReleaseOwnedJobs()
     {
-        foreach ((long jobId, Entry entry) in Jobs)
+        foreach (Entry entry in Jobs.Values.Where(entry => ReferenceEquals(entry.Owner, this)))
         {
-            if (ReferenceEquals(entry.Owner, this)
-                && Jobs.TryRemove(jobId, out Entry? removed))
-            {
-                removed.Release(waitForProcessing: true);
-            }
+            entry.Release(waitForCompletion: true);
         }
     }
 
-    private sealed class Entry(ImGuiDrawCallbackQueue owner, IQueuedJob job)
+    private void LogFailure(Exception exception, string operation)
+    {
+        try
+        {
+            logger.LogError(exception, "ImGui draw callback {Operation} failed", operation);
+        }
+        catch
+        {
+            // logging must not release through a native callback
+        }
+    }
+
+    private sealed class Entry(ImGuiDrawCallbackQueue owner, long jobId, IQueuedJob job)
     {
         private readonly object _stateLock = new();
         private bool _processing;
         private bool _releaseRequested;
+        private bool _releaseStarted;
         private bool _released;
 
         public ImGuiDrawCallbackQueue Owner { get; } = owner;
@@ -168,45 +182,64 @@ internal sealed unsafe class ImGuiDrawCallbackQueue : IDisposable
                 lock (_stateLock)
                 {
                     _processing = false;
-                    release = TryMarkReleasedLocked();
-                    Monitor.PulseAll(_stateLock);
+                    release = TryStartReleaseLocked();
                 }
 
                 if (release)
                 {
-                    job.Release();
+                    ReleasePayload();
                 }
             }
         }
 
-        public void Release(bool waitForProcessing)
+        public void Release(bool waitForCompletion)
         {
             bool release;
             lock (_stateLock)
             {
                 _releaseRequested = true;
-                while (waitForProcessing && _processing)
+                release = TryStartReleaseLocked();
+                while (waitForCompletion && !release && !_released)
                 {
                     Monitor.Wait(_stateLock);
                 }
-
-                release = TryMarkReleasedLocked();
             }
 
             if (release)
             {
-                job.Release();
+                ReleasePayload();
             }
         }
 
-        private bool TryMarkReleasedLocked()
+        private void ReleasePayload()
         {
-            if (!_releaseRequested || _processing || _released)
+            try
+            {
+                job.Release();
+            }
+            catch (Exception ex)
+            {
+                Owner.LogFailure(ex, "release");
+            }
+            finally
+            {
+                lock (_stateLock)
+                {
+                    _released = true;
+                    Jobs.TryRemove(jobId, out _);
+                    Monitor.PulseAll(_stateLock);
+                }
+            }
+        }
+
+        private bool TryStartReleaseLocked()
+        {
+            if (!_releaseRequested || _processing || _releaseStarted)
             {
                 return false;
             }
 
-            _released = true;
+            _releaseStarted = true;
             return true;
         }
     }
@@ -236,14 +269,15 @@ internal sealed unsafe class ImGuiDrawCallbackQueue : IDisposable
 internal sealed class ImGuiDrawCallbackQueue<TJob> : IDisposable
     where TJob : class
 {
-    private readonly ImGuiDrawCallbackQueue _queue = new();
-    private readonly Action<TJob>          _processJob;
-    private readonly Action<TJob>?         _releaseJob;
+    private readonly ImGuiDrawCallbackQueue _queue;
+    private readonly Action<TJob>           _processJob;
+    private readonly Action<TJob>?          _releaseJob;
 
-    public ImGuiDrawCallbackQueue(Action<TJob> processJob, Action<TJob>? releaseJob = null)
+    public ImGuiDrawCallbackQueue(ILogger logger, Action<TJob> processJob, Action<TJob>? releaseJob = null)
     {
         ArgumentNullException.ThrowIfNull(processJob);
 
+        _queue = new ImGuiDrawCallbackQueue(logger);
         _processJob = processJob;
         _releaseJob = releaseJob;
     }

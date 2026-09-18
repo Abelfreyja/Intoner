@@ -11,7 +11,6 @@ internal sealed record ObjectBoundsSnapshot : SceneItemBoundsSnapshot
         Guid id,
         string name,
         ObjectKind kind,
-        nint nativeAddress,
         Vector3 min,
         Vector3 max,
         OrientedBounds? localBounds,
@@ -30,7 +29,6 @@ internal sealed record ObjectBoundsSnapshot : SceneItemBoundsSnapshot
     {
         Name = name;
         Kind = kind;
-        NativeAddress = nativeAddress;
         LocalBounds = localBounds;
         PlacementClearance = placementClearance;
         PlacementSurfaceSupport = placementSurfaceSupport;
@@ -39,7 +37,6 @@ internal sealed record ObjectBoundsSnapshot : SceneItemBoundsSnapshot
 
     public string Name { get; }
     public ObjectKind Kind { get; }
-    public nint NativeAddress { get; }
     public OrientedBounds? LocalBounds { get; }
     public ObjectPlacementClearance? PlacementClearance { get; }
     public ObjectPlacementSurfaceSupport PlacementSurfaceSupport { get; }
@@ -49,7 +46,6 @@ internal sealed record ObjectBoundsSnapshot : SceneItemBoundsSnapshot
         => Id == other.Id
            && string.Equals(Name, other.Name, StringComparison.Ordinal)
            && Kind == other.Kind
-           && NativeAddress == other.NativeAddress
            && Min == other.Min
            && Max == other.Max
            && Equals(LocalBounds, other.LocalBounds)

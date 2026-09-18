@@ -499,7 +499,6 @@ internal sealed class ObjectScene : IObjectScene, IDisposable
             snapshot.Id,
             snapshot.Name,
             snapshot.Kind,
-            runtime.Address,
             min,
             max,
             hasLocalBounds ? localBounds : null,

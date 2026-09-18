@@ -16,6 +16,7 @@ internal sealed unsafe class BgObjectRuntime : DrawObjectRuntime
     private readonly ObjectResourceTracker _resourceTracker;
     private string _modelPath;
     private ObjectResourceRegistration _rootHandleRegistration = new();
+    private BgObjectSceneInterop.ModelLoadState? _lastModelLoadState;
 
     public override ObjectKind Kind
         => ObjectKind.BgObject;
@@ -45,7 +46,10 @@ internal sealed unsafe class BgObjectRuntime : DrawObjectRuntime
     }
 
     internal override void Initialize()
-        => UpdateRegisteredRootHandle(Snapshot);
+    {
+        LogModelLoadState();
+        UpdateRegisteredRootHandle(Snapshot);
+    }
 
     protected override void FrameworkUpdateUnsafe()
     {
@@ -54,6 +58,7 @@ internal sealed unsafe class BgObjectRuntime : DrawObjectRuntime
             return;
         }
 
+        LogModelLoadState();
         _deferredVisualState.Replay<BgObjectModel>(
             Snapshot,
             ApplyRuntimeStateUnsafe,
@@ -136,7 +141,33 @@ internal sealed unsafe class BgObjectRuntime : DrawObjectRuntime
         => BgObjectSceneInterop.ApplyRuntimeState(_bgObject, snapshot);
 
     private bool TryApplyVisualStateUnsafe(BgObjectModel bgObjectModel)
-        => BgObjectSceneInterop.TryApplyVisualState(_bgObject, bgObjectModel);
+    {
+        LogModelLoadState();
+        return BgObjectSceneInterop.TryApplyVisualState(_bgObject, bgObjectModel);
+    }
+
+    private void LogModelLoadState()
+    {
+        if (_bgObject == null)
+        {
+            return;
+        }
+
+        BgObjectSceneInterop.ModelLoadState state = BgObjectSceneInterop.GetModelLoadState(_bgObject);
+        if (_lastModelLoadState == state)
+        {
+            return;
+        }
+
+        _lastModelLoadState = state;
+        Logger.LogInformation(
+            "bgobject model state: object {ObjectId}, address 0x{Address:X}, model {ModelPath}, handle 0x{Handle:X}, "
+            + "draw {DrawState}, read {ReadState}, load {LoadState}, resource lod bytes 0x{ResourceLodBytes:X8}, "
+            + "lod count {LodCount}, current lod {CurrentLod}",
+            Snapshot.Id, (ulong)(nint)_bgObject, _modelPath, (ulong)state.Handle,
+            state.DrawState, state.ReadState, state.LoadState, state.ResourceLodBytes,
+            state.LodCount, BgObjectSceneInterop.GetCurrentLod(_bgObject));
+    }
 
     private bool HasLoadedGraphics()
         => BgObjectSceneInterop.IsModelLoaded(_bgObject);

@@ -74,8 +74,7 @@ internal static unsafe class FurnitureSceneInterop
             return false;
         }
 
-        ApplyTransparency(&instance->Instances, transparency);
-        return true;
+        return TryApplyChildTransparency(&instance->Instances, transparency);
     }
 
     private static bool TryApplyOutlineColor(SharedGroupLayoutInstance* instance, ObjectOutlineColor outlineColor)
@@ -254,8 +253,9 @@ internal static unsafe class FurnitureSceneInterop
         }
     }
 
-    private static void ApplyTransparency(ChildNodeContainer* container, float transparency)
+    private static bool TryApplyChildTransparency(ChildNodeContainer* container, float transparency)
     {
+        bool applied = true;
         foreach (var child in container->Instances.AsSpan())
         {
             var node = child.Value;
@@ -265,30 +265,33 @@ internal static unsafe class FurnitureSceneInterop
             }
 
             var primaryGraphics = node->Instance->GetGraphics();
-            ApplyTransparency(primaryGraphics, transparency);
+            applied &= TryApplyChildTransparency(primaryGraphics, transparency);
 
             var secondaryGraphics = node->Instance->GetGraphics2();
             if (secondaryGraphics != null && secondaryGraphics != primaryGraphics)
             {
-                ApplyTransparency(secondaryGraphics, transparency);
+                applied &= TryApplyChildTransparency(secondaryGraphics, transparency);
             }
 
             if (node->Instance->Id.Type == InstanceType.SharedGroup)
             {
                 var childGroup = (SharedGroupLayoutInstance*)node->Instance;
-                ApplyTransparency(&childGroup->Instances, transparency);
+                applied &= TryApplyChildTransparency(&childGroup->Instances, transparency);
             }
         }
+
+        return applied;
     }
 
-    private static void ApplyTransparency(GraphicsSceneObject* graphics, float transparency)
+    private static bool TryApplyChildTransparency(GraphicsSceneObject* graphics, float transparency)
     {
         if (!ObjectSceneInterop.TryGetDrawObject(graphics, out var drawObject))
         {
-            return;
+            return true;
         }
 
-        ObjectSceneInterop.ApplyTransparency(drawObject, transparency);
+        return drawObject->LoadState == 4
+            || ObjectSceneInterop.TryApplyTransparency(drawObject, transparency);
     }
 
     private static void ApplyOutlineColor(ChildNodeContainer* container, ObjectOutlineColor outlineColor)

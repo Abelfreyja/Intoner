@@ -1,6 +1,7 @@
 using Dalamud.Bindings.ImGui;
 using Intoner.Objects.Preview.Assets;
 using Intoner.Objects.Rendering.Drawing;
+using Microsoft.Extensions.Logging;
 using System.Numerics;
 
 namespace Intoner.Objects.Preview.Rendering;
@@ -9,16 +10,18 @@ internal sealed class ViewportService : IDisposable
 {
     private readonly PreviewService                    _previewService;
     private readonly ViewportRenderer                  _renderer;
-    private readonly ImGuiDrawCallbackQueue<RenderJob> _renderJobs = new(ProcessRenderJob, static job => job.Dispose());
+    private readonly ImGuiDrawCallbackQueue<RenderJob> _renderJobs;
 
     private bool _disposed;
 
     public ViewportService(
+        ILogger<ViewportService> logger,
         PreviewService previewService,
         ViewportRenderer renderer)
     {
         _previewService = previewService;
         _renderer       = renderer;
+        _renderJobs     = new(logger, ProcessRenderJob, static job => job.Dispose());
     }
 
     public bool TryDrawPreview(
