@@ -45,6 +45,10 @@ internal sealed class GizmoSettings
 
     public SceneTransformSnapSettings TransformSnapSettings { get; set; } = DefaultTransformSnapSettings;
 
+    public bool AnchoredScaling { get; set; }
+
+    public bool UniformScaling { get; set; } = true;
+
     public SceneBoundsInteractionSettings BoundsInteractionSettings { get; set; } = DefaultBoundsInteractionSettings;
 }
 

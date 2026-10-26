@@ -1,3 +1,4 @@
+using Intoner.Objects.Resources;
 using Intoner.Objects.Assets.Cache;
 
 namespace Intoner.Objects.Assets;
@@ -12,15 +13,10 @@ internal static class ObjectAssetStateChange
         IEnumerable<string> searchTerms,
         KnownVfxFamily vfxFamily = KnownVfxFamily.None)
     {
-        string normalizedPath = GameAssetPathRules.NormalizeGamePath(path);
+        string normalizedPath = ObjectResolvedPath.FromGamePath(path).Path;
         if (!state.KnowledgeBase.AddPath(normalizedPath, source, contract, searchTerms, vfxFamily))
         {
             return false;
-        }
-
-        if (ObjectAssetPathRules.IsCatalogModelPath(normalizedPath))
-        {
-            state.ObservedBgSnapshotDirty = true;
         }
 
         if (GameAssetPathRules.IsFileKind(normalizedPath, GameAssetFileKind.Avfx))
@@ -33,13 +29,13 @@ internal static class ObjectAssetStateChange
 
     public static void MarkObservedBgChanged(CatalogAssetState state)
     {
-        MarkBgObjectChanged(state, observedAssetsChanged: true);
+        MarkBgObjectChanged(state);
         MarkCacheSectionsDirty(state, ObjectAssetCacheSectionSet.BgModels);
     }
 
     public static void MarkGameDataBgChanged(CatalogAssetState state)
     {
-        MarkBgObjectChanged(state, observedAssetsChanged: false);
+        MarkBgObjectChanged(state);
         MarkCacheSectionsDirty(state, ObjectAssetCacheSectionSet.StaticBgObjects);
     }
 
@@ -47,7 +43,7 @@ internal static class ObjectAssetStateChange
     {
         state.StandaloneVfxSnapshotDirty = true;
         state.StandaloneVfxSectionVersion++;
-        MarkCacheSectionsDirty(state, ObjectAssetCacheSectionSet.StandaloneVfx);
+        MarkCacheSectionsDirty(state, ObjectAssetCacheSectionSet.RuntimeVfx);
     }
 
     public static void MarkCacheSectionsDirty(CatalogAssetState state, ObjectAssetCacheSectionSet sections)
@@ -78,17 +74,9 @@ internal static class ObjectAssetStateChange
         return ObservationApplyResult.None;
     }
 
-    private static void MarkBgObjectChanged(CatalogAssetState state, bool observedAssetsChanged)
+    private static void MarkBgObjectChanged(CatalogAssetState state)
     {
-        if (observedAssetsChanged)
-        {
-            state.ObservedBgSnapshotDirty = true;
-        }
-        else
-        {
-            state.GameDataBgSnapshotDirty = true;
-        }
-
+        state.BgObjectSnapshotDirty = true;
         state.BgObjectSectionVersion++;
     }
 }

@@ -47,9 +47,6 @@ internal interface IPluginStoragePaths
     /// <summary> gets the object asset cache manifest path </summary>
     string AssetCacheManifestPath { get; }
 
-    /// <summary> gets the object asset cache payload path </summary>
-    string AssetCachePayloadPath { get; }
-
     /// <summary> gets the shared authored scene store path </summary>
     string SceneStorePath { get; }
 }
@@ -72,7 +69,6 @@ internal sealed class PluginStoragePaths : IPluginStoragePaths
         ObjectAutosaveRejectedPath = Path.Combine(ObjectAutosaveRootPath, "rejected.autosave.json");
         AssetCacheRootPath = Path.Combine(ObjectRootPath, "asset-cache");
         AssetCacheManifestPath = Path.Combine(AssetCacheRootPath, "manifest.json");
-        AssetCachePayloadPath = Path.Combine(AssetCacheRootPath, "assets.cache");
         SceneStorePath = Path.Combine(ObjectRootPath, "scene.json");
     }
 
@@ -104,8 +100,5 @@ internal sealed class PluginStoragePaths : IPluginStoragePaths
 
     public string AssetCacheManifestPath { get; }
 
-    public string AssetCachePayloadPath { get; }
-
     public string SceneStorePath { get; }
 }
-

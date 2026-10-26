@@ -23,27 +23,30 @@ internal readonly record struct ObjectPasteDestination(ObjectPasteDestinationKin
 internal sealed record ObjectTransferImport(
     IReadOnlyList<ObjectSnapshot> Objects,
     IReadOnlyList<ObjectFolderSnapshot> Folders,
-    bool IsFolderTransfer);
+    bool IsFolderTransfer)
+{
+    public IReadOnlyList<SceneGroupSnapshot> Groups { get; init; } = [];
+}
 
 /// <summary> maps scene object transfers and persistent snapshots </summary>
 internal static class ObjectTransferMapper
 {
     public static bool TryCreateDocument(
-        IReadOnlyList<ObjectSnapshot> snapshots,
+        IReadOnlyList<SceneItemSnapshot> snapshots,
         IReadOnlyList<ObjectFolderSnapshot> folders,
         out ObjectTransferDocument document)
         => TryCreateDocument(snapshots, folders, folderName: null, out document);
 
     public static bool TryCreateFolderDocument(
-        IReadOnlyList<ObjectSnapshot> snapshots,
+        IReadOnlyList<SceneItemSnapshot> snapshots,
         string folderPath,
         IReadOnlyList<ObjectFolderSnapshot> folders,
         out ObjectTransferDocument document)
     {
         string normalizedFolder = ObjectFolderUtility.SanitizeFolderPath(folderPath);
         if (normalizedFolder.Length == 0
-            || snapshots.Any(snapshot => !ObjectFolderUtility.IsSameOrDescendant(
-                snapshot.FolderPath,
+            || snapshots.Any(snapshot => snapshot is not ObjectSceneItemSnapshot item || !ObjectFolderUtility.IsSameOrDescendant(
+                item.FolderPath,
                 normalizedFolder)))
         {
             document = null!;
@@ -78,8 +81,9 @@ internal static class ObjectTransferMapper
             || source.Objects is null
             || source.Folders is null
             || source.FolderColors is null
-            || source.Objects.Count > ObjectTransferCodec.MaximumObjectCount
-            || (transfer.FolderName is null && source.Objects.Count == 0)
+            || source.Groups is null
+            || source.Objects.Count + source.Groups.Count > ObjectTransferCodec.MaximumObjectCount
+            || (transfer.FolderName is null && source.Objects.Count == 0 && source.Groups.Count == 0)
             || (transfer.FolderName is { } folderName
                 && source.Folders.Any(folder => !ObjectFolderUtility.IsSameOrDescendant(folder, folderName))))
         {
@@ -87,46 +91,41 @@ internal static class ObjectTransferMapper
         }
 
         DateTime createdAtUtc = DateTime.UtcNow;
-        List<ObjectSnapshot> sourceSnapshots = new(source.Objects.Count);
-        foreach (PersistentObject? entry in source.Objects)
-        {
-            if (entry is null || !ObjectApiMapper.TryToPersistentSnapshot(entry, out ObjectSnapshot snapshot))
-            {
-                return false;
-            }
-
-            sourceSnapshots.Add(snapshot with
-            {
-                LayoutId = layoutId,
-                CreatedAtUtc = createdAtUtc,
-                CreatedIn = createdIn,
-            });
-        }
-
-        if (!ObjectSnapshotUtility.TryCopyWithNewIds(sourceSnapshots, out List<ObjectSnapshot> snapshots))
+        if (!ObjectApiMapper.TryToPersistentSet(source, layoutId, out List<ObjectSnapshot> sourceSnapshots,
+                out _, out List<SceneGroupSnapshot> sourceGroups)
+            || !ObjectSnapshotUtility.TryCopyWithNewIds(sourceSnapshots, sourceGroups,
+                out List<ObjectSnapshot> snapshots, out List<SceneGroupSnapshot> groups))
         {
             return false;
         }
+
+        for (int index = 0; index < snapshots.Count; ++index)
+            snapshots[index] = snapshots[index] with { CreatedAtUtc = createdAtUtc, CreatedIn = createdIn };
+        for (int index = 0; index < groups.Count; ++index)
+            groups[index] = groups[index] with { CreatedAtUtc = createdAtUtc, CreatedIn = createdIn };
 
         if (!TryApplyDestination(
                 transfer,
                 ObjectFolderUtility.FromFolderColorMap(
-                    source.Folders.Concat(sourceSnapshots.Select(static snapshot => snapshot.FolderPath)).Append(transfer.FolderName ?? string.Empty),
+                    source.Folders.Concat(sourceSnapshots.Select(static snapshot => snapshot.FolderPath))
+                        .Concat(sourceGroups.Select(static group => group.FolderPath)).Append(transfer.FolderName ?? string.Empty),
                     source.FolderColors),
                 snapshots,
+                groups,
                 existingFolders,
                 destination,
-                out IReadOnlyList<ObjectFolderSnapshot> folders))
+                out IReadOnlyList<ObjectFolderSnapshot> folders)
+            || !SceneGroupUtility.TryValidateOwner(layoutId, snapshots, groups, out _))
         {
             return false;
         }
 
-        import = new ObjectTransferImport(snapshots, folders, transfer.FolderName is not null);
+        import = new ObjectTransferImport(snapshots, folders, transfer.FolderName is not null) { Groups = groups };
         return true;
     }
 
     private static bool TryCreateDocument(
-        IReadOnlyList<ObjectSnapshot> snapshots,
+        IReadOnlyList<SceneItemSnapshot> snapshots,
         IEnumerable<ObjectFolderSnapshot> folders,
         string? folderName,
         out ObjectTransferDocument document)
@@ -138,8 +137,14 @@ internal static class ObjectTransferMapper
             return false;
         }
 
+        List<SceneGroupSnapshot> groups = snapshots.OfType<SceneGroupSnapshot>().ToList();
+        HashSet<Guid> groupIds = groups.Select(static group => group.Id).ToHashSet();
+        List<ObjectSnapshot> objects = snapshots.OfType<ObjectSnapshot>().Select(snapshot =>
+            snapshot.GroupId is Guid id && !groupIds.Contains(id) ? snapshot with { GroupId = null } : snapshot).ToList();
+        if (objects.Count + groups.Count != snapshots.Count)
+            return false;
         HashSet<Guid> objectIds = new(snapshots.Count);
-        foreach (ObjectSnapshot snapshot in snapshots)
+        foreach (SceneItemSnapshot snapshot in snapshots)
         {
             if (snapshot.Id == Guid.Empty
                 || !objectIds.Add(snapshot.Id)
@@ -152,11 +157,11 @@ internal static class ObjectTransferMapper
         }
 
         IReadOnlyList<ObjectFolderSnapshot> orderedFolders = ObjectFolderUtility.OrderFolderEntries(
-            folders.Concat(snapshots.Select(static snapshot => new ObjectFolderSnapshot(snapshot.FolderPath))));
+            folders.Concat(snapshots.Select(static snapshot => new ObjectFolderSnapshot(ObjectFolderUtility.GetItemFolderPath(snapshot)))));
         document = new ObjectTransferDocument(
             ObjectTransferKind.SceneObjects,
             SceneObjects: new SceneObjectTransfer(
-                ObjectApiMapper.ToPersistentSet(snapshots, orderedFolders),
+                ObjectApiMapper.ToPersistentSet(objects, orderedFolders, groups),
                 folderName));
         return true;
     }
@@ -165,57 +170,42 @@ internal static class ObjectTransferMapper
         SceneObjectTransfer transfer,
         IReadOnlyList<ObjectFolderSnapshot> sourceFolders,
         List<ObjectSnapshot> snapshots,
+        List<SceneGroupSnapshot> groups,
         IReadOnlyList<string> existingFolders,
         ObjectPasteDestination destination,
         out IReadOnlyList<ObjectFolderSnapshot> folders)
     {
         folders = [];
-        if (transfer.FolderName is not null)
-        {
-            return TryApplyFolderDestination(
-                transfer,
-                sourceFolders,
-                snapshots,
-                existingFolders,
-                destination,
-                out folders);
-        }
 
-        switch (destination.Kind)
+        if (transfer.FolderName is null)
         {
-            case ObjectPasteDestinationKind.Ungrouped:
-                ReplaceFolder(snapshots, string.Empty);
-                return true;
-            case ObjectPasteDestinationKind.Folder:
-                string targetFolder = ObjectFolderUtility.SanitizeFolderPath(destination.FolderPath);
-                if (targetFolder.Length == 0)
-                {
+            switch (destination.Kind)
+            {
+                case ObjectPasteDestinationKind.Ungrouped:
+                    ReplaceFolders(snapshots, groups, static _ => string.Empty);
+                    return true;
+                case ObjectPasteDestinationKind.Folder:
+                    string destinationFolder = ObjectFolderUtility.SanitizeFolderPath(destination.FolderPath);
+                    if (destinationFolder.Length == 0)
+                    {
+                        return false;
+                    }
+
+                    ReplaceFolders(snapshots, groups, _ => destinationFolder);
+                    folders = [new ObjectFolderSnapshot(destinationFolder)];
+                    return true;
+                case ObjectPasteDestinationKind.KeepOrganization:
+                    folders = sourceFolders;
+                    return true;
+                default:
                     return false;
-                }
-
-                ReplaceFolder(snapshots, targetFolder);
-                folders = [new ObjectFolderSnapshot(targetFolder)];
-                return true;
-            case ObjectPasteDestinationKind.KeepOrganization:
-                folders = sourceFolders;
-                return true;
-            default:
-                return false;
+            }
         }
-    }
 
-    private static bool TryApplyFolderDestination(
-        SceneObjectTransfer transfer,
-        IReadOnlyList<ObjectFolderSnapshot> sourceFolders,
-        List<ObjectSnapshot> snapshots,
-        IReadOnlyList<string> existingFolders,
-        ObjectPasteDestination destination,
-        out IReadOnlyList<ObjectFolderSnapshot> folders)
-    {
-        folders = [];
         string sourceRoot = ObjectFolderUtility.SanitizeFolderPath(transfer.FolderName);
         if (sourceRoot.Length == 0
-         || snapshots.Any(snapshot => !ObjectFolderUtility.IsSameOrDescendant(snapshot.FolderPath, sourceRoot)))
+         || snapshots.Any(snapshot => !ObjectFolderUtility.IsSameOrDescendant(snapshot.FolderPath, sourceRoot))
+         || groups.Any(group => !ObjectFolderUtility.IsSameOrDescendant(group.FolderPath, sourceRoot)))
         {
             return false;
         }
@@ -243,16 +233,7 @@ internal static class ObjectTransferMapper
             return false;
         }
 
-        for (int index = 0; index < snapshots.Count; ++index)
-        {
-            snapshots[index] = snapshots[index] with
-            {
-                FolderPath = ObjectFolderUtility.RebaseFolderPath(
-                    snapshots[index].FolderPath,
-                    sourceRoot,
-                    destinationRoot),
-            };
-        }
+        ReplaceFolders(snapshots, groups, path => ObjectFolderUtility.RebaseFolderPath(path, sourceRoot, destinationRoot));
 
         folders = ObjectFolderUtility.OrderFolderEntries(
             sourceFolders
@@ -261,11 +242,13 @@ internal static class ObjectTransferMapper
         return true;
     }
 
-    private static void ReplaceFolder(List<ObjectSnapshot> snapshots, string folderPath)
+    private static void ReplaceFolders(List<ObjectSnapshot> snapshots, List<SceneGroupSnapshot> groups, Func<string, string> map)
     {
         for (int index = 0; index < snapshots.Count; ++index)
         {
-            snapshots[index] = snapshots[index] with { FolderPath = folderPath };
+            snapshots[index] = snapshots[index] with { FolderPath = map(snapshots[index].FolderPath) };
         }
+        for (int index = 0; index < groups.Count; ++index)
+            groups[index] = groups[index] with { FolderPath = map(groups[index].FolderPath) };
     }
 }

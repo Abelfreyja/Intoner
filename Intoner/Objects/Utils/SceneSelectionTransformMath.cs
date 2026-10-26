@@ -74,6 +74,11 @@ internal static class SceneSelectionTransformMath
             return Vector3.Zero;
         }
 
+        if (SceneGroupUtility.ResolveSelectedGroup(selectedItems) is { } group)
+        {
+            return group.Transform.Position;
+        }
+
         if (TryResolveSelectionWorldBounds(selectedItems, boundsLookup, out var min, out var max))
         {
             return (min + max) * 0.5f;
@@ -348,4 +353,3 @@ internal static class SceneSelectionTransformMath
     public static Vector3 ProjectDirectionOntoPlane(Vector3 direction, Vector3 normal)
         => direction - (Vector3.Dot(direction, normal) * normal);
 }
-

@@ -1,9 +1,11 @@
+using Intoner.Objects.Api;
 using Dalamud.Interface;
 using Intoner.Displays;
 using Intoner.Objects.Collections;
 using Intoner.Objects.Models;
 using Intoner.Objects.Utils;
 using Intoner.Services.Gpu;
+using Intoner.Scene;
 
 namespace Intoner.Objects.UI;
 
@@ -55,6 +57,44 @@ internal static class SceneItemPresentation
         => target.Kind == WindowsCaptureTargetKind.Monitor
             ? "Monitor"
             : "Window";
+
+    internal static (string DataCenter, string Worlds) DescribeWorldSelection(ObjectWorldSelection? selection, ISceneLocationService locations)
+    {
+        if (selection is null)
+        {
+            return ("Unknown", "Unknown");
+        }
+
+        if (selection.AllDataCenters)
+        {
+            return ("All data centers", "All worlds");
+        }
+
+        List<string> worlds = [];
+        HashSet<string> dataCenters = new(StringComparer.Ordinal);
+        foreach (uint id in selection.DataCenterIds)
+        {
+            string name = locations.TryResolveDataCenter(id, out string? resolved) ? resolved : $"Data center #{id}";
+            dataCenters.Add(name);
+            worlds.Add($"{name}: All worlds");
+        }
+
+        foreach (ushort id in selection.WorldIds)
+        {
+            if (locations.TryResolveWorld(id, out SceneWorldInfo? world))
+            {
+                worlds.Add(world.Name);
+                dataCenters.Add(world.DataCenterName);
+            }
+            else
+            {
+                worlds.Add($"World #{id}");
+                dataCenters.Add("Unknown");
+            }
+        }
+
+        return (string.Join(", ", dataCenters.Order(StringComparer.Ordinal)), string.Join(", ", worlds));
+    }
 
     internal static string ResolveSceneLocationLabel(string? name, uint id, string fallbackPrefix)
     {

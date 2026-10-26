@@ -1,3 +1,5 @@
+using Intoner.Objects.Assets.Cache;
+using Intoner.Objects.Resources;
 using Microsoft.Extensions.Logging;
 
 namespace Intoner.Objects.Assets;
@@ -38,6 +40,7 @@ internal sealed class ObjectAssetStaticDiscovery
         StaticAssetDiscoveryReuseInput? reuseInput = null,
         CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         SqpackIndexSnapshot? indexSnapshot = null;
         if (reuseInput?.CollisionPaths is null || reuseInput.ResolvedVfxPaths is null)
         {
@@ -46,71 +49,96 @@ internal sealed class ObjectAssetStaticDiscovery
 
         IReadOnlyList<string> resolvedCollisionPaths = BuildStaticCollisionPaths(
             reuseInput?.CollisionPaths
-            ?? indexSnapshot!.NamedPaths
-                .Select(static path => path.Path)
-                .ToArray(),
+            ?? indexSnapshot!.NamedPaths.Select(static path => path.Path),
             cancellationToken);
 
-        IReadOnlyDictionary<string, GameDataBgObjectAsset> resolvedGameDataBgObjectAssets = BuildStaticGameDataBgObjects(
-            reuseInput?.GameDataBgObjects ?? _gameDataLayoutAssetResolver.Resolve(cancellationToken).BgObjects,
+        GameDataLayoutAssetResolver.Snapshot? layoutSnapshot = reuseInput?.GameDataBgObjects is null || reuseInput.ResolvedVfxPaths is null
+            ? _gameDataLayoutAssetResolver.Resolve(cancellationToken)
+            : null;
+        ObjectAssetCacheSectionSet completeSections = ObjectAssetCacheSectionSet.AllStatic;
+        IReadOnlyDictionary<string, BgObjectAsset> resolvedBgObjectAssets = BuildStaticGameDataBgObjects(
+            reuseInput?.GameDataBgObjects ?? layoutSnapshot!.BgObjects,
             cancellationToken);
+
+        if (reuseInput?.GameDataBgObjects is null && !layoutSnapshot!.BgObjectsComplete)
+        {
+            completeSections &= ~ObjectAssetCacheSectionSet.StaticBgObjects;
+        }
 
         IReadOnlyDictionary<string, ResolvedVfxPath> resolvedVfxAssets = BuildStaticResolvedVfxPaths(
             reuseInput?.ResolvedVfxPaths ?? [],
             cancellationToken);
         if (reuseInput?.ResolvedVfxPaths is null)
         {
-            resolvedVfxAssets = ResolveDiscoveredVfxPaths(indexSnapshot!, cancellationToken);
+            resolvedVfxAssets = ResolveDiscoveredVfxPaths(indexSnapshot!, layoutSnapshot!, out bool isComplete, cancellationToken);
+
+            if (!isComplete)
+            {
+                completeSections &= ~ObjectAssetCacheSectionSet.StaticResolvedVfx;
+            }
         }
 
         string resolvedGameVersion = !string.IsNullOrWhiteSpace(gameVersion)
             ? gameVersion
             : indexSnapshot?.GameVersion ?? string.Empty;
 
+        cancellationToken.ThrowIfCancellationRequested();
         int analyzedVfxCount = resolvedVfxAssets.Values.Count(static asset => asset.Analysis is not null);
 
         _logger.LogInformation(
             "built static asset discovery snapshot with {CollisionPathCount} sqpack named paths, {GameDataBgObjectCount} game data bgobject models, {ResolvedVfxCount} resolved vfx paths, and {AnalyzedVfxCount} analyzed vfx paths",
             resolvedCollisionPaths.Count,
-            resolvedGameDataBgObjectAssets.Count,
+            resolvedBgObjectAssets.Count,
             resolvedVfxAssets.Count,
             analyzedVfxCount);
 
         return new StaticAssetDiscoverySnapshot(
             resolvedGameVersion,
             resolvedCollisionPaths,
-            resolvedGameDataBgObjectAssets,
-            resolvedVfxAssets);
+            resolvedBgObjectAssets,
+            resolvedVfxAssets,
+            completeSections);
     }
 
     private IReadOnlyDictionary<string, ResolvedVfxPath> ResolveDiscoveredVfxPaths(
         SqpackIndexSnapshot indexSnapshot,
+        GameDataLayoutAssetResolver.Snapshot layoutSnapshot,
+        out bool isComplete,
         CancellationToken cancellationToken)
     {
-        List<ResolvedVfxPath> staticResolvedVfxPaths = [];
-        staticResolvedVfxPaths.AddRange(_gameDataVfxResolver.Resolve(indexSnapshot, cancellationToken));
+        ResolvedVfxDiscoverySnapshot gameDataVfxSnapshot = _gameDataVfxResolver.Resolve(indexSnapshot, layoutSnapshot, cancellationToken);
+        isComplete = gameDataVfxSnapshot.IsComplete;
+        List<ResolvedVfxPath> staticResolvedVfxPaths = [.. gameDataVfxSnapshot.ResolvedVfxPaths];
 
         cancellationToken.ThrowIfCancellationRequested();
         RootExlDatasetIndex? rootExlDatasetIndex = _rootExlResolver.Load(cancellationToken);
         if (rootExlDatasetIndex is not null)
         {
-            staticResolvedVfxPaths.AddRange(_rootExlVfxFamilyResolver.Resolve(rootExlDatasetIndex, indexSnapshot, cancellationToken));
+            ResolvedVfxDiscoverySnapshot rootExlVfxSnapshot = _rootExlVfxFamilyResolver.Resolve(rootExlDatasetIndex, indexSnapshot, cancellationToken);
+            isComplete &= rootExlVfxSnapshot.IsComplete;
+            staticResolvedVfxPaths.AddRange(rootExlVfxSnapshot.ResolvedVfxPaths);
+        }
+        else
+        {
+            isComplete = false;
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        staticResolvedVfxPaths.AddRange(_nativeVfxFamilyResolver.Resolve(indexSnapshot, cancellationToken));
+        ResolvedVfxDiscoverySnapshot nativeVfxSnapshot = _nativeVfxFamilyResolver.Resolve(indexSnapshot, cancellationToken);
+        isComplete &= nativeVfxSnapshot.IsComplete;
+        staticResolvedVfxPaths.AddRange(nativeVfxSnapshot.ResolvedVfxPaths);
         return BuildStaticResolvedVfxPaths(staticResolvedVfxPaths, cancellationToken);
     }
 
     private static IReadOnlyList<string> BuildStaticCollisionPaths(
-        IReadOnlyList<string> paths,
+        IEnumerable<string> paths,
         CancellationToken cancellationToken)
     {
         HashSet<string> collisionPaths = new(StringComparer.OrdinalIgnoreCase);
         foreach (string path in paths)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            string normalizedPath = GameAssetPathRules.NormalizeGamePath(path);
+            string normalizedPath = ObjectResolvedPath.FromGamePath(path).Path;
             if (ObjectAssetPathRules.IsRelevantSqpackCatalogSeedPath(normalizedPath))
             {
                 _ = collisionPaths.Add(normalizedPath);
@@ -122,16 +150,16 @@ internal sealed class ObjectAssetStaticDiscovery
             .ToArray();
     }
 
-    private static IReadOnlyDictionary<string, GameDataBgObjectAsset> BuildStaticGameDataBgObjects(
-        IReadOnlyList<GameDataBgObjectAsset> assets,
+    private static IReadOnlyDictionary<string, BgObjectAsset> BuildStaticGameDataBgObjects(
+        IReadOnlyList<BgObjectAsset> assets,
         CancellationToken cancellationToken)
     {
-        Dictionary<string, GameDataBgObjectAsset> gameDataAssets = new(StringComparer.OrdinalIgnoreCase);
-        foreach (GameDataBgObjectAsset asset in assets)
+        Dictionary<string, BgObjectAsset> gameDataAssets = new(StringComparer.OrdinalIgnoreCase);
+        foreach (BgObjectAsset asset in assets)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            string normalizedPath = GameAssetPathRules.NormalizeGamePath(asset.ModelPath);
-            if (string.IsNullOrWhiteSpace(normalizedPath))
+            string normalizedPath = ObjectResolvedPath.FromGamePath(asset.ModelPath).Path;
+            if (!ObjectAssetPathRules.IsCatalogModelPath(normalizedPath))
             {
                 continue;
             }
@@ -184,4 +212,3 @@ internal sealed class ObjectAssetStaticDiscovery
             .ToDictionary(static asset => asset.Path, static asset => asset, StringComparer.OrdinalIgnoreCase);
     }
 }
-

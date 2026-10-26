@@ -4,7 +4,7 @@ namespace Intoner.Objects.Assets;
 
 internal sealed record StaticAssetDiscoveryReuseInput(
     IReadOnlyList<string>? CollisionPaths,
-    IReadOnlyList<GameDataBgObjectAsset>? GameDataBgObjects,
+    IReadOnlyList<BgObjectAsset>? GameDataBgObjects,
     IReadOnlyList<ResolvedVfxPath>? ResolvedVfxPaths)
 {
     public static StaticAssetDiscoveryReuseInput FromCache(
@@ -16,32 +16,30 @@ internal sealed record StaticAssetDiscoveryReuseInput(
                 : null,
             loadedSections.Contains(ObjectAssetCacheSectionKind.StaticBgObjects)
                 ? snapshot.StaticGameDataBgObjects
-                    .Select(ObjectAssetCacheProjection.ToGameDataBgObjectAsset)
-                    .ToArray()
                 : null,
             loadedSections.Contains(ObjectAssetCacheSectionKind.StaticResolvedVfx)
                 ? snapshot.StaticResolvedVfxEntries
-                    .Select(ObjectAssetCacheProjection.ToResolvedVfxPath)
-                    .ToArray()
                 : null);
 }
 
 internal sealed record StaticAssetDiscoverySnapshot(
     string GameVersion,
     IReadOnlyList<string> StaticCollisionPaths,
-    IReadOnlyDictionary<string, GameDataBgObjectAsset> StaticGameDataBgObjects,
-    IReadOnlyDictionary<string, ResolvedVfxPath> StaticResolvedVfxPaths)
+    IReadOnlyDictionary<string, BgObjectAsset> StaticGameDataBgObjects,
+    IReadOnlyDictionary<string, ResolvedVfxPath> StaticResolvedVfxPaths,
+    ObjectAssetCacheSectionSet CompleteSections = ObjectAssetCacheSectionSet.AllStatic)
 {
     public static StaticAssetDiscoverySnapshot FromCache(string gameVersion, ObjectAssetCacheSnapshot snapshot)
         => new(
             gameVersion,
             snapshot.StaticCollisionPaths,
             snapshot.StaticGameDataBgObjects
-                .Select(ObjectAssetCacheProjection.ToGameDataBgObjectAsset)
                 .ToDictionary(static asset => asset.ModelPath, static asset => asset, StringComparer.OrdinalIgnoreCase),
             snapshot.StaticResolvedVfxEntries
-                .Select(ObjectAssetCacheProjection.ToResolvedVfxPath)
                 .ToDictionary(static asset => asset.Path, static asset => asset, StringComparer.OrdinalIgnoreCase));
 
 }
 
+internal sealed record ResolvedVfxDiscoverySnapshot(
+    IReadOnlyList<ResolvedVfxPath> ResolvedVfxPaths,
+    bool IsComplete = true);

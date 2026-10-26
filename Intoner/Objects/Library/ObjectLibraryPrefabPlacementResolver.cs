@@ -1,3 +1,4 @@
+using Intoner.Objects.Utils;
 using Intoner.Scene;
 using System.Numerics;
 
@@ -33,23 +34,36 @@ internal static class ObjectLibraryPrefabPlacementResolver
         }
 
         Vector3 anchor = new(
-            (minimum.X + maximum.X) * 0.5f,
+            minimum.X * 0.5f + maximum.X * 0.5f,
             minimum.Y,
-            (minimum.Z + maximum.Z) * 0.5f);
-        Vector3 offset = targetAnchor.HasValue ? targetAnchor.Value - anchor : Vector3.Zero;
-        placements = ordered
-            .Select(entry => new ObjectLibraryPrefabPlacement(
-                entry,
-                entry.WorldTransform! with { Position = entry.WorldTransform.Position + offset }))
-            .ToArray();
+            minimum.Z * 0.5f + maximum.Z * 0.5f);
+        List<ObjectLibraryPrefabPlacement> resolved = new(ordered.Count);
+        foreach (ObjectLibraryEntry entry in ordered)
+        {
+            SceneTransform transform = entry.WorldTransform!;
+            if (targetAnchor is { } target)
+            {
+                Vector3 position = transform.Position;
+                transform = transform with
+                {
+                    Position = new Vector3(
+                        (float)(target.X + ((double)position.X - anchor.X)),
+                        (float)(target.Y + ((double)position.Y - anchor.Y)),
+                        (float)(target.Z + ((double)position.Z - anchor.Z))),
+                };
+            }
+
+            if (!NumericsUtility.IsFinite(transform.Position))
+            {
+                return false;
+            }
+
+            resolved.Add(new ObjectLibraryPrefabPlacement(entry, transform));
+        }
+
+        placements = resolved;
         return true;
     }
-
-    public static bool CanRestoreWorldPosition(
-        ObjectLibraryPrefab prefab,
-        SceneCreationContext currentContext)
-        => prefab.CapturedIn.Scope.IsValid
-        && prefab.CapturedIn.Scope == currentContext.Scope;
 
     private static bool TryOrder(
         IReadOnlyList<ObjectLibraryEntry> entries,

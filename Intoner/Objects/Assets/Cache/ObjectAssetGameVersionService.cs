@@ -1,6 +1,5 @@
-using ClientFramework = FFXIVClientStructs.FFXIV.Client.System.Framework.Framework;
 using Microsoft.Extensions.Logging;
-using System.Diagnostics;
+using ClientFramework = FFXIVClientStructs.FFXIV.Client.System.Framework.Framework;
 
 namespace Intoner.Objects.Assets.Cache;
 
@@ -41,10 +40,7 @@ internal sealed class ObjectAssetGameVersionService : IObjectAssetGameVersionSer
                     return _gameVersion;
                 }
 
-                string? executablePath = Process.GetCurrentProcess().MainModule?.FileName;
-                string gameDirectory = executablePath is null
-                    ? string.Empty
-                    : Path.GetDirectoryName(executablePath) ?? string.Empty;
+                string? gameDirectory = Path.GetDirectoryName(Environment.ProcessPath);
                 if (string.IsNullOrWhiteSpace(gameDirectory))
                 {
                     _gameVersion = string.Empty;
@@ -74,4 +70,3 @@ internal sealed class ObjectAssetGameVersionService : IObjectAssetGameVersionSer
             : framework->GameVersionString.Trim();
     }
 }
-

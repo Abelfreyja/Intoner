@@ -332,7 +332,7 @@ internal sealed class WorldSurfaceRenderer : IDisposable
                 DepthComparison = Comparison.Always,
                 IsStencilEnabled = false,
             });
-            _blendState = CreateBlendState(device);
+            _blendState = GpuRenderStateUtility.CreateAlphaBlendState(device);
             _placeholderTexture = GpuTextureView.CreateRgba(device, CheckerSize, CheckerSize, CreateCheckerPixels());
         }
 
@@ -354,20 +354,6 @@ internal sealed class WorldSurfaceRenderer : IDisposable
             _pixelShader = null;
             _vertexShader?.Dispose();
             _vertexShader = null;
-        }
-
-        private static BlendState CreateBlendState(Device device)
-        {
-            BlendStateDescription description = BlendStateDescription.Default();
-            description.RenderTarget[0].IsBlendEnabled = true;
-            description.RenderTarget[0].SourceBlend = BlendOption.SourceAlpha;
-            description.RenderTarget[0].DestinationBlend = BlendOption.InverseSourceAlpha;
-            description.RenderTarget[0].BlendOperation = BlendOperation.Add;
-            description.RenderTarget[0].SourceAlphaBlend = BlendOption.One;
-            description.RenderTarget[0].DestinationAlphaBlend = BlendOption.InverseSourceAlpha;
-            description.RenderTarget[0].AlphaBlendOperation = BlendOperation.Add;
-            description.RenderTarget[0].RenderTargetWriteMask = ColorWriteMaskFlags.All;
-            return new BlendState(device, description);
         }
 
         private static byte[] CreateCheckerPixels()

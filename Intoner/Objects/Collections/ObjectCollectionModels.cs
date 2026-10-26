@@ -1,5 +1,5 @@
-using System.Collections.Immutable;
 using Intoner.Objects.Resources;
+using System.Text.Json.Serialization;
 
 namespace Intoner.Objects.Collections;
 
@@ -80,7 +80,9 @@ internal sealed record ObjectCollectionSnapshot
 
 internal sealed record ObjectCollectionsFile
 {
+    [JsonRequired]
     public int Version { get; init; } = 1;
+    [JsonRequired]
     public List<ObjectCollection> Collections { get; init; } = [];
 }
 
@@ -95,8 +97,56 @@ internal sealed record ObjectModResolveResult
     public string StatusText { get; init; } = string.Empty;
     public bool KeepLastGoodSnapshot { get; init; }
     public IReadOnlyList<string> Warnings { get; init; } = [];
-    public IReadOnlyDictionary<string, ObjectResolvedPath> ResolvedPaths { get; init; }
-        = ImmutableDictionary<string, ObjectResolvedPath>.Empty;
+    public ObjectModRedirectSnapshot Redirects { get; init; } = ObjectModRedirectSnapshot.Empty;
 }
 
+internal sealed class ObjectModRedirectSnapshot
+{
+    private readonly PenumbraModResolver.PreparedRedirects[] _mods;
+    private readonly CancellationToken[] _sourceChanges;
 
+    public static readonly ObjectModRedirectSnapshot Empty = new([]);
+
+    public ObjectModRedirectSnapshot(
+        IReadOnlyList<PenumbraModResolver.PreparedRedirects> mods,
+        params CancellationToken[] sourceChanges)
+    {
+        _mods = [.. mods];
+        _sourceChanges = [.. sourceChanges];
+    }
+
+    public void ThrowIfChanged(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        foreach (CancellationToken changes in _sourceChanges)
+        {
+            changes.ThrowIfCancellationRequested();
+        }
+    }
+
+    public bool TryResolvePath(
+        string requestedPath,
+        out ObjectResolvedPath resolvedPath,
+        CancellationToken cancellationToken)
+    {
+        ThrowIfChanged(cancellationToken);
+        resolvedPath = default;
+
+        if (!ObjectResourcePathUtility.TryNormalizeSupportedGamePath(requestedPath, out string normalizedPath))
+        {
+            return false;
+        }
+
+        foreach (PenumbraModResolver.PreparedRedirects mod in _mods)
+        {
+            if (mod.TryResolveNormalizedPath(normalizedPath, out resolvedPath, cancellationToken))
+            {
+                ThrowIfChanged(cancellationToken);
+                return true;
+            }
+        }
+
+        ThrowIfChanged(cancellationToken);
+        return false;
+    }
+}

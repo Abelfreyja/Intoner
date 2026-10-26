@@ -4,48 +4,49 @@ using Intoner.Objects.Utils;
 namespace Intoner.Objects.Runtime;
 
 /// <summary>
-/// Owns explicit folder state for standalone objects and the current default layout
+/// Owns explicit folder state for standalone objects and enabled layouts
 /// </summary>
 internal interface IObjectFolderService
 {
     /// <summary>
-    /// Captures the explicit folder state for standalone objects and the current default layout
+    /// Captures the explicit folder state for standalone objects and enabled layouts
     /// </summary>
     /// <returns>The captured explicit folder state.</returns>
     ObjectFolderSceneState CaptureSceneState();
 
     /// <summary>
-    /// Applies explicit folder state for standalone objects and one saved layout
+    /// Captures folders for storage and all saved owners
+    /// </summary>
+    ObjectFolderSceneState CaptureStoredState();
+
+    /// <summary>
+    /// Applies explicit folder state to each owner without merging their folders
     /// </summary>
     /// <param name="state">The folder state to apply.</param>
     /// <returns>true when any explicit folder state changed.</returns>
+    /// <exception cref="IOException"> saved layout files could not be restored after a failed write.</exception>
     bool TryApplySceneState(ObjectFolderSceneState state);
 
     /// <summary>
-    /// Gets the explicit folder color map for the current persisted scene
+    /// Gets the explicit folder color map for one owner
     /// </summary>
-    /// <returns>The ordered folder color map for standalone objects and the current default layout.</returns>
-    IReadOnlyDictionary<string, string> GetSceneFolderColors();
+    /// <param name="layoutId">Saved layout owner, or null for standalone folders.</param>
+    /// <returns>The selected owner's folder color map.</returns>
+    IReadOnlyDictionary<string, string> GetSceneFolderColors(Guid? layoutId);
 
     /// <summary>
-    /// Gets all explicit and object implied folders for the current persisted scene
+    /// Gets explicit folders and folders used by objects or groups for one owner
     /// </summary>
-    /// <param name="snapshots">The persisted object snapshots to include.</param>
-    /// <returns>The ordered folder paths for the current persisted scene.</returns>
-    IReadOnlyList<string> GetSceneFolders(IReadOnlyList<ObjectSnapshot> snapshots);
+    /// <param name="snapshots">The persisted objects and groups to include.</param>
+    /// <param name="layoutId">Saved layout owner, or null for standalone folders.</param>
+    /// <returns>The ordered folder paths for the selected owner.</returns>
+    IReadOnlyList<string> GetSceneFolders(IEnumerable<ObjectSceneItemSnapshot> snapshots, Guid? layoutId);
 
     /// <summary>
-    /// Builds layout folder data from the current explicit scene state and the provided layout objects
+    /// Gets explicit folders from enabled layouts and standalone storage
     /// </summary>
-    /// <param name="snapshots">The layout objects to include.</param>
-    /// <returns>The ordered folder export for the saved layout.</returns>
-    IReadOnlyList<ObjectFolderSnapshot> BuildLayoutExport(IReadOnlyList<ObjectSnapshot> snapshots);
-
-    /// <summary>
-    /// Checks whether any standalone explicit folder state exists
-    /// </summary>
-    /// <returns>true when any standalone folders exist.</returns>
-    bool HasStandaloneState();
+    /// <returns>The folder metadata in layout order, followed by standalone folders.</returns>
+    IReadOnlyList<ObjectFolderSnapshot> GetWorkspaceFolders();
 
     /// <summary>
     /// Clears standalone explicit folder state
@@ -81,19 +82,24 @@ internal sealed class ObjectFolderService : IObjectFolderService
     {
         lock (_stateLock)
         {
-            Guid? defaultLayoutId = _layoutManager.GetDefaultLayoutId();
-            IReadOnlyList<ObjectFolderSnapshot> defaultLayoutFolders = [];
-            if (defaultLayoutId.HasValue
-                && _layoutManager.TryGetLayout(defaultLayoutId.Value, out ObjectLayoutSnapshot defaultLayout))
-            {
-                defaultLayoutFolders = defaultLayout.Folders;
-            }
-
             return new ObjectFolderSceneState
             {
                 StandaloneFolders = ObjectFolderUtility.OrderFolderEntries(_standaloneFolders),
-                DefaultLayoutId = defaultLayoutId,
-                DefaultLayoutFolders = ObjectFolderUtility.OrderFolderEntries(defaultLayoutFolders),
+                LayoutFolders = _layoutManager.GetEnabledLayouts().ToDictionary(
+                    static layout => layout.Id,
+                    static layout => ObjectFolderUtility.OrderFolderEntries(layout.Folders)),
+            };
+        }
+    }
+
+    public ObjectFolderSceneState CaptureStoredState()
+    {
+        lock (_stateLock)
+        {
+            return new ObjectFolderSceneState
+            {
+                StandaloneFolders = _standaloneFolders,
+                LayoutFolders = _layoutManager.GetLayouts().ToDictionary(static layout => layout.Id, static layout => layout.Folders),
             };
         }
     }
@@ -105,28 +111,33 @@ internal sealed class ObjectFolderService : IObjectFolderService
         lock (_stateLock)
         {
             IReadOnlyList<ObjectFolderSnapshot> nextStandaloneFolders = ObjectFolderUtility.OrderFolderEntries(state.StandaloneFolders);
-            IReadOnlyList<ObjectFolderSnapshot> nextDefaultLayoutFolders = ObjectFolderUtility.OrderFolderEntries(state.DefaultLayoutFolders);
-            ObjectLayoutSnapshot layout = null!;
-            if (state.DefaultLayoutId.HasValue
-                && !_layoutManager.TryGetLayout(state.DefaultLayoutId.Value, out layout!))
+            List<ObjectLayoutContentUpdate> updates = [];
+            foreach ((Guid id, IReadOnlyList<ObjectFolderSnapshot> folders) in state.LayoutFolders)
             {
-                return false;
-            }
-
-            bool changed = false;
-            if (state.DefaultLayoutId.HasValue
-                && !ObjectFolderUtility.FolderEntriesMatch(layout.Folders, nextDefaultLayoutFolders))
-            {
-                if (!_layoutManager.TryReplaceLayoutFolders(
-                        state.DefaultLayoutId.Value,
-                        nextDefaultLayoutFolders))
+                if (!_layoutManager.TryGetLayout(id, out ObjectLayoutSnapshot layout))
                 {
                     return false;
                 }
 
-                changed = true;
+                if (!ObjectFolderUtility.FolderEntriesMatch(layout.Folders, folders))
+                {
+                    updates.Add(new ObjectLayoutContentUpdate(id, layout.Objects, folders) { Groups = layout.Groups });
+                }
             }
 
+            PersistentMutationStatus status = _layoutManager.ReplaceLayoutContents(updates);
+
+            if (status == PersistentMutationStatus.RecoveryRequired)
+            {
+                throw new IOException("folder changes failed and saved layouts could not be restored");
+            }
+
+            if (status != PersistentMutationStatus.Success)
+            {
+                return false;
+            }
+
+            bool changed = updates.Count > 0;
             if (!ObjectFolderUtility.FolderEntriesMatch(_standaloneFolders, nextStandaloneFolders))
             {
                 _standaloneFolders = nextStandaloneFolders;
@@ -142,37 +153,39 @@ internal sealed class ObjectFolderService : IObjectFolderService
         }
     }
 
-    public IReadOnlyDictionary<string, string> GetSceneFolderColors()
-    {
-        var sceneState = CaptureSceneState();
-        return ObjectFolderUtility.ToFolderColorMap(ObjectFolderUtility.OrderFolderEntries(
-            sceneState.DefaultLayoutFolders.Concat(sceneState.StandaloneFolders)));
-    }
+    public IReadOnlyDictionary<string, string> GetSceneFolderColors(Guid? layoutId)
+        => ObjectFolderUtility.ToFolderColorMap(ObjectFolderUtility.OrderFolderEntries(GetExplicitFolders(layoutId)));
 
-    public IReadOnlyList<string> GetSceneFolders(IReadOnlyList<ObjectSnapshot> snapshots)
+    public IReadOnlyList<string> GetSceneFolders(IEnumerable<ObjectSceneItemSnapshot> snapshots, Guid? layoutId)
     {
-        var sceneState = CaptureSceneState();
         return ObjectFolderUtility.ExpandFolders(
-            sceneState.StandaloneFolders
-                .Concat(sceneState.DefaultLayoutFolders)
+            GetExplicitFolders(layoutId)
                 .Select(static folder => folder.Path)
-                .Concat(snapshots.Select(static snapshot => snapshot.FolderPath)));
+                .Concat(snapshots.Where(snapshot => snapshot.LayoutId == layoutId).Select(static snapshot => snapshot.FolderPath)));
     }
 
-    public IReadOnlyList<ObjectFolderSnapshot> BuildLayoutExport(IReadOnlyList<ObjectSnapshot> snapshots)
-    {
-        var sceneState = CaptureSceneState();
-        return ObjectFolderUtility.OrderFolderEntries(
-            sceneState.DefaultLayoutFolders
-                .Concat(sceneState.StandaloneFolders)
-                .Concat(snapshots.Select(static snapshot => new ObjectFolderSnapshot(snapshot.FolderPath))));
-    }
-
-    public bool HasStandaloneState()
+    private IReadOnlyList<ObjectFolderSnapshot> GetExplicitFolders(Guid? layoutId)
     {
         lock (_stateLock)
         {
-            return _standaloneFolders.Count > 0;
+            if (!layoutId.HasValue)
+            {
+                return _standaloneFolders;
+            }
+
+            return _layoutManager.IsLayoutEnabled(layoutId.Value)
+                && _layoutManager.TryGetLayout(layoutId.Value, out ObjectLayoutSnapshot layout)
+                    ? layout.Folders
+                    : [];
+        }
+    }
+
+    public IReadOnlyList<ObjectFolderSnapshot> GetWorkspaceFolders()
+    {
+        lock (_stateLock)
+        {
+            return _layoutManager.GetEnabledLayouts().SelectMany(static layout => layout.Folders)
+                .Concat(_standaloneFolders).ToArray();
         }
     }
 
@@ -188,4 +201,3 @@ internal sealed class ObjectFolderService : IObjectFolderService
         }
     }
 }
-

@@ -33,45 +33,63 @@ internal static class AvfxStandaloneRewriter
         => CountRewritableTimelineBindPoints(data) > 0;
 
     private static int CountRewritableTimelineBindPoints(ReadOnlySpan<byte> data)
+        => TryReadAttachments(data, out _, out int count) ? count : 0;
+
+    private static bool TryReadAttachments(ReadOnlySpan<byte> data, out Chunk avfx, out int count)
     {
-        if (!TryFindRootChunk(data, AvfxMagic.AvfxBase, out Chunk avfx))
+        count = 0;
+        if (!TryReadRoot(data, out avfx))
         {
-            return 0;
+            return false;
         }
 
-        int count = 0;
         ChunkCursor cursor = EnumerateChildren(data, avfx);
-        while (cursor.TryReadNext(out Chunk child))
+        while (cursor.TryReadNext(out Chunk block))
         {
-            if (child.Tag == AvfxMagic.Timeline)
+            if (block.Tag is not (AvfxMagic.Timeline or AvfxMagic.Binder))
             {
-                count += CountRewritableTimelineBindPoints(data, child);
+                continue;
             }
+
+            int boundItemCount = 0;
+            ChunkCursor children = EnumerateChildren(data, block);
+            while (children.TryReadNext(out Chunk child))
+            {
+                if (block.Tag == AvfxMagic.Timeline && child.Tag == AvfxChunkReader.Tags.TimelineBinderNumber)
+                {
+                    if (!TryReadSignedPayload(data, child, out _))
+                    {
+                        return false;
+                    }
+                }
+                else if (block.Tag == AvfxMagic.Timeline && child.Tag == AvfxChunkReader.Tags.TimelineItem)
+                {
+                    if (!TryReadTimelineItemBindPoints(data, child, out boundItemCount))
+                    {
+                        return false;
+                    }
+                }
+                else if (block.Tag == AvfxMagic.Binder && IsBinderPropertyTag(child.Tag)
+                      && !TryReadBinderProperty(data, child, out _))
+                {
+                    return false;
+                }
+            }
+
+            if (!children.IsComplete)
+            {
+                return false;
+            }
+
+            count += boundItemCount;
         }
 
-        return count;
-    }
-
-    private static int CountRewritableTimelineBindPoints(ReadOnlySpan<byte> data, in Chunk timeline)
-    {
-        int count = 0;
-        ChunkCursor cursor = EnumerateChildren(data, timeline);
-        while (cursor.TryReadNext(out Chunk child))
-        {
-            if (child.Tag == AvfxChunkReader.Tags.TimelineItem
-             && TryReadTimelineBindPoint(data, child, out int bindPoint)
-             && bindPoint != DetachedTimelineBindPoint)
-            {
-                count++;
-            }
-        }
-
-        return count;
+        return cursor.IsComplete;
     }
 
     public static RewriteResult RewriteForStandaloneSpawn(Span<byte> data)
     {
-        if (!TryFindRootChunk(data, AvfxMagic.AvfxBase, out Chunk avfx))
+        if (!TryReadAttachments(data, out Chunk avfx, out _))
         {
             return default;
         }
@@ -103,13 +121,21 @@ internal static class AvfxStandaloneRewriter
         ChunkCursor cursor = EnumerateChildren(data, timeline);
         while (cursor.TryReadNext(out Chunk child))
         {
-            if (child.Tag == AvfxChunkReader.Tags.TimelineItem
-             && TryFindChunk(data, child.PayloadStart, child.PayloadLength, AvfxChunkReader.Tags.TimelineBindPoint, out Chunk bindPointChunk)
-             && TryReadSignedPayload(data, bindPointChunk, out int bindPoint)
-             && bindPoint != DetachedTimelineBindPoint)
+            if (child.Tag != AvfxChunkReader.Tags.TimelineItem)
             {
-                WriteIntegerPayload(data, bindPointChunk, uint.MaxValue);
-                rewritten++;
+                continue;
+            }
+
+            ChunkCursor items = EnumerateChildren(data, child);
+            while (items.TryReadNext(out Chunk bindPointChunk))
+            {
+                if (bindPointChunk.Tag == AvfxChunkReader.Tags.TimelineBindPoint
+                 && TryReadSignedPayload(data, bindPointChunk, out int bindPoint)
+                 && bindPoint != DetachedTimelineBindPoint)
+                {
+                    WriteIntegerPayload(data, bindPointChunk, uint.MaxValue);
+                    rewritten++;
+                }
             }
         }
 
@@ -151,51 +177,31 @@ internal static class AvfxStandaloneRewriter
 
     private static int RewriteBinderProperty(Span<byte> data, in Chunk property)
     {
-        int bindPoint = DefaultBinderBindPoint;
-        int bindTargetPoint = DefaultBinderBindTargetPoint;
-        int bindPointId = DefaultBinderBindPointId;
-        bool hasBindPoint = TryFindChunk(data, property.PayloadStart, property.PayloadLength, AvfxChunkReader.Tags.BinderBindPoint, out Chunk bindPointChunk)
-                          && TryReadSignedPayload(data, bindPointChunk, out bindPoint);
-        bool hasBindTargetPoint = TryFindChunk(data, property.PayloadStart, property.PayloadLength, AvfxChunkReader.Tags.BinderBindTargetPoint, out Chunk bindTargetPointChunk)
-                             && TryReadSignedPayload(data, bindTargetPointChunk, out bindTargetPoint);
-        bool hasBindPointId = TryFindChunk(data, property.PayloadStart, property.PayloadLength, AvfxChunkReader.Tags.BinderBindPointId, out Chunk bindPointIdChunk)
-                           && TryReadSignedPayload(data, bindPointIdChunk, out bindPointId);
-
-        if ((!hasBindPoint || bindPoint != TargetBinderBindPoint)
-         && (!hasBindTargetPoint || bindTargetPoint != ByNameBinderBindTargetPoint)
-         && (!hasBindPointId || bindPointId == DefaultBinderBindPointId))
+        if (!TryReadBinderProperty(data, property, out BinderProperty fields))
         {
             return 0;
         }
 
-        if (hasBindPoint && bindPoint == TargetBinderBindPoint)
+        bool rewritten = false;
+
+        if (fields.BindPoint is { Value: TargetBinderBindPoint } point)
         {
-            WriteIntegerPayload(data, bindPointChunk, DefaultBinderBindPoint);
+            WriteIntegerPayload(data, point.Chunk, DefaultBinderBindPoint);
+            rewritten = true;
         }
 
-        if (hasBindTargetPoint && bindTargetPoint == ByNameBinderBindTargetPoint)
+        if (fields.BindTargetPoint is { Value: ByNameBinderBindTargetPoint } target)
         {
-            WriteIntegerPayload(data, bindTargetPointChunk, DefaultBinderBindTargetPoint);
+            WriteIntegerPayload(data, target.Chunk, DefaultBinderBindTargetPoint);
+            rewritten = true;
         }
 
-        if (hasBindPointId && bindPointId != DefaultBinderBindPointId)
+        if (fields.BindPointId is { } id && id.Value != DefaultBinderBindPointId)
         {
-            WriteIntegerPayload(data, bindPointIdChunk, DefaultBinderBindPointId);
+            WriteIntegerPayload(data, id.Chunk, DefaultBinderBindPointId);
+            rewritten = true;
         }
 
-        return 1;
+        return rewritten ? 1 : 0;
     }
-
-    private static bool TryReadTimelineBindPoint(ReadOnlySpan<byte> data, in Chunk item, out int bindPoint)
-    {
-        bindPoint = 0;
-        return TryFindChunk(data, item.PayloadStart, item.PayloadLength, AvfxChunkReader.Tags.TimelineBindPoint, out Chunk bindPointChunk)
-            && TryReadSignedPayload(data, bindPointChunk, out bindPoint);
-    }
-
-    private static bool IsBinderPropertyTag(uint tag)
-        => tag is AvfxChunkReader.Tags.BinderStartProperty
-               or AvfxChunkReader.Tags.BinderPrimaryProperty
-               or AvfxChunkReader.Tags.BinderSecondaryProperty
-               or AvfxChunkReader.Tags.BinderGoalProperty;
 }

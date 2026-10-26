@@ -4,7 +4,6 @@ using Intoner.Objects.Utils;
 using Intoner.Scene;
 using Intoner.Services.Configuration;
 using System.Numerics;
-using OrientedBounds = FFXIVClientStructs.FFXIV.Common.Math.OrientedBounds;
 
 namespace Intoner.Objects.Runtime;
 
@@ -185,7 +184,7 @@ internal sealed class PlacementSurfaceResolver(PlacementSurfaceRaycaster surface
             return true;
         }
 
-        if (boundsSnapshot.LocalBounds is { } localBounds)
+        if (boundsSnapshot.OrientedBounds is { } localBounds)
         {
             Vector3 halfExtents = localBounds.HalfExtents;
             radius = MathF.Min(MathF.Abs(halfExtents.X), MathF.Abs(halfExtents.Z));
@@ -207,7 +206,7 @@ internal sealed class PlacementSurfaceResolver(PlacementSurfaceRaycaster surface
             return count;
         }
 
-        if (boundsSnapshot.LocalBounds is { } localBounds)
+        if (boundsSnapshot.OrientedBounds is { } localBounds)
         {
             return BuildBoundsProbePoints(position, localBounds, probePoints, count);
         }
@@ -220,7 +219,7 @@ internal sealed class PlacementSurfaceResolver(PlacementSurfaceRaycaster surface
 
     private static int BuildBoundsProbePoints(
         Vector3 position,
-        OrientedBounds bounds,
+        SceneOrientedBounds bounds,
         Span<Vector3> probePoints,
         int count)
     {
@@ -243,7 +242,7 @@ internal sealed class PlacementSurfaceResolver(PlacementSurfaceRaycaster surface
     }
 
     private static int AddBoundsProbePoint(
-        OrientedBounds bounds,
+        SceneOrientedBounds bounds,
         float y,
         Vector3 localPoint,
         Span<Vector3> probePoints,
@@ -281,4 +280,3 @@ internal sealed class PlacementSurfaceResolver(PlacementSurfaceRaycaster surface
         return count + 1;
     }
 }
-

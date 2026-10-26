@@ -2,7 +2,7 @@ namespace Intoner.Services.Configuration;
 
 internal sealed class IntonerConfiguration
 {
-    public const int CurrentVersion = 2;
+    public const int CurrentVersion = 3;
 
     public required int Version { get; set; }
     public required AssetCaptureConfiguration AssetCapture { get; set; }
@@ -39,4 +39,3 @@ internal sealed class IntonerConfiguration
             Ui = Ui.Copy(),
         };
 }
-

@@ -1,6 +1,5 @@
 using Intoner.Objects.Assets;
-using Intoner.Objects.Models;
-using Intoner.Objects.Utils;
+using Penumbra.Api.Enums;
 
 namespace Intoner.Objects.Resources;
 
@@ -10,6 +9,7 @@ internal enum ObjectRootPathKind
     BgModel,
     FurnitureSharedGroup,
     Vfx,
+    LightProjection,
 }
 
 /// <summary> resolved object root path status </summary>
@@ -20,6 +20,7 @@ internal enum ObjectResolvedRootPathStatus
     InvalidRedirectKind,
     UnsupportedLocalFile,
     UnsupportedMemoryResource,
+    InvalidNativePath,
 }
 
 /// <summary> resolved object root resource request </summary>
@@ -66,32 +67,33 @@ internal readonly record struct ObjectResolvedRootPath
 /// <summary> resolves object root paths against their resource collections </summary>
 internal sealed class ObjectPathResolver
 {
-    private readonly IObjectResolvedCollectionStore _collectionStore;
     private readonly ObjectFileReadService _fileReadService;
     private readonly IObjectResourceLoader _resourceLoader;
 
     public ObjectPathResolver(
-        IObjectResolvedCollectionStore collectionStore,
         ObjectFileReadService fileReadService,
         IObjectResourceLoader resourceLoader)
     {
-        _collectionStore = collectionStore;
         _fileReadService = fileReadService;
         _resourceLoader = resourceLoader;
     }
 
-    public ObjectResolvedRootPath ResolveRootPath(ObjectSnapshot snapshot, ObjectRootPathKind kind, string requestedPath)
+    public ObjectResolvedRootPath ResolveRootPath(ObjectRootPathKind kind, string requestedPath, ObjectCollectionResolveData? collection)
     {
-        string normalizedRequestedPath = GameAssetPathRules.NormalizeGamePath(requestedPath);
-        string requestedCollectionId = ObjectCollectionKeyUtility.NormalizeCollectionId(snapshot.CollectionId);
-        string resourceCollectionId = string.Empty;
-        ObjectResolvedPath resolvedPath = ObjectResolvedPath.FromGamePath(normalizedRequestedPath);
-        var status = ObjectResolvedRootPathStatus.Ready;
-        if (requestedCollectionId.Length > 0
-         && _collectionStore.TryGetCollection(requestedCollectionId, out ObjectCollectionResolveData collection)
-         && collection.Redirects.Count > 0)
+        ObjectResolvedPath resolvedPath = ObjectResolvedPath.FromGamePath(requestedPath);
+        string normalizedRequestedPath = resolvedPath.Path;
+
+        if (normalizedRequestedPath.Length == 0)
         {
-            resourceCollectionId = requestedCollectionId;
+            return new ObjectResolvedRootPath(string.Empty, string.Empty, string.Empty, string.Empty,
+                ObjectResolvedPathKind.GamePath, ObjectResolvedRootPathStatus.InvalidNativePath);
+        }
+
+        string resourceCollectionId = string.Empty;
+        var status = ObjectResolvedRootPathStatus.Ready;
+        if (collection is { Redirects.Count: > 0 })
+        {
+            resourceCollectionId = collection.CollectionId;
             if (!_resourceLoader.CanResolveCollectionResources(kind))
             {
                 status = ObjectResolvedRootPathStatus.ResourceHooksUnavailable;
@@ -106,9 +108,20 @@ internal sealed class ObjectPathResolver
             }
         }
 
+        long resourceScopeId = resourceCollectionId.Length > 0 ? collection!.ResourceScopeId : 0;
+        string createPath = ObjectScopedResourcePathUtility.Create(resourceScopeId, normalizedRequestedPath);
+
+        if (status == ObjectResolvedRootPathStatus.Ready
+         && (createPath.Length == 0
+          || (!string.Equals(normalizedRequestedPath, resolvedPath.Path, StringComparison.Ordinal)
+              && ObjectScopedResourcePathUtility.Create(resourceScopeId, resolvedPath.Path).Length == 0)))
+        {
+            status = ObjectResolvedRootPathStatus.InvalidNativePath;
+        }
+
         if (status == ObjectResolvedRootPathStatus.Ready
             && resolvedPath.IsLocalFile
-            && !_fileReadService.CanLoadLocalFilePath(resolvedPath.Path))
+            && !_fileReadService.CanLoadLocalFilePath(resolvedPath.Path, ResourceType.FromPath(normalizedRequestedPath)))
         {
             status = ObjectResolvedRootPathStatus.UnsupportedLocalFile;
         }
@@ -121,7 +134,7 @@ internal sealed class ObjectPathResolver
 
         return new ObjectResolvedRootPath(
             normalizedRequestedPath,
-            normalizedRequestedPath,
+            createPath,
             resolvedPath.Path,
             resourceCollectionId,
             resolvedPath.Kind,
@@ -138,6 +151,7 @@ internal sealed class ObjectPathResolver
             ObjectRootPathKind.BgModel => ObjectAssetPathRules.IsCatalogModelPath(resourcePath),
             ObjectRootPathKind.FurnitureSharedGroup => ObjectAssetPathRules.IsCatalogSharedGroupPath(resourcePath),
             ObjectRootPathKind.Vfx => GameAssetPathRules.IsFileKind(resourcePath, GameAssetFileKind.Avfx),
+            ObjectRootPathKind.LightProjection => GameAssetPathRules.IsFileKind(resourcePath, GameAssetFileKind.Tex),
             _ => false,
         };
     }

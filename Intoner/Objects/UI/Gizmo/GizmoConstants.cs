@@ -21,6 +21,9 @@ internal static class GizmoConstants
 
     public const float CenterPointRadius = 4f;
     public const float CenterInteractionRadius = 9f;
+    public const float PivotRingGap = 4f;
+    public const float PivotRingThickness = 3f;
+    public const float PivotRingHitPadding = 1.5f;
     public const float CenterGlowRadiusMultiplier = 2.2f;
     public const float CenterGlowOpacity = 0.35f;
 
@@ -74,4 +77,3 @@ internal static class GizmoConstants
     public const float SnapGridCenterLineAlpha = 0.46f;
     public const float SnapGridLineAlpha = 0.21f;
 }
-

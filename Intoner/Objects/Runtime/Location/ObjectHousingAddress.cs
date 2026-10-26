@@ -1,4 +1,6 @@
 using Intoner.Services.Configuration;
+using Intoner.Scene;
+using System.Runtime.InteropServices;
 
 namespace Intoner.Objects.Runtime;
 
@@ -26,50 +28,127 @@ internal static class ObjectHousingAddress
             : ObjectHousingSize.Small;
     }
 
+    private static readonly HousingDistrict[] Districts =
+    [
+        new(ObjectHousingDistrict.Mist, 339, 282, 283, 284, 384, 423, 608),
+        new(ObjectHousingDistrict.LavenderBeds, 340, 342, 343, 344, 385, 425, 609),
+        new(ObjectHousingDistrict.Goblet, 341, 345, 346, 347, 386, 424, 610),
+        new(ObjectHousingDistrict.Shirogane, 641, 649, 650, 651, 652, 653, 655),
+        new(ObjectHousingDistrict.Empyreum, 979, 980, 981, 982, 983, 984, 999),
+    ];
+
     public static bool TryResolveDistrict(uint territoryId, out ObjectHousingDistrict district)
     {
-        (bool success, ObjectHousingDistrict resolvedDistrict) = ((HousingTerritory)territoryId) switch
+        foreach (HousingDistrict candidate in Districts.AsSpan())
         {
-            HousingTerritory.Mist
-                or HousingTerritory.MistSmall
-                or HousingTerritory.MistMedium
-                or HousingTerritory.MistLarge
-                or HousingTerritory.MistFCRoom
-                or HousingTerritory.MistFCWorkshop
-                or HousingTerritory.MistApartment => (true, ObjectHousingDistrict.Mist),
-            HousingTerritory.Lavender
-                or HousingTerritory.LavenderSmall
-                or HousingTerritory.LavenderMedium
-                or HousingTerritory.LavenderLarge
-                or HousingTerritory.LavenderFCRoom
-                or HousingTerritory.LavenderFCWorkshop
-                or HousingTerritory.LavenderApartment => (true, ObjectHousingDistrict.LavenderBeds),
-            HousingTerritory.Goblet
-                or HousingTerritory.GobletSmall
-                or HousingTerritory.GobletMedium
-                or HousingTerritory.GobletLarge
-                or HousingTerritory.GobletFCRoom
-                or HousingTerritory.GobletFCWorkshop
-                or HousingTerritory.GobletApartment => (true, ObjectHousingDistrict.Goblet),
-            HousingTerritory.Shirogane
-                or HousingTerritory.ShiroganeSmall
-                or HousingTerritory.ShiroganeMedium
-                or HousingTerritory.ShiroganeLarge
-                or HousingTerritory.ShiroganeFCRoom
-                or HousingTerritory.ShiroganeFCWorkshop
-                or HousingTerritory.ShiroganeApartment => (true, ObjectHousingDistrict.Shirogane),
-            HousingTerritory.Empyreum
-                or HousingTerritory.EmpyreumSmall
-                or HousingTerritory.EmpyreumMedium
-                or HousingTerritory.EmpyreumLarge
-                or HousingTerritory.EmpyreumFCRoom
-                or HousingTerritory.EmpyreumFCWorkshop
-                or HousingTerritory.EmpyreumApartment => (true, ObjectHousingDistrict.Empyreum),
-            _ => (false, default),
-        };
+            if (candidate.Contains(territoryId))
+            {
+                district = candidate.District;
+                return true;
+            }
+        }
 
-        district = resolvedDistrict;
-        return success;
+        district = default;
+        return false;
+    }
+
+    public static SceneLocationAddress Normalize(SceneLocationAddress location)
+    {
+        if (location.DivisionId != 0 || location.HouseId is < 1 or > 60)
+        {
+            return location;
+        }
+
+        foreach (HousingDistrict district in Districts)
+        {
+            if (district.IsHouse(location.TerritoryId) || location.TerritoryId == district.Chamber || location.TerritoryId == district.Workshop)
+            {
+                return location with { DivisionId = location.HouseId > 30 ? 2u : 1u };
+            }
+        }
+
+        return location;
+    }
+
+    public static bool TryResolveHousingTerritory(SceneLocationAddress location, out uint territoryId)
+    {
+        territoryId = 0;
+        location = Normalize(location);
+
+        if (location.WardId is < 1 or > 30 || location.DivisionId is < 1 or > 2)
+        {
+            return false;
+        }
+
+        foreach (HousingDistrict district in Districts)
+        {
+            if (location.TerritoryId == district.Outdoor)
+            {
+                territoryId = district.Outdoor;
+                return location.HouseId == 0 && location.RoomId == 0;
+            }
+
+            if (location.TerritoryId == district.Apartment)
+            {
+                if (location.HouseId != 100 || location.RoomId is < 1 or > 90)
+                {
+                    return false;
+                }
+
+                territoryId = district.Apartment;
+                return true;
+            }
+
+            bool chamber = location.TerritoryId == district.Chamber;
+            bool workshop = location.TerritoryId == district.Workshop;
+
+            if (!chamber && !workshop && !district.IsHouse(location.TerritoryId))
+            {
+                continue;
+            }
+
+            if (location.HouseId is < 1 or > 60
+                || location.DivisionId != (location.HouseId > 30 ? 2u : 1u)
+                || (chamber ? location.RoomId is < 1 or > 512 : location.RoomId != 0))
+            {
+                return false;
+            }
+
+            territoryId = chamber || workshop ? location.TerritoryId : GetSize(district.District, (int)location.HouseId) switch
+            {
+                ObjectHousingSize.Medium => district.Medium,
+                ObjectHousingSize.Large => district.Large,
+                _ => district.Small,
+            };
+            return true;
+        }
+
+        return false;
+    }
+
+    public static bool CanChangeLocation(SceneLocationAddress current, SceneLocationAddress requested)
+    {
+        if (current == requested)
+        {
+            return true;
+        }
+
+        foreach (HousingDistrict district in Districts)
+        {
+            bool sameArea = district.IsHouse(current.TerritoryId) && district.IsHouse(requested.TerritoryId)
+                || current.TerritoryId == requested.TerritoryId
+                && (current.TerritoryId == district.Apartment || current.TerritoryId == district.Chamber || current.TerritoryId == district.Workshop
+                    || current.TerritoryId == district.Outdoor && current.DivisionId == requested.DivisionId);
+
+            if (sameArea)
+            {
+                return TryResolveHousingTerritory(current, out _)
+                    && TryResolveHousingTerritory(requested, out uint territoryId)
+                    && territoryId == requested.TerritoryId;
+            }
+        }
+
+        return false;
     }
 
     private static int NormalizePlot(int plot)
@@ -99,47 +178,16 @@ internal static class ObjectHousingAddress
             _                                  => false,
         };
 
-    private enum HousingTerritory : uint
+    [StructLayout(LayoutKind.Auto)]
+    private readonly record struct HousingDistrict(
+        ObjectHousingDistrict District, uint Outdoor, uint Small, uint Medium, uint Large,
+        uint Chamber, uint Workshop, uint Apartment)
     {
-        Mist = 339,
-        MistSmall = 282,
-        MistMedium = 283,
-        MistLarge = 284,
-        MistFCRoom = 384,
-        MistFCWorkshop = 423,
-        MistApartment = 608,
+        public bool IsHouse(uint territoryId)
+            => territoryId == Small || territoryId == Medium || territoryId == Large;
 
-        Lavender = 340,
-        LavenderSmall = 342,
-        LavenderMedium = 343,
-        LavenderLarge = 344,
-        LavenderFCRoom = 385,
-        LavenderFCWorkshop = 425,
-        LavenderApartment = 609,
-
-        Goblet = 341,
-        GobletSmall = 345,
-        GobletMedium = 346,
-        GobletLarge = 347,
-        GobletFCRoom = 386,
-        GobletFCWorkshop = 424,
-        GobletApartment = 610,
-
-        Shirogane = 641,
-        ShiroganeSmall = 649,
-        ShiroganeMedium = 650,
-        ShiroganeLarge = 651,
-        ShiroganeFCRoom = 652,
-        ShiroganeFCWorkshop = 653,
-        ShiroganeApartment = 655,
-
-        Empyreum = 979,
-        EmpyreumSmall = 980,
-        EmpyreumMedium = 981,
-        EmpyreumLarge = 982,
-        EmpyreumFCRoom = 983,
-        EmpyreumFCWorkshop = 984,
-        EmpyreumApartment = 999,
+        public bool Contains(uint territoryId)
+            => IsHouse(territoryId) || territoryId == Outdoor || territoryId == Chamber
+            || territoryId == Workshop || territoryId == Apartment;
     }
 }
-

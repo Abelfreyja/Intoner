@@ -1,4 +1,5 @@
 using MessagePack;
+using MessagePack.Resolvers;
 using System.Buffers.Binary;
 using System.IO.Compression;
 
@@ -31,12 +32,16 @@ internal static class ObjectTransferCodec
     private const byte BrotliPayload = 1;
     private const int MaximumPayloadLength = 8 * 1024 * 1024;
     private const string RootPrefix = "INTONER:";
-    private const string FormatVersion = "1";
+    private const string FormatVersion = "2";
 
     internal const string Prefix = RootPrefix + FormatVersion + ":";
+    private const string ReleasedPrefix = RootPrefix + "1:";
 
     private static readonly MessagePackSerializerOptions StandardOptions =
         MessagePackSerializerOptions.Standard.WithSecurity(MessagePackSecurity.UntrustedData);
+
+    private static readonly MessagePackSerializerOptions ReleasedOptions = StandardOptions.WithResolver(
+        CompositeResolver.Create([new LegacyObjectLocationFormatter()], [StandardResolver.Instance]));
 
     public static bool TryEncode(ObjectTransferDocument? document, out string text)
     {
@@ -81,17 +86,15 @@ internal static class ObjectTransferCodec
             return new ObjectTransferDecodeResult(ObjectTransferDecodeStatus.NotIntoner, null);
         }
 
-        int versionEnd = value.IndexOf(':', RootPrefix.Length);
-        if (versionEnd < 0
-            || !value.AsSpan(RootPrefix.Length, versionEnd - RootPrefix.Length)
-                .SequenceEqual(FormatVersion.AsSpan()))
+        bool released = value.StartsWith(ReleasedPrefix, StringComparison.Ordinal);
+        if (!released && !value.StartsWith(Prefix, StringComparison.Ordinal))
         {
             return new ObjectTransferDecodeResult(ObjectTransferDecodeStatus.UnsupportedVersion, null);
         }
 
         try
         {
-            byte[] payload = DecodeBase64Url(value[(versionEnd + 1)..]);
+            byte[] payload = DecodeBase64Url(value[(released ? ReleasedPrefix.Length : Prefix.Length)..]);
             if (!TryDecodePayload(payload, out ReadOnlyMemory<byte> messagePack))
             {
                 return new ObjectTransferDecodeResult(ObjectTransferDecodeStatus.Invalid, null);
@@ -99,7 +102,7 @@ internal static class ObjectTransferCodec
 
             ObjectTransferDocument? document = MessagePackSerializer.Deserialize<ObjectTransferDocument>(
                 messagePack,
-                StandardOptions);
+                released ? ReleasedOptions : StandardOptions);
             return document is not null && IsValid(document)
                 ? new ObjectTransferDecodeResult(ObjectTransferDecodeStatus.Success, document)
                 : new ObjectTransferDecodeResult(ObjectTransferDecodeStatus.Invalid, null);
@@ -144,7 +147,6 @@ internal static class ObjectTransferCodec
     {
         bool isFolder = transfer.FolderName is not null;
         return transfer.Content is not null
-            && (isFolder || transfer.Content.Objects.Count > 0)
             && IsValid(transfer.Content, allowEmpty: isFolder);
     }
 
@@ -153,26 +155,16 @@ internal static class ObjectTransferCodec
         if (content.Objects is null
             || content.Folders is null
             || content.FolderColors is null
-            || content.Objects.Count > MaximumObjectCount
-            || (!allowEmpty && content.Objects.Count == 0)
+            || content.Groups is null
+            || content.Objects.Count + content.Groups.Count > MaximumObjectCount
+            || (!allowEmpty && content.Objects.Count == 0 && content.Groups.Count == 0)
             || content.Folders.Count > MaximumObjectCount
             || content.FolderColors.Count > MaximumObjectCount)
         {
             return false;
         }
 
-        HashSet<Guid> objectIds = [];
-        foreach (PersistentObject? entry in content.Objects)
-        {
-            if (entry?.Object is null
-                || entry.Object.Id == Guid.Empty
-                || !objectIds.Add(entry.Object.Id))
-            {
-                return false;
-            }
-        }
-
-        return true;
+        return ObjectApiMapper.TryToPersistentSet(content, null, out _, out _, out _);
     }
 
     private static bool IsValid(ObjectLibraryTransfer transfer)

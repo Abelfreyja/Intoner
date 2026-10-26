@@ -35,23 +35,25 @@ internal sealed class RootExlVfxFamilyResolver
         _gameData = gameData;
     }
 
-    public IReadOnlyList<ResolvedVfxPath> Resolve(
+    public ResolvedVfxDiscoverySnapshot Resolve(
         RootExlDatasetIndex rootExlDatasetIndex,
         SqpackIndexSnapshot sqpackIndexSnapshot,
         CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         Dictionary<string, ResolvedVfxPathAccumulator> resolvedPaths = new(StringComparer.OrdinalIgnoreCase);
 
-        ResolveCommon(rootExlDatasetIndex, sqpackIndexSnapshot, resolvedPaths, cancellationToken);
-        ResolveOmen(rootExlDatasetIndex, sqpackIndexSnapshot, resolvedPaths, cancellationToken);
-        ResolveChanneling(rootExlDatasetIndex, sqpackIndexSnapshot, resolvedPaths, cancellationToken);
-        ResolveLockon(rootExlDatasetIndex, sqpackIndexSnapshot, resolvedPaths, cancellationToken);
-        ResolveEvent(rootExlDatasetIndex, sqpackIndexSnapshot, resolvedPaths, cancellationToken);
+        bool isComplete = ResolveCommon(rootExlDatasetIndex, sqpackIndexSnapshot, resolvedPaths, cancellationToken);
+        isComplete &= ResolveOmen(rootExlDatasetIndex, sqpackIndexSnapshot, resolvedPaths, cancellationToken);
+        isComplete &= ResolveChanneling(rootExlDatasetIndex, sqpackIndexSnapshot, resolvedPaths, cancellationToken);
+        isComplete &= ResolveLockon(rootExlDatasetIndex, sqpackIndexSnapshot, resolvedPaths, cancellationToken);
+        isComplete &= ResolveEvent(rootExlDatasetIndex, sqpackIndexSnapshot, resolvedPaths, cancellationToken);
 
+        cancellationToken.ThrowIfCancellationRequested();
         IReadOnlyList<ResolvedVfxPath> snapshot = ResolvedVfxPathAccumulator.BuildSnapshot(resolvedPaths.Values);
 
         _logger.LogInformation("resolved {VfxCount} static vfx paths from root.exl-backed family resolvers", snapshot.Count);
-        return snapshot;
+        return new ResolvedVfxDiscoverySnapshot(snapshot, isComplete);
     }
 
     private bool TryRequireDataset(RootExlDatasetIndex rootExlDatasetIndex, string datasetName, uint expectedDatasetId)
@@ -74,7 +76,7 @@ internal sealed class RootExlVfxFamilyResolver
         return true;
     }
 
-    private void ResolveCommon(
+    private bool ResolveCommon(
         RootExlDatasetIndex rootExlDatasetIndex,
         SqpackIndexSnapshot sqpackIndexSnapshot,
         IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
@@ -82,13 +84,13 @@ internal sealed class RootExlVfxFamilyResolver
     {
         if (!TryRequireDataset(rootExlDatasetIndex, "VFX", VfxDatasetId))
         {
-            return;
+            return false;
         }
 
         ExcelSheet<VFX>? sheet = _gameData.GetExcelSheet<VFX>();
         if (sheet is null)
         {
-            return;
+            return false;
         }
 
         foreach (VFX row in sheet)
@@ -104,9 +106,11 @@ internal sealed class RootExlVfxFamilyResolver
                 RuntimeVfxEvidence.Common,
                 ["common effect", "VFX", token]);
         }
+
+        return true;
     }
 
-    private void ResolveOmen(
+    private bool ResolveOmen(
         RootExlDatasetIndex rootExlDatasetIndex,
         SqpackIndexSnapshot sqpackIndexSnapshot,
         IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
@@ -114,13 +118,13 @@ internal sealed class RootExlVfxFamilyResolver
     {
         if (!TryRequireDataset(rootExlDatasetIndex, "Omen", OmenDatasetId))
         {
-            return;
+            return false;
         }
 
         ExcelSheet<Omen>? sheet = _gameData.GetExcelSheet<Omen>();
         if (sheet is null)
         {
-            return;
+            return false;
         }
 
         foreach (Omen row in sheet)
@@ -146,9 +150,11 @@ internal sealed class RootExlVfxFamilyResolver
                 RuntimeVfxEvidence.Omen,
                 ["omen", "Omen", "ally", allyToken]);
         }
+
+        return true;
     }
 
-    private void ResolveChanneling(
+    private bool ResolveChanneling(
         RootExlDatasetIndex rootExlDatasetIndex,
         SqpackIndexSnapshot sqpackIndexSnapshot,
         IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
@@ -156,13 +162,13 @@ internal sealed class RootExlVfxFamilyResolver
     {
         if (!TryRequireDataset(rootExlDatasetIndex, "Channeling", ChannelingDatasetId))
         {
-            return;
+            return false;
         }
 
         ExcelSheet<Channeling>? sheet = _gameData.GetExcelSheet<Channeling>();
         if (sheet is null)
         {
-            return;
+            return false;
         }
 
         foreach (Channeling row in sheet)
@@ -178,9 +184,11 @@ internal sealed class RootExlVfxFamilyResolver
                 RuntimeVfxEvidence.Channeling,
                 ["channeling", "Channeling", token]);
         }
+
+        return true;
     }
 
-    private void ResolveLockon(
+    private bool ResolveLockon(
         RootExlDatasetIndex rootExlDatasetIndex,
         SqpackIndexSnapshot sqpackIndexSnapshot,
         IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
@@ -188,13 +196,13 @@ internal sealed class RootExlVfxFamilyResolver
     {
         if (!TryRequireDataset(rootExlDatasetIndex, "Lockon", LockonDatasetId))
         {
-            return;
+            return false;
         }
 
         ExcelSheet<Lockon>? sheet = _gameData.GetExcelSheet<Lockon>();
         if (sheet is null)
         {
-            return;
+            return false;
         }
 
         foreach (Lockon row in sheet)
@@ -210,9 +218,11 @@ internal sealed class RootExlVfxFamilyResolver
                 RuntimeVfxEvidence.Lockon,
                 ["lockon", "Lockon", token]);
         }
+
+        return true;
     }
 
-    private void ResolveEvent(
+    private bool ResolveEvent(
         RootExlDatasetIndex rootExlDatasetIndex,
         SqpackIndexSnapshot sqpackIndexSnapshot,
         IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
@@ -220,13 +230,13 @@ internal sealed class RootExlVfxFamilyResolver
     {
         if (!TryRequireDataset(rootExlDatasetIndex, "EventVfx", EventVfxDatasetId))
         {
-            return;
+            return false;
         }
 
         ExcelSheet<EventVfx>? sheet = _gameData.GetExcelSheet<EventVfx>();
         if (sheet is null)
         {
-            return;
+            return false;
         }
 
         foreach (EventVfx row in sheet)
@@ -249,6 +259,8 @@ internal sealed class RootExlVfxFamilyResolver
                 RuntimeVfxEvidence.Event,
                 BuildEventSearchTerms(label, token, eventType));
         }
+
+        return true;
     }
 
     private void TryAddTokenResolvedPath(
@@ -260,63 +272,21 @@ internal sealed class RootExlVfxFamilyResolver
         RuntimeVfxEvidence evidence,
         IEnumerable<string> searchTerms)
     {
-        if (!TryBuildVfxPath(pathPrefix, token, out string path))
+        if (!GameDataAssetPathUtility.TryBuildVfxFamilyPath(pathPrefix, token, out string path))
         {
             return;
         }
 
-        TryAddResolvedPath(
-            sqpackIndexSnapshot,
-            resolvedPaths,
-            path,
-            family,
-            evidence,
-            AssetPathSource.RootExl,
-            AssetPathContract.DeterministicBuilder,
-            searchTerms);
-    }
-
-    private void TryAddResolvedPath(
-        SqpackIndexSnapshot sqpackIndexSnapshot,
-        IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
-        string path,
-        KnownVfxFamily family,
-        RuntimeVfxEvidence evidence,
-        AssetPathSource sources,
-        AssetPathContract contracts,
-        IEnumerable<string> searchTerms)
-        => _ = VfxResolvedPathUtility.TryMergeResolvedPath(
+        _ = VfxResolvedPathUtility.TryMergeResolvedPath(
             resolvedPaths,
             _gameData,
             path,
             sqpackIndexSnapshot,
             family,
             evidence,
-            sources,
-            contracts,
+            AssetPathSource.RootExl,
+            AssetPathContract.DeterministicBuilder,
             searchTerms);
-
-    private static bool TryBuildVfxPath(string prefix, string token, out string path)
-    {
-        string normalizedPrefix = GameAssetPathRules.NormalizeGamePath(prefix);
-        string normalizedToken = GameAssetPathRules.NormalizeGamePath(token);
-        if (string.IsNullOrWhiteSpace(normalizedPrefix) || string.IsNullOrWhiteSpace(normalizedToken))
-        {
-            path = string.Empty;
-            return false;
-        }
-
-        bool hasExtension = GameAssetPathRules.IsFileKind(normalizedToken, GameAssetFileKind.Avfx);
-        if (normalizedToken.StartsWith("vfx/", StringComparison.OrdinalIgnoreCase))
-        {
-            path = hasExtension ? normalizedToken : $"{normalizedToken}.avfx";
-            return true;
-        }
-
-        path = hasExtension
-            ? $"{normalizedPrefix}/{normalizedToken}"
-            : $"{normalizedPrefix}/{normalizedToken}.avfx";
-        return true;
     }
 
     private static IReadOnlyList<string> BuildEventSearchTerms(string label, string token, EventVfxPathType eventType)
@@ -362,4 +332,3 @@ internal sealed class RootExlVfxFamilyResolver
             ? KnownVfxFamily.Event | KnownVfxFamily.GroupPose
             : KnownVfxFamily.Event;
 }
-

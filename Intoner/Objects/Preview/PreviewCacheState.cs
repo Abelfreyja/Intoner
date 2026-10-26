@@ -12,7 +12,7 @@ internal static class PreviewCacheState
         public PreviewAsset PreviewAsset { get; set; } = previewAsset;
         public bool LoadQueued { get; set; }
         public bool LoadRunning { get; set; }
-        public bool HasLoadedGeometry { get; set; }
+        public bool HasLoadedGeometry => GeometryEntry is not null;
         public PreviewAssetState.GeometryEntry? GeometryEntry { get; set; }
         public string? Error { get; set; }
         public int LoadFailureCount { get; set; }
@@ -41,6 +41,7 @@ internal static class PreviewCacheState
         public string? Error { get; set; }
         public int RenderFailureCount { get; set; }
         public long NextRenderRetryAtMs { get; set; }
+        public long NextAssetRetryAtMs { get; set; }
 
         public bool HasActiveResources()
             => Texture is not null
@@ -59,6 +60,7 @@ internal static class PreviewCacheState
             Texture?.Dispose();
             Texture = null;
             TextureByteCount = 0;
+            NextAssetRetryAtMs = 0;
         }
 
         public void ReleaseRetainedTextures()
@@ -79,15 +81,13 @@ internal static class PreviewCacheState
     internal sealed class PendingThumbnailTexture(
         PreviewRender.Request request,
         byte[] pixels,
-        int width,
-        int height,
-        string textureName)
+        string textureName,
+        long nextAssetRetryAtMs = 0)
     {
         public PreviewRender.Request Request { get; } = request;
         public byte[] Pixels { get; } = pixels;
-        public int Width { get; } = width;
-        public int Height { get; } = height;
         public string TextureName { get; } = textureName;
+        public long NextAssetRetryAtMs { get; } = nextAssetRetryAtMs;
         public long ByteCount { get; } = pixels.LongLength;
     }
 }

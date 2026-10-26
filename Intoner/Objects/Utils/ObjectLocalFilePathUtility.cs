@@ -1,6 +1,5 @@
+using Intoner.Objects.Resources;
 using Intoner.Services.Interop;
-using Penumbra.String.Classes;
-using System.Text;
 
 namespace Intoner.Objects.Utils;
 
@@ -17,7 +16,8 @@ internal static class ObjectLocalFilePathUtility
     public static string NormalizeLocalFilePath(string path)
     {
         string normalizedPath = TextUtility.TrimOrEmpty(path);
-        if (normalizedPath.Length == 0)
+
+        if (!ObjectResourcePathEncoding.TryGetNativePathByteCount(normalizedPath, out _))
         {
             return string.Empty;
         }
@@ -54,8 +54,9 @@ internal static class ObjectLocalFilePathUtility
         normalizedPath = string.Empty;
         try
         {
-            string fullPath = new FullPath(Path.GetFullPath(path)).InternalName.ToString();
-            if (Encoding.UTF8.GetByteCount(fullPath) >= Utf8GamePath.MaxGamePathLength)
+            string fullPath = Path.GetFullPath(path).Replace('\\', '/').Trim();
+
+            if (!ObjectResourcePathEncoding.TryGetNativePathByteCount(fullPath, out _))
             {
                 return false;
             }
@@ -81,4 +82,3 @@ internal static class ObjectLocalFilePathUtility
             && TryNormalizeWindowsPath(winePath, out normalizedPath);
     }
 }
-

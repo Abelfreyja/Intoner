@@ -24,7 +24,6 @@ internal sealed class AttachedSurfaceRule(
                 snapshot,
                 context.SnapshotsById,
                 context.BoundsById,
-                out _,
                 out ObjectBoundsSnapshot childBounds,
                 out ObjectBoundsSnapshot parentBounds,
                 out PlacementIssueCode issueCode,
@@ -50,4 +49,3 @@ internal sealed class AttachedSurfaceRule(
         return false;
     }
 }
-

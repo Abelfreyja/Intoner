@@ -65,6 +65,13 @@ internal sealed class ImGuiRenderer : IRenderer
                     break;
             }
         }
+
+        foreach (TextPrimitive text in batch.Texts)
+        {
+            text.Style.Draw(drawList, text.Position,
+                text.Measure(),
+                text.Font, text.FontSize, text.Text, context.AlphaMultiplier);
+        }
     }
 
     private static ImDrawListPtr ResolveDrawList(DrawLayer layer)
@@ -74,4 +81,3 @@ internal sealed class ImGuiRenderer : IRenderer
             _                    => ImGui.GetWindowDrawList(),
         };
 }
-

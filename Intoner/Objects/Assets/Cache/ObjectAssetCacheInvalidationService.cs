@@ -1,56 +1,34 @@
-using Intoner.Objects.Assets;
-
 namespace Intoner.Objects.Assets.Cache;
 
-/// <summary> checks whether a saved object asset cache snapshot can be reused </summary>
+/// <summary> gets the current build identity for object asset cache loading </summary>
 internal interface IObjectAssetCacheInvalidationService
 {
-    /// <summary> gets the current live game version used for object asset cache invalidation </summary>
-    string CurrentGameVersion { get; }
-
-    /// <summary> gets the current local sqpack index fingerprint used for object asset cache invalidation </summary>
-    string CurrentSqpackIndexFingerprint { get; }
-
-    /// <summary> gets reusable cache sections for the current game build </summary>
-    /// <param name="manifest">the loaded cache manifest when one is available</param>
-    /// <param name="requestedSections">the cache sections the caller wants to reuse</param>
-    /// <returns>the reusable cache sections for the current game build</returns>
-    ObjectAssetCacheSectionSet GetReusableSections(
-        ObjectAssetCacheManifest? manifest,
-        ObjectAssetCacheSectionSet requestedSections);
+    /// <summary> gets the current build identity and requested cache sections once </summary>
+    /// <param name="sections">the cache sections the caller wants to reuse</param>
+    /// <returns>the load request with the set build identity</returns>
+    ObjectAssetCacheLoadRequest CreateLoadRequest(ObjectAssetCacheSectionSet sections);
 }
 
 internal sealed class ObjectAssetCacheInvalidationService : IObjectAssetCacheInvalidationService
 {
     private readonly IObjectAssetGameVersionService _gameVersionService;
     private readonly ISqpackIndexFingerprintService _sqpackIndexFingerprintService;
+    private readonly IObjectAssetGameData _gameData;
 
     public ObjectAssetCacheInvalidationService(
         IObjectAssetGameVersionService gameVersionService,
-        ISqpackIndexFingerprintService sqpackIndexFingerprintService)
+        ISqpackIndexFingerprintService sqpackIndexFingerprintService,
+        IObjectAssetGameData gameData)
     {
         _gameVersionService = gameVersionService;
         _sqpackIndexFingerprintService = sqpackIndexFingerprintService;
+        _gameData = gameData;
     }
 
-    public string CurrentGameVersion
-        => _gameVersionService.GetCurrentGameVersion();
-
-    public string CurrentSqpackIndexFingerprint
-        => _sqpackIndexFingerprintService.GetCurrentSqpackIndexFingerprint();
-
-    public ObjectAssetCacheSectionSet GetReusableSections(
-        ObjectAssetCacheManifest? manifest,
-        ObjectAssetCacheSectionSet requestedSections)
-    {
-        string currentGameVersion = CurrentGameVersion;
-        string currentSqpackIndexFingerprint = CurrentSqpackIndexFingerprint;
-        if (manifest is null
-         || !manifest.MatchesBuildIdentity(currentGameVersion, currentSqpackIndexFingerprint))
-        {
-            return ObjectAssetCacheSectionSet.None;
-        }
-
-        return manifest.GetReusableSections(requestedSections);
-    }
+    public ObjectAssetCacheLoadRequest CreateLoadRequest(ObjectAssetCacheSectionSet sections)
+        => new(
+            _gameVersionService.GetCurrentGameVersion(),
+            _sqpackIndexFingerprintService.GetCurrentSqpackIndexFingerprint(),
+            _gameData.Language,
+            sections);
 }

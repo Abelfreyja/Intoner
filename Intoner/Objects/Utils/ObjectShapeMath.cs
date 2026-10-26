@@ -1,5 +1,6 @@
 using Intoner.Scene;
 using System.Numerics;
+using AxisAlignedBounds = FFXIVClientStructs.FFXIV.Common.Math.AxisAlignedBounds;
 using OrientedBounds = FFXIVClientStructs.FFXIV.Common.Math.OrientedBounds;
 
 namespace Intoner.Objects.Utils;
@@ -9,6 +10,38 @@ internal static class ObjectShapeMath
     private const float MaximumSkewAngleDegrees = 89.9f;
 
     public const int WireCircleSegmentCount = 16;
+
+    public static bool IsValidBounds(AxisAlignedBounds bounds)
+    {
+        Vector3 min = bounds.Min;
+        Vector3 max = bounds.Max;
+
+        // unavailable VFX sometimes can return float.MaxValue, which is finite but overflows distance calculations D:
+        return min.X <= max.X && min.Y <= max.Y && min.Z <= max.Z
+            && float.IsFinite(((min + max) * 0.5f).LengthSquared())
+            && float.IsFinite(((max - min) * 0.5f).LengthSquared());
+    }
+
+    public static bool IsValidBounds(OrientedBounds bounds)
+    {
+        Matrix4x4 transform = bounds.Transform;
+        Vector3 halfExtents = bounds.HalfExtents;
+
+        if (!NumericsUtility.IsFinite(transform)
+            || halfExtents.X < 0f || halfExtents.Y < 0f || halfExtents.Z < 0f)
+        {
+            return false;
+        }
+
+        Vector3 worldHalfExtents = Vector3.Abs(new Vector3(transform.M11, transform.M12, transform.M13) * halfExtents.X)
+            + Vector3.Abs(new Vector3(transform.M21, transform.M22, transform.M23) * halfExtents.Y)
+            + Vector3.Abs(new Vector3(transform.M31, transform.M32, transform.M33) * halfExtents.Z);
+        return IsValidBounds(new AxisAlignedBounds
+        {
+            Min = transform.Translation - worldHalfExtents,
+            Max = transform.Translation + worldHalfExtents,
+        });
+    }
 
     public static Matrix4x4 CreateRigidTransform(Vector3 position, Vector3 rotationDegrees)
     {
@@ -50,6 +83,7 @@ internal static class ObjectShapeMath
         float sizeY = axisY.Length();
         float sizeZ = axisZ.Length();
         if (!NumericsUtility.IsFinite(boxTransform)
+            || !float.IsFinite(sizeX) || !float.IsFinite(sizeY) || !float.IsFinite(sizeZ)
             || sizeX <= NumericsUtility.ScalarEpsilon
             || sizeY <= NumericsUtility.ScalarEpsilon
             || sizeZ <= NumericsUtility.ScalarEpsilon)
@@ -178,4 +212,3 @@ internal static class ObjectShapeMath
              + (MathF.Abs(Vector3.Dot(normalizedNormal, axisZ)) * halfExtents.Z);
     }
 }
-

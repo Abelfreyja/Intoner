@@ -45,7 +45,22 @@ internal sealed class RootExlResolver
                 return _datasetIndex;
             }
 
-            ExcelListFile? rootExl = _gameData.GetFile<ExcelListFile>(RootExlPath);
+            ExcelListFile? rootExl;
+            try
+            {
+                rootExl = _gameData.GetFile<ExcelListFile>(RootExlPath);
+            }
+            catch (Exception ex) when (ObjectAssetFileUtility.IsReadFailure(ex)
+                                       || ex is (FormatException or OverflowException or IndexOutOfRangeException or InvalidOperationException)
+                                           and not ObjectDisposedException)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                _logger.LogWarning(ex, "failed to load {RootExlPath}", RootExlPath);
+                return null;
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+
             if (rootExl is null)
             {
                 _logger.LogWarning("failed to load {RootExlPath}", RootExlPath);
@@ -64,6 +79,7 @@ internal sealed class RootExlResolver
                 datasetIds[name] = (uint)id;
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
             _datasetIndex = new RootExlDatasetIndex(datasetIds);
 
             _logger.LogInformation("loaded root.exl dataset map with {DatasetCount} entries", _datasetIndex.DatasetCount);
@@ -71,4 +87,3 @@ internal sealed class RootExlResolver
         }
     }
 }
-

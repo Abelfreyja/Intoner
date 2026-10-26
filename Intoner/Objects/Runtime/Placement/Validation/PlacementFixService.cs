@@ -117,7 +117,6 @@ internal sealed class PlacementFixService(
                    snapshot,
                    snapshots,
                    boundsSnapshots,
-                   out _,
                    out ObjectBoundsSnapshot childBounds,
                    out ObjectBoundsSnapshot parentBounds,
                    out _,
@@ -190,4 +189,3 @@ internal sealed class PlacementFixService(
             "Clear attachment",
             "Remove the imported furniture parent link.");
 }
-

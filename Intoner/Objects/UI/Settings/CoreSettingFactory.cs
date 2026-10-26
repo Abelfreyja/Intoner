@@ -9,8 +9,8 @@ namespace Intoner.Objects.UI.Settings;
 internal sealed partial class CoreSettingFactory
 {
     private readonly IIntonerConfigurationService _configuration;
-    private readonly IObjectHousingModePolicy      _housingMode;
-    private readonly IntonerThemeStyle             _themeStyle;
+    private readonly IObjectHousingModePolicy     _housingMode;
+    private readonly IntonerThemeStyle            _themeStyle;
 
     private static readonly ChoiceOption<ObjectWorkspaceMode>[] WorkspaceModeOptions =
     [
@@ -135,8 +135,8 @@ internal sealed partial class CoreSettingFactory
         IntonerThemeStyle themeStyle)
     {
         _configuration = configuration;
-        _housingMode    = housingMode;
-        _themeStyle     = themeStyle;
+        _housingMode   = housingMode;
+        _themeStyle    = themeStyle;
     }
 
     public ISettingEntry CreateWorkspaceMode()
@@ -330,6 +330,18 @@ internal sealed partial class CoreSettingFactory
                 configuration => configuration.Ui.EnableShortcutsWithoutEditor = value),
             () => ResolveOutsideEditorStatus(_configuration.Current.Ui.EnableShortcutsWithoutEditor));
 
+    public ISettingEntry CreatePlacedLayoutView()
+        => new ChoiceSettingEntry<PlacedLayoutView>(
+            new SettingDefinition(
+                "placedLayoutView",
+                "Placed Layout View",
+                "Show enabled layouts as collapsible sections or tabs.",
+                "ui interface placed list layouts sections tabs"),
+            [new(PlacedLayoutView.Sections, "Sections", string.Empty), new(PlacedLayoutView.Tabs, "Tabs", string.Empty)],
+            () => _configuration.Current.Ui.PlacedLayoutView,
+            value => _configuration.TryUpdate(configuration => configuration.Ui.PlacedLayoutView = value),
+            style: ChoiceRowStyle.Segmented);
+
     public ISettingEntry CreatePlacedListRowSize()
         => new ChoiceSettingEntry<SceneListRowSize>(
             new SettingDefinition(
@@ -517,4 +529,3 @@ internal sealed partial class CoreSettingFactory
     [StructLayout(LayoutKind.Auto)]
     private readonly record struct ColorChoice(UiColorPreset? Preset);
 }
-

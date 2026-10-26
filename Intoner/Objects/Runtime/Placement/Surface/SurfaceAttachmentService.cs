@@ -3,7 +3,6 @@ using Intoner.Objects.Models;
 using Intoner.Objects.Utils;
 using Intoner.Scene;
 using System.Numerics;
-using OrientedBounds = FFXIVClientStructs.FFXIV.Common.Math.OrientedBounds;
 
 namespace Intoner.Objects.Runtime;
 
@@ -21,8 +20,18 @@ internal sealed class SurfaceAttachmentService(FurnitureMetadataResolver metadat
         SceneSurfaceHit? hit,
         IReadOnlyList<ObjectBoundsSnapshot> boundsSnapshots)
     {
-        if (!TryResolveSurfaceDragAttachment(snapshot, hit, boundsSnapshots, out FurnitureModel furnitureModel, out Guid? parentId)
-            || furnitureModel.AttachmentParentId == parentId)
+        if (hit is not { } surfaceHit
+            || !metadataResolver.TryResolve(snapshot, out FurnitureModel furnitureModel, out HousingFurnitureMetadata metadata)
+            || !CanAttachToObjectSurface(metadata.Surface))
+        {
+            return snapshot;
+        }
+
+        Guid? parentId = TryResolveSurfaceParent(metadata.Surface, surfaceHit, snapshot.Id, boundsSnapshots, out Guid targetObjectId)
+            ? targetObjectId
+            : null;
+
+        if (furnitureModel.AttachmentParentId == parentId)
         {
             return snapshot;
         }
@@ -36,24 +45,15 @@ internal sealed class SurfaceAttachmentService(FurnitureMetadataResolver metadat
         };
     }
 
-    public bool HasSurfaceDragAttachmentChange(
-        ObjectSnapshot snapshot,
-        SceneSurfaceHit hit,
-        IReadOnlyList<ObjectBoundsSnapshot> boundsSnapshots)
-        => TryResolveSurfaceDragAttachment(snapshot, hit, boundsSnapshots, out FurnitureModel furnitureModel, out Guid? parentId)
-           && furnitureModel.AttachmentParentId != parentId;
-
     public static bool TryResolveAttachedParent(
         ObjectSnapshot snapshot,
         IReadOnlyDictionary<Guid, ObjectSnapshot> snapshotsById,
         IReadOnlyDictionary<Guid, ObjectBoundsSnapshot> boundsById,
-        out ObjectSnapshot parentSnapshot,
         out ObjectBoundsSnapshot childBounds,
         out ObjectBoundsSnapshot parentBounds,
         out PlacementIssueCode issueCode,
         out string errorMessage)
     {
-        parentSnapshot = default!;
         childBounds = default!;
         parentBounds = default!;
         issueCode = PlacementIssueCode.None;
@@ -71,7 +71,6 @@ internal sealed class SurfaceAttachmentService(FurnitureMetadataResolver metadat
             resolvedParentSnapshot,
             resolvedChildBounds,
             resolvedParentBounds,
-            out parentSnapshot,
             out childBounds,
             out parentBounds,
             out issueCode,
@@ -82,13 +81,11 @@ internal sealed class SurfaceAttachmentService(FurnitureMetadataResolver metadat
         ObjectSnapshot snapshot,
         IReadOnlyList<ObjectSnapshot> snapshots,
         IReadOnlyList<ObjectBoundsSnapshot> boundsSnapshots,
-        out ObjectSnapshot parentSnapshot,
         out ObjectBoundsSnapshot childBounds,
         out ObjectBoundsSnapshot parentBounds,
         out PlacementIssueCode issueCode,
         out string errorMessage)
     {
-        parentSnapshot = default!;
         childBounds = default!;
         parentBounds = default!;
         issueCode = PlacementIssueCode.None;
@@ -106,7 +103,6 @@ internal sealed class SurfaceAttachmentService(FurnitureMetadataResolver metadat
             resolvedParentSnapshot,
             resolvedChildBounds,
             resolvedParentBounds,
-            out parentSnapshot,
             out childBounds,
             out parentBounds,
             out issueCode,
@@ -199,13 +195,11 @@ internal sealed class SurfaceAttachmentService(FurnitureMetadataResolver metadat
         ObjectSnapshot? resolvedParentSnapshot,
         ObjectBoundsSnapshot? resolvedChildBounds,
         ObjectBoundsSnapshot? resolvedParentBounds,
-        out ObjectSnapshot parentSnapshot,
         out ObjectBoundsSnapshot childBounds,
         out ObjectBoundsSnapshot parentBounds,
         out PlacementIssueCode issueCode,
         out string errorMessage)
     {
-        parentSnapshot = default!;
         childBounds = default!;
         parentBounds = default!;
         if (resolvedParentSnapshot is null || resolvedParentSnapshot.Kind != ObjectKind.Furniture)
@@ -222,7 +216,6 @@ internal sealed class SurfaceAttachmentService(FurnitureMetadataResolver metadat
             return false;
         }
 
-        parentSnapshot = resolvedParentSnapshot;
         childBounds = resolvedChildBounds;
         parentBounds = resolvedParentBounds;
         issueCode = PlacementIssueCode.None;
@@ -232,28 +225,6 @@ internal sealed class SurfaceAttachmentService(FurnitureMetadataResolver metadat
 
     private static bool CanAttachToObjectSurface(HousingPlacementSurface surface)
         => surface is HousingPlacementSurface.Tabletop or HousingPlacementSurface.Wall;
-
-    private bool TryResolveSurfaceDragAttachment(
-        ObjectSnapshot snapshot,
-        SceneSurfaceHit? hit,
-        IReadOnlyList<ObjectBoundsSnapshot> boundsSnapshots,
-        out FurnitureModel furnitureModel,
-        out Guid? parentId)
-    {
-        furnitureModel = default!;
-        parentId = null;
-        if (hit is not { } surfaceHit
-            || !metadataResolver.TryResolve(snapshot, out furnitureModel, out HousingFurnitureMetadata metadata)
-            || !CanAttachToObjectSurface(metadata.Surface))
-        {
-            return false;
-        }
-
-        parentId = TryResolveSurfaceParent(metadata.Surface, surfaceHit, snapshot.Id, boundsSnapshots, out Guid targetObjectId)
-            ? targetObjectId
-            : null;
-        return true;
-    }
 
     private static bool TryResolveSurfaceParent(
         HousingPlacementSurface surface,
@@ -338,7 +309,7 @@ internal sealed class SurfaceAttachmentService(FurnitureMetadataResolver metadat
 
     private static bool TryResolveVerticalRange(ObjectBoundsSnapshot boundsSnapshot, out float minY, out float maxY)
     {
-        if (boundsSnapshot.LocalBounds is { } localBounds)
+        if (boundsSnapshot.OrientedBounds is { } localBounds)
         {
             Span<Vector3> corners = stackalloc Vector3[8];
             ObjectShapeMath.CopyOrientedBoxCorners(localBounds, corners);
@@ -360,7 +331,7 @@ internal sealed class SurfaceAttachmentService(FurnitureMetadataResolver metadat
 
     private static bool TryResolveContactCenter(ObjectBoundsSnapshot boundsSnapshot, float contactY, out Vector3 contactCenter)
     {
-        if (boundsSnapshot.LocalBounds is { } localBounds)
+        if (boundsSnapshot.OrientedBounds is { } localBounds)
         {
             Vector3 center = localBounds.Transform.Translation;
             contactCenter = new Vector3(center.X, contactY, center.Z);
@@ -373,11 +344,11 @@ internal sealed class SurfaceAttachmentService(FurnitureMetadataResolver metadat
     }
 
     private static bool ContainsParentSurfacePoint(ObjectBoundsSnapshot parentBounds, Vector3 worldPoint)
-        => parentBounds.LocalBounds is { } localBounds
+        => parentBounds.OrientedBounds is { } localBounds
             ? ContainsOrientedParentSurfacePoint(localBounds, worldPoint)
             : ContainsAxisAlignedParentSurfacePoint(parentBounds, worldPoint);
 
-    private static bool ContainsOrientedParentSurfacePoint(OrientedBounds parentBounds, Vector3 worldPoint)
+    private static bool ContainsOrientedParentSurfacePoint(SceneOrientedBounds parentBounds, Vector3 worldPoint)
     {
         if (!Matrix4x4.Invert(parentBounds.Transform, out Matrix4x4 inverseTransform))
         {
@@ -395,4 +366,3 @@ internal sealed class SurfaceAttachmentService(FurnitureMetadataResolver metadat
            && worldPoint.Z >= parentBounds.Min.Z - ParentSurfaceBoundsTolerance
            && worldPoint.Z <= parentBounds.Max.Z + ParentSurfaceBoundsTolerance;
 }
-

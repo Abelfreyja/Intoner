@@ -42,14 +42,12 @@ internal interface IObjectModDataSource : IDisposable
     /// <returns>a settings view containing only group types object collections can apply</returns>
     ObjectCollectionModSettingsView GetModSettings(ObjectCollectionModSettings entry);
 
-    /// <summary> resolves effective object redirects for requested paths from assigned Penumbra mods without mutating Penumbra collections </summary>
+    /// <summary> prepares selected object redirect data from assigned Penumbra mods without mutating Penumbra collections </summary>
     /// <param name="collection">the authored object collection to resolve</param>
-    /// <param name="requestedPaths">the normalized requested game paths to resolve</param>
     /// <param name="cancellationToken">the cancellation token for the operation</param>
-    /// <returns>the resolve state and resolved redirection map</returns>
-    Task<ObjectModResolveResult> ResolvePathsAsync(
+    /// <returns>the preparation state and immutable selections for reached path lookups</returns>
+    Task<ObjectModResolveResult> PrepareCollectionAsync(
         ObjectCollection collection,
-        IReadOnlySet<string> requestedPaths,
         CancellationToken cancellationToken);
 }
 
@@ -88,6 +86,8 @@ internal sealed class PenumbraObjectModDataSource : IObjectModDataSource
     private bool _isDisposed;
     private long _inventoryVersion;
     private long _settingsViewVersion;
+    private CancellationTokenSource _sourceChangesCancellation = new();
+    private readonly Dictionary<string, CancellationTokenSource> _modChangesCancellationByDirectory = new(StringComparer.OrdinalIgnoreCase);
     private long _nextInventoryLoadAttempt;
     private readonly Dictionary<string, string> _resolvedModRootsByDirectory = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, ModSettingsViewCacheEntry> _settingsViewsByModDirectory = new(StringComparer.OrdinalIgnoreCase);
@@ -190,27 +190,22 @@ internal sealed class PenumbraObjectModDataSource : IObjectModDataSource
         }
     }
 
-    public Task<ObjectModResolveResult> ResolvePathsAsync(
+    public Task<ObjectModResolveResult> PrepareCollectionAsync(
         ObjectCollection collection,
-        IReadOnlySet<string> requestedPaths,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        HashSet<string> normalizedRequestedPaths = CreateSupportedResourceSet(requestedPaths);
-        if (normalizedRequestedPaths.Count == 0)
-        {
-            return CompleteResolve(
-                ObjectCollectionResolveState.Inactive,
-                "collection has no requested object resource paths");
-        }
-
         List<ObjectCollectionModSettings> enabledEntries = collection.Entries
             .Where(static entry => entry.Enabled)
             .ToList();
+
+        cancellationToken.ThrowIfCancellationRequested();
+
         if (enabledEntries.Count == 0)
         {
             return CompleteResolve(
+                cancellationToken,
                 ObjectCollectionResolveState.Inactive,
                 "collection has no enabled Penumbra mods");
         }
@@ -218,17 +213,42 @@ internal sealed class PenumbraObjectModDataSource : IObjectModDataSource
         if (TryResolveUnavailablePenumbra(out ObjectCollectionResolveState resolveState, out string statusText))
         {
             return CompleteResolve(
+                cancellationToken,
                 resolveState,
                 statusText,
                 keepLastGoodSnapshot: resolveState is ObjectCollectionResolveState.Inactive
                                              or ObjectCollectionResolveState.WaitingForPenumbra);
         }
 
+        CancellationToken[] sourceChanges = [];
         try
         {
-            Dictionary<string, ObjectResolvedPath> resolvedPaths = new(StringComparer.OrdinalIgnoreCase);
+            lock (_stateLock)
+            {
+                ObjectDisposedException.ThrowIf(Volatile.Read(ref _isDisposed), this);
+                sourceChanges = new CancellationToken[enabledEntries.Count + 1];
+                sourceChanges[0] = _sourceChangesCancellation.Token;
+                for (int entryIndex = 0; entryIndex < enabledEntries.Count; ++entryIndex)
+                {
+                    string modDirectory = ObjectCollectionKeyUtility.NormalizeModDirectory(enabledEntries[entryIndex].ModDirectory);
+                    if (modDirectory.Length == 0)
+                    {
+                        continue;
+                    }
+
+                    if (!_modChangesCancellationByDirectory.TryGetValue(modDirectory, out CancellationTokenSource? changes))
+                    {
+                        changes = new CancellationTokenSource();
+                        _modChangesCancellationByDirectory.Add(modDirectory, changes);
+                    }
+
+                    sourceChanges[entryIndex + 1] = changes.Token;
+                }
+            }
+
+            List<PenumbraModResolver.PreparedRedirects> preparedMods = [];
             List<string> resolveWarnings = [];
-            PenumbraModRootInventory modRootInventory = LoadModRootInventory(enabledEntries);
+            PenumbraModRootInventory modRootInventory = LoadModRootInventory(enabledEntries, cancellationToken);
             List<ObjectCollectionModSettings> orderedEntries = OrderEntriesForPriorityConflictResolution(
                 enabledEntries,
                 modRootInventory);
@@ -255,13 +275,12 @@ internal sealed class PenumbraObjectModDataSource : IObjectModDataSource
                     continue;
                 }
 
-                IReadOnlyList<ObjectPathRedirection> modRedirections;
+                PenumbraModResolver.PreparedRedirects preparedMod;
                 try
                 {
-                    modRedirections = ResolveModRedirections(
+                    preparedMod = PrepareModRedirections(
                         modRootPath,
                         entry,
-                        normalizedRequestedPaths,
                         resolveWarnings,
                         cancellationToken);
                 }
@@ -271,19 +290,38 @@ internal sealed class PenumbraObjectModDataSource : IObjectModDataSource
                 }
                 catch (Exception ex)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     ++failedModCount;
                     resolveWarnings.Add($"Penumbra mod '{entry.ModDirectory}' failed to resolve: {ex.Message}");
                     continue;
                 }
 
+                cancellationToken.ThrowIfCancellationRequested();
                 ++usableModCount;
-                foreach (ObjectPathRedirection redirect in modRedirections)
-                {
-                    resolvedPaths.TryAdd(redirect.RequestedPath, redirect.ResolvedPath);
-                }
+                preparedMods.Add(preparedMod);
             }
 
             IReadOnlyList<string> warnings = ObjectCollectionDiagnosticUtility.NormalizeWarnings(resolveWarnings);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (TryResolveUnavailablePenumbra(out resolveState, out statusText))
+            {
+                return CompleteResolve(cancellationToken, resolveState, statusText,
+                    keepLastGoodSnapshot: resolveState is ObjectCollectionResolveState.Inactive or ObjectCollectionResolveState.WaitingForPenumbra,
+                    warnings: warnings);
+            }
+
+            lock (_stateLock)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (Volatile.Read(ref _isDisposed) || sourceChanges.Any(static changes => changes.IsCancellationRequested))
+                {
+                    return CompleteResolve(cancellationToken, ObjectCollectionResolveState.ResolveFailed,
+                        "Penumbra data changed while preparing the collection", keepLastGoodSnapshot: true, warnings: warnings);
+                }
+            }
+
             if (usableModCount == 0)
             {
                 ObjectCollectionResolveState failureState = failedModCount == 0 && missingModCount > 0
@@ -293,20 +331,19 @@ internal sealed class PenumbraObjectModDataSource : IObjectModDataSource
                     ? "all assigned Penumbra mods are missing"
                     : "no assigned Penumbra mods could be resolved";
                 return CompleteResolve(
+                    cancellationToken,
                     failureState,
                     failureText,
                     warnings: warnings);
             }
 
-            IReadOnlyDictionary<string, ObjectResolvedPath> snapshot
-                = resolvedPaths.ToImmutableDictionary(StringComparer.OrdinalIgnoreCase);
+            cancellationToken.ThrowIfCancellationRequested();
             return CompleteResolve(
+                cancellationToken,
                 ObjectCollectionResolveState.Ready,
-                snapshot.Count == 0
-                    ? $"assigned Penumbra mods expose no redirects for {normalizedRequestedPaths.Count} requested object resource paths"
-                    : $"resolved {snapshot.Count} redirected object resource paths from {usableModCount} Penumbra mods",
+                $"prepared object redirect data from {usableModCount} Penumbra mods",
                 warnings: warnings,
-                resolvedPaths: snapshot,
+                redirects: new ObjectModRedirectSnapshot(preparedMods, sourceChanges),
                 isComplete: missingModCount == 0 && failedModCount == 0);
         }
         catch (OperationCanceledException)
@@ -315,15 +352,41 @@ internal sealed class PenumbraObjectModDataSource : IObjectModDataSource
         }
         catch (Exception ex)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (TryResolveUnavailablePenumbra(out resolveState, out statusText))
+            {
+                return CompleteResolve(cancellationToken, resolveState, statusText,
+                    keepLastGoodSnapshot: resolveState is ObjectCollectionResolveState.Inactive or ObjectCollectionResolveState.WaitingForPenumbra);
+            }
+
             _logger.LogWarning(ex, "failed to resolve object collection {CollectionId} from Penumbra mod files", collection.CollectionId);
             return CompleteResolve(
+                cancellationToken,
                 ObjectCollectionResolveState.ResolveFailed,
-                $"Penumbra resolve failed: {ex.Message}");
+                $"Penumbra resolve failed: {ex.Message}",
+                keepLastGoodSnapshot: Volatile.Read(ref _isDisposed) || sourceChanges.Any(static changes => changes.IsCancellationRequested));
         }
     }
 
     public void Dispose()
     {
+        lock (_modManagerLock)
+        {
+            if (_isDisposed)
+            {
+                return;
+            }
+
+            _isDisposed = true;
+        }
+
+        lock (_stateLock)
+        {
+            _sourceChangesCancellation.Cancel();
+            _sourceChangesCancellation.Dispose();
+            CancelModChanges();
+        }
+
         DisposeModDirectoryWatcher();
         _penumbra.ModDirectoryChanged -= HandlePenumbraModDirectoryChanged;
         _penumbra.StatusChanged -= HandlePenumbraStatusChanged;
@@ -332,7 +395,6 @@ internal sealed class PenumbraObjectModDataSource : IObjectModDataSource
         _modAdded.Dispose();
         lock (_modManagerLock)
         {
-            _isDisposed = true;
             _modManager.Dispose();
         }
     }
@@ -431,25 +493,32 @@ internal sealed class PenumbraObjectModDataSource : IObjectModDataSource
         }
     }
 
-    private IReadOnlyList<ObjectPathRedirection> ResolveModRedirections(
+    private PenumbraModResolver.PreparedRedirects PrepareModRedirections(
         string modRootPath,
         ObjectCollectionModSettings entry,
-        IReadOnlySet<string> requestedPaths,
         ICollection<string> warnings,
         CancellationToken cancellationToken)
     {
         PenumbraModMetadata metadata = _metadataReader.Load(modRootPath, cancellationToken);
-        return PenumbraModResolver.ResolveRedirections(
+        return PenumbraModResolver.PrepareRedirections(
             metadata,
             modRootPath,
             entry,
-            requestedPaths,
             warnings,
             cancellationToken);
     }
 
-    private PenumbraModRootInventory LoadModRootInventory(IEnumerable<ObjectCollectionModSettings> entries)
+    private PenumbraModRootInventory LoadModRootInventory(
+        IEnumerable<ObjectCollectionModSettings> entries,
+        CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        long inventoryVersion;
+        lock (_stateLock)
+        {
+            inventoryVersion = _inventoryVersion;
+        }
+
         HashSet<string> requestedDirectories = entries
             .Select(static entry => ObjectCollectionKeyUtility.NormalizeModDirectory(entry.ModDirectory))
             .Where(static modDirectory => modDirectory.Length > 0)
@@ -466,13 +535,18 @@ internal sealed class PenumbraObjectModDataSource : IObjectModDataSource
             List<(string Identifier, string RootPath, int Index)> matches = [];
             foreach ((string identifier, string name) in manager.EnumerateNames())
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 string modDirectory = ObjectCollectionKeyUtility.NormalizeModDirectory(identifier);
+
                 if (!requestedDirectories.Contains(modDirectory))
                 {
                     continue;
                 }
 
                 using ModWrapper? mod = manager.GetByName((identifier, name));
+
+                cancellationToken.ThrowIfCancellationRequested();
+
                 if (mod is not null)
                 {
                     matches.Add((mod.Identifier, mod.ModPath, mod.Index));
@@ -484,6 +558,7 @@ internal sealed class PenumbraObjectModDataSource : IObjectModDataSource
 
         foreach ((string identifier, string rootPath, int index) in mods)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             string modDirectory = ObjectCollectionKeyUtility.NormalizeModDirectory(identifier);
 
             if (rootPath.Length == 0 || !Directory.Exists(rootPath))
@@ -507,9 +582,14 @@ internal sealed class PenumbraObjectModDataSource : IObjectModDataSource
 
         lock (_stateLock)
         {
-            foreach ((string modDirectory, PenumbraModRootEntry modRoot) in rootsByDirectory)
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (inventoryVersion == _inventoryVersion)
             {
-                _resolvedModRootsByDirectory[modDirectory] = modRoot.RootPath;
+                foreach ((string modDirectory, PenumbraModRootEntry modRoot) in rootsByDirectory)
+                {
+                    _resolvedModRootsByDirectory[modDirectory] = modRoot.RootPath;
+                }
             }
         }
 
@@ -570,28 +650,17 @@ internal sealed class PenumbraObjectModDataSource : IObjectModDataSource
             : int.MaxValue;
     }
 
-    private static HashSet<string> CreateSupportedResourceSet(IEnumerable<string> paths)
-    {
-        HashSet<string> normalizedPaths = new(StringComparer.OrdinalIgnoreCase);
-        foreach (string path in paths)
-        {
-            if (ObjectAssetPathRules.TryNormalizeSupportedResourcePath(path, out string normalizedPath))
-            {
-                normalizedPaths.Add(normalizedPath);
-            }
-        }
-
-        return normalizedPaths;
-    }
-
     private static Task<ObjectModResolveResult> CompleteResolve(
+        CancellationToken cancellationToken,
         ObjectCollectionResolveState resolveState,
         string statusText,
         bool keepLastGoodSnapshot = false,
         IReadOnlyList<string>? warnings = null,
-        IReadOnlyDictionary<string, ObjectResolvedPath>? resolvedPaths = null,
+        ObjectModRedirectSnapshot? redirects = null,
         bool isComplete = true)
-        => Task.FromResult(new ObjectModResolveResult
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(new ObjectModResolveResult
         {
             IsComplete = isComplete && !keepLastGoodSnapshot
                 && resolveState is ObjectCollectionResolveState.Ready or ObjectCollectionResolveState.Inactive,
@@ -599,9 +668,9 @@ internal sealed class PenumbraObjectModDataSource : IObjectModDataSource
             StatusText = statusText,
             KeepLastGoodSnapshot = keepLastGoodSnapshot,
             Warnings = warnings ?? [],
-            ResolvedPaths = resolvedPaths
-                ?? ImmutableDictionary<string, ObjectResolvedPath>.Empty,
+            Redirects = redirects ?? ObjectModRedirectSnapshot.Empty,
         });
+    }
 
     private static ObjectCollectionModSettingsView CreateModSettingsView(
         ObjectCollectionResolveState resolveState,
@@ -644,6 +713,19 @@ internal sealed class PenumbraObjectModDataSource : IObjectModDataSource
     {
         lock (_stateLock)
         {
+            if (Volatile.Read(ref _isDisposed))
+            {
+                return;
+            }
+
+            if (invalidation.AffectsAllCollections)
+            {
+                _sourceChangesCancellation.Cancel();
+                _sourceChangesCancellation.Dispose();
+                _sourceChangesCancellation = new CancellationTokenSource();
+                CancelModChanges();
+            }
+
             ++_settingsViewVersion;
             if (invalidation.Kind is ObjectModDataChangeKind.AvailabilityChanged
                 or ObjectModDataChangeKind.ModDirectoryChanged
@@ -668,6 +750,12 @@ internal sealed class PenumbraObjectModDataSource : IObjectModDataSource
             {
                 foreach (string modDirectory in invalidation.AffectedModDirectories)
                 {
+                    if (_modChangesCancellationByDirectory.Remove(modDirectory, out CancellationTokenSource? changes))
+                    {
+                        changes.Cancel();
+                        changes.Dispose();
+                    }
+
                     _settingsViewsByModDirectory.Remove(modDirectory);
                     if (_resolvedModRootsByDirectory.TryGetValue(modDirectory, out string? resolvedModRoot))
                     {
@@ -690,6 +778,17 @@ internal sealed class PenumbraObjectModDataSource : IObjectModDataSource
         {
             _logger.LogWarning(ex, "object Penumbra mod state handler failed");
         }
+    }
+
+    private void CancelModChanges()
+    {
+        foreach (CancellationTokenSource changes in _modChangesCancellationByDirectory.Values)
+        {
+            changes.Cancel();
+            changes.Dispose();
+        }
+
+        _modChangesCancellationByDirectory.Clear();
     }
 
     private static ObjectModDataChange CreateModDirectoryInvalidation(IEnumerable<string> modDirectories)
@@ -741,6 +840,10 @@ internal sealed class PenumbraObjectModDataSource : IObjectModDataSource
                     retried = true;
                     _modManager.Disconnect();
                 }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
                 catch
                 {
                     _modManager.Disconnect();
@@ -781,7 +884,8 @@ internal sealed class PenumbraObjectModDataSource : IObjectModDataSource
         IObjectFileWatchSubscription? nextWatcher = null;
         lock (_stateLock)
         {
-            if (!force && string.Equals(_watchedModDirectoryRoot, nextRoot, StringComparison.OrdinalIgnoreCase))
+            if (Volatile.Read(ref _isDisposed)
+             || !force && string.Equals(_watchedModDirectoryRoot, nextRoot, StringComparison.OrdinalIgnoreCase))
             {
                 return;
             }
@@ -914,5 +1018,4 @@ internal sealed class PenumbraObjectModDataSource : IObjectModDataSource
 
         return matchedModDirectory;
     }
-
 }

@@ -6,6 +6,9 @@ namespace Intoner.Objects.Runtime;
 /// <summary>owns temporary source identity, sessions, revisions, and desired state</summary>
 internal interface ITemporarySourceStore
 {
+    /// <summary> gets the version of the complete active source set </summary>
+    long Revision { get; }
+
     /// <summary> gets immutable snapshots for all active temporary sources </summary>
     IReadOnlyList<ObjectTemporarySourceSnapshot> GetSources();
 
@@ -44,6 +47,7 @@ internal sealed class TemporarySourceStore : ITemporarySourceStore
     internal const int MaximumRemovedSourceTombstones = 4096;
 
     private readonly Lock _stateLock;
+    private long _revision;
     private readonly Dictionary<string, ObjectTemporarySourceSnapshot> _sources = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, ObjectTemporarySourceState> _removedSourceStates = new(StringComparer.OrdinalIgnoreCase);
     private readonly Queue<(string SourceKey, ObjectTemporarySourceState State)> _removedSourceOrder = new();
@@ -51,6 +55,17 @@ internal sealed class TemporarySourceStore : ITemporarySourceStore
     public TemporarySourceStore(ObjectStateLock stateLock)
     {
         _stateLock = stateLock.Value;
+    }
+
+    public long Revision
+    {
+        get
+        {
+            lock (_stateLock)
+            {
+                return _revision;
+            }
+        }
     }
 
     public IReadOnlyList<ObjectTemporarySourceSnapshot> GetSources()
@@ -208,6 +223,7 @@ internal sealed class TemporarySourceStore : ITemporarySourceStore
             }
 
             _sources.Remove(normalizedSourceKey);
+            ++_revision;
             RetainRemovedSourceState(
                 normalizedSourceKey,
                 new ObjectTemporarySourceState(sessionId, revision));
@@ -259,6 +275,7 @@ internal sealed class TemporarySourceStore : ITemporarySourceStore
     private void Commit(ObjectTemporarySourceSnapshot source)
     {
         _sources[source.SourceKey] = source;
+        ++_revision;
         _removedSourceStates.Remove(source.SourceKey);
     }
 
@@ -276,5 +293,4 @@ internal sealed class TemporarySourceStore : ITemporarySourceStore
             }
         }
     }
-
 }

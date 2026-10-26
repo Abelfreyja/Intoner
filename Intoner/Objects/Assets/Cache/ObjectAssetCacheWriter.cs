@@ -30,29 +30,19 @@ internal sealed class ObjectAssetCacheWriter : IDisposable
 
     public void SaveImmediately(CatalogAssetState state, string successMessage)
     {
-        if (state.DirtyCacheSections == ObjectAssetCacheSectionSet.None)
+        ObjectAssetCacheSaveWork? saveWork = CaptureSaveWork(state);
+
+        if (saveWork is null)
         {
             return;
         }
 
-        ObjectAssetCacheSectionSet sectionsToSave = state.DirtyCacheSections;
-        long capturedRevision = state.CacheRevision;
-        ObjectAssetCacheSaveBuilder.CaptureData capture = ObjectAssetCacheSaveBuilder.Capture(state, sectionsToSave);
-        ObjectAssetCacheSaveRequest saveRequest = ObjectAssetCacheSaveBuilder.BuildRequest(capture);
+        bool writeSucceeded = SaveWork(saveWork, "failed to save rebuilt object asset cache immediately");
+        ApplySaveResult(saveWork, writeSucceeded);
 
-        try
+        if (writeSucceeded)
         {
-            _cacheService.Save(saveRequest);
-            if (state.CacheRevision == capturedRevision)
-            {
-                state.DirtyCacheSections &= ~sectionsToSave;
-            }
-
             _logger.LogInformation(successMessage);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "failed to save rebuilt object asset cache immediately");
         }
     }
 
@@ -118,7 +108,7 @@ internal sealed class ObjectAssetCacheWriter : IDisposable
         bool writeSucceeded = SaveWork(saveWork, "failed to flush object asset cache");
         lock (_stateLock)
         {
-            ApplySaveResultLocked(saveWork, writeSucceeded);
+            ApplySaveResult(saveWork, writeSucceeded);
         }
     }
 
@@ -145,7 +135,7 @@ internal sealed class ObjectAssetCacheWriter : IDisposable
 
             lock (_stateLock)
             {
-                ApplySaveResultLocked(saveWork, writeSucceeded);
+                ApplySaveResult(saveWork, writeSucceeded);
                 if (!writeSucceeded)
                 {
                     restartAfterFailedSave = _saveQueued && !_isDisposed();
@@ -185,23 +175,27 @@ internal sealed class ObjectAssetCacheWriter : IDisposable
 
     private ObjectAssetCacheSaveWork? TryCaptureSaveWorkLocked()
     {
-        if (!_tryGetState(out CatalogAssetState? state)
-         || state.DirtyCacheSections == ObjectAssetCacheSectionSet.None)
+        return _tryGetState(out CatalogAssetState? state) ? CaptureSaveWork(state) : null;
+    }
+
+    private static ObjectAssetCacheSaveWork? CaptureSaveWork(CatalogAssetState state)
+    {
+        if (state.DirtyCacheSections == ObjectAssetCacheSectionSet.None)
         {
             return null;
         }
 
         ObjectAssetCacheSectionSet sectionsToSave = state.DirtyCacheSections;
         long capturedRevision = state.CacheRevision;
-        ObjectAssetCacheSaveBuilder.CaptureData capture = ObjectAssetCacheSaveBuilder.Capture(state, sectionsToSave);
-        return new ObjectAssetCacheSaveWork(state, sectionsToSave, capturedRevision, capture);
+        ObjectAssetCacheSaveRequest request = ObjectAssetCacheSaveBuilder.Capture(state, sectionsToSave);
+        return new ObjectAssetCacheSaveWork(state, sectionsToSave, capturedRevision, request);
     }
 
     private bool SaveWork(ObjectAssetCacheSaveWork saveWork, string failureMessage)
     {
         try
         {
-            _cacheService.Save(ObjectAssetCacheSaveBuilder.BuildRequest(saveWork.Capture));
+            _cacheService.Save(saveWork.Request);
             return true;
         }
         catch (Exception ex)
@@ -211,7 +205,7 @@ internal sealed class ObjectAssetCacheWriter : IDisposable
         }
     }
 
-    private static void ApplySaveResultLocked(ObjectAssetCacheSaveWork saveWork, bool writeSucceeded)
+    private static void ApplySaveResult(ObjectAssetCacheSaveWork saveWork, bool writeSucceeded)
     {
         if (writeSucceeded && saveWork.State.CacheRevision == saveWork.CapturedRevision)
         {
@@ -223,7 +217,7 @@ internal sealed class ObjectAssetCacheWriter : IDisposable
         CatalogAssetState State,
         ObjectAssetCacheSectionSet Sections,
         long CapturedRevision,
-        ObjectAssetCacheSaveBuilder.CaptureData Capture);
+        ObjectAssetCacheSaveRequest Request);
 
     public delegate bool TryGetStateDelegate([NotNullWhen(true)] out CatalogAssetState? state);
 }

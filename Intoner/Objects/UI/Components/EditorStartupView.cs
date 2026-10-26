@@ -16,6 +16,7 @@ namespace Intoner.Objects.UI;
 
 internal sealed partial class EditorStartupView : IDisposable
 {
+    private readonly IObjectWorkspaceHistory      _workspaceHistory;
     private readonly IObjectManager               _objectManager;
     private readonly IObjectLayoutManager         _layoutManager;
     private readonly IObjectLayoutRecoveryService _objectLayoutRecoveryService;
@@ -41,10 +42,12 @@ internal sealed partial class EditorStartupView : IDisposable
         EditorOverlayLayer editorOverlayLayer,
         EdgeGlowRenderer edgeGlowRenderer,
         BackdropRenderer windowBackdropRenderer,
-        UiSharedService uiSharedService)
+        UiSharedService uiSharedService,
+        IObjectWorkspaceHistory workspaceHistory)
     {
         _splashScreenVersionLabel    = buildInfo.SplashScreenVersion;
         _objectManager               = objectManager;
+        _workspaceHistory            = workspaceHistory;
         _layoutManager               = layoutManager;
         _objectLayoutRecoveryService = objectLayoutRecoveryService;
         _configurationService        = configurationService;

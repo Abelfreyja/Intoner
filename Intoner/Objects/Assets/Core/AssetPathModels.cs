@@ -50,7 +50,7 @@ internal enum ObjectResourcePathKind
     Vfx,
     Atex,
     Sound,
-    Eid,
+    Collision,
 }
 
 internal enum GameAssetFileKind
@@ -68,6 +68,7 @@ internal enum GameAssetFileKind
     Atex,
     Scd,
     Eid,
+    Pcb,
 }
 
 [Flags]
@@ -181,4 +182,3 @@ internal static class KnownVfxFamilyExtensions
         return KnownVfxFamily.None;
     }
 }
-

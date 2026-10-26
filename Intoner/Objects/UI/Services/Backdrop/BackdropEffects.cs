@@ -40,7 +40,8 @@ internal abstract class PreparedBackdropEffectBase<TStyle, TRequest> : BackdropE
     protected abstract bool TryResolveDraw(in TRequest request, out BackdropRenderer.TextureDrawInfo draw);
 
     /// <summary> draws the prepared effect output over a rounded region </summary>
-    public void DrawRegion(
+    /// <returns> true when the effect was queued for drawing </returns>
+    public bool DrawRegion(
         ImDrawListPtr drawList,
         Vector2 min,
         Vector2 max,
@@ -50,13 +51,13 @@ internal abstract class PreparedBackdropEffectBase<TStyle, TRequest> : BackdropE
     {
         if (!Renderer.TryPrepareBackdropRegion(drawList, min, max, rounding, roundingFlags, out var region))
         {
-            return;
+            return false;
         }
 
         var request = CreateRequest(region, style);
         if (!TryResolveDraw(request, out var draw))
         {
-            return;
+            return false;
         }
 
         drawList.AddImageRounded(
@@ -68,6 +69,7 @@ internal abstract class PreparedBackdropEffectBase<TStyle, TRequest> : BackdropE
             ResolveDrawTint(request),
             rounding,
             roundingFlags);
+        return true;
     }
 }
 
@@ -207,17 +209,17 @@ internal abstract class ShaderBackdropEffectBase<TStyle, TRequest, TEffectConsta
     where TRequest : struct
     where TEffectConstants : unmanaged
 {
+    private readonly GpuShaderBytecode _shaderBytecode;
     private PixelShader? _shader;
     private GpuColorTarget? _framebuffer;
     private Buffer? _effectConstantBuffer;
     private int _clearedFrame = -1;
 
-    protected ShaderBackdropEffectBase(BackdropRenderer renderer)
+    protected ShaderBackdropEffectBase(BackdropRenderer renderer, GpuShaderBytecode shaderBytecode)
         : base(renderer)
-    { }
-
-    /// <summary> embedded shader resource used for this effect </summary>
-    protected abstract GpuShaderBytecode ShaderBytecode { get; }
+    {
+        _shaderBytecode = shaderBytecode;
+    }
 
     /// <summary> log message used when effect processing fails </summary>
     protected abstract string FailureLogMessage { get; }
@@ -235,7 +237,8 @@ internal abstract class ShaderBackdropEffectBase<TStyle, TRequest, TEffectConsta
     protected abstract TEffectConstants CreateEffectConstants(in TRequest request);
 
     /// <summary> draws the effect output over a prepared rounded region </summary>
-    public void DrawRegion(
+    /// <returns> true when the effect was queued for drawing </returns>
+    public bool DrawRegion(
         ImDrawListPtr drawList,
         Vector2 min,
         Vector2 max,
@@ -245,10 +248,16 @@ internal abstract class ShaderBackdropEffectBase<TStyle, TRequest, TEffectConsta
     {
         if (!TryPrepareShaderDraw(drawList, min, max, rounding, roundingFlags, out var region, out var draw))
         {
-            return;
+            return false;
         }
 
-        var request = CreateRequest(region, style);
+        QueuePreparedDraw(drawList, min, max, rounding, roundingFlags, CreateRequest(region, style), draw);
+        return true;
+    }
+
+    private void QueuePreparedDraw(ImDrawListPtr drawList, Vector2 min, Vector2 max, float rounding, ImDrawFlags roundingFlags,
+        TRequest request, BackdropRenderer.TextureDrawInfo draw)
+    {
         Renderer.QueueEffectDraw(
             drawList,
             new ShaderEffectDrawJob(this, request),
@@ -308,10 +317,13 @@ internal abstract class ShaderBackdropEffectBase<TStyle, TRequest, TEffectConsta
         out BackdropRenderer.BackdropRegion region,
         out BackdropRenderer.TextureDrawInfo draw)
     {
+        region = default;
         draw = default;
-        if (!Renderer.TryPrepareBackdropRegion(drawList, min, max, rounding, roundingFlags, out region)
+
+        if (!_shaderBytecode.IsCompilationComplete
+            || !Renderer.TryPrepareBackdropRegion(drawList, min, max, rounding, roundingFlags, out region)
+            || !Renderer.TryEnsureEffectShader(_shaderBytecode, ref _shader)
             || !Renderer.TryEnsureEffectFramebuffer(ref _framebuffer)
-            || !Renderer.TryEnsureEffectShader(ShaderBytecode, ref _shader)
             || !Renderer.TryEnsureEffectConstantBuffer<TEffectConstants>(ref _effectConstantBuffer)
             || _framebuffer?.ShaderResourceView is null)
         {
@@ -381,7 +393,7 @@ internal sealed class BlurEffect
     protected override bool TryResolveDraw(in BlurRequest request, out BackdropRenderer.TextureDrawInfo draw)
         => Renderer.TryCreateBlurDraw(request.Region, out draw);
 
-    public void DrawRegion(
+    public bool DrawRegion(
         ImDrawListPtr drawList,
         Vector2 min,
         Vector2 max,
@@ -473,10 +485,9 @@ internal sealed class GlassEffect
     }
 
     public GlassEffect(BackdropRenderer renderer)
-        : base(renderer)
+        : base(renderer, GlassShader)
     { }
 
-    protected override GpuShaderBytecode ShaderBytecode => GlassShader;
     protected override string FailureLogMessage => "object window glass processing failed";
 
     protected override GlassRequest CreateRequest(in BackdropRenderer.BackdropRegion region, Style style)
@@ -488,4 +499,3 @@ internal sealed class GlassEffect
     protected override GlassConstants CreateEffectConstants(in GlassRequest request)
         => new(request.TintColor, request.EdgeColor, request.Params0, request.Params1);
 }
-

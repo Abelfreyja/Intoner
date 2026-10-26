@@ -1,14 +1,17 @@
 using Intoner.Scene;
 using Intoner.Services.Gpu;
 using System.Numerics;
+using System.Text.Json.Serialization;
 
 namespace Intoner.Displays;
 
 internal sealed record DisplayDocument
 {
-    public const int CurrentFormatVersion = 1;
+    public const int CurrentFormatVersion = 2;
 
+    [JsonRequired]
     public int FormatVersion { get; init; } = CurrentFormatVersion;
+    [JsonRequired]
     public IReadOnlyList<DisplaySnapshot> Displays { get; init; } = [];
 }
 

@@ -1,3 +1,4 @@
+using Intoner.Objects.Api;
 using System.Diagnostics.CodeAnalysis;
 
 namespace Intoner.Scene;
@@ -22,6 +23,18 @@ internal interface ISceneLocationService
     /// <param name="world">the resolved world when found</param>
     /// <returns>true when the world has a name and a valid data center</returns>
     bool TryResolveWorld(ushort worldId, [NotNullWhen(true)] out SceneWorldInfo? world);
+
+    /// <summary> resolves a data center name from the game sheets </summary>
+    bool TryResolveDataCenter(uint dataCenterId, [NotNullWhen(true)] out string? name);
+
+    /// <summary> checks the world selection against the game sheets </summary>
+    bool IsValidWorldSelection(ObjectWorldSelection? selection);
+
+    /// <summary> matches an authored location against the current world and address </summary>
+    bool MatchesLocation(SceneCreationContext location, SceneLocationScope current);
+
+    /// <summary> resolves the display name for a territory from the game sheets </summary>
+    string GetTerritoryName(uint territoryId);
 
     /// <summary> gets the current creation context for new placed items </summary>
     SceneCreationContext GetCurrentCreationContext();

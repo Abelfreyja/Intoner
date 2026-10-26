@@ -2,14 +2,13 @@ using FFXIVClientStructs.FFXIV.Client.System.Resource.Handle;
 using Intoner.Objects.Utils;
 using Intoner.Utils;
 using Microsoft.Extensions.Logging;
+using System.Runtime.InteropServices;
 
 namespace Intoner.Objects.Resources;
 
 internal sealed unsafe class ObjectResourceIncRefGuard : IDisposable
 {
-    private const int HandleTypeOffset = 0x08;
-    private const int TypeOffset = 0x0C;
-    private const int HashOffset = 0x10;
+    private static readonly nint HandleTypeOffset = Marshal.OffsetOf<ResourceHandle>(nameof(ResourceHandle.Type));
 
     private readonly ILogger _logger;
     private readonly ThreadLocal<int> _depth = new(static () => 0);
@@ -63,10 +62,9 @@ internal sealed unsafe class ObjectResourceIncRefGuard : IDisposable
             handleType,
             resourceType,
             resourceHash,
-            path,
             getResourceParameters,
             hasHandleLock,
-            out var reload);
+            out nint resourceHandle);
         if (!inScope && !hasIncRefReloadArguments)
         {
             return false;
@@ -74,8 +72,8 @@ internal sealed unsafe class ObjectResourceIncRefGuard : IDisposable
 
         if (hasIncRefReloadArguments)
         {
-            LogIncRefReloadBypass(reload, inScope);
-            LogIncRefReloadWithoutScope(reload, inScope);
+            LogIncRefReloadBypass(resourceHandle, (nint)path, inScope);
+            LogIncRefReloadWithoutScope(resourceHandle, inScope);
         }
         else
         {
@@ -118,12 +116,11 @@ internal sealed unsafe class ObjectResourceIncRefGuard : IDisposable
         ResourceHandleType* handleType,
         uint* resourceType,
         uint* resourceHash,
-        byte* path,
         ObjectGetResourceParameters* getResourceParameters,
         bool hasHandleLock,
-        out IncRefReload reload)
+        out nint resourceHandle)
     {
-        reload = default;
+        resourceHandle = nint.Zero;
         if (isSync
             || !hasHandleLock
             || getResourceParameters != null
@@ -134,42 +131,34 @@ internal sealed unsafe class ObjectResourceIncRefGuard : IDisposable
             return false;
         }
 
-        var handle = (nint)handleType - HandleTypeOffset;
-        if (handle != (nint)resourceType - TypeOffset
-            || handle != (nint)resourceHash - HashOffset)
+        ResourceHandle* handle = (ResourceHandle*)((byte*)handleType - HandleTypeOffset);
+        if (&handle->FileType != resourceType || &handle->Id != resourceHash)
         {
             return false;
         }
 
-        reload = new IncRefReload(
-            handle,
-            (nint)handleType,
-            (nint)resourceType,
-            (nint)resourceHash,
-            (nint)path,
-            hasHandleLock,
-            getResourceParameters != null);
+        resourceHandle = (nint)handle;
         return true;
     }
 
-    private void LogIncRefReloadBypass(IncRefReload reload, bool inScope)
+    private void LogIncRefReloadBypass(nint resourceHandle, nint path, bool inScope)
     {
         if (Interlocked.Exchange(ref _loggedReloadBypass, 1) == 0)
         {
-            _logger.LogDebug(
+            ObjectResourceLog.Write(() => _logger.LogDebug(
                 "object resource IncRef reload; skipping redirect Handle=0x{Handle:X} HandleType=0x{HandleType:X} Type=0x{Type:X} Hash=0x{Hash:X} Path=0x{Path:X} HasHandleLock={HasHandleLock} HasParameters={HasParameters} InIncRef={InIncRef}",
-                (ulong)reload.ResourceHandle,
-                (ulong)reload.HandleTypePointer,
-                (ulong)reload.TypePointer,
-                (ulong)reload.HashPointer,
-                (ulong)reload.PathPointer,
-                reload.HasHandleLock,
-                reload.HasParameters,
-                inScope);
+                (ulong)resourceHandle,
+                (ulong)(&((ResourceHandle*)resourceHandle)->Type),
+                (ulong)(&((ResourceHandle*)resourceHandle)->FileType),
+                (ulong)(&((ResourceHandle*)resourceHandle)->Id),
+                (ulong)path,
+                true,
+                false,
+                inScope));
         }
     }
 
-    private void LogIncRefReloadWithoutScope(IncRefReload reload, bool inScope)
+    private void LogIncRefReloadWithoutScope(nint resourceHandle, bool inScope)
     {
         if (inScope
             || Interlocked.Exchange(ref _loggedReloadWithoutScope, 1) != 0)
@@ -177,27 +166,18 @@ internal sealed unsafe class ObjectResourceIncRefGuard : IDisposable
             return;
         }
 
-        _logger.LogWarning(
+        ObjectResourceLog.Write(() => _logger.LogWarning(
             "object resource IncRef reload without active scope; using argument layout fallback Handle=0x{Handle:X}",
-            (ulong)reload.ResourceHandle);
+            (ulong)resourceHandle));
     }
 
     private void LogScopeBypass()
     {
         if (Interlocked.Exchange(ref _loggedScopeBypass, 1) == 0)
         {
-            _logger.LogDebug("object resource request bypassed during IncRef scope");
+            ObjectResourceLog.Write(() => _logger.LogDebug("object resource request bypassed during IncRef scope"));
         }
     }
-
-    private readonly record struct IncRefReload(
-        nint ResourceHandle,
-        nint HandleTypePointer,
-        nint TypePointer,
-        nint HashPointer,
-        nint PathPointer,
-        bool HasHandleLock,
-        bool HasParameters);
 
     public readonly struct Scope : IDisposable
     {
@@ -210,4 +190,3 @@ internal sealed unsafe class ObjectResourceIncRefGuard : IDisposable
             => _owner?.Leave();
     }
 }
-

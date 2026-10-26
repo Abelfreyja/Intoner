@@ -1,9 +1,9 @@
-using Intoner.Scene;
 using Intoner.Objects.Catalog;
-using Intoner.Services.Configuration;
 using Intoner.Objects.Models;
 using Intoner.Objects.Runtime;
 using Intoner.Objects.Utils;
+using Intoner.Scene;
+using Intoner.Services.Configuration;
 
 namespace Intoner.Objects.Api;
 
@@ -118,7 +118,6 @@ internal sealed class MakePlaceImportMapper(
         {
             Id = Guid.NewGuid(),
             Name = TextUtility.TrimOrFallback(furniture.Name, match.DisplayName),
-            Kind = ObjectKind.Furniture,
             CreatedAtUtc = createdAtUtc,
             CreatedIn = currentContext,
             Transform = transform,

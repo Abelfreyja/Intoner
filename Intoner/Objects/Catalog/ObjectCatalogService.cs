@@ -1,11 +1,11 @@
+using Intoner.Logging;
 using Intoner.Objects.Assets;
-using Intoner.Objects.Utils;
+using Intoner.Objects.Resources;
 using Intoner.Services.Loading;
+using Intoner.Utils;
 using Microsoft.Extensions.Logging;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
-
-using Intoner.Utils;
 
 namespace Intoner.Objects.Catalog;
 
@@ -26,14 +26,6 @@ internal interface IObjectCatalogService : ILoadOperation
     /// </summary>
     /// <returns>The current object catalog.</returns>
     ObjectCatalogData GetCatalog();
-
-    /// <summary>
-    /// Resolves preview model paths for the given catalog entry path.
-    /// </summary>
-    /// <param name="kind">The catalog kind to resolve.</param>
-    /// <param name="path">The source asset path from the catalog entry.</param>
-    /// <returns>The previewable model paths for that entry.</returns>
-    IReadOnlyList<string> ResolvePreviewModelPaths(ObjectCatalogKind kind, string path);
 
     /// <summary>
     /// Resolves preview models for the given catalog entry path.
@@ -87,6 +79,8 @@ internal sealed class ObjectCatalogService : IObjectCatalogService, IDisposable
     private bool _projectionUpdateRequested;
     private long _appliedBgObjectSectionVersion = -1;
     private long _appliedStandaloneVfxSectionVersion = -1;
+    private readonly Dictionary<string, ObjectCatalogEntry> _pendingFurniturePreviews = new(StringComparer.OrdinalIgnoreCase);
+    private long _nextFurniturePreviewRetryAtMs;
 
     public ObjectCatalogService(
         ILogger<ObjectCatalogService> logger,
@@ -117,22 +111,22 @@ internal sealed class ObjectCatalogService : IObjectCatalogService, IDisposable
         => _loading.EnsureLoaded();
 
     public bool TryGetCatalog([NotNullWhen(true)] out ObjectCatalogData? catalog)
-        => _load.TryGet(out catalog);
+    {
+        if (!_load.TryGet(out catalog))
+        {
+            return false;
+        }
+
+        ScheduleFurniturePreviewRetry();
+        return true;
+    }
 
     public ObjectCatalogData GetCatalog()
     {
         EnsureLoaded();
-        return _load.Get();
-    }
-
-    public IReadOnlyList<string> ResolvePreviewModelPaths(ObjectCatalogKind kind, string path)
-    {
-        if (!TryNormalizeCatalogPath(path, out string normalizedPath))
-        {
-            return [];
-        }
-
-        return GetCatalog().ResolvePreviewModelPaths(kind, normalizedPath);
+        ObjectCatalogData catalog = _load.Get();
+        ScheduleFurniturePreviewRetry();
+        return catalog;
     }
 
     public IReadOnlyList<PreviewModelInfo> ResolvePreviewModels(ObjectCatalogKind kind, string path)
@@ -182,7 +176,10 @@ internal sealed class ObjectCatalogService : IObjectCatalogService, IDisposable
     }
 
     private static bool TryNormalizeCatalogPath(string path, out string normalizedPath)
-        => GameAssetPathRules.TryNormalizeGamePath(path, out normalizedPath);
+    {
+        normalizedPath = ObjectResolvedPath.FromGamePath(path).Path;
+        return normalizedPath.Length > 0;
+    }
 
     public void Dispose()
     {
@@ -201,6 +198,8 @@ internal sealed class ObjectCatalogService : IObjectCatalogService, IDisposable
             projectionUpdateCancellation = _projectionUpdateCancellation;
             _projectionUpdateTask = null;
             _projectionUpdateCancellation = null;
+            _pendingFurniturePreviews.Clear();
+            Volatile.Write(ref _nextFurniturePreviewRetryAtMs, 0);
         }
 
         projectionUpdateCancellation?.Cancel();
@@ -215,13 +214,16 @@ internal sealed class ObjectCatalogService : IObjectCatalogService, IDisposable
         long startedAt = Stopwatch.GetTimestamp();
 
         cancellationToken.ThrowIfCancellationRequested();
-        long bgObjectSectionVersion = _assetIndex.GetBgObjectSectionVersion(cancellationToken);
-        long standaloneVfxSectionVersion = _assetIndex.GetStandaloneVfxSectionVersion(cancellationToken);
+        ObjectAssetCatalogSnapshot assets = _assetIndex.GetCatalogSnapshot(cancellationToken);
         TimeSpan assetWaitTime = Stopwatch.GetElapsedTime(startedAt);
-        ObjectCatalogData catalog = _builder.Build(progress);
+        ObjectCatalogData catalog = _builder.Build(assets, progress);
         TimeSpan totalTime = Stopwatch.GetElapsedTime(startedAt);
-        _appliedBgObjectSectionVersion = bgObjectSectionVersion;
-        _appliedStandaloneVfxSectionVersion = standaloneVfxSectionVersion;
+        lock (_updateLock)
+        {
+            _appliedBgObjectSectionVersion = assets.BgObjectVersion;
+            _appliedStandaloneVfxSectionVersion = assets.StandaloneVfxVersion;
+            InitializeFurniturePreviewRetries(catalog);
+        }
 
         _logger.LogInformation(
             "built object catalog with {TotalCount} entries, {FurnitureCount} furniture entries, {BgObjectCount} bgobject entries, and {VfxCount} vfx entries in {ElapsedMilliseconds:F0} ms after waiting {AssetWaitMilliseconds:F0} ms for assets",
@@ -233,6 +235,34 @@ internal sealed class ObjectCatalogService : IObjectCatalogService, IDisposable
             assetWaitTime.TotalMilliseconds);
 
         return catalog;
+    }
+
+    private void InitializeFurniturePreviewRetries(ObjectCatalogData catalog)
+    {
+        if (IsDisposing)
+        {
+            return;
+        }
+
+        foreach (ObjectCatalogEntry entry in catalog.Furniture.Entries)
+        {
+            if (!entry.PreviewModelDiscoveryComplete)
+            {
+                _pendingFurniturePreviews.Add(entry.PlacementPath, entry);
+            }
+        }
+
+        Volatile.Write(ref _nextFurniturePreviewRetryAtMs, _pendingFurniturePreviews.Count == 0
+            ? 0 : Environment.TickCount64 + (long)ObjectAssetFileUtility.AssetReadRetryDelay.TotalMilliseconds);
+    }
+
+    private void ScheduleFurniturePreviewRetry()
+    {
+        long retryAtMs = Volatile.Read(ref _nextFurniturePreviewRetryAtMs);
+        if (retryAtMs > 0 && Environment.TickCount64 >= retryAtMs)
+        {
+            ScheduleProjectionUpdate();
+        }
     }
 
     private void HandleCatalogAssetsChanged()
@@ -333,37 +363,113 @@ internal sealed class ObjectCatalogService : IObjectCatalogService, IDisposable
 
         IReadOnlyList<ObjectCatalogEntry>? bgObjectEntries = null;
         IReadOnlyList<ObjectCatalogEntry>? vfxEntries = null;
-        long bgObjectSectionVersion = _assetIndex.GetBgObjectSectionVersion(cancellationToken);
-        if (bgObjectSectionVersion != _appliedBgObjectSectionVersion)
+        ObjectAssetCatalogSnapshot assets = _assetIndex.GetCatalogSnapshot(cancellationToken);
+
+        if (assets.BgObjectVersion != _appliedBgObjectSectionVersion)
         {
-            bgObjectEntries = _builder.BuildBgObjectEntries(LoadProgress.Unreported(cancellationToken));
+            bgObjectEntries = ObjectCatalogBuilder.BuildBgObjectEntries(assets.BgObjects, LoadProgress.Unreported(cancellationToken));
         }
 
-        long standaloneVfxSectionVersion = _assetIndex.GetStandaloneVfxSectionVersion(cancellationToken);
-        if (standaloneVfxSectionVersion != _appliedStandaloneVfxSectionVersion)
+        if (assets.StandaloneVfxVersion != _appliedStandaloneVfxSectionVersion)
         {
-            vfxEntries = _builder.BuildVfxEntries(LoadProgress.Unreported(cancellationToken));
+            vfxEntries = ObjectCatalogBuilder.BuildVfxEntries(assets.StandaloneVfx, LoadProgress.Unreported(cancellationToken));
         }
 
-        if (bgObjectEntries is null && vfxEntries is null)
+        Dictionary<string, ObjectCatalogEntry>? furnitureUpdates = BuildFurniturePreviewUpdates(cancellationToken);
+        if (bgObjectEntries is null && vfxEntries is null && furnitureUpdates is null)
+        {
+            return;
+        }
+
+        ObjectCatalogEntry[]? furnitureEntries = furnitureUpdates is null ? null : catalog.Furniture.Entries
+            .Select(entry => furnitureUpdates.GetValueOrDefault(entry.PlacementPath, entry))
+            .ToArray();
+
+        cancellationToken.ThrowIfCancellationRequested();
+        if (IsDisposing)
         {
             return;
         }
 
         catalog.ReplaceSections(
             bgObjectEntries: bgObjectEntries,
+            furnitureEntries: furnitureEntries,
             vfxEntries: vfxEntries,
             cancellationToken: cancellationToken);
 
-        if (bgObjectEntries is not null)
+        lock (_updateLock)
         {
-            _appliedBgObjectSectionVersion = bgObjectSectionVersion;
+            if (IsDisposing)
+            {
+                return;
+            }
+
+            if (furnitureUpdates is not null)
+            {
+                foreach (string path in furnitureUpdates.Keys)
+                {
+                    _pendingFurniturePreviews.Remove(path);
+                }
+
+                if (_pendingFurniturePreviews.Count == 0)
+                {
+                    Volatile.Write(ref _nextFurniturePreviewRetryAtMs, 0);
+                }
+            }
+
+            if (bgObjectEntries is not null)
+            {
+                _appliedBgObjectSectionVersion = assets.BgObjectVersion;
+            }
+
+            if (vfxEntries is not null)
+            {
+                _appliedStandaloneVfxSectionVersion = assets.StandaloneVfxVersion;
+            }
+        }
+    }
+
+    private Dictionary<string, ObjectCatalogEntry>? BuildFurniturePreviewUpdates(CancellationToken cancellationToken)
+    {
+        ObjectCatalogEntry[] pending;
+        long now = Environment.TickCount64;
+        lock (_updateLock)
+        {
+            if (IsDisposing || _nextFurniturePreviewRetryAtMs == 0 || now < _nextFurniturePreviewRetryAtMs)
+            {
+                return null;
+            }
+
+            pending = _pendingFurniturePreviews.Values.ToArray();
+            Volatile.Write(ref _nextFurniturePreviewRetryAtMs,
+                now + (long)ObjectAssetFileUtility.AssetReadRetryDelay.TotalMilliseconds);
         }
 
-        if (vfxEntries is not null)
+        Dictionary<string, ObjectCatalogEntry>? updates = null;
+        foreach (ObjectCatalogEntry entry in pending)
         {
-            _appliedStandaloneVfxSectionVersion = standaloneVfxSectionVersion;
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                if (!_assetIndex.TryGetSharedGroupAssets(entry.PlacementPath, out SharedGroupAssetInfo? group)
+                 || !group.IsComplete)
+                {
+                    continue;
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+                updates ??= new Dictionary<string, ObjectCatalogEntry>(StringComparer.OrdinalIgnoreCase);
+                updates.Add(entry.PlacementPath, entry.WithCompletedFurniturePreview(group));
+            }
+            catch (Exception ex) when (ObjectAssetFileUtility.IsReadFailure(ex))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                DiagnosticLog.Write(_logger, LogLevel.Warning, ex, "failed to refresh furniture preview models for {Path}", entry.PlacementPath);
+            }
         }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        return updates;
     }
 
     private bool IsDisposing
@@ -392,4 +498,3 @@ internal sealed class ObjectCatalogService : IObjectCatalogService, IDisposable
         }
     }
 }
-

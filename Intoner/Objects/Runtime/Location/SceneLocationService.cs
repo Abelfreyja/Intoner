@@ -1,6 +1,7 @@
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
+using Intoner.Objects.Api;
 using Intoner.Objects.Utils;
 using Intoner.Utils;
 using System.Diagnostics.CodeAnalysis;
@@ -16,6 +17,7 @@ internal sealed class SceneLocationService : ISceneLocationService, IDisposable
     private readonly IFramework _framework;
     private readonly IPlayerState _playerState;
     private readonly Dictionary<ushort, SceneWorldInfo> _worlds = [];
+    private readonly Dictionary<uint, string> _dataCenters = [];
 
     private bool _locationInvalidationScheduled;
     private bool _isTransitioning;
@@ -50,6 +52,41 @@ internal sealed class SceneLocationService : ISceneLocationService, IDisposable
     public bool TryResolveWorld(ushort worldId, [NotNullWhen(true)] out SceneWorldInfo? world)
         => _worlds.TryGetValue(worldId, out world);
 
+    public bool TryResolveDataCenter(uint dataCenterId, [NotNullWhen(true)] out string? name)
+        => _dataCenters.TryGetValue(dataCenterId, out name);
+
+    public bool IsValidWorldSelection(ObjectWorldSelection? selection)
+    {
+        if (selection is null)
+        {
+            return true;
+        }
+
+        foreach (uint id in selection.DataCenterIds.AsSpan())
+        {
+            if (!_dataCenters.ContainsKey(id))
+            {
+                return false;
+            }
+        }
+
+        foreach (ushort id in selection.WorldIds.AsSpan())
+        {
+            if (!_worlds.ContainsKey(id))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    public bool MatchesLocation(SceneCreationContext location, SceneLocationScope current)
+        => location.MatchesLocation(current, TryResolveWorld(current.WorldId, out SceneWorldInfo? world) ? world.DataCenterId : 0);
+
+    public string GetTerritoryName(uint territoryId)
+        => ObjectTerritoryMetadataUtility.BuildForTerritoryId(territoryId, _gameData).TerritoryName;
+
     public SceneCreationContext GetCurrentCreationContext()
         => FrameworkThreadUtility.Run(_framework, BuildCurrentCreationContext);
 
@@ -70,21 +107,16 @@ internal sealed class SceneLocationService : ISceneLocationService, IDisposable
     private SceneCreationContext BuildCurrentCreationContext()
     {
         SceneLocationScope scope = BuildCurrentLocationScope();
-        return new SceneCreationContext
-        {
-            WorldId = scope.WorldId,
-            WorldName = TryResolveWorld(scope.WorldId, out SceneWorldInfo? world) ? world.Name : string.Empty,
-            TerritoryId = scope.TerritoryId,
-            TerritoryName = ObjectTerritoryMetadataUtility.BuildForTerritoryId(scope.TerritoryId, _gameData).TerritoryName,
-            DivisionId = scope.DivisionId,
-            WardId = scope.WardId,
-            HouseId = scope.HouseId,
-            RoomId = scope.RoomId,
-        };
+        return SceneCreationContext.FromScope(scope, GetTerritoryName(scope.TerritoryId));
     }
 
     private unsafe SceneLocationScope BuildCurrentLocationScope()
     {
+        if (_isTransitioning)
+        {
+            return default;
+        }
+
         uint territoryId = _clientState.TerritoryType;
         uint divisionId = 0;
         uint wardId = 0;
@@ -94,21 +126,32 @@ internal sealed class SceneLocationService : ISceneLocationService, IDisposable
         HousingManager* housingManager = HousingManager.Instance();
         if (housingManager != null)
         {
-            if (housingManager->IsInside())
+            bool inside = housingManager->IsInside();
+
+            if (inside || housingManager->IsInWorkshop())
             {
-                territoryId = HousingManager.GetOriginalHouseTerritoryTypeId();
-                HouseId house = housingManager->GetCurrentIndoorHouseId();
-                wardId = house.WardIndex + 1u;
-                houseId = house.IsApartment ? 100u : house.PlotIndex + 1u;
-                roomId = (uint)house.RoomNumber;
-                divisionId = house.IsApartment ? house.ApartmentDivision + 1u : housingManager->GetCurrentDivision();
-            }
-            else if (housingManager->IsInWorkshop())
-            {
-                HouseId house = housingManager->WorkshopTerritory->HouseId;
+                HouseId house = inside ? housingManager->GetCurrentIndoorHouseId() : housingManager->WorkshopTerritory->HouseId;
+
+                if (house.Id == ulong.MaxValue)
+                {
+                    return default;
+                }
+
+                if (inside)
+                {
+                    territoryId = HousingManager.GetOriginalHouseTerritoryTypeId();
+                    roomId = (uint)house.RoomNumber;
+                }
+
                 wardId = house.WardIndex + 1u;
                 houseId = house.PlotIndex + 1u;
-                divisionId = housingManager->GetCurrentDivision();
+                divisionId = house.PlotIndex >= 30 ? 2u : 1u;
+
+                if (house.IsApartment)
+                {
+                    houseId = 100;
+                    divisionId = house.ApartmentDivision + 1u;
+                }
             }
             else if (housingManager->IsOutside())
             {
@@ -146,6 +189,7 @@ internal sealed class SceneLocationService : ISceneLocationService, IDisposable
 
             SceneWorldInfo info = new((ushort)world.RowId, name, world.DataCenter.RowId, dataCenterName);
             _worlds.Add(info.Id, info);
+            _dataCenters.TryAdd(info.DataCenterId, info.DataCenterName);
             if (world.IsPublic)
             {
                 publicWorlds.Add(info);

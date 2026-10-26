@@ -1,4 +1,5 @@
 using Intoner.Objects.Assets;
+using Intoner.Objects.Resources;
 using System.Globalization;
 using System.Numerics;
 using System.Text;
@@ -60,7 +61,7 @@ internal sealed class PreviewAsset
                 builder.Append('|');
             }
 
-            builder.Append(GameAssetPathRules.NormalizeGamePath(model.ModelPath));
+            builder.Append(ObjectResolvedPath.FromGamePath(model.ModelPath).Path);
             builder.Append('@');
             AppendMatrixKey(builder, model.Transform);
         }

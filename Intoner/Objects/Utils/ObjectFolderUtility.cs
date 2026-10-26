@@ -1,10 +1,19 @@
 using Intoner.Objects.Models;
+using Intoner.Scene;
 using System.Numerics;
 
 namespace Intoner.Objects.Utils;
 
 internal static class ObjectFolderUtility
 {
+    public static string GetItemFolderPath(SceneItemSnapshot item)
+        => item is ObjectSceneItemSnapshot snapshot ? snapshot.FolderPath
+            : throw new ArgumentException("item does not support folders", nameof(item));
+
+    public static Guid? GetItemLayoutId(SceneItemSnapshot item)
+        => item is ObjectSceneItemSnapshot snapshot ? snapshot.LayoutId
+            : throw new ArgumentException("item does not support layout ownership", nameof(item));
+
     public static string SanitizeFolderPath(string? folderPath)
         => string.IsNullOrWhiteSpace(folderPath)
             ? string.Empty
@@ -172,6 +181,13 @@ internal static class ObjectFolderUtility
         return entries.Values.OrderBy(static folder => folder.Path, StringComparer.OrdinalIgnoreCase).ToList();
     }
 
+    public static IReadOnlyList<ObjectFolderSnapshot> ExpandFolderEntries(
+        IEnumerable<ObjectFolderSnapshot> folders,
+        IEnumerable<ObjectSnapshot> objects,
+        IEnumerable<SceneGroupSnapshot>? groups = null)
+        => ExpandFolderEntries(folders.Concat(objects.Select(static snapshot => new ObjectFolderSnapshot(snapshot.FolderPath)))
+            .Concat((groups ?? []).Select(static group => new ObjectFolderSnapshot(group.FolderPath))));
+
     public static IReadOnlyList<ObjectFolderSnapshot> ExpandFolderEntries(IEnumerable<ObjectFolderSnapshot> folders)
     {
         List<ObjectFolderSnapshot> entries = [];
@@ -249,24 +265,7 @@ internal static class ObjectFolderUtility
     private static string ResolveAvailableFolderPath(string preferredPath, IReadOnlySet<string> existingPaths)
     {
         string preferred = SanitizeFolderPath(preferredPath);
-        if (preferred.Length == 0)
-        {
-            return string.Empty;
-        }
-
-        if (!existingPaths.Contains(preferred))
-        {
-            return preferred;
-        }
-
-        int suffix = 2;
-        string candidate = $"{preferred} ({suffix})";
-        while (existingPaths.Contains(candidate))
-        {
-            candidate = $"{preferred} ({++suffix})";
-        }
-
-        return candidate;
+        return TextUtility.ResolveAvailableName(preferred, existingPaths);
     }
 
     public static string SanitizeFolderColorValue(string? colorValue)
@@ -328,4 +327,3 @@ internal static class ObjectFolderUtility
             : $"#{byteColor.R:X2}{byteColor.G:X2}{byteColor.B:X2}{byteColor.A:X2}";
     }
 }
-

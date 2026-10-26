@@ -5,6 +5,7 @@ internal static class GameAssetPathRules
     private static readonly FileExtensionRule[] FileExtensionRules =
     [
         new(".mdl", GameAssetFileKind.Mdl),
+        new(".pcb", GameAssetFileKind.Pcb),
         new(".sgb", GameAssetFileKind.Sgb),
         new(".tmb", GameAssetFileKind.Tmb),
         new(".sklb", GameAssetFileKind.Sklb),

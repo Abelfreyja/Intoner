@@ -1,8 +1,10 @@
 using Intoner.Logging;
 using Intoner.Services.Serialization;
 using Intoner.Services.Storage;
+using Intoner.Utils;
 using Microsoft.Extensions.Logging;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace Intoner.Services.Configuration;
 
@@ -24,6 +26,11 @@ internal interface IIntonerConfigurationService
     /// <param name="update"> mutation to apply to the current config </param>
     /// <returns>true when the updated config was written and committed</returns>
     bool TryUpdate(Action<IntonerConfiguration> update);
+
+    /// <summary> applies and saves a config change only when the callback returns true </summary>
+    /// <param name="update"> the change to apply; return false to leave the config and file unchanged, without notifying listeners </param>
+    /// <returns> true if the change was saved and committed; false if the callback rejects it or saving fails </returns>
+    bool TryUpdateIf(Func<IntonerConfiguration, bool> update);
 }
 
 internal sealed class IntonerConfigurationService : IIntonerConfigurationService
@@ -33,10 +40,13 @@ internal sealed class IntonerConfigurationService : IIntonerConfigurationService
     private readonly ILogger<IntonerConfigurationService> _logger;
     private readonly IPluginStoragePaths                  _pathService;
     private readonly IPluginFileSystem                    _fileSystem;
-    private readonly IIntonerLogLevelService             _logLevelService;
-    private readonly Lock                                _lock = new();
+    private readonly IIntonerLogLevelService              _logLevelService;
+    private readonly Lock                                 _lock = new();
 
     private IntonerConfiguration _current;
+    private JsonObject? _sourceDocument;
+    private bool _canWriteConfiguration = true;
+    private (string Path, string Contents)? _pendingBackup;
 
     public IntonerConfigurationService(
         ILogger<IntonerConfigurationService> logger,
@@ -85,12 +95,29 @@ internal sealed class IntonerConfigurationService : IIntonerConfigurationService
     public bool TryUpdate(Action<IntonerConfiguration> update)
     {
         ArgumentNullException.ThrowIfNull(update);
+        return TryUpdateIf(configuration =>
+        {
+            update(configuration);
+            return true;
+        });
+    }
+
+    public bool TryUpdateIf(Func<IntonerConfiguration, bool> update)
+    {
+        ArgumentNullException.ThrowIfNull(update);
 
         lock (_lock)
         {
             IntonerConfiguration next = _current.Copy();
-            update(next);
+
+            if (!update(next))
+            {
+                return false;
+            }
+
             IntonerConfigurationNormalizer.Normalize(next);
+            next = next.Copy();
+
             if (!TryWriteConfiguration(next))
             {
                 return false;
@@ -100,7 +127,7 @@ internal sealed class IntonerConfigurationService : IIntonerConfigurationService
             ApplyRuntimeSettings(_current);
         }
 
-        ConfigurationChanged?.Invoke();
+        CommittedChangeNotification.Publish(ConfigurationChanged, _logger, "configuration change");
         return true;
     }
 
@@ -124,26 +151,84 @@ internal sealed class IntonerConfigurationService : IIntonerConfigurationService
             return false;
         }
 
+        string? original = null;
         try
         {
-            IntonerConfiguration? loaded = JsonSerializer.Deserialize<IntonerConfiguration>(
-                _fileSystem.ReadAllText(_pathService.ConfigurationPath),
-                JsonOptions);
-            if (loaded is null)
+            original = JsonDocumentUtility.ReadFile(_fileSystem, _pathService.ConfigurationPath);
+            JsonObject root = IntonerConfigurationReader.Parse(original, JsonOptions);
+            bool migrated = UpgradeConfiguration(root);
+            IntonerConfiguration loaded = IntonerConfigurationReader.Read(root, JsonOptions, out bool repaired);
+            _sourceDocument = root;
+            if (migrated || repaired)
             {
-                _logger.LogWarning("failed to load Intoner config: file was empty");
-                return false;
+                string backupPath = _pathService.ConfigurationPath + (migrated ? ".v2.bak" : ".repair.bak");
+                if (!migrated || !_fileSystem.FileExists(backupPath))
+                {
+                    _pendingBackup = (backupPath, original);
+                }
+
+                if (repaired)
+                {
+                    DiagnosticLog.Write(() => _logger.LogWarning("repaired invalid or missing Intoner config values; valid settings were preserved"));
+                }
+                _ = TryWriteConfiguration(loaded);
             }
 
-            IntonerConfigurationNormalizer.Normalize(loaded);
             configuration = loaded;
             return true;
         }
-        catch (Exception ex)
+        catch (JsonException ex) when (original is not null)
         {
-            _logger.LogWarning(ex, "failed to load Intoner config");
+            _pendingBackup = (_pathService.ConfigurationPath + ".invalid.bak", original);
+            DiagnosticLog.Write(() => _logger.LogWarning(ex, "Intoner config is not readable JSON; restoring defaults after backing up the original"));
             return false;
         }
+        catch (Exception ex)
+        {
+            _canWriteConfiguration = false;
+            DiagnosticLog.Write(() => _logger.LogWarning(ex, "failed to load Intoner config; the original is unchanged and configuration writes are disabled"));
+            return false;
+        }
+    }
+
+    // only version 2 has the singular default layout contract
+    private static bool UpgradeConfiguration(JsonObject root)
+    {
+        if (root["version"] is not JsonValue versionNode || !versionNode.TryGetValue<int>(out int version))
+        {
+            return false;
+        }
+
+        if (version != 2 && version != IntonerConfiguration.CurrentVersion)
+        {
+            throw new InvalidDataException("unsupported Intoner configuration version");
+        }
+
+        if (version != 2)
+        {
+            return false;
+        }
+
+        if (root["layouts"] is not JsonObject layouts)
+        {
+            layouts = new JsonObject();
+            root["layouts"] = layouts;
+        }
+
+        JsonElement releasedLayouts = JsonSerializer.SerializeToElement(layouts);
+        Guid? id = releasedLayouts.TryGetPropertyIgnoreCase("defaultLayoutId", out JsonElement value)
+            && value.ValueKind == JsonValueKind.String && value.TryGetGuid(out Guid parsed) && parsed != Guid.Empty ? parsed : null;
+        layouts["enabledLayoutIds"] = id.HasValue ? new JsonArray(JsonValue.Create(id.Value)) : new JsonArray();
+        layouts["creationLayoutId"] = id.HasValue ? JsonValue.Create(id.Value) : null;
+        string? legacyKey = layouts.FirstOrDefault(static entry => entry.Key.Equals("defaultLayoutId", StringComparison.OrdinalIgnoreCase)).Key;
+
+        if (legacyKey is not null)
+        {
+            layouts.Remove(legacyKey);
+        }
+
+        root["version"] = IntonerConfiguration.CurrentVersion;
+        return true;
     }
 
     private void ApplyRuntimeSettings(IntonerConfiguration configuration)
@@ -151,15 +236,27 @@ internal sealed class IntonerConfigurationService : IIntonerConfigurationService
 
     private bool TryWriteConfiguration(IntonerConfiguration configuration)
     {
+        if (!_canWriteConfiguration)
+        {
+            return false;
+        }
+
         try
         {
-            string json = JsonSerializer.Serialize(configuration, JsonOptions);
-            _fileSystem.WriteAllTextAtomic(_pathService.ConfigurationPath, json);
+            if (_pendingBackup is { } backup)
+            {
+                _fileSystem.WriteAllTextAtomic(backup.Path, backup.Contents);
+                _pendingBackup = null;
+            }
+
+            JsonObject document = IntonerConfigurationReader.CreateDocument(configuration, _sourceDocument, JsonOptions);
+            JsonDocumentUtility.WriteFile(_fileSystem, _pathService.ConfigurationPath, document.ToJsonString(JsonOptions));
+            _sourceDocument = document;
             return true;
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "failed to save Intoner config");
+            DiagnosticLog.Write(() => _logger.LogWarning(ex, "failed to save Intoner config"));
             return false;
         }
     }

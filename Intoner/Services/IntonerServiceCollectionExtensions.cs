@@ -39,7 +39,6 @@ using Intoner.UI.Performance;
 using Intoner.UI.Windows;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Logging;
 
 namespace Intoner.Services;
 
@@ -79,7 +78,6 @@ internal static class IntonerServiceCollectionExtensions
         services.AddDependency<IPenumbraDependency, PenumbraDependency>();
         services.AddSingleton<IDependencyService, DependencyService>();
         services.AddScoped<ISettingsProvider, DependencySettings>();
-        services.AddScoped<DependencyIndicatorProvider>();
         return services;
     }
 
@@ -120,8 +118,9 @@ internal static class IntonerServiceCollectionExtensions
         services.AddSingleton<IHostEnvironment>(_ => IntonerHostEnvironment.FromPluginInterface(dalamudServices.PluginInterface));
 
         services.AddSingleton<IntonerBuildInfoService>();
-        services.AddScoped<IntonerMediator>();
-        services.AddScoped<IIntonerMediator>(provider => provider.GetRequiredService<IntonerMediator>());
+        services.AddSingleton<IntonerPluginRuntime>();
+        services.AddScoped<IntonerSession>();
+        services.AddScoped<IIntonerMediator, IntonerMediator>();
 
         return services;
     }
@@ -186,6 +185,7 @@ internal static class IntonerServiceCollectionExtensions
     private static IServiceCollection AddObjectResourceServices(this IServiceCollection services)
     {
         services.AddSingleton<ObjectTextureLodService>();
+        services.AddSingleton<ObjectResourceReadBindings>();
         services.AddSingleton<ObjectResourceLoadScope>();
         services.AddSingleton<ObjectMemoryResourceRegistry>();
         services.AddSingleton<IObjectMemoryResourceService, ObjectMemoryResourceService>();
@@ -211,19 +211,19 @@ internal static class IntonerServiceCollectionExtensions
         services.AddScoped<ObjectIdentitySource>();
         services.AddScoped<ISceneIdentitySource>(provider => provider.GetRequiredService<ObjectIdentitySource>());
         services.AddScoped<IObjectIdentityService, ObjectIdentityService>();
-        services.AddScoped<ObjectSceneState>();
-        services.AddScoped<IObjectSceneState>(provider => provider.GetRequiredService<ObjectSceneState>());
+        services.AddScoped<IObjectSceneState, ObjectSceneState>();
         services.AddScoped<IObjectSceneSnapshotResolver, ObjectSceneSnapshotResolver>();
         services.AddScoped<ObjectMutationService>();
         services.AddScoped<IObjectMutationService>(provider => provider.GetRequiredService<ObjectMutationService>());
         services.AddScoped<IObjectSceneMutationService>(provider => provider.GetRequiredService<ObjectMutationService>());
         services.AddScoped<IObjectScene, ObjectScene>();
+        services.AddScoped<ObjectFrameworkDiagnostics>();
         services.AddScoped<IObjectSceneView, ObjectSceneView>();
-        services.AddScoped<ObjectSceneDomain>();
-        services.AddScoped<ISceneItemDomain>(provider => provider.GetRequiredService<ObjectSceneDomain>());
+        services.AddScoped<ISceneItemDomain, ObjectSceneDomain>();
         services.AddScoped<IObjectOrganizationService, ObjectOrganizationService>();
         services.AddScoped<ITemporarySourceService, TemporarySourceService>();
         services.AddScoped<IObjectManager, ObjectManager>();
+        services.AddScoped<ObjectSceneHost>();
         return services;
     }
 
@@ -231,11 +231,12 @@ internal static class IntonerServiceCollectionExtensions
     {
         services.AddSingleton<ObjectNativeBindings>();
         services.AddSingleton<FurnitureEmoteGuard>();
+        services.AddSingleton<ObjectCollisionOwnership>();
+        services.AddSingleton<CameraCollisionBindings>();
+        services.AddSingleton<CameraCollisionService>();
         services.AddScoped<ObjectHousingRuntimeContextResolver>();
-        services.AddScoped<ObjectRuntimeLocationService>();
-        services.AddScoped<IObjectRuntimeLocationService>(provider => provider.GetRequiredService<ObjectRuntimeLocationService>());
+        services.AddScoped<IObjectRuntimeLocationService, ObjectRuntimeLocationService>();
         services.AddScoped<IObjectRuntimeFactory, ObjectRuntimeFactory>();
-        services.AddScoped<Func<IObjectRuntimeFactory>>(provider => () => provider.GetRequiredService<IObjectRuntimeFactory>());
         return services;
     }
 
@@ -243,16 +244,15 @@ internal static class IntonerServiceCollectionExtensions
     {
         services.AddSingleton<ISceneLocationService, SceneLocationService>();
         services.AddScoped<ISceneIdentityRegistry, SceneIdentityRegistry>();
-        services.AddScoped<ObjectModelSelectionGeometryCache>();
-        services.AddScoped<ISceneSelectionGeometryProvider>(
-            provider => provider.GetRequiredService<ObjectModelSelectionGeometryCache>());
+        services.AddScoped<ISceneSelectionGeometryProvider, ObjectModelSelectionGeometryCache>();
         services.AddScoped<ISceneItemService, SceneItemService>();
         services.AddScoped<ISceneSurfaceService, SceneSurfaceService>();
         services.AddScoped<ISceneHistoryManager, SceneHistoryManager>();
+        services.AddScoped<IObjectWorkspaceHistoryReplay, ObjectWorkspaceHistoryReplay>();
+        services.AddScoped<IObjectWorkspaceHistory, ObjectWorkspaceHistory>();
         services.AddScoped<ISceneSelectionService, SceneSelectionService>();
-        services.AddScoped<SceneInputService>();
-        services.AddScoped<ISceneInputService>(provider => provider.GetRequiredService<SceneInputService>());
-        services.AddScoped<ISceneInputRegistry>(provider => provider.GetRequiredService<SceneInputService>());
+        services.AddScoped<ISceneInputService, SceneInputService>();
+        services.AddScoped<ISceneInputRegistry, SceneInputRegistry>();
         return services;
     }
 
@@ -291,10 +291,10 @@ internal static class IntonerServiceCollectionExtensions
         services.AddSingleton<PrimitiveCallbackRenderer>();
         services.AddSingleton<PrimitiveService>();
         services.AddSingleton<WorldSurfaceRenderer>();
-        services.AddSingleton<WorldSurfaceService>();
-        services.AddSingleton<IWorldSurfaceService>(provider => provider.GetRequiredService<WorldSurfaceService>());
+        services.AddSingleton<IWorldSurfaceService, WorldSurfaceService>();
 
         services.AddScoped<IRenderer, NativeRenderer>();
+        services.AddScoped<NativeTextTextureCache>();
         services.AddScoped<PreviewService>();
         services.AddScoped<ViewportRenderer>();
         services.AddScoped<ViewportService>();
@@ -316,10 +316,8 @@ internal static class IntonerServiceCollectionExtensions
         services.AddScoped<DisplayPersistence>();
         services.AddScoped<DisplayState>();
         services.AddScoped<DisplayRuntimeManager>();
-        services.AddScoped<DisplayService>();
-        services.AddScoped<IDisplayService>(provider => provider.GetRequiredService<DisplayService>());
-        services.AddScoped<DisplaySceneDomain>();
-        services.AddScoped<ISceneItemDomain>(provider => provider.GetRequiredService<DisplaySceneDomain>());
+        services.AddScoped<IDisplayService, DisplayService>();
+        services.AddScoped<ISceneItemDomain, DisplaySceneDomain>();
         return services;
     }
 
@@ -373,8 +371,10 @@ internal static class IntonerServiceCollectionExtensions
         services.AddScoped<EditorWorkspaceHost>();
         services.AddScoped<SceneEditorCommands>();
         services.AddScoped<EditorOverlayLayer>();
+        services.AddScoped<IUiOverlayTarget>(provider => provider.GetRequiredService<EditorOverlayLayer>());
         services.AddScoped<EditorListCard>();
         services.AddScoped<SceneListRow>();
+        services.AddScoped<LayoutActions>();
         services.AddScoped<LayoutWorkspace>();
         services.AddScoped<HistoryWorkspace>();
         services.AddScoped<EditorFilterBar>();
@@ -394,33 +394,24 @@ internal static class IntonerServiceCollectionExtensions
         services.AddScoped<CatalogLibraryStatus>();
         services.AddScoped<CollectionsWorkspace>();
         services.AddScoped<CollectionModSettingsEditor>();
-        services.AddScoped<CollectionPanel>();
+        services.AddScoped<EditorColumnPanel>();
         services.AddScoped<SceneWorkspace>();
         services.AddScoped<EditorToolbar>();
         services.AddScoped<DebugWorkspace>();
         services.AddScoped<DebugIpcSession>();
         services.AddScoped<DebugIpcSamples>();
-        services.AddScoped(provider => new SettingsPage(
-            provider.GetRequiredService<SettingsCatalog>(),
-            provider.GetRequiredService<EditorOverlayLayer>()));
+        services.AddScoped<SettingsPage>();
         services.AddSingleton<IClipboardTextService, ClipboardTextService>();
         services.AddScoped<IObjectClipboardService, ObjectClipboardService>();
         services.AddScoped<WindowVisibilityService>();
 
-        services.AddScoped<HousingContextIndicatorProvider>();
-        services.AddScoped<HousingFurnitureLimitIndicatorProvider>();
-        services.AddScoped<EditorTitleBarIndicatorService>(provider => new EditorTitleBarIndicatorService(
-            provider.GetRequiredService<HousingFurnitureLimitIndicatorProvider>(),
-            provider.GetRequiredService<HousingContextIndicatorProvider>(),
-            provider.GetRequiredService<DependencyIndicatorProvider>()));
-        services.AddScoped(provider =>
-        {
-            var buildInfo = provider.GetRequiredService<IntonerBuildInfoService>();
-            return new TitleBarIconRenderer(
-                provider.GetRequiredService<ILogger<TitleBarIconRenderer>>(),
-                provider.GetRequiredService<UiSharedService>(),
-                TitleBarIconOptions.Embedded(buildInfo.TitleBarText, "intoner.png"));
-        });
+        services.AddScoped<IEditorTitleBarIndicatorProvider, HousingFurnitureLimitIndicatorProvider>();
+        services.AddScoped<IEditorTitleBarIndicatorProvider, HousingContextIndicatorProvider>();
+        services.AddScoped<IEditorTitleBarIndicatorProvider, DependencyIndicatorProvider>();
+        services.AddScoped<EditorTitleBarIndicatorService>();
+        services.AddSingleton(provider => TitleBarIconOptions.Embedded(
+            provider.GetRequiredService<IntonerBuildInfoService>().TitleBarText, "intoner.png"));
+        services.AddScoped<TitleBarIconRenderer>();
         services.AddScoped<TitleBarWindowMetrics>();
         services.AddScoped<EditorWindow>();
         services.AddScoped<EditorBackgroundWindow>();

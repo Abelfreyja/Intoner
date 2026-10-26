@@ -16,6 +16,7 @@ internal sealed record FurnitureColorModel
 internal sealed record FurnitureModel : ObjectData
 {
     public string SharedGroupPath { get; init; } = string.Empty;
+    public bool CameraCollision { get; init; } = true;
     public FurnitureColorModel Color { get; init; } = new();
     public float Transparency { get; init; }
     public ObjectOutlineColor OutlineColor { get; init; }
@@ -40,4 +41,3 @@ internal sealed record FurnitureModel : ObjectData
     public bool RequiresRecreateToClearColor(FurnitureModel previousModel)
         => previousModel.Color.HasManualColor && !Color.HasManualColor;
 }
-

@@ -6,6 +6,9 @@ using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Component.GUI;
 using Intoner.Objects.Utils;
 using Intoner.Scene;
+using Intoner.Services.Interop;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using System.Numerics;
 using System.Runtime.InteropServices;
 
@@ -18,6 +21,9 @@ internal readonly record struct ViewportMouseInput(Vector2 Position, ScenePointe
 /// <summary> observes editor left mouse inputs and optionally captures drags before viewport handling </summary>
 internal interface IViewportMouseInputService
 {
+    /// <summary> installs input observation once and awaits framework initialization </summary>
+    Task StartAsync();
+
     /// <summary> gets whether a captured input or its final unread sample still owns the pointer </summary>
     bool IsCapturing { get; }
 
@@ -38,7 +44,7 @@ internal interface IViewportMouseInputService
 }
 
 /// <summary> tracks one editor input and optionally filters input after game UI processing, before camera processing </summary>
-internal sealed unsafe class ViewportMouseInputService : IViewportMouseInputService, IDisposable
+internal sealed unsafe class ViewportMouseInputService : FrameworkNativeService, IViewportMouseInputService
 {
     internal enum InputFilter
     {
@@ -48,7 +54,8 @@ internal sealed unsafe class ViewportMouseInputService : IViewportMouseInputServ
     }
 
     private readonly IUiBuilder _uiBuilder;
-    private readonly Hook<AtkModule.Delegates.HandleInput>? _handleInputHook;
+    private readonly IGameInteropProvider? _gameInteropProvider;
+    private Hook<AtkModule.Delegates.HandleInput>? _handleInputHook;
     private readonly Lock _stateLock = new();
     private Vector2 _viewportPosition;
     private Vector2 _viewportSize;
@@ -61,26 +68,33 @@ internal sealed unsafe class ViewportMouseInputService : IViewportMouseInputServ
     private bool _cancelled;
     private bool _disposed;
 
-    public ViewportMouseInputService(IUiBuilder uiBuilder, IGameInteropProvider gameInteropProvider)
-        : this(uiBuilder)
+    public ViewportMouseInputService(
+        IUiBuilder uiBuilder,
+        IGameInteropProvider gameInteropProvider,
+        ILogger<ViewportMouseInputService> logger,
+        IFramework framework)
+        : this(uiBuilder, logger, framework)
     {
-        try
-        {
-            _handleInputHook = gameInteropProvider.HookFromAddress<AtkModule.Delegates.HandleInput>(
-                AtkModule.MemberFunctionPointers.HandleInput, HandleInput);
-            _handleInputHook.Enable();
-        }
-        catch
-        {
-            Dispose();
-            throw;
-        }
+        _gameInteropProvider = gameInteropProvider;
     }
 
-    internal ViewportMouseInputService(IUiBuilder uiBuilder)
+    internal ViewportMouseInputService(IUiBuilder uiBuilder, IFramework framework)
+        : this(uiBuilder, NullLogger<ViewportMouseInputService>.Instance, framework)
+    {
+    }
+
+    private ViewportMouseInputService(IUiBuilder uiBuilder, ILogger<ViewportMouseInputService> logger, IFramework framework)
+        : base(framework, logger)
     {
         _uiBuilder = uiBuilder;
         _uiBuilder.HideUi += Cancel;
+    }
+
+    protected override void InitializeCore()
+    {
+        _handleInputHook = Hooks.Add(_gameInteropProvider!.HookFromAddress<AtkModule.Delegates.HandleInput>(
+            (nint)AtkModule.MemberFunctionPointers.HandleInput, HandleInput));
+        Hooks.Enable();
     }
 
     public bool IsCapturing
@@ -142,22 +156,31 @@ internal sealed unsafe class ViewportMouseInputService : IViewportMouseInputServ
         }
     }
 
-    public void Dispose()
+    protected override void DisposeCore()
     {
+        bool firstDispose;
         lock (_stateLock)
         {
-            if (_disposed)
+            firstDispose = !_disposed;
+            if (firstDispose)
             {
-                return;
+                _disposed = true;
+                CancelUnsafe();
+                _ownsLeft = false;
             }
-
-            _disposed = true;
-            CancelUnsafe();
-            _ownsLeft = false;
         }
 
-        _uiBuilder.HideUi -= Cancel;
-        _handleInputHook?.Dispose();
+        try
+        {
+            if (firstDispose)
+            {
+                _uiBuilder.HideUi -= Cancel;
+            }
+        }
+        finally
+        {
+            base.DisposeCore();
+        }
     }
 
     private void CancelUnsafe()
@@ -170,7 +193,13 @@ internal sealed unsafe class ViewportMouseInputService : IViewportMouseInputServ
 
     private byte HandleInput(AtkModule* module, UIInputData* inputData, bool isPadMouseModeEnabled)
     {
-        byte result = _handleInputHook!.Original(module, inputData, isPadMouseModeEnabled);
+        using InteropHookCollection.CallbackScope callback = Hooks.EnterCallback();
+        byte result = _handleInputHook!.OriginalDisposeSafe(module, inputData, isPadMouseModeEnabled);
+        if (!callback.IsActive)
+        {
+            return result;
+        }
+
         InputFilter filter = ProcessInput(in *inputData);
         if (filter == InputFilter.Viewport)
         {
@@ -202,7 +231,7 @@ internal sealed unsafe class ViewportMouseInputService : IViewportMouseInputServ
     {
         lock (_stateLock)
         {
-            if (_disposed || (!_canStart && !_ownsLeft))
+            if (IsDisposing || _disposed || (!_canStart && !_ownsLeft))
             {
                 return InputFilter.None;
             }

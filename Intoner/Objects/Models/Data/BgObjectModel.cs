@@ -6,6 +6,8 @@ namespace Intoner.Objects.Models;
 internal sealed record BgObjectModel : ObjectData
 {
     public string ModelPath { get; init; } = string.Empty;
+    public BgColliderDefinition? ColliderDefinition { get; init; }
+    public bool CameraCollision { get; init; } = true;
     public float Transparency { get; init; }
     public Vector4 DyeColor { get; init; } = Vector4.One;
     public bool IsCoveredFromRain { get; init; }
@@ -25,4 +27,3 @@ internal sealed record BgObjectModel : ObjectData
                 || previousModel.IsCoveredFromRain != IsCoveredFromRain);
     }
 }
-

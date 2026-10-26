@@ -25,19 +25,10 @@ internal readonly record struct GizmoDrawOptions(
 
 [StructLayout(LayoutKind.Auto)]
 internal readonly record struct RotationProjectionContext(
-    Vector2 Center,
-    float ScreenRadius,
+    GizmoRotationMath.Projection MathProjection,
     float VisualRadius,
-    float WorldRadius,
-    Vector3 WorldPosition,
-    Matrix4x4 ViewProjection,
-    Vector2 ViewportPos,
-    Vector2 ViewportSize,
     Quaternion Rotation,
-    bool UseWorldSpace,
-    Vector3? CameraViewDirection,
-    Vector3? CameraRight,
-    Vector3? CameraUp);
+    bool UseWorldSpace);
 
 [StructLayout(LayoutKind.Auto)]
 internal readonly record struct TranslationDragPlaneContext(
@@ -71,6 +62,9 @@ internal readonly record struct GizmoContext(
     bool SurfaceDragSupported)
 {
     public int SelectionCount => SelectedSnapshots.Count;
+    public IReadOnlyList<SceneItemSnapshot>? PivotEditTargets { get; init; }
+    public IReadOnlyList<SceneItemSnapshot> EditSnapshots => PivotEditTargets ?? SelectedSnapshots;
+    public bool CanTransform => EditSnapshots.All(static snapshot => !snapshot.Locked);
 }
 
 [StructLayout(LayoutKind.Auto)]
@@ -128,7 +122,9 @@ internal readonly record struct GizmoAxisVisualState(
     float WorldLength,
     Vector2 ScreenDirection,
     float ScreenLength,
-    float VisualScale)
+    float VisualScale,
+    int DirectionSign = 1,
+    bool IsMirrored = false)
 {
     public static readonly GizmoAxisVisualState None = new(
         GizmoAxis.None,
@@ -142,6 +138,18 @@ internal readonly record struct GizmoAxisVisualState(
 
     public bool IsValid
         => Axis != GizmoAxis.None;
+
+    public bool Matches(GizmoAxis axis, Vector3 direction)
+        => Axis == axis && Vector3.Dot(WorldDirection, direction) > 0f;
+
+    public GizmoAxisVisualState Opposite => this with
+    {
+        ScreenEnd = ScreenStart - ScreenDirection * ScreenLength,
+        ScreenDirection = -ScreenDirection,
+        WorldDirection = -WorldDirection,
+        DirectionSign = -DirectionSign,
+        IsMirrored = !IsMirrored,
+    };
 }
 
 [StructLayout(LayoutKind.Auto)]
@@ -165,6 +173,7 @@ internal enum GizmoInteractionPhase
     Idle,
     HoverAxis,
     HoverCenter,
+    HoverPivot,
     TransformDrag,
     SurfaceDrag,
     RadialMenu,
@@ -225,10 +234,10 @@ internal readonly record struct GizmoInteractionState(
         => Phase == GizmoInteractionPhase.SurfaceDrag;
 
     public bool IsHovering
-        => Phase is GizmoInteractionPhase.HoverAxis or GizmoInteractionPhase.HoverCenter;
+        => Phase is GizmoInteractionPhase.HoverAxis or GizmoInteractionPhase.HoverCenter or GizmoInteractionPhase.HoverPivot;
 
     public bool ShouldCaptureMouse
-        => Phase is GizmoInteractionPhase.HoverAxis or GizmoInteractionPhase.HoverCenter or GizmoInteractionPhase.TransformDrag;
+        => IsHovering || Phase == GizmoInteractionPhase.TransformDrag;
 
     public bool CanStartSurfaceDrag
         => Phase == GizmoInteractionPhase.HoverCenter && CenterHovered;
@@ -266,8 +275,12 @@ internal readonly record struct GizmoFrame(
 
     public bool HasMode(GizmoTransformMode mode) => (Modes & mode) != GizmoTransformMode.None;
 
+    public bool IsHovered(GizmoTransformMode operation, in GizmoAxisVisualState axis)
+        => Interaction.Phase == GizmoInteractionPhase.HoverAxis && HoveredHandle.Operation == operation
+            && HoveredHandle.Axis == axis.Axis && HoveredHandle.LinearAxis.DirectionSign == axis.DirectionSign;
+
     public bool BlocksSelection
-        => Interaction.Phase is GizmoInteractionPhase.HoverAxis or GizmoInteractionPhase.HoverCenter;
+        => Interaction.IsHovering;
 
     public GizmoInteractionState ForOperation(GizmoTransformMode operation)
     {
@@ -291,7 +304,8 @@ internal readonly record struct GizmoFrameRequest(
     int SelectionRevision,
     long SceneRevision,
     Vector2 MousePosition,
-    bool PointerAvailable);
+    bool PointerAvailable,
+    bool AnchoredScaling = false);
 
 [StructLayout(LayoutKind.Auto)]
 internal readonly record struct GizmoCachedFrame(GizmoFrameRequest Request, GizmoFrame Frame)
@@ -411,6 +425,12 @@ internal readonly struct GizmoTransformSnapPolicy
         => !ScaleEnabled
             ? scale
             : SceneTransformSnapUtility.SnapScale(scale, ScaleStep);
+
+    public float SnapScale(float scale)
+        => !ScaleEnabled ? scale : SceneTransformSnapUtility.SnapScale(scale, ScaleStep);
+
+    public float SnapScaleFactor(float factor)
+        => !ScaleEnabled ? factor : 1f + SceneTransformSnapUtility.SnapValue(factor - 1f, ScaleStep);
 }
 
 internal enum GizmoWheelAction
@@ -444,4 +464,3 @@ internal readonly record struct GizmoWheelSegment(
 internal readonly record struct GizmoRadialTooltipInfo(
     Vector2 MousePosition,
     string Title);
-

@@ -190,7 +190,7 @@ internal sealed class ObjectBrowserPanel
                 "##createBrowserSourceMenu",
                 clicked,
                 new Vector2(buttonMin.X, buttonMax.Y),
-                252f);
+                EditorLayout.Scaled(252f));
             if (sourceMenu)
             {
                 DrawCreateBrowserSourceMenu(catalogCount);

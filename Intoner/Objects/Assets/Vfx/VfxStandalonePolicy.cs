@@ -180,7 +180,8 @@ internal static class VfxStandalonePolicy
             analysis,
             familyHint,
             sourceEvidence,
-            pathContracts);
+            pathContracts,
+            contextClues);
         bool isValidatedOmenFitGround =
             !hasDetachedRuntimeSignal
          && !hasUnknownSource
@@ -299,13 +300,23 @@ internal static class VfxStandalonePolicy
         VfxAnalysis analysis,
         KnownVfxFamily familyHint,
         RuntimeVfxEvidence sourceEvidence,
-        AssetPathContract pathContracts)
+        AssetPathContract pathContracts,
+        ContextClue contextClues)
         => familyHint.HasAll(KnownVfxFamily.GroupPose)
         && sourceEvidence.HasAll(RuntimeVfxEvidence.Event)
         && pathContracts.HasAll(AssetPathContract.DeterministicBuilder)
         && analysis.HasRenderableContent
         && analysis.UsesScreenLayer
-        && !analysis.HasModelSkinParticle;
+        && !analysis.HasModelSkinParticle
+        && analysis.BinderCount == 1
+        && analysis.BinderFacts.TimelineCount == 0
+        && analysis.BinderFacts.Types == VfxBinderTypes.Camera
+        && analysis.BinderFacts.PropertyFlags == VfxBinderProperties.CasterOrigin
+        && !sourceEvidence.HasAny(StrongContextEvidence)
+        && (contextClues & ~(ContextClue.Binder
+                          | ContextClue.CameraBinder
+                          | ContextClue.OriginBinder
+                          | ContextClue.ScreenLayer)) == ContextClue.None;
 
     private static bool IsValidatedOmenFitGround(
         VfxAnalysis analysis,

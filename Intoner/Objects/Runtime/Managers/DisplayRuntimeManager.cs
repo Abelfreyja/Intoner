@@ -238,7 +238,7 @@ internal sealed class DisplayRuntimeManager : IDisposable
 
         SceneLocationScope location = _locationService.GetCurrentLocationScope();
         DisplaySnapshot[] desired = snapshots
-            .Where(snapshot => MatchesLocation(snapshot, location))
+            .Where(snapshot => _locationService.MatchesLocation(snapshot.CreatedIn, location))
             .ToArray();
         bool complete = ApplyRuntimeSnapshot(desired);
         lock (_stateLock)
@@ -463,7 +463,4 @@ internal sealed class DisplayRuntimeManager : IDisposable
         _attemptedPersistentRevision = -1;
         _retryReconciliationAfterMilliseconds = 0;
     }
-
-    private static bool MatchesLocation(DisplaySnapshot snapshot, SceneLocationScope location)
-        => !snapshot.CreatedIn.IsValid || snapshot.CreatedIn.Scope == location;
 }

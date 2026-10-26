@@ -4,6 +4,7 @@ using Dalamud.Interface.Textures.TextureWraps;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using Intoner.Services.Configuration;
+using Intoner.UI.Performance;
 using System.Numerics;
 using System.Runtime.InteropServices;
 
@@ -12,7 +13,12 @@ namespace Intoner.Objects.UI.Components;
 internal sealed class SceneListRow(EditorListCard listCard)
 {
     [StructLayout(LayoutKind.Auto)]
-    public readonly record struct FolderResult(bool Collapsed, RowGeometry Geometry);
+    public readonly record struct FolderResult(bool Collapsed, RowGeometry Geometry, int ClickedAction = -1,
+        bool Clicked = false, bool RightClicked = false);
+
+    [StructLayout(LayoutKind.Auto)]
+    public readonly record struct FolderAction(
+        string Id, FontAwesomeIcon Icon, string Tooltip, Vector4 Color, bool Highlighted, bool Enabled);
 
     [StructLayout(LayoutKind.Auto)]
     public readonly record struct Metrics(
@@ -20,14 +26,17 @@ internal sealed class SceneListRow(EditorListCard listCard)
         float ItemHeight,
         float FolderHeight,
         float ItemSpacing,
-        float GroupSpacing,
         float ChildInset,
         float ChildRightInset,
         float TreeLineInset);
 
     public readonly record struct ColorMarker(Vector4 Color, string Label, string Tooltip);
 
-    public readonly record struct Status(string Label, Vector4 Color);
+    public readonly record struct Status(string Label, Vector4 Color)
+    {
+        public static Status Activity(bool active)
+            => new(active ? "Active" : "Inactive", active ? ThemeColors.AccentGreen : ThemeColors.AccentBlue);
+    }
 
     [StructLayout(LayoutKind.Auto)]
     public readonly record struct RowGeometry(Vector2 Min, Vector2 Max)
@@ -64,6 +73,11 @@ internal sealed class SceneListRow(EditorListCard listCard)
         public string? TypeLabel { get; init; }
         public required int ChildCount { get; init; }
         public required bool Collapsed { get; init; }
+        public bool Selectable { get; init; }
+        public bool Selected { get; init; }
+        public bool? Visible { get; init; }
+        public bool Locked { get; init; }
+        public Status? Status { get; init; }
     }
 
     public static Metrics ResolveMetrics(SceneListRowSize size)
@@ -77,7 +91,6 @@ internal sealed class SceneListRow(EditorListCard listCard)
                 MathF.Max(34f * scale, lineHeight + (14f * scale)),
                 MathF.Max(38f * scale, lineHeight + (16f * scale)),
                 2f * scale,
-                6f * scale,
                 32f * scale,
                 4f * scale,
                 18f * scale),
@@ -86,7 +99,6 @@ internal sealed class SceneListRow(EditorListCard listCard)
                 MathF.Max(52f * scale, (lineHeight * 2f) + (20f * scale)),
                 MathF.Max(44f * scale, (lineHeight * 2f) + (14f * scale)),
                 2f * scale,
-                8f * scale,
                 32f * scale,
                 4f * scale,
                 18f * scale),
@@ -96,18 +108,106 @@ internal sealed class SceneListRow(EditorListCard listCard)
     public static EditorListCard.Interaction DrawInteraction(Item item, Metrics metrics)
         => DrawInteraction(item.Id, item.Selected, metrics.ItemHeight, item.LeftInset, item.RightInset);
 
-    public static EditorListCard.Interaction DrawFolderInteraction(
+    public EditorListCard.Interaction DrawSection(
+        string id,
+        string name,
+        FontAwesomeIcon icon,
+        IReadOnlyList<EditorBadge> badges,
+        bool collapsed,
+        Vector4 accent)
+    {
+        float scale = ImGuiHelpers.GlobalScale;
+        float height = MathF.Max(36f * scale, ImGui.GetTextLineHeight() + 16f * scale);
+        EditorListCard.Interaction interaction = DrawInteraction(id, false, height, null, null);
+
+        if (!ImGui.IsRectVisible(interaction.Min, interaction.Max))
+        {
+            return interaction;
+        }
+
+        ImDrawListPtr drawList = ImGui.GetWindowDrawList();
+        listCard.DrawFrame(drawList, interaction.Min, interaction.Max,
+            accent with { W = interaction.Hovered ? 0.19f : 0.12f },
+            accent with { W = 0.36f }, Vector4.Zero, 4f * scale,
+            interaction.Hovered, ImDrawFlags.RoundCornersAll);
+        float centerY = (interaction.Min.Y + interaction.Max.Y) * 0.5f;
+        bool showCollapsed = interaction.Clicked ? !collapsed : collapsed;
+        EditorIcon.DrawCentered(drawList, showCollapsed ? FontAwesomeIcon.ChevronRight : FontAwesomeIcon.ChevronDown,
+            new Vector2(interaction.Min.X + 8f * scale, centerY - 7f * scale),
+            new Vector2(interaction.Min.X + 22f * scale, centerY + 7f * scale), accent, 0.75f);
+        EditorIcon.DrawCentered(drawList, icon,
+            new Vector2(interaction.Min.X + 29f * scale, centerY - 8f * scale),
+            new Vector2(interaction.Min.X + 45f * scale, centerY + 8f * scale), accent, 0.88f);
+        float right = EditorBadgeRenderer.DrawRightAligned(drawList, badges, null,
+            interaction.Max.X - 8f * scale, centerY - EditorBadgeRenderer.Height * 0.5f,
+            selected: false, contentAlpha: 1f, panelSurface: true);
+        float textX = interaction.Min.X + 53f * scale;
+        EditorTextUtility.ClippedText label = EditorTextUtility.ClipTextToWidthResult(name, MathF.Max(1f, right - textX - 8f * scale));
+        drawList.AddText(new Vector2(textX, centerY - ImGui.GetTextLineHeight() * 0.5f), ImGui.GetColorU32(ThemeColors.Text), label.Text);
+        EditorTextUtility.AttachTooltipIfClipped(interaction.Min,
+            new Vector2(MathF.Max(0f, right - interaction.Min.X), height), name, label.IsClipped);
+        return interaction;
+    }
+
+    public FolderResult DrawFolder<TContext>(
         Folder folder,
         Metrics metrics,
+        TContext context,
+        Action<TContext> drawContextMenu,
+        ReadOnlySpan<FolderAction> actions = default,
+        bool allowCollapse = true,
         float? leftInset = null,
         float? rightInset = null)
-        => DrawInteraction(
-            folder.Id,
-            selected: false,
-            height: metrics.FolderHeight,
-            leftInset,
-            rightInset,
-            flags: ImGuiSelectableFlags.AllowItemOverlap);
+    {
+        EditorListCard.Interaction interaction = DrawInteraction(folder.Id, folder.Selected, metrics.FolderHeight,
+            leftInset, rightInset, ImGuiSelectableFlags.AllowItemOverlap);
+        using (EditorContextMenu.PopupScope menu = EditorContextMenu.BeginForLastItem($"##{folder.Id}:context"))
+        {
+            if (menu)
+            {
+                drawContextMenu(context);
+            }
+        }
+
+        float scale = ImGuiHelpers.GlobalScale;
+        float edge = MathF.Max(22f * scale, ImGui.GetTextLineHeight() + 6f * scale);
+        float gap = 2f * scale;
+        Vector2 actionStart = new(interaction.Max.X - 6f * scale - actions.Length * (edge + gap) + gap,
+            (interaction.Min.Y + interaction.Max.Y - edge) * 0.5f);
+        bool clickedActionArea = false;
+        for (int index = 0; index < actions.Length; ++index)
+        {
+            Vector2 min = actionStart + new Vector2(index * (edge + gap), 0f);
+            clickedActionArea |= EditorInputUtility.IsMouseInside(min, min + new Vector2(edge));
+        }
+
+        bool clickedDisclosure = ImGui.GetMousePos().X < interaction.Min.X + 30f * scale;
+        bool clickedSelection = interaction.Clicked && !clickedActionArea && folder.Selectable && !clickedDisclosure;
+        if (interaction.Clicked && allowCollapse && !clickedActionArea && (!folder.Selectable || clickedDisclosure))
+        {
+            folder = folder with { Collapsed = !folder.Collapsed };
+        }
+
+        DrawFolderChrome(folder, interaction);
+        Vector2 cursorAfterRow = ImGui.GetCursorPos();
+        int clickedAction = -1;
+        for (int index = 0; index < actions.Length; ++index)
+        {
+            FolderAction action = actions[index];
+            ImGui.SetCursorScreenPos(actionStart + new Vector2(index * (edge + gap), 0f));
+            using var disabled = ImRaii.Disabled(!action.Enabled);
+            if (DrawActionButton(action.Id, action.Icon, action.Tooltip, action.Color, action.Highlighted, edge))
+            {
+                clickedAction = index;
+            }
+        }
+
+        ImGui.SetCursorPos(cursorAfterRow);
+        float contentRight = actions.IsEmpty ? interaction.Max.X - 10f * scale : actionStart.X - 8f * scale;
+        DrawFolderContent(folder, metrics, interaction, contentRight);
+        return new FolderResult(folder.Collapsed, new RowGeometry(interaction.Min, interaction.Max),
+            clickedAction, clickedSelection, interaction.RightClicked);
+    }
 
     private static EditorListCard.Interaction DrawInteraction(
         string id,
@@ -137,7 +237,13 @@ internal sealed class SceneListRow(EditorListCard listCard)
 
     public void DrawContent(Item item, Metrics metrics, EditorListCard.Interaction interaction)
     {
+        if (!ImGui.IsRectVisible(interaction.Min, interaction.Max))
+        {
+            return;
+        }
+
         DrawChrome(interaction, item);
+
         if (metrics.Size == SceneListRowSize.Compact)
         {
             DrawCompactContent(interaction, item);
@@ -148,8 +254,20 @@ internal sealed class SceneListRow(EditorListCard listCard)
         }
     }
 
-    public void DrawFolderChrome(Folder folder, EditorListCard.Interaction interaction)
+    private void DrawFolderChrome(Folder folder, EditorListCard.Interaction interaction)
     {
+        if (!ImGui.IsRectVisible(interaction.Min, interaction.Max))
+        {
+            return;
+        }
+
+        if (folder.Selectable)
+        {
+            listCard.DrawChrome(ImGui.GetWindowDrawList(), interaction.Min, interaction.Max,
+                folder.Selected, interaction.Hovered, folder.Accent, 1f, folder.Selected ? 0.95f : 0.62f);
+            return;
+        }
+
         Vector4 fill = ThemeColors.ButtonDefault with { W = 0.20f };
         Vector4 border = folder.Accent with { W = interaction.Hovered ? 0.54f : 0.28f };
         listCard.DrawFrame(
@@ -163,18 +281,29 @@ internal sealed class SceneListRow(EditorListCard listCard)
             interaction.Hovered);
     }
 
-    public static void DrawFolderContent(
+    private static void DrawFolderContent(
         Folder folder,
         Metrics metrics,
         EditorListCard.Interaction interaction,
         float contentRight)
     {
+        if (!ImGui.IsRectVisible(interaction.Min, interaction.Max))
+        {
+            return;
+        }
+
         ImDrawListPtr drawList = ImGui.GetWindowDrawList();
         float scale = ImGuiHelpers.GlobalScale;
         float rowHeight = interaction.Max.Y - interaction.Min.Y;
         float padX = 10f * scale;
         float lineHeight = ImGui.GetTextLineHeight();
         FontAwesomeIcon disclosureIcon = folder.Collapsed ? FontAwesomeIcon.ChevronRight : FontAwesomeIcon.ChevronDown;
+        float stateY = interaction.Min.Y + (rowHeight - lineHeight) * 0.5f;
+        if (folder.Status is { } status)
+            contentRight = DrawStatusIndicator(drawList, contentRight, interaction.Min.Y + rowHeight * 0.5f, status, 1f);
+        contentRight = DrawLockState(drawList, contentRight, stateY, folder.Locked, lineHeight, 1f);
+        if (folder.Visible is { } visible)
+            contentRight = DrawVisibilityState(drawList, contentRight, stateY, visible, lineHeight, 1f);
         FontAwesomeIcon resolvedFolderIcon = folder.TypeIcon
             ?? (folder.Collapsed ? FontAwesomeIcon.Folder : FontAwesomeIcon.FolderOpen);
         EditorIcon.Metrics disclosureMetrics = EditorIcon.Measure(disclosureIcon);
@@ -225,13 +354,7 @@ internal sealed class SceneListRow(EditorListCard listCard)
             EditorTextUtility.ClipTextToWidth(folder.Detail, labelWidth));
     }
 
-    public static float ResolveActionButtonEdge()
-    {
-        float scale = ImGuiHelpers.GlobalScale;
-        return MathF.Max(22f * scale, ImGui.GetTextLineHeight() + (6f * scale));
-    }
-
-    public static bool DrawActionButton(
+    private static bool DrawActionButton(
         string id,
         FontAwesomeIcon icon,
         string tooltip,
@@ -301,15 +424,54 @@ internal sealed class SceneListRow(EditorListCard listCard)
         return left - (10f * scale);
     }
 
-    public static FolderChildrenScope BeginFolderChildren(
+    public static void DrawFolderChildren<TItem, TFolder, TContext>(
+        IReadOnlyList<TItem> items,
+        IReadOnlyList<TFolder> folders,
         Metrics metrics,
         Vector4 accent,
-        int depth = 1,
-        float? branchX = null)
-        => new(metrics, accent, depth, branchX);
+        int depth,
+        float itemHeight,
+        TContext context,
+        Func<TItem, int, TContext, RowGeometry> drawItem,
+        Func<TFolder, int, TContext, FolderResult> drawFolder,
+        Action<TFolder, int, TContext> drawChildren)
+    {
+        if (items.Count == 0 && folders.Count == 0)
+        {
+            return;
+        }
+
+        int childDepth = depth + 1;
+        using FolderChildrenScope children = new(metrics, accent, childDepth);
+        using (UiVirtualList.Scope list = UiVirtualList.Begin(items.Count,
+                   UiVirtualListOptions.Rows(itemHeight, metrics.ItemSpacing) with { DrawTrailingSpacing = folders.Count > 0 }))
+        {
+            while (list.Step())
+            {
+                for (int index = list.DisplayStart; index < list.DisplayEnd; ++index)
+                {
+                    children.Add(drawItem(items[index], childDepth, context));
+                    list.FinishItem(index);
+                }
+            }
+        }
+
+        for (int index = 0; index < folders.Count; ++index)
+        {
+            TFolder folder = folders[index];
+            FolderResult row = drawFolder(folder, childDepth, context);
+            children.Add(row.Geometry);
+            if (!row.Collapsed)
+            {
+                drawChildren(folder, childDepth, context);
+            }
+
+            children.AddSpacing(index + 1 < folders.Count);
+        }
+    }
 
     [StructLayout(LayoutKind.Auto)]
-    public ref struct FolderChildrenScope
+    private ref struct FolderChildrenScope : IDisposable
     {
         private readonly Metrics _metrics;
         private readonly ImDrawListPtr _drawList;
@@ -319,14 +481,13 @@ internal sealed class SceneListRow(EditorListCard listCard)
         private float? _firstLineY;
         private float _lastLineY;
 
-        internal FolderChildrenScope(Metrics metrics, Vector4 accent, int depth, float? branchX)
+        internal FolderChildrenScope(Metrics metrics, Vector4 accent, int depth)
         {
             _metrics = metrics;
             _drawList = ImGui.GetWindowDrawList();
             _lineColor = accent with { W = 0.76f };
             _scale = ImGuiHelpers.GlobalScale;
-            _lineX = branchX
-                ?? ImGui.GetCursorScreenPos().X
+            _lineX = ImGui.GetCursorScreenPos().X
                     + (Math.Max(0, depth - 1) * metrics.ChildInset)
                     + metrics.TreeLineInset;
             _firstLineY = null;
@@ -375,28 +536,15 @@ internal sealed class SceneListRow(EditorListCard listCard)
             (false, true)  => 0.62f,
             (false, false) => 0.72f,
         };
-        Vector4 fill = (item.Selected, interaction.Hovered) switch
-        {
-            (true, _)     => item.Accent with { W = 0.17f * contentAlpha },
-            (false, true) => item.Accent with { W = 0.08f * contentAlpha },
-            _             => ThemeColors.ButtonDefault with { W = 0.22f * contentAlpha },
-        };
-        Vector4 border = (item.Selected, interaction.Hovered) switch
-        {
-            (true, _)     => item.Accent with { W = 0.85f * contentAlpha },
-            (false, true) => item.Accent with { W = 0.58f * contentAlpha },
-            _             => ThemeColors.Border with { W = 0.38f * contentAlpha },
-        };
-
-        listCard.DrawFrame(
+        listCard.DrawChrome(
             ImGui.GetWindowDrawList(),
             interaction.Min,
             interaction.Max,
-            fill,
-            border,
-            item.Accent with { W = item.Selected ? 0.95f : 0.62f },
-            8f * ImGuiHelpers.GlobalScale,
-            interaction.Hovered && !item.Selected);
+            item.Selected,
+            interaction.Hovered,
+            item.Accent,
+            contentAlpha,
+            item.Selected ? 0.95f : 0.62f);
     }
 
     private static unsafe void DrawLargeContent(EditorListCard.Interaction interaction, Item item)
@@ -426,15 +574,7 @@ internal sealed class SceneListRow(EditorListCard listCard)
 
         if (item.Locked)
         {
-            right = DrawStateIcon(
-                drawList,
-                right - (6f * scale),
-                centerY - (lineHeight * 0.5f),
-                FontAwesomeIcon.Lock,
-                "Locked",
-                ThemeColors.DimRed,
-                lineHeight,
-                textColor.W);
+            right = DrawLockState(drawList, right - (6f * scale), centerY - (lineHeight * 0.5f), true, lineHeight, textColor.W);
         }
 
         float nameX = iconMax.X + (7f * scale);
@@ -467,15 +607,8 @@ internal sealed class SceneListRow(EditorListCard listCard)
         ImFontGlyphPtr ascender = (ImFontGlyphPtr)font.FindGlyph('A');
         ImFontGlyphPtr descender = (ImFontGlyphPtr)font.FindGlyph('g');
         float textCenterY = detailY + ((ascender.Y0 + descender.Y1) * ImGui.GetFontSize() / font.FontSize * 0.5f);
-        _ = DrawStateIcon(
-            drawList,
-            nameX + visibilityWidth,
-            textCenterY - (lineHeight * 0.5f),
-            visibilityIcon,
-            item.Visible ? "Visible" : "Hidden",
-            item.Visible ? ThemeColors.TextDisabled : ThemeColors.DimRed,
-            lineHeight,
-            textColor.W);
+        _ = DrawVisibilityState(drawList, nameX + visibilityWidth, textCenterY - (lineHeight * 0.5f),
+            item.Visible, lineHeight, textColor.W);
         float detailX = nameX + visibilityWidth + (8f * scale);
         drawList.AddText(
             new Vector2(detailX, detailY),
@@ -508,20 +641,8 @@ internal sealed class SceneListRow(EditorListCard listCard)
             right = DrawStatusIndicator(drawList, right, centerY, status, textColor.W);
         }
 
-        if (item.Locked)
-        {
-            right = DrawStateIcon(drawList, right, stateIconY, FontAwesomeIcon.Lock, "Locked", ThemeColors.DimRed, lineHeight, textColor.W);
-        }
-
-        right = DrawStateIcon(
-            drawList,
-            right,
-            stateIconY,
-            item.Visible ? FontAwesomeIcon.Eye : FontAwesomeIcon.EyeSlash,
-            item.Visible ? "Visible" : "Hidden",
-            item.Visible ? ThemeColors.TextDisabled : ThemeColors.DimRed,
-            lineHeight,
-            textColor.W);
+        right = DrawLockState(drawList, right, stateIconY, item.Locked, lineHeight, textColor.W);
+        right = DrawVisibilityState(drawList, right, stateIconY, item.Visible, lineHeight, textColor.W);
 
         float nameX = iconMax.X + (7f * scale);
         float markerWidth = item.ColorMarker.HasValue ? 18f * scale : 0f;
@@ -609,6 +730,13 @@ internal sealed class SceneListRow(EditorListCard listCard)
         return center.X - radius - (8f * scale);
     }
 
+    private static float DrawLockState(ImDrawListPtr drawList, float right, float y, bool locked, float edge, float alpha)
+        => locked ? DrawStateIcon(drawList, right, y, FontAwesomeIcon.Lock, "Locked", ThemeColors.DimRed, edge, alpha) : right;
+
+    private static float DrawVisibilityState(ImDrawListPtr drawList, float right, float y, bool visible, float edge, float alpha)
+        => DrawStateIcon(drawList, right, y, visible ? FontAwesomeIcon.Eye : FontAwesomeIcon.EyeSlash,
+            visible ? "Visible" : "Hidden", visible ? ThemeColors.TextDisabled : ThemeColors.DimRed, edge, alpha);
+
     private static float DrawStateIcon(
         ImDrawListPtr drawList,
         float right,
@@ -686,5 +814,4 @@ internal sealed class SceneListRow(EditorListCard listCard)
                 options: new IntonerTooltipOptions { Accent = accent });
         }
     }
-
 }

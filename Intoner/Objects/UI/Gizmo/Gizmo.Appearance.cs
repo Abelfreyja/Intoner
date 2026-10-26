@@ -26,6 +26,18 @@ internal sealed partial class Gizmo
         ? new Vector4(_appearance.Center.ToNormalizedVector3(), 1f)
         : Vector4.One;
 
+    private Vector4 GetAxisLabelTextColor(bool isActive)
+    {
+        Vector3 color = (_appearance.Preset, isActive) switch
+        {
+            (GizmoColorPreset.ImGuizmo, _) => Vector3.Zero,
+            (GizmoColorPreset.Custom, _) => _appearance.AxisLabelText.ToNormalizedVector3(),
+            (_, true) => Vector3.Zero,
+            _ => new Vector3(0.05f),
+        };
+        return new Vector4(color, isActive ? 0.95f : 0.90f);
+    }
+
     private Vector4 GetGizmoAxisBase(GizmoAxis axis)
         => (_appearance.Preset, axis) switch
         {

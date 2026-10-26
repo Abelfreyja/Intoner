@@ -91,8 +91,8 @@ internal sealed class LayoutApi(
             }
         });
 
-    public Guid? GetDefault()
-        => layoutManager.GetDefaultLayoutId();
+    public Guid? GetCreation()
+        => layoutManager.GetCreationLayoutId();
 
     public SavedObjectLayoutMutationResult Create(string name)
         => ToMutationResult(objectManager.CreateEmptyLayout(name));
@@ -102,19 +102,19 @@ internal sealed class LayoutApi(
             ? InvalidRequest("layout save request is invalid")
             : ToMutationResult(objectManager.SaveCurrentObjectsAsLayout(request.Name, request.ExpectedPersistentRevision));
 
-    public SavedObjectLayoutMutationResult SetDefault(SavedObjectLayoutSetDefaultRequest? request)
+    public SavedObjectLayoutMutationResult SetEnabled(SavedObjectLayoutSetEnabledRequest? request)
         => request is null || request.LayoutId == Guid.Empty
-            ? InvalidRequest("set default layout request is invalid")
-            : ToMutationResult(objectManager.SelectLayout(
+            ? InvalidRequest("layout membership request is invalid")
+            : ToMutationResult(objectManager.SetLayoutEnabled(
                 request.LayoutId,
+                request.Enabled,
                 request.ExpectedPersistentRevision,
                 request.ExpectedLayoutRevision));
 
-    public SavedObjectLayoutMutationResult ClearDefault(long expectedPersistentRevision)
-        => ToMutationResult(objectManager.SelectLayout(
-            null,
-            expectedPersistentRevision,
-            expectedLayoutRevision: null));
+    public SavedObjectLayoutMutationResult SetCreation(CreationLayoutRequest? request)
+        => request is null || request.LayoutId == Guid.Empty
+            ? InvalidRequest("creation layout request is invalid")
+            : ToMutationResult(objectManager.SetCreationLayout(request.LayoutId, request.ExpectedPersistentRevision));
 
     public SavedObjectLayoutMutationResult Delete(SavedObjectLayoutDeleteRequest? request)
         => request is null || request.LayoutId == Guid.Empty
@@ -357,7 +357,7 @@ internal sealed class SceneApi(
         => new(
             sceneView.GetSceneRevision(),
             sceneView.GetPersistentSceneRevision(),
-            layoutManager.GetDefaultLayoutId(),
+            layoutManager.GetCreationLayoutId(),
             sceneView.GetStandaloneObjectSnapshots().Select(ObjectApiMapper.ToWorldObject).ToList(),
             layoutManager.GetLoadedLayouts().Select(ObjectApiMapper.ToLoadedLayout).ToList(),
             sceneView.GetRuntimeStateSnapshots().Select(ObjectApiMapper.ToRuntimeState).ToList(),
@@ -391,16 +391,26 @@ internal sealed class PersistentSceneApi(
     public PersistentObjectSceneMutationResult Apply(PersistentObjectSceneApplyRequest? dto)
     {
         if (!ObjectApiMapper.TryToPersistentSceneUpdate(dto, out ObjectPersistentSceneUpdate update)
-            || !TrySanitizeObjects(update.StandaloneObjects, out List<ObjectSnapshot> standaloneObjects)
-            || !TrySanitizeObjects(update.DefaultLayoutObjects, out List<ObjectSnapshot> defaultLayoutObjects))
+            || !TrySanitizeObjects(update.StandaloneObjects, out List<ObjectSnapshot> standaloneObjects))
         {
             return Failure(ObjectApiResultStatus.InvalidRequest, "persistent scene payload is invalid");
+        }
+
+        List<ObjectLayoutContentUpdate> layouts = [];
+        foreach (ObjectLayoutContentUpdate layout in update.Layouts)
+        {
+            if (!TrySanitizeObjects(layout.Objects, out List<ObjectSnapshot> objects))
+            {
+                return Failure(ObjectApiResultStatus.InvalidRequest, "layout payload is invalid");
+            }
+
+            layouts.Add(layout with { Objects = objects });
         }
 
         PersistentMutationResult result = objectManager.TryApplyPersistentScene(update with
         {
             StandaloneObjects = standaloneObjects,
-            DefaultLayoutObjects = defaultLayoutObjects,
+            Layouts = layouts,
         });
         ObjectRevisionSnapshot revisions = result.SceneRevision > 0
             ? new ObjectRevisionSnapshot(
@@ -418,20 +428,16 @@ internal sealed class PersistentSceneApi(
 
     private PersistentObjectSceneSnapshot CreateSnapshot()
     {
-        SavedObjectLayout? defaultLayout = null;
         ObjectFolderSceneState folderState = folderService.CaptureSceneState();
-        Guid? defaultLayoutId = layoutManager.GetDefaultLayoutId();
-        if (defaultLayoutId.HasValue && layoutManager.TryGetLayout(defaultLayoutId.Value, out ObjectLayoutSnapshot layout))
-        {
-            defaultLayout = ObjectApiMapper.ToSavedLayout(layout);
-        }
 
         return new PersistentObjectSceneSnapshot(
             sceneView.GetPersistentSceneRevision(),
-            defaultLayout,
+            layoutManager.GetEnabledLayouts().Select(ObjectApiMapper.ToSavedLayout).ToList(),
+            layoutManager.GetCreationLayoutId(),
             ObjectApiMapper.ToPersistentSet(
                 sceneView.GetStandaloneObjectSnapshots(),
-                folderState.StandaloneFolders),
+                folderState.StandaloneFolders,
+                sceneView.GetPlacedGroups().Where(static group => !group.LayoutId.HasValue).ToArray()),
             ObjectApiMapper.ToLocation(sceneView.GetCurrentLocationContext()));
     }
 
@@ -504,6 +510,7 @@ internal sealed class ObjectMutationApi(
         {
             Id = snapshot.Id == Guid.Empty ? Guid.NewGuid() : snapshot.Id,
             CreatedAtUtc = snapshot.CreatedAtUtc == default ? DateTime.UtcNow : snapshot.CreatedAtUtc,
+            LayoutId = sceneView.GetCreationLayoutId(),
         };
         if (!objectKindService.TrySanitizeSnapshot(snapshot, out snapshot))
         {
@@ -525,6 +532,16 @@ internal sealed class ObjectMutationApi(
         if (!objectKindService.TrySanitizeSnapshot(snapshot, out snapshot))
         {
             return Failure(ObjectApiResultStatus.InvalidRequest, "object payload is invalid");
+        }
+
+        if (!sceneView.TryGetPersistentSceneObjectSnapshot(snapshot.Id, out ObjectSnapshot currentSnapshot))
+        {
+            return Failure(ObjectApiResultStatus.NotFound, "object was not found");
+        }
+
+        if (currentSnapshot.LayoutId.HasValue)
+        {
+            snapshot = snapshot with { LayoutId = currentSnapshot.LayoutId };
         }
 
         return ToDto(mutationService.UpdateObjectSnapshot(snapshot, dto.ExpectedRevision));
@@ -598,14 +615,20 @@ internal sealed class ObjectMutationApi(
         out ObjectMutationResult? failure)
     {
         id = dto?.ObjectId ?? Guid.Empty;
-        if (id != Guid.Empty)
+        if (id == Guid.Empty)
         {
-            failure = null;
-            return true;
+            failure = Failure(ObjectApiResultStatus.InvalidRequest, "object id is invalid");
+            return false;
         }
 
-        failure = Failure(ObjectApiResultStatus.InvalidRequest, "object id is invalid");
-        return false;
+        if (!sceneView.TryGetPersistentSceneObjectSnapshot(id, out _))
+        {
+            failure = Failure(ObjectApiResultStatus.NotFound, "object was not found");
+            return false;
+        }
+
+        failure = null;
+        return true;
     }
 
     private static ObjectMutationResult Failure(ObjectApiResultStatus status, string message)

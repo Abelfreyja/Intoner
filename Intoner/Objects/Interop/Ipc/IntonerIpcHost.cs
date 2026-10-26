@@ -18,14 +18,15 @@ internal sealed class IntonerIpcHost : IDisposable
     private readonly IObjectSceneView _sceneView;
     private readonly ObjectApi _api;
     private readonly CallGateProviderCollection _providers;
-    private readonly EventProvider<ObjectApiStateChanged> _stateChanged;
-    private readonly EventProvider<ObjectSceneChanged> _sceneChanged;
-    private readonly EventProvider<PersistentObjectSceneChanged> _persistentSceneChanged;
-    private readonly EventProvider<SavedObjectLayoutsChanged> _savedLayoutsChanged;
+    private EventProvider<ObjectApiStateChanged> _stateChanged = null!;
+    private EventProvider<ObjectSceneChanged> _sceneChanged = null!;
+    private EventProvider<PersistentObjectSceneChanged> _persistentSceneChanged = null!;
+    private EventProvider<SavedObjectLayoutsChanged> _savedLayoutsChanged = null!;
 
     private int _pendingSceneChanged;
     private int _pendingPersistentSceneChanged;
     private int _pendingSavedLayoutsChanged;
+    private bool _started;
     private bool _subscribed;
     private int _disposed;
 
@@ -43,7 +44,18 @@ internal sealed class IntonerIpcHost : IDisposable
         _sceneView = sceneView;
         _api = api;
         _providers = new CallGateProviderCollection(pluginInterface, logger);
+    }
 
+    public void Start()
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+
+        if (_started)
+        {
+            return;
+        }
+
+        _started = true;
         try
         {
             _stateChanged = _providers.Register(ObjectIpcEndpoints.Events.StateChanged);
@@ -61,6 +73,7 @@ internal sealed class IntonerIpcHost : IDisposable
         }
         catch
         {
+            Interlocked.Exchange(ref _disposed, 1);
             Unsubscribe();
             _providers.Dispose();
             throw;
@@ -74,11 +87,24 @@ internal sealed class IntonerIpcHost : IDisposable
             return;
         }
 
-        ObjectApiInfo disposingInfo = _api.PluginState.BeginDisposing();
-        Unsubscribe();
-        _stateChanged.Publish(new ObjectApiStateChanged(disposingInfo));
-        _providers.Dispose();
-        _logger.LogInformation("Unregistered Intoner API providers");
+        try
+        {
+            if (_started)
+            {
+                ObjectApiInfo disposingInfo = _api.PluginState.BeginDisposing();
+                Unsubscribe();
+                _stateChanged.Publish(new ObjectApiStateChanged(disposingInfo));
+            }
+        }
+        finally
+        {
+            _providers.Dispose();
+        }
+
+        if (_started)
+        {
+            _logger.LogInformation("Unregistered Intoner API providers");
+        }
     }
 
     private void RegisterEndpoints()
@@ -87,11 +113,11 @@ internal sealed class IntonerIpcHost : IDisposable
 
         _providers.Register(ObjectIpcEndpoints.Layouts.GetAll, _api.Layouts.GetAll);
         _providers.Register(ObjectIpcEndpoints.Layouts.Get, _api.Layouts.Get);
-        _providers.Register(ObjectIpcEndpoints.Layouts.GetDefault, _api.Layouts.GetDefault);
+        _providers.Register(ObjectIpcEndpoints.Layouts.GetCreation, _api.Layouts.GetCreation);
         _providers.RegisterOnFramework(ObjectIpcEndpoints.Layouts.Create, _framework, _api.Layouts.Create);
         _providers.RegisterOnFramework(ObjectIpcEndpoints.Layouts.SaveCurrent, _framework, _api.Layouts.SaveCurrent);
-        _providers.RegisterOnFramework(ObjectIpcEndpoints.Layouts.SetDefault, _framework, _api.Layouts.SetDefault);
-        _providers.RegisterOnFramework(ObjectIpcEndpoints.Layouts.ClearDefault, _framework, _api.Layouts.ClearDefault);
+        _providers.RegisterOnFramework(ObjectIpcEndpoints.Layouts.SetEnabled, _framework, _api.Layouts.SetEnabled);
+        _providers.RegisterOnFramework(ObjectIpcEndpoints.Layouts.SetCreation, _framework, _api.Layouts.SetCreation);
         _providers.RegisterOnFramework(ObjectIpcEndpoints.Layouts.Delete, _framework, _api.Layouts.Delete);
 
         _providers.Register(

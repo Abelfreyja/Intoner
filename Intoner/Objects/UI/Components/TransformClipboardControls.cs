@@ -17,7 +17,8 @@ internal static class TransformClipboardControls
         return (edge * ButtonCount) + ImGui.GetStyle().ItemSpacing.X;
     }
 
-    public static bool Draw(IObjectClipboardService clipboard, string id, ObjectTransformPart part, Vector3 value, out Vector3 pastedValue)
+    public static bool Draw(IObjectClipboardService clipboard, string id, ObjectTransformPart part, Vector3 value, out Vector3 pastedValue,
+        bool uniformScale = false)
     {
         pastedValue = default;
 
@@ -31,10 +32,15 @@ internal static class TransformClipboardControls
 
         ImGui.SameLine();
 
-        bool canPaste = clipboard.TryPasteTransform(part, out Vector3 clipboardValue);
-        string pasteTooltip = canPaste
-            ? $"Paste {label}"
-            : $"Clipboard does not contain {label}";
+        bool hasTransform = clipboard.TryPasteTransform(part, out Vector3 clipboardValue);
+        bool canPaste = hasTransform && (!uniformScale || clipboardValue == new Vector3(clipboardValue.X));
+        string pasteTooltip = canPaste ? $"Paste {label}" : "Group scaling requires equal X, Y, and Z values.";
+
+        if (!hasTransform)
+        {
+            pasteTooltip = $"Clipboard does not contain {label}";
+        }
+
         if (EditorIconButton.DrawCompact($"{id}_paste", FontAwesomeIcon.FileImport, pasteTooltip, accent, canPaste))
         {
             pastedValue = clipboardValue;

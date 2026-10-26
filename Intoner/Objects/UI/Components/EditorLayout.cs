@@ -40,6 +40,9 @@ internal static class EditorLayout
     public static Vector2 ScaledVector(float x, float y)
         => new(Scaled(x), Scaled(y));
 
+    public static float CenterY(float top, float height, float contentHeight)
+        => top + MathF.Max(0f, (height - contentHeight) * 0.5f);
+
     public static float Positive(float value)
         => MathF.Max(1f, value);
 

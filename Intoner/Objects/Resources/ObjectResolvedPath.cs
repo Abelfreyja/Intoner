@@ -36,47 +36,53 @@ internal readonly record struct ObjectResolvedPath
             : Path;
 
     public static ObjectResolvedPath FromGamePath(string path)
-        => new(ObjectResolvedPathKind.GamePath, GameAssetPathRules.NormalizeGamePath(path));
+    {
+        if (System.IO.Path.IsPathFullyQualified(TextUtility.TrimOrEmpty(path)))
+        {
+            return new(ObjectResolvedPathKind.GamePath, string.Empty);
+        }
+
+        string normalizedPath = GameAssetPathRules.NormalizeGamePath(path);
+        return new(ObjectResolvedPathKind.GamePath,
+            ObjectScopedResourcePathUtility.IsObjectScopedPath(normalizedPath)
+             || ObjectScopedResourcePathUtility.IsForeignScopedPath(normalizedPath)
+             || ObjectMemoryResourcePathUtility.IsMemoryResourcePath(normalizedPath)
+             || ObjectLocalFilePathUtility.IsLocalFilePath(normalizedPath)
+             || !ObjectResourcePathEncoding.TryGetGamePathByteCount(normalizedPath, out _)
+                ? string.Empty : normalizedPath);
+    }
 
     public static ObjectResolvedPath FromLocalFile(string path)
-        => new(ObjectResolvedPathKind.LocalFile, ObjectLocalFilePathUtility.NormalizeLocalFilePath(path));
+        => new(ObjectResolvedPathKind.LocalFile,
+            ObjectLocalFilePathUtility.IsLocalFilePath(path)
+                ? ObjectScopedResourcePathUtility.Create(0, path)
+                : string.Empty);
 
     public static ObjectResolvedPath FromMemory(string path)
         => new(ObjectResolvedPathKind.Memory, ObjectMemoryResourcePathUtility.Normalize(path));
 
     public static bool TryCreate(string path, out ObjectResolvedPath resolvedPath)
     {
-        if (ObjectMemoryResourcePathUtility.IsMemoryResourcePath(path))
+        resolvedPath = default;
+        string normalizedPath = ObjectScopedResourcePathUtility.Create(0, path);
+
+        if (normalizedPath.Length == 0)
         {
-            if (!ObjectMemoryResourcePathUtility.TryParse(path, out ObjectMemoryResourcePath memoryPath))
-            {
-                resolvedPath = default;
-                return false;
-            }
-
-            resolvedPath = new ObjectResolvedPath(ObjectResolvedPathKind.Memory, memoryPath.Path);
-            return true;
-        }
-
-        if (ObjectLocalFilePathUtility.IsLocalFilePath(path))
-        {
-            if (!ObjectLocalFilePathUtility.TryNormalizeLocalFilePath(path, out string normalizedLocalFilePath))
-            {
-                resolvedPath = default;
-                return false;
-            }
-
-            resolvedPath = new ObjectResolvedPath(ObjectResolvedPathKind.LocalFile, normalizedLocalFilePath);
-            return true;
-        }
-
-        if (!GameAssetPathRules.TryNormalizeGamePath(path, out string normalizedGamePath))
-        {
-            resolvedPath = default;
             return false;
         }
 
-        resolvedPath = new ObjectResolvedPath(ObjectResolvedPathKind.GamePath, normalizedGamePath);
+        ObjectResolvedPathKind kind = ObjectResolvedPathKind.GamePath;
+
+        if (ObjectMemoryResourcePathUtility.IsMemoryResourcePath(normalizedPath))
+        {
+            kind = ObjectResolvedPathKind.Memory;
+        }
+        else if (ObjectLocalFilePathUtility.IsLocalFilePath(normalizedPath))
+        {
+            kind = ObjectResolvedPathKind.LocalFile;
+        }
+
+        resolvedPath = new ObjectResolvedPath(kind, normalizedPath);
         return true;
     }
 }
@@ -86,7 +92,7 @@ internal readonly record struct ObjectPathRedirection
 {
     public ObjectPathRedirection(string requestedPath, ObjectResolvedPath resolvedPath)
     {
-        RequestedPath = GameAssetPathRules.NormalizeGamePath(requestedPath);
+        RequestedPath = ObjectResolvedPath.FromGamePath(requestedPath).Path;
         ResolvedPath = resolvedPath;
     }
 
@@ -97,18 +103,27 @@ internal readonly record struct ObjectPathRedirection
 /// <summary> object resource helpers for tracked paths, existence checks, and redirect validation </summary>
 internal static class ObjectResourcePathUtility
 {
-    public static string NormalizeTrackedPath(string path)
+    /// <summary> recognizes set private path prefixes even when the identity is malformed </summary>
+    public static bool IsOwnedResourcePath(string path)
+        => ObjectScopedResourcePathUtility.IsObjectScopedPath(path)
+            || ObjectMemoryResourcePathUtility.IsMemoryResourcePath(path);
+
+    /// <summary> admits game paths before checking their supported object resource kind </summary>
+    public static bool TryNormalizeSupportedGamePath(string path, out string normalizedPath)
     {
-        string unscopedPath = ObjectScopedResourcePathUtility.Strip(path);
-        if (ObjectMemoryResourcePathUtility.IsMemoryResourcePath(unscopedPath))
+        normalizedPath = ObjectResolvedPath.FromGamePath(path).Path;
+
+        if (ObjectAssetPathRules.IsSupportedResourcePath(normalizedPath))
         {
-            return ObjectMemoryResourcePathUtility.Normalize(unscopedPath);
+            return true;
         }
 
-        return ObjectLocalFilePathUtility.IsLocalFilePath(unscopedPath)
-            ? ObjectLocalFilePathUtility.NormalizeLocalFilePath(unscopedPath)
-            : GameAssetPathRules.NormalizeGamePath(unscopedPath);
+        normalizedPath = string.Empty;
+        return false;
     }
+
+    public static string NormalizeTrackedPath(string path)
+        => ObjectScopedResourcePathUtility.Create(0, ObjectScopedResourcePathUtility.Strip(path));
 
     public static bool TryNormalizeTrackedPath(string path, out string normalizedPath)
     {
@@ -130,8 +145,9 @@ internal static class ObjectResourcePathUtility
 
     public static bool IsSupportedRedirection(string requestedPath, ObjectResolvedPath resolvedPath)
     {
-        return GameAssetPathRules.TryNormalizeGamePath(requestedPath, out string normalizedRequestedPath)
-            && resolvedPath.Path.Length > 0
+        string normalizedRequestedPath = ObjectResolvedPath.FromGamePath(requestedPath).Path;
+        return normalizedRequestedPath.Length > 0
+            && !string.IsNullOrEmpty(resolvedPath.Path)
             && HasCompatibleResourceKind(normalizedRequestedPath, resolvedPath);
     }
 
@@ -151,5 +167,3 @@ internal static class ObjectResourcePathUtility
         return requestedKind == ObjectAssetPathRules.ClassifyResourcePath(resolvedPath.ResourceGamePath);
     }
 }
-
-

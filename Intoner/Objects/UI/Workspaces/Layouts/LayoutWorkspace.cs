@@ -1,91 +1,91 @@
 using Dalamud.Bindings.ImGui;
-using Dalamud.Interface.Utility.Raii;
-using Dalamud.Interface.Utility;
 using Dalamud.Interface;
+using Dalamud.Interface.Utility;
+using Dalamud.Interface.Utility.Raii;
 using Intoner.Objects.Api;
 using Intoner.Objects.Models;
 using Intoner.Objects.Runtime;
 using Intoner.Objects.UI.Components;
 using Intoner.Objects.UI.Services;
 using Intoner.Objects.Utils;
-using Intoner.Services.Loading;
-using Intoner.UI.Performance;
 using Intoner.UI;
-using Microsoft.Extensions.Logging;
+using Intoner.UI.Performance;
 using System.Numerics;
 using static Intoner.Objects.UI.Components.EditorCard;
 
 namespace Intoner.Objects.UI;
 
-internal sealed class LayoutWorkspace : IAsyncDisposable
+internal sealed class LayoutWorkspace
 {
-    private readonly ILogger<LayoutWorkspace> _logger;
     private readonly IObjectLayoutManager _layoutManager;
-    private readonly IObjectLayoutFileService _objectLayoutFileService;
-    private readonly IObjectManager _objectManager;
-    private readonly UiSharedService _uiSharedService;
-    private readonly EditorInteraction _interaction;
-    private readonly EditorListCard _listCard;
-    private readonly EditorOverlayLayer _editorOverlayLayer;
-    private readonly BackgroundOperation<ObjectLayoutTransferResult> _layoutFileOperation;
-    private string _layoutFileDialogDirectory = string.Empty;
-    private string _layoutStatusMessage = string.Empty;
+    private readonly LayoutActions        _actions;
+    private readonly EditorInteraction    _interaction;
+    private readonly EditorListCard       _listCard;
+    private readonly EditorOverlayLayer   _editorOverlayLayer;
+    private readonly EditorColumnPanel    _columnPanel;
     private string _layoutName = string.Empty;
-    private bool _layoutStatusIsError;
-    private const int LayoutNameMaxLength = 128;
+    private string _layoutFilter = string.Empty;
+    private (IReadOnlyList<ObjectLayoutSnapshot> Source, string Filter, IReadOnlyList<ObjectLayoutSnapshot> Matches)? _layoutSearch;
     private const string LayoutMenuPopupId = "##layoutMenu";
     private const string LayoutCreationTitle = "Create Layout";
     private const string LayoutCreationDescription = "Save the objects currently placed in the scene as a new layout.";
     private const float LayoutCreationTopSpacing = 2f;
     private const float LayoutCreationHeaderSpacing = 2f;
 
-    public Guid? SelectedLayoutId { get; set; }
+    public Guid? SelectedLayoutId
+    {
+        get => _actions.SelectedLayoutId;
+        set => _actions.SelectedLayoutId = value;
+    }
 
     public LayoutWorkspace(
-        ILogger<LayoutWorkspace> logger,
         IObjectLayoutManager layoutManager,
-        IObjectLayoutFileService objectLayoutFileService,
-        IObjectManager objectManager,
-        UiSharedService uiSharedService,
+        LayoutActions actions,
         EditorInteraction interaction,
         EditorListCard listCard,
-        EditorOverlayLayer editorOverlayLayer)
+        EditorOverlayLayer editorOverlayLayer,
+        EditorColumnPanel columnPanel)
     {
-        _logger                  = logger;
-        _layoutManager           = layoutManager;
-        _objectLayoutFileService = objectLayoutFileService;
-        _objectManager           = objectManager;
-        _uiSharedService         = uiSharedService;
-        _interaction             = interaction;
-        _listCard                = listCard;
-        _editorOverlayLayer      = editorOverlayLayer;
-        _layoutFileOperation     = new BackgroundOperation<ObjectLayoutTransferResult>(logger);
+        _layoutManager      = layoutManager;
+        _actions            = actions;
+        _interaction        = interaction;
+        _listCard           = listCard;
+        _editorOverlayLayer = editorOverlayLayer;
+        _columnPanel        = columnPanel;
     }
 
     public void RefreshContext(IReadOnlyList<ObjectLayoutSnapshot> layouts)
+        => _actions.RefreshContext(layouts);
+
+    internal void DrawLayoutListPanel(IReadOnlyList<ObjectLayoutSnapshot> layouts, Guid? creationLayoutId)
     {
-        if (SelectedLayoutId is { } selectedId && layouts.All(layout => layout.Id != selectedId))
-        {
-            SelectedLayoutId = null;
-        }
-
-        CompleteLayoutFileOperation();
-    }
-
-    public ValueTask DisposeAsync()
-        => _layoutFileOperation.DisposeAsync();
-
-    internal void DrawLayoutListPanel(IReadOnlyList<ObjectLayoutSnapshot> layouts, Guid? defaultLayoutId)
-    {
-        DrawLayoutListHero(layouts, defaultLayoutId);
-        DrawLayoutListCard(layouts, defaultLayoutId);
+        ObjectLayoutSnapshot? selectedLayout = SelectedLayoutId.HasValue
+            ? layouts.FirstOrDefault(layout => layout.Id == SelectedLayoutId.Value)
+            : null;
+        IReadOnlyList<EditorBadge> badges = BuildLayoutListBadges(layouts, selectedLayout, creationLayoutId);
+        _columnPanel.DrawPanel(
+            "layouts", FontAwesomeIcon.Folder, "Layouts", string.Empty, ThemeColors.AccentPrimary,
+            EditorLayout.Positive(ImGui.GetContentRegionAvail().X), EditorLayout.ResolveRemainingRegionHeight(),
+            header =>
+            {
+                float edge = EditorLayout.Scaled(30f);
+                float right = header.Max.X - (header.Height - edge) * 0.5f;
+                float left = right - EditorLayout.ResolveActionStripWidth(edge, 2);
+                float textRight = EditorColumnPanel.DrawHeaderBadges(header, "Layouts", badges, left, [badges[0]]);
+                ImGui.SetCursorScreenPos(new Vector2(left, header.Min.Y + (header.Height - edge) * 0.5f));
+                DrawLayoutHeaderActions(selectedLayout, edge);
+                return textRight;
+            },
+            contentHeight => DrawLayoutList(layouts, creationLayoutId, contentHeight),
+            DrawLayoutNavigation,
+            contentHorizontalInset: EditorLayout.Scaled(4f));
     }
 
     internal void DrawLayoutInspectorPanel(
         IReadOnlyList<ObjectSnapshot> objects,
         IReadOnlyList<ObjectSnapshot> activeObjects,
         IReadOnlyList<ObjectLayoutSnapshot> layouts,
-        Guid? defaultLayoutId)
+        Guid? creationLayoutId)
     {
         ObjectLayoutSnapshot? selectedLayout = SelectedLayoutId.HasValue
             ? layouts.FirstOrDefault(layout => layout.Id == SelectedLayoutId.Value)
@@ -103,111 +103,93 @@ internal sealed class LayoutWorkspace : IAsyncDisposable
             panelHeight,
             () => DrawLayoutInspectorContent(
                 selectedLayout,
-                defaultLayoutId,
+                creationLayoutId,
                 objects.Count,
                 objects.Count(static snapshot => !snapshot.LayoutId.HasValue),
                 activeObjects,
                 contentHeight));
     }
 
-    private void DrawLayoutListHero(IReadOnlyList<ObjectLayoutSnapshot> layouts, Guid? defaultLayoutId)
+    private float DrawLayoutNavigation(float width)
     {
-        var selectedLayout = SelectedLayoutId.HasValue
-            ? layouts.FirstOrDefault(layout => layout.Id == SelectedLayoutId.Value)
-            : null;
-        float actionButtonEdge = EditorIconButton.MeasureMaxEdge(FontAwesomeIcon.EllipsisH, FontAwesomeIcon.Trash);
-        float actionWidth = EditorLayout.ResolveActionStripWidth(actionButtonEdge, 2);
+        Vector2 start = ImGui.GetCursorScreenPos();
+        float inset = EditorLayout.Scaled(8f);
+        float gap = EditorLayout.Scaled(4f);
+        ImGui.SetCursorScreenPos(start + new Vector2(inset));
+        _ = EditorSearchField.Draw("layoutListFilter", ref _layoutFilter,
+            new EditorSearchFieldOptions("Search layouts", ThemeColors.AccentPrimary,
+                MaxLength: EditorColumnPanel.FilterMaxLength, Width: MathF.Max(1f, width - inset * 2f)));
+        float bottom = start.Y + inset + EditorSearchField.Height + gap;
 
-        EditorCard.DrawPanelCard(
-            "layout-list-hero",
-            ThemeColors.ButtonDefault with { W = 0.30f },
-            ThemeColors.AccentPrimary with { W = 0.24f },
-            EditorLayout.Scaled(8f),
-            EditorLayout.ResolveObjectListCardPadding(),
-            () =>
-            {
-                DrawCardHeader(
-                    "layoutListHeroHeader",
-                    FontAwesomeIcon.Folder,
-                    "Layouts",
-                    BuildLayoutListBadges(layouts, selectedLayout, defaultLayoutId),
-                    ThemeColors.AccentPrimary,
-                    () => DrawLayoutHeaderActions(selectedLayout, defaultLayoutId, actionButtonEdge),
-                    actionWidth,
-                    drawAfterBadges: DrawLayoutStatus);
-            });
+        if (!string.IsNullOrWhiteSpace(_actions.StatusMessage))
+        {
+            ImGui.SetCursorScreenPos(new Vector2(start.X + inset, bottom));
+            DrawLayoutStatus();
+            bottom = ImGui.GetCursorScreenPos().Y + gap;
+        }
+
+        return bottom - start.Y;
     }
 
-    private void DrawLayoutListCard(IReadOnlyList<ObjectLayoutSnapshot> layouts, Guid? defaultLayoutId)
+    private void DrawLayoutList(IReadOnlyList<ObjectLayoutSnapshot> layouts, Guid? creationLayoutId, float height)
     {
-        var padding = EditorLayout.ResolveObjectListCardPadding();
-        var itemSpacingY = EditorLayout.ResolveObjectListItemSpacingY();
-        float panelHeight = EditorLayout.ResolveRemainingRegionHeight();
-        float innerHeight = EditorLayout.Positive(panelHeight - (padding.Y * 2f) - (ImGui.GetStyle().ItemSpacing.Y * 2f));
-        var background = ThemeColors.ButtonDefault with { W = 0.24f };
-        var rounding = EditorLayout.Scaled(8f);
+        string filter = _layoutFilter.Trim();
 
-        DrawFixedPanelCard(
-            "layout-list-card",
-            background,
-            ThemeColors.AccentPrimary with { W = 0.18f },
-            rounding,
-            padding,
-            panelHeight,
-            () =>
-            {
-                if (layouts.Count == 0)
-                {
-                    EditorEmptyState.Draw("No layouts have been saved yet.", innerHeight);
-                    return;
-                }
+        if (_layoutSearch is not { } cached || !ReferenceEquals(cached.Source, layouts)
+            || !string.Equals(cached.Filter, filter, StringComparison.OrdinalIgnoreCase))
+        {
+            _layoutSearch = (layouts, filter, filter.Length == 0
+                ? layouts
+                : layouts.Where(layout => layout.Name.Contains(filter, StringComparison.OrdinalIgnoreCase)).ToArray());
+        }
 
-                using var childBg = ImRaii.PushColor(ImGuiCol.ChildBg, Vector4.Zero);
-                using var child = EditorScrollList.Begin(
-                    "##layoutEntries",
-                    new Vector2(0f, innerHeight),
-                    _editorOverlayLayer.CreateScrollPanelOptions(background, rounding, ThemeColors.AccentPrimary));
-                if (!child)
-                {
-                    return;
-                }
+        IReadOnlyList<ObjectLayoutSnapshot> visibleLayouts = _layoutSearch.Value.Matches;
 
-                ImGui.Dummy(new Vector2(0f, itemSpacingY));
+        if (visibleLayouts.Count == 0)
+        {
+            EditorEmptyState.Draw(layouts.Count == 0
+                ? "No layouts have been saved yet."
+                : "No layouts match your search.", height);
+            return;
+        }
 
-                var itemHeight = EditorLayout.ResolveObjectListEntryHeight();
-                UiVirtualList.Draw(
-                    layouts,
-                    UiVirtualListOptions.Rows(itemHeight, itemSpacingY),
-                    (layout, _) => DrawLayoutListEntry(layout, defaultLayoutId, itemHeight));
-            });
+        float itemSpacingY = EditorLayout.ResolveObjectListItemSpacingY();
+        ImGui.Dummy(new Vector2(0f, itemSpacingY));
+        float itemHeight = EditorLayout.ResolveObjectListEntryHeight();
+        UiVirtualList.Draw(
+            visibleLayouts,
+            UiVirtualListOptions.Rows(itemHeight, itemSpacingY),
+            (layout, _) => DrawLayoutListEntry(layout, creationLayoutId, itemHeight));
     }
 
-    private void DrawLayoutListEntry(ObjectLayoutSnapshot layout, Guid? defaultLayoutId, float itemHeight)
+    private void DrawLayoutListEntry(ObjectLayoutSnapshot layout, Guid? creationLayoutId, float itemHeight)
     {
         var isSelected = SelectedLayoutId == layout.Id;
-        var isDefault = defaultLayoutId == layout.Id;
+        var isCreation = creationLayoutId == layout.Id;
         if (_listCard.Draw(
             $"layoutEntry:{layout.Id}",
             layout.Name,
-            BuildLayoutEntryBadges(layout, isDefault),
+            BuildLayoutEntryBadges(layout, isCreation),
             isSelected,
             ThemeColors.AccentPrimary,
             itemHeight,
-            () => DrawLayoutListEntryContextMenu(layout, defaultLayoutId),
+            () => DrawLayoutListEntryContextMenu(layout),
             panelBadgeSurface: true))
         {
             SelectedLayoutId = isSelected ? null : layout.Id;
         }
     }
 
-    private void DrawLayoutListEntryContextMenu(ObjectLayoutSnapshot layout, Guid? defaultLayoutId)
+    private void DrawLayoutListEntryContextMenu(ObjectLayoutSnapshot layout)
     {
-        bool isDefault = defaultLayoutId == layout.Id;
-        if (EditorContextMenu.DrawItem(
-                isDefault ? FontAwesomeIcon.Ban : FontAwesomeIcon.Star,
-                isDefault ? "Clear Default Layout" : "Use as Default Layout"))
+        bool enabled = _layoutManager.IsLayoutEnabled(layout.Id);
+        SceneSelectionMenu.DrawChildren(_interaction, enabled ? layout.Objects : []);
+        EditorContextMenu.DrawSeparator();
+
+        if (EditorContextMenu.DrawItem(enabled ? FontAwesomeIcon.ToggleOn : FontAwesomeIcon.ToggleOff,
+                enabled ? "Disable Layout" : "Enable Layout"))
         {
-            SetDefaultLayoutFromEditor(isDefault ? null : layout.Id);
+            _actions.SetEnabled(layout.Id, !enabled);
         }
 
         if (DrawLayoutFileMenu(
@@ -216,27 +198,28 @@ internal sealed class LayoutWorkspace : IAsyncDisposable
                 "Export Layout",
                 enabled: true) is { } fileKind)
         {
-            BeginLayoutExportDialog(layout, fileKind);
+            _actions.Export(layout, fileKind);
         }
 
         if (EditorContextMenu.DrawItem(FontAwesomeIcon.Edit, "Rename Layout"))
         {
-            OpenRenameLayoutDialog(layout);
+            _actions.Rename(layout);
         }
 
+        DrawPlacementDestinationMenu(layout);
         EditorContextMenu.DrawSeparator();
         if (EditorContextMenu.DrawItem(
                 FontAwesomeIcon.Trash,
                 "Delete Layout",
                 color: ThemeColors.DimRed))
         {
-            OpenDeleteLayoutDialog(layout);
+            _actions.Delete(layout);
         }
     }
 
     private void DrawLayoutInspectorContent(
         ObjectLayoutSnapshot? selectedLayout,
-        Guid? defaultLayoutId,
+        Guid? creationLayoutId,
         int objectCount,
         int unassignedCount,
         IReadOnlyList<ObjectSnapshot> activeObjects,
@@ -255,7 +238,7 @@ internal sealed class LayoutWorkspace : IAsyncDisposable
         float creationHeight = MeasureLayoutCreationRegionHeight(ImGui.GetContentRegionAvail().X);
         float usedHeight = ImGui.GetCursorPosY() - contentStartY;
         float detailsHeight = EditorLayout.Positive(contentHeight - usedHeight - creationHeight - ImGui.GetStyle().ItemSpacing.Y);
-        DrawLayoutDetailsRegion(selectedLayout, defaultLayoutId, activeObjects, detailsHeight);
+        DrawLayoutDetailsRegion(selectedLayout, creationLayoutId, activeObjects, detailsHeight);
 
         ImGui.Separator();
         ImGuiHelpers.ScaledDummy(LayoutCreationTopSpacing);
@@ -264,7 +247,7 @@ internal sealed class LayoutWorkspace : IAsyncDisposable
 
     private void DrawLayoutDetailsRegion(
         ObjectLayoutSnapshot? selectedLayout,
-        Guid? defaultLayoutId,
+        Guid? creationLayoutId,
         IReadOnlyList<ObjectSnapshot> activeObjects,
         float height)
     {
@@ -279,6 +262,8 @@ internal sealed class LayoutWorkspace : IAsyncDisposable
             return;
         }
 
+        _editorOverlayLayer.CaptureCurrentWindow();
+
         if (selectedLayout is null)
         {
             EditorEmptyState.Draw(
@@ -287,23 +272,23 @@ internal sealed class LayoutWorkspace : IAsyncDisposable
             return;
         }
 
-        bool isDefault = defaultLayoutId == selectedLayout.Id;
-        DrawSelectedLayoutSummary(selectedLayout, isDefault);
+        bool isCreation = creationLayoutId == selectedLayout.Id;
+        DrawSelectedLayoutSummary(selectedLayout, isCreation);
         ImGui.Separator();
         DrawSelectedLayoutMetrics(selectedLayout, activeObjects);
-        DrawDefaultLayoutNote();
     }
 
-    private void DrawSelectedLayoutSummary(ObjectLayoutSnapshot layout, bool isDefault)
+    private void DrawSelectedLayoutSummary(ObjectLayoutSnapshot layout, bool isCreation)
     {
-        FontAwesomeIcon actionIcon = isDefault ? FontAwesomeIcon.Ban : FontAwesomeIcon.Star;
-        string actionLabel = isDefault ? "Unset" : "Set as Default";
-        string actionTooltip = isDefault
-            ? "Stop using this layout as the default."
-            : "Load this layout automatically and assign new objects to it.";
-        Vector4 accent = isDefault ? ThemeColors.AccentYellow : ThemeColors.AccentPrimary;
+        bool enabled = _layoutManager.IsLayoutEnabled(layout.Id);
+        FontAwesomeIcon actionIcon = enabled ? FontAwesomeIcon.Ban : FontAwesomeIcon.Star;
+        string actionLabel = enabled ? "Unset" : "Set";
+        string actionTooltip = enabled
+            ? "Unload this layout without changing other enabled layouts."
+            : "Load this layout alongside other enabled layouts.";
+        Vector4 accent = enabled ? ThemeColors.AccentYellow : ThemeColors.AccentPrimary;
         float actionWidth = MathF.Max(
-            EditorButton.MeasureWidth(FontAwesomeIcon.Star, "Set as Default"),
+            EditorButton.MeasureWidth(FontAwesomeIcon.Star, "Set"),
             EditorButton.MeasureWidth(FontAwesomeIcon.Ban, "Unset"));
         float actionHeight = EditorButton.Height;
         float paddingX = EditorLayout.Scaled(10f);
@@ -311,7 +296,11 @@ internal sealed class LayoutWorkspace : IAsyncDisposable
         float width = EditorLayout.Positive(ImGui.GetContentRegionAvail().X);
         float contentWidth = EditorLayout.Positive(width - (paddingX * 2f));
         float textWidth = EditorLayout.Positive(contentWidth - actionWidth - ImGui.GetStyle().ItemSpacing.X);
-        string subtitle = isDefault ? "Currently used as the default layout" : "Not currently used as the default";
+        string subtitle = enabled ? "Enabled" : "Disabled";
+        if (enabled && isCreation)
+        {
+            subtitle = "Enabled / New Objects";
+        }
         EditorIconTextOptions textOptions = new() { WrapTitle = true, WrapSubtitle = true };
         float textHeight = EditorIconText.MeasureHeight(
             FontAwesomeIcon.Folder,
@@ -341,32 +330,27 @@ internal sealed class LayoutWorkspace : IAsyncDisposable
                  | ImGuiTableFlags.NoPadInnerX
                  | ImGuiTableFlags.NoPadOuterX
                  | ImGuiTableFlags.NoSavedSettings,
-                new Vector2(contentWidth, contentHeight)))
+                   new Vector2(contentWidth, contentHeight)))
         {
             if (table)
             {
                 ImGui.TableSetupColumn("Layout", ImGuiTableColumnFlags.WidthStretch);
-                ImGui.TableSetupColumn("Default", ImGuiTableColumnFlags.WidthFixed, actionWidth);
+                ImGui.TableSetupColumn("Enabled", ImGuiTableColumnFlags.WidthFixed, actionWidth);
                 ImGui.TableNextRow(ImGuiTableRowFlags.None, contentHeight);
                 ImGui.TableNextColumn();
-                EditorIconText.Draw(
-                    FontAwesomeIcon.Folder,
-                    layout.Name,
-                    subtitle,
-                    accent,
-                    textOptions);
+                EditorIconText.Draw(FontAwesomeIcon.Folder, layout.Name, subtitle, accent, textOptions);
 
                 ImGui.TableNextColumn();
                 ImGui.SetCursorPosY(ImGui.GetCursorPosY() + MathF.Max(0f, (contentHeight - actionHeight) * 0.5f));
                 if (EditorButton.DrawPrimary(
-                        "toggleDefaultLayout",
+                        "toggleLayoutEnabled",
                         actionIcon,
                         actionLabel,
                         accent,
                         new Vector2(actionWidth, actionHeight),
                         tooltip: actionTooltip))
                 {
-                    SetDefaultLayoutFromEditor(isDefault ? null : layout.Id);
+                    _actions.SetEnabled(layout.Id, !enabled);
                 }
             }
         }
@@ -381,48 +365,6 @@ internal sealed class LayoutWorkspace : IAsyncDisposable
     {
         int loadedCount = activeObjects.Count(snapshot => snapshot.LayoutId == layout.Id);
         EditorBadgeRenderer.DrawInline(BuildSelectedLayoutBadges(layout, loadedCount));
-    }
-
-    private void DrawDefaultLayoutNote()
-    {
-        const string text = "The default layout loads automatically and receives newly created objects.";
-        float width = EditorLayout.Positive(ImGui.GetContentRegionAvail().X);
-        float padX = EditorLayout.Scaled(10f);
-        float padY = EditorLayout.Scaled(6f);
-        float iconEdge = EditorLayout.Scaled(16f);
-        float iconGap = EditorLayout.Scaled(8f);
-        float textWidth = EditorLayout.Positive(width - (padX * 2f) - iconEdge - iconGap);
-        float textHeight = ImGui.CalcTextSize(text, false, textWidth).Y;
-        float height = MathF.Max(iconEdge, textHeight) + (padY * 2f);
-        Vector2 min = ImGui.GetCursorScreenPos();
-        Vector2 max = min + new Vector2(width, height);
-        ImDrawListPtr drawList = ImGui.GetWindowDrawList();
-
-        _listCard.DrawFrame(
-            drawList,
-            min,
-            max,
-            ThemeColors.AccentPrimary with { W = 0.055f },
-            ThemeColors.Border with { W = 0.28f },
-            ThemeColors.AccentPrimary with { W = 0.84f },
-            EditorLayout.Scaled(6f),
-            showEdgeGlow: false);
-        Vector2 iconMin = min + new Vector2(padX, padY);
-        EditorIcon.DrawCentered(
-            drawList,
-            FontAwesomeIcon.Star,
-            iconMin,
-            iconMin + new Vector2(iconEdge),
-            ThemeColors.AccentPrimary);
-
-        ImGui.SetCursorScreenPos(new Vector2(iconMin.X + iconEdge + iconGap, min.Y + padY));
-        using (ImRaii.PushColor(ImGuiCol.Text, ThemeColors.TextDisabled))
-        using (ImRaiiScope.TextWrapPos(ImGui.GetCursorPosX() + textWidth))
-        {
-            ImGui.TextUnformatted(text);
-        }
-
-        ImGui.SetCursorScreenPos(new Vector2(min.X, max.Y));
     }
 
     private void DrawLayoutCreationSection(int objectCount, int unassignedCount)
@@ -446,7 +388,7 @@ internal sealed class LayoutWorkspace : IAsyncDisposable
                 "##layoutName",
                 "Layout name",
                 ref _layoutName,
-                LayoutNameMaxLength,
+                LayoutActions.NameMaxLength,
                 ImGuiInputTextFlags.EnterReturnsTrue);
         }
 
@@ -460,29 +402,10 @@ internal sealed class LayoutWorkspace : IAsyncDisposable
             canCreate,
             canCreate ? null : "Enter a layout name first.");
 
-        if ((submitted || clicked) && canCreate)
+        if ((submitted || clicked) && canCreate && _actions.SaveCurrent(_layoutName))
         {
-            SaveCurrentObjectsAsLayout();
+            _layoutName = string.Empty;
         }
-    }
-
-    private void SaveCurrentObjectsAsLayout()
-    {
-        PersistentMutationResult result = _objectManager.SaveCurrentObjectsAsLayout(_layoutName);
-        if (!result.IsAccepted || !result.EntityId.HasValue)
-        {
-            SetLayoutStatus(
-                string.IsNullOrWhiteSpace(result.Message)
-                    ? "The layout could not be created."
-                    : result.Message,
-                isError: true);
-            return;
-        }
-
-        _layoutName = string.Empty;
-        SelectedLayoutId = result.EntityId.Value;
-        SetLayoutStatus(string.Empty, isError: false);
-        _interaction.SelectionChanged(_interaction.Selection.TryClear());
     }
 
     private static float MeasureLayoutCreationRegionHeight(float width)
@@ -507,31 +430,21 @@ internal sealed class LayoutWorkspace : IAsyncDisposable
 
     private void DrawLayoutHeaderActions(
         ObjectLayoutSnapshot? selectedLayout,
-        Guid? defaultLayoutId,
         float buttonEdge)
     {
-        bool open = EditorIconButton.DrawAccent(
-            "layoutMenu",
-            FontAwesomeIcon.EllipsisH,
-            "Layout Menu",
-            ThemeColors.AccentPrimary,
-            buttonEdge);
+        bool open = EditorIconButton.DrawToggle(
+            "layoutMenu", FontAwesomeIcon.EllipsisH, new Vector2(buttonEdge), false,
+            ThemeColors.AccentPrimary, ThemeColors.AccentPrimary, "Layout Menu");
         Vector2 menuAnchor = new(ImGui.GetItemRectMin().X, ImGui.GetItemRectMax().Y);
 
         ImGui.SameLine();
-        using (ImRaii.Disabled(selectedLayout is null))
+
+        if (EditorIconButton.DrawToggle(
+                "layoutDeleteSelected", FontAwesomeIcon.Trash, new Vector2(buttonEdge), false,
+                ThemeColors.DimRed, ThemeColors.DimRed, "Delete Selected Layout", enabled: selectedLayout is not null)
+            && selectedLayout is not null)
         {
-            if (EditorIconButton.DrawAccent(
-                    "layoutDeleteSelected",
-                    FontAwesomeIcon.Trash,
-                    "Delete Selected Layout",
-                    ThemeColors.DimRed,
-                    buttonEdge,
-                    tooltipTitleColor: ThemeColors.DimRed)
-                && selectedLayout is not null)
-            {
-                OpenDeleteLayoutDialog(selectedLayout);
-            }
+            _actions.Delete(selectedLayout);
         }
 
         using EditorContextMenu.PopupScope popup = EditorContextMenu.BeginDropdown(
@@ -550,7 +463,13 @@ internal sealed class LayoutWorkspace : IAsyncDisposable
                 "Import Layout",
                 enabled: true) is { } importFileKind)
         {
-            BeginLayoutImportDialog(importFileKind);
+            _actions.Import(importFileKind);
+        }
+
+        if (EditorContextMenu.DrawItem(FontAwesomeIcon.FileImport, "Recover Layout...", enabled: !_actions.IsBusy,
+                tooltip: "Recover valid entries into a separate layout. The original file is not changed in any way."))
+        {
+            _actions.Recover();
         }
 
         if (DrawLayoutFileMenu(
@@ -561,7 +480,7 @@ internal sealed class LayoutWorkspace : IAsyncDisposable
                 "Select a layout first.") is { } exportFileKind
             && selectedLayout is not null)
         {
-            BeginLayoutExportDialog(selectedLayout, exportFileKind);
+            _actions.Export(selectedLayout, exportFileKind);
         }
 
         if (EditorContextMenu.DrawItem(
@@ -571,116 +490,38 @@ internal sealed class LayoutWorkspace : IAsyncDisposable
                 tooltip: selectedLayout is null ? "Select a layout first." : null)
             && selectedLayout is not null)
         {
-            OpenRenameLayoutDialog(selectedLayout);
+            _actions.Rename(selectedLayout);
         }
 
-        EditorContextMenu.DrawSectionLabel("Default Layout");
-        bool selectedIsDefault = selectedLayout is not null && selectedLayout.Id == defaultLayoutId;
-        if (EditorContextMenu.DrawItem(
-                FontAwesomeIcon.Star,
-                "Use Selected as Default",
-                enabled: selectedLayout is not null && !selectedIsDefault,
-                tooltip: ResolveUseSelectedLayoutTooltip(selectedLayout, selectedIsDefault)))
-        {
-            SetDefaultLayoutFromEditor(selectedLayout!.Id);
-        }
-
-        if (EditorContextMenu.DrawItem(
-                FontAwesomeIcon.Ban,
-                "Clear Default Layout",
-                enabled: defaultLayoutId.HasValue,
-                tooltip: defaultLayoutId.HasValue ? null : "No default layout is set."))
-        {
-            SetDefaultLayoutFromEditor(null);
-        }
+        DrawPlacementDestinationMenu(selectedLayout);
     }
 
-    private void SetDefaultLayoutFromEditor(Guid? layoutId)
+    private void DrawPlacementDestinationMenu(ObjectLayoutSnapshot? layout)
     {
-        PersistentMutationResult result = _objectManager.SelectLayout(layoutId);
-        if (!result.IsAccepted)
+        Guid? creationLayoutId = _layoutManager.GetCreationLayoutId();
+        bool selected = layout is not null && layout.Id == creationLayoutId;
+        string? unavailable = null;
+        if (layout is null)
+            unavailable = "Select a layout first.";
+        else if (!_layoutManager.IsLayoutEnabled(layout.Id))
+            unavailable = "Enable this layout first.";
+
+        EditorContextMenu.DrawSectionLabel("New Objects Go To");
+        if (EditorContextMenu.DrawItem(FontAwesomeIcon.MapMarkerAlt, "This Layout",
+                selected: selected, enabled: unavailable is null && !selected)
+            && layout is not null)
         {
-            SetLayoutStatus(
-                string.IsNullOrWhiteSpace(result.Message)
-                    ? "The default layout could not be changed."
-                    : result.Message,
-                isError: true);
-            return;
+            _actions.SetCreation(layout.Id);
         }
 
-        if (layoutId.HasValue)
+        if (unavailable is not null)
+            IntonerTooltip.Attach(unavailable);
+
+        if (EditorContextMenu.DrawItem(FontAwesomeIcon.Cubes, "Unassigned",
+                selected: !creationLayoutId.HasValue, enabled: creationLayoutId.HasValue, accent: ThemeColors.AccentRose))
         {
-            SelectedLayoutId = layoutId;
+            _actions.SetCreation(null);
         }
-
-        SetLayoutStatus(string.Empty, isError: false);
-        _interaction.SelectionChanged(_interaction.Selection.TryClear());
-    }
-
-    private static string? ResolveUseSelectedLayoutTooltip(
-        ObjectLayoutSnapshot? selectedLayout,
-        bool selectedIsDefault)
-    {
-        if (selectedLayout is null)
-        {
-            return "Select a layout first.";
-        }
-
-        return selectedIsDefault
-            ? "The selected layout is already the default."
-            : null;
-    }
-
-    private void OpenRenameLayoutDialog(ObjectLayoutSnapshot layout)
-    {
-        _interaction.OpenDialog(EditorDialog.Request.TextInput(
-            "layout-rename",
-            "Rename Layout",
-            "Rename Layout",
-            name => _layoutManager.TryRenameLayout(layout.Id, name)) with
-        {
-            Icon = FontAwesomeIcon.Edit,
-            InitialValue = layout.Name,
-            Placeholder = "layout name",
-            FailureMessage = "The layout could not be renamed.",
-            MaxLength = LayoutNameMaxLength,
-            Validate = static name => TextUtility.TrimOrEmpty(name).Length == 0
-                ? "Enter a layout name."
-                : null,
-        });
-    }
-
-    private void OpenDeleteLayoutDialog(ObjectLayoutSnapshot layout)
-    {
-        _interaction.OpenDialog(EditorDialog.Request.TryConfirmation(
-            "layout-delete",
-            "Delete Layout",
-            "Delete Layout",
-            () => TryDeleteLayoutFromEditor(layout.Id)) with
-        {
-            Icon = FontAwesomeIcon.Trash,
-            ConfirmIcon = FontAwesomeIcon.Trash,
-            Accent = ThemeColors.DimRed,
-            Detail = layout.Name,
-            Description = "This permanently deletes the saved layout. If it is active, its layout objects will be removed.",
-            FailureMessage = "The layout could not be deleted.",
-        });
-    }
-
-    private bool TryDeleteLayoutFromEditor(Guid layoutId)
-    {
-        if (!_objectManager.DeleteLayout(layoutId).IsAccepted)
-        {
-            return false;
-        }
-
-        if (SelectedLayoutId == layoutId)
-        {
-            SelectedLayoutId = null;
-        }
-
-        _interaction.SelectionChanged(_interaction.Selection.TryClear());
-        return true;
     }
 
     private ObjectLayoutFileKind? DrawLayoutFileMenu(
@@ -690,7 +531,7 @@ internal sealed class LayoutWorkspace : IAsyncDisposable
         bool enabled,
         string? disabledTooltip = null)
     {
-        if (_layoutFileOperation.IsBusy)
+        if (_actions.IsBusy)
         {
             enabled = false;
             disabledTooltip = "A layout import or export is already running.";
@@ -723,139 +564,33 @@ internal sealed class LayoutWorkspace : IAsyncDisposable
 
     private void DrawLayoutStatus()
     {
-        if (string.IsNullOrWhiteSpace(_layoutStatusMessage))
+        if (string.IsNullOrWhiteSpace(_actions.StatusMessage))
         {
             return;
         }
 
         using var textWrap = ImRaiiScope.TextWrapPos();
         ImGui.TextColored(
-            _layoutStatusIsError
+            _actions.StatusIsError
                 ? ThemeColors.DimRed
                 : ThemeColors.AccentGreen,
-            _layoutStatusMessage);
+            _actions.StatusMessage);
     }
 
-    private void BeginLayoutImportDialog(ObjectLayoutFileKind fileKind)
-    {
-        string dialogTitle = fileKind == ObjectLayoutFileKind.MakePlaceLayout
-            ? "Import MakePlace layout from json"
-            : "Import object layout from json";
-
-        _uiSharedService.FileDialogManager.OpenFileDialog(
-            dialogTitle,
-            ".json",
-            (success, paths) =>
-            {
-                if (!success)
-                {
-                    return;
-                }
-
-                if (paths.FirstOrDefault() is not string path || string.IsNullOrWhiteSpace(path))
-                {
-                    return;
-                }
-
-                RememberLayoutFileDialogDirectory(path);
-                if (_layoutFileOperation.TryStart(token => _objectLayoutFileService.ImportLayoutAsync(path, fileKind, token)))
-                {
-                    SetLayoutStatus("Importing layout...", isError: false);
-                }
-            },
-            1,
-            ResolveLayoutFileDialogDirectory());
-    }
-
-    private void BeginLayoutExportDialog(ObjectLayoutSnapshot layout, ObjectLayoutFileKind fileKind)
-    {
-        string defaultFileName = ObjectLayoutFileUtility.BuildExportFileName(layout.Name);
-        string dialogTitle = fileKind == ObjectLayoutFileKind.MakePlaceLayout
-            ? "Export MakePlace layout to json"
-            : "Export layout to json";
-        _uiSharedService.FileDialogManager.SaveFileDialog(
-            dialogTitle,
-            ".json",
-            defaultFileName,
-            ".json",
-            (success, path) =>
-            {
-                if (!success || string.IsNullOrWhiteSpace(path))
-                {
-                    return;
-                }
-
-                RememberLayoutFileDialogDirectory(path);
-                if (_layoutFileOperation.TryStart(token => _objectLayoutFileService.ExportLayoutAsync(layout, path, fileKind, token)))
-                {
-                    SetLayoutStatus("Exporting layout...", isError: false);
-                }
-            },
-            ResolveLayoutFileDialogDirectory());
-    }
-
-    private void CompleteLayoutFileOperation()
-    {
-        if (!_layoutFileOperation.TryTakeCompleted(out Task<ObjectLayoutTransferResult>? task))
-        {
-            return;
-        }
-
-        try
-        {
-            ObjectLayoutTransferResult result = task.GetAwaiter().GetResult();
-            if (result.Success && result.Layout is { } layout)
-            {
-                SelectedLayoutId = layout.Id;
-                _interaction.SelectionChanged(_interaction.Selection.TryClear());
-            }
-
-            SetLayoutStatus(result.Message, isError: !result.Success);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Layout file operation failed");
-            SetLayoutStatus("The layout file operation failed.", isError: true);
-        }
-    }
-
-    private void SetLayoutStatus(string? message, bool isError)
-    {
-        _layoutStatusMessage = TextUtility.TrimOrEmpty(message);
-        _layoutStatusIsError = isError;
-    }
-
-    private string? ResolveLayoutFileDialogDirectory()
-    {
-        if (Directory.Exists(_layoutFileDialogDirectory))
-        {
-            return _layoutFileDialogDirectory;
-        }
-
-        var documentsDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-        return Directory.Exists(documentsDirectory)
-            ? documentsDirectory
-            : null;
-    }
-
-    private void RememberLayoutFileDialogDirectory(string path)
-    {
-        var directory = Path.GetDirectoryName(path);
-        if (!string.IsNullOrWhiteSpace(directory) && Directory.Exists(directory))
-        {
-            _layoutFileDialogDirectory = directory;
-        }
-    }
-
-    private static IReadOnlyList<EditorBadge> BuildLayoutEntryBadges(ObjectLayoutSnapshot layout, bool isDefault)
+    private IReadOnlyList<EditorBadge> BuildLayoutEntryBadges(ObjectLayoutSnapshot layout, bool isCreation)
     {
         List<EditorBadge> badges =
         [
             EditorBadge.Count(FontAwesomeIcon.Cube, layout.Objects.Count, "object", "objects"),
         ];
-        if (isDefault)
+        if (_layoutManager.IsLayoutEnabled(layout.Id))
         {
-            badges.Add(EditorBadge.Label("Default", FontAwesomeIcon.Star, ThemeColors.AccentGreen));
+            badges.Add(EditorBadge.Label("Enabled", FontAwesomeIcon.Check, ThemeColors.AccentGreen));
+        }
+
+        if (isCreation)
+        {
+            badges.Add(EditorBadge.Label("New Objects", FontAwesomeIcon.Plus, ThemeColors.AccentYellow));
         }
 
         badges.Add(EditorBadge.Label(
@@ -908,19 +643,19 @@ internal sealed class LayoutWorkspace : IAsyncDisposable
     private static IReadOnlyList<EditorBadge> BuildLayoutListBadges(
         IReadOnlyList<ObjectLayoutSnapshot> layouts,
         ObjectLayoutSnapshot? selectedLayout,
-        Guid? defaultLayoutId)
+        Guid? creationLayoutId)
     {
-        ObjectLayoutSnapshot? defaultLayout = defaultLayoutId.HasValue
-            ? layouts.FirstOrDefault(layout => layout.Id == defaultLayoutId.Value)
+        ObjectLayoutSnapshot? creationLayout = creationLayoutId.HasValue
+            ? layouts.FirstOrDefault(layout => layout.Id == creationLayoutId.Value)
             : null;
         return
         [
             EditorBadge.Count(FontAwesomeIcon.Folder, layouts.Count, "layout", "layouts"),
             EditorBadge.Label(
-                defaultLayout?.Name ?? "No default layout",
+                creationLayout?.Name ?? ObjectDestinationMenu.UnassignedLabel,
                 FontAwesomeIcon.Star,
-                defaultLayout is null ? ThemeColors.TextDisabled : ThemeColors.AccentYellow,
-                "Default layout"),
+                creationLayout is null ? ThemeColors.TextDisabled : ThemeColors.AccentYellow,
+                "New object destination"),
             EditorBadge.Label(
                 selectedLayout?.Name ?? "None selected",
                 FontAwesomeIcon.MousePointer,

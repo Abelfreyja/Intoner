@@ -92,7 +92,9 @@ internal sealed class EditorListCard(EdgeGlowRenderer edgeGlowRenderer)
         Vector2 max,
         bool selected,
         bool hovered,
-        Vector4 accent)
+        Vector4 accent,
+        float contentAlpha = 1f,
+        float? railAlpha = null)
     {
         Vector4 fill = (selected, hovered) switch
         {
@@ -106,7 +108,7 @@ internal sealed class EditorListCard(EdgeGlowRenderer edgeGlowRenderer)
             (false, true) => accent with { W = 0.58f },
             _             => ThemeColors.Border with { W = 0.38f },
         };
-        float railAlpha = (selected, hovered) switch
+        railAlpha ??= (selected, hovered) switch
         {
             (true, _)     => 0.95f,
             (false, true) => 0.72f,
@@ -117,9 +119,9 @@ internal sealed class EditorListCard(EdgeGlowRenderer edgeGlowRenderer)
             drawList,
             min,
             max,
-            fill,
-            border,
-            accent with { W = railAlpha },
+            fill with { W = fill.W * contentAlpha },
+            border with { W = border.W * contentAlpha },
+            accent with { W = railAlpha.Value },
             8f * ImGuiHelpers.GlobalScale,
             hovered && !selected);
     }

@@ -5,7 +5,58 @@ namespace Intoner.Scene;
 
 internal static class SceneTransformMath
 {
+    public const float MinimumScale = 0.01f;
+
     private const float GimbalToleranceDegrees = 0.05f;
+
+    /// <summary> scales an item and its distance from a shared pivot without changing its orientation </summary>
+    public static SceneTransform ApplyUniformScale(SceneTransform transform, Vector3 pivot, float factor, bool scaleSize = true,
+        Vector3 translation = default)
+    {
+        if (factor.Equals(1f) && translation == Vector3.Zero)
+            return transform;
+
+        return transform with
+        {
+            Position = pivot + (transform.Position - pivot) * factor + translation,
+            Scale = scaleSize ? transform.Scale * factor : transform.Scale,
+        };
+    }
+
+    /// <summary> gets the smallest common factor that preserves the minimum size on every axis </summary>
+    public static float MinimumUniformScaleFactor(Vector3 scale)
+        => MinimumScale / MathF.Min(scale.X, MathF.Min(scale.Y, scale.Z));
+
+    public static Vector3 WithAxisScale(Vector3 startScale, int axis, float value, bool uniform)
+    {
+        if (uniform)
+        {
+            return startScale * MathF.Max(MinimumUniformScaleFactor(startScale), value / startScale[axis]);
+        }
+
+        startScale[axis] = MathF.Max(MinimumScale, value);
+        return startScale;
+    }
+
+    public static Quaternion ResolveRotationDelta(Quaternion start, Quaternion target)
+        => NormalizeQuaternion(NormalizeQuaternion(target) * Quaternion.Inverse(NormalizeQuaternion(start)));
+
+    public static SceneTransform ApplyRigidRotation(SceneTransform transform, Vector3 pivot, Quaternion delta,
+        Vector3 referenceRotationDegrees)
+        => ApplyRigidRotation(transform, pivot, transform.Position - pivot,
+            CreateRotationQuaternion(transform.RotationDegrees), delta, referenceRotationDegrees);
+
+    /// <summary> rotates a captured offset and orientation around the current selection pivot </summary>
+    public static SceneTransform ApplyRigidRotation(SceneTransform transform, Vector3 pivot, Vector3 pivotOffset,
+        Quaternion startRotation, Quaternion delta, Vector3 referenceRotationDegrees)
+    {
+        Quaternion normalized = NormalizeQuaternion(delta);
+        return transform with
+        {
+            Position = pivot + Vector3.Transform(pivotOffset, normalized),
+            RotationDegrees = ToRotationDegrees(normalized * startRotation, referenceRotationDegrees),
+        };
+    }
 
     public static Matrix4x4 CreateWorldTransform(SceneTransform transform)
         => CreateWorldTransform(
@@ -32,30 +83,9 @@ internal static class SceneTransformMath
     }
 
     public static Quaternion NormalizeQuaternion(Quaternion rotation)
-        => TryNormalizeQuaternion(rotation, out var normalizedRotation)
+        => NumericsUtility.TryNormalize(rotation, out var normalizedRotation)
             ? normalizedRotation
             : Quaternion.Identity;
-
-    public static bool TryNormalizeQuaternion(Quaternion rotation, out Quaternion normalizedRotation)
-    {
-        normalizedRotation = Quaternion.Identity;
-        if (!NumericsUtility.HasLength(rotation))
-        {
-            return false;
-        }
-
-        rotation = Quaternion.Normalize(rotation);
-        if (!NumericsUtility.IsFinite(rotation))
-        {
-            return false;
-        }
-
-        normalizedRotation = rotation;
-        return true;
-    }
-
-    public static Quaternion AlignUpToNormal(Quaternion rotation, Vector3 normal)
-        => AlignLocalAxisToDirection(rotation, Vector3.UnitY, normal);
 
     public static Quaternion AlignLocalAxisToDirection(Quaternion rotation, Vector3 localAxis, Vector3 direction)
     {
@@ -271,4 +301,3 @@ internal static class SceneTransformMath
         return NormalizeQuaternion(quaternion);
     }
 }
-

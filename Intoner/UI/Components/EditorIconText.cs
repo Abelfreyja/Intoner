@@ -24,41 +24,33 @@ internal readonly record struct EditorIconTextOptions
 internal static class EditorIconText
 {
     public static float MeasureWidth(
-        FontAwesomeIcon icon,
+        FontAwesomeIcon? icon,
         string title,
         string subtitle,
         float? iconSpacing = null)
     {
-        Vector2 iconSize;
-        using (ImRaii.PushFont(UiBuilder.IconFont))
-        {
-            iconSize = ImGui.CalcTextSize(icon.ToIconString());
-        }
-
         float textWidth = MathF.Max(ImGui.CalcTextSize(title).X, ImGui.CalcTextSize(subtitle).X);
-        float spacing = iconSpacing is { } value
-            ? value * ImGuiHelpers.GlobalScale
-            : ImGui.GetStyle().ItemSpacing.X;
-        return iconSize.X + spacing + textWidth;
+        return icon is { } glyph
+            ? MeasureIconSize(glyph).X + ResolveIconSpacing(iconSpacing) + textWidth
+            : textWidth;
     }
 
     public static float MeasureHeight(
-        FontAwesomeIcon icon,
+        FontAwesomeIcon? icon,
         string title,
         string subtitle,
         float availableWidth,
         EditorIconTextOptions options = default)
     {
-        Vector2 iconSize;
-        using (ImRaii.PushFont(UiBuilder.IconFont))
+        Vector2 iconSize = default;
+
+        if (icon is { } glyph)
         {
-            iconSize = ImGui.CalcTextSize(icon.ToIconString());
+            iconSize = MeasureIconSize(glyph);
+            availableWidth -= iconSize.X + ResolveIconSpacing(options.IconSpacing);
         }
 
-        float iconSpacing = options.IconSpacing is { } value
-            ? value * ImGuiHelpers.GlobalScale
-            : ImGui.GetStyle().ItemSpacing.X;
-        float textWidth = MathF.Max(1f, availableWidth - iconSize.X - iconSpacing);
+        float textWidth = MathF.Max(1f, availableWidth);
         float textHeight = MeasureTextHeight(title, options.WrapTitle, textWidth);
         if (!string.IsNullOrWhiteSpace(subtitle))
         {
@@ -72,7 +64,7 @@ internal static class EditorIconText
     }
 
     public static void Draw(
-        FontAwesomeIcon icon,
+        FontAwesomeIcon? icon,
         string title,
         string subtitle,
         Vector4 accent,
@@ -83,22 +75,19 @@ internal static class EditorIconText
                 ImGuiStyleVar.ItemSpacing,
                 new Vector2(ImGui.GetStyle().ItemSpacing.X, lineSpacing * ImGuiHelpers.GlobalScale))
             : default;
-        using (ImRaii.PushFont(UiBuilder.IconFont))
-        using (ImRaii.PushColor(ImGuiCol.Text, accent))
+        if (icon is { } glyph)
         {
-            ImGui.TextUnformatted(icon.ToIconString());
-        }
+            using (ImRaii.PushFont(UiBuilder.IconFont))
+            using (ImRaii.PushColor(ImGuiCol.Text, accent))
+            {
+                ImGui.TextUnformatted(glyph.ToIconString());
+            }
 
-        if (options.IconSpacing is { } iconSpacing)
-        {
-            ImGui.SameLine(0f, iconSpacing * ImGuiHelpers.GlobalScale);
-        }
-        else
-        {
-            ImGui.SameLine();
+            ImGui.SameLine(0f, ResolveIconSpacing(options.IconSpacing));
         }
 
         using var group = ImRaii.Group();
+
         if (options.AlignTitleToFramePadding)
         {
             ImGui.AlignTextToFramePadding();
@@ -117,6 +106,15 @@ internal static class EditorIconText
 
         options.DrawAfterSubtitle?.Invoke();
     }
+
+    private static Vector2 MeasureIconSize(FontAwesomeIcon icon)
+    {
+        using var font = ImRaii.PushFont(UiBuilder.IconFont);
+        return ImGui.CalcTextSize(icon.ToIconString());
+    }
+
+    private static float ResolveIconSpacing(float? spacing)
+        => spacing is { } value ? value * ImGuiHelpers.GlobalScale : ImGui.GetStyle().ItemSpacing.X;
 
     private static void DrawText(string text, bool wrap, Vector4? colorOverride)
     {

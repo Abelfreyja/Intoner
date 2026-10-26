@@ -18,7 +18,7 @@ internal static class ObjectLibraryPrefabFactory
         prefab = default!;
         entries = [];
         string normalizedName = ObjectLibraryRules.NormalizeName(name);
-        if (normalizedName.Length == 0 || !capturedIn.Scope.IsValid || snapshots.Count == 0)
+        if (normalizedName.Length == 0 || !capturedIn.IsAssigned || snapshots.Count == 0)
         {
             return false;
         }

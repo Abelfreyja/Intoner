@@ -3,7 +3,6 @@ using Intoner.Objects.Utils;
 using Intoner.Scene;
 using System.Numerics;
 using System.Runtime.InteropServices;
-using OrientedBounds = FFXIVClientStructs.FFXIV.Common.Math.OrientedBounds;
 
 namespace Intoner.Objects.Runtime;
 
@@ -31,7 +30,7 @@ internal static class WallPlacementGeometry
 
         Vector3 probeOrigin;
         float expectedDistance;
-        if (boundsSnapshot.LocalBounds is { } localBounds)
+        if (boundsSnapshot.OrientedBounds is { } localBounds)
         {
             probeOrigin = localBounds.Transform.Translation;
             expectedDistance = ObjectShapeMath.ComputeOrientedBoundsSupportExtent(rotation, localBounds.HalfExtents, direction);
@@ -75,12 +74,12 @@ internal static class WallPlacementGeometry
         Vector3 worldPoint,
         Vector3 expectedNormal,
         float tolerance)
-        => boundsSnapshot.LocalBounds is { } localBounds
+        => boundsSnapshot.OrientedBounds is { } localBounds
             ? ContainsOrientedWallSurfacePoint(localBounds, worldPoint, expectedNormal, tolerance)
             : ContainsAxisAlignedWallSurfacePoint(boundsSnapshot, worldPoint, expectedNormal, tolerance);
 
     private static bool ContainsOrientedWallSurfacePoint(
-        OrientedBounds bounds,
+        SceneOrientedBounds bounds,
         Vector3 worldPoint,
         Vector3 expectedNormal,
         float tolerance)
@@ -142,4 +141,3 @@ internal static class WallPlacementGeometry
                && absPoint.Y <= halfExtents.Y + tolerance;
     }
 }
-

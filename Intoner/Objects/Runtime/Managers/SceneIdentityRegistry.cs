@@ -5,6 +5,9 @@ namespace Intoner.Scene;
 /// <summary> provides current scene item identities owned outside the registry </summary>
 internal interface ISceneIdentitySource
 {
+    /// <summary> gets the version of the item sets returned by this source </summary>
+    long Revision { get; }
+
     /// <summary> gets each independently owned scene item id set </summary>
     IEnumerable<IEnumerable<Guid>> GetOwnedItemIds();
 }
@@ -12,6 +15,12 @@ internal interface ISceneIdentitySource
 /// <summary> validates and reserves process wide scene item identities </summary>
 internal interface ISceneIdentityRegistry
 {
+    /// <summary> gets the combined version of all registered identity owners </summary>
+    long Revision { get; }
+
+    /// <summary> checks new identities against all registered owners in one batch </summary>
+    bool TryValidateNewItems(IReadOnlyCollection<Guid> itemIds, out Guid conflictingId);
+
     /// <summary> validates a complete replacement for one registered identity source </summary>
     bool TryValidateReplacement(
         ISceneIdentitySource source,
@@ -31,6 +40,7 @@ internal interface ISceneIdentityRegistry
 internal sealed class SceneIdentityRegistry : ISceneIdentityRegistry
 {
     private readonly Lock _stateLock;
+    private long _revision;
     private readonly IReadOnlyList<ISceneIdentitySource> _sources;
     private readonly Dictionary<object, HashSet<Guid>> _ownedItemIds = new(ReferenceEqualityComparer.Instance);
 
@@ -40,6 +50,31 @@ internal sealed class SceneIdentityRegistry : ISceneIdentityRegistry
     {
         _stateLock = stateLock.Value;
         _sources = sources.ToList();
+    }
+
+    public long Revision
+    {
+        get
+        {
+            lock (_stateLock)
+            {
+                long revision = _revision;
+                for (int index = 0; index < _sources.Count; ++index)
+                {
+                    revision = unchecked(revision + _sources[index].Revision);
+                }
+
+                return revision;
+            }
+        }
+    }
+
+    public bool TryValidateNewItems(IReadOnlyCollection<Guid> itemIds, out Guid conflictingId)
+    {
+        lock (_stateLock)
+        {
+            return TryValidate(excludedSource: null, excludedOwner: null, [itemIds], out conflictingId);
+        }
     }
 
     public bool TryValidateReplacement(
@@ -69,13 +104,22 @@ internal sealed class SceneIdentityRegistry : ISceneIdentityRegistry
                 return false;
             }
 
+            if (_ownedItemIds.TryGetValue(owner, out HashSet<Guid>? current) && current.SetEquals(itemIds))
+            {
+                return true;
+            }
+
             if (itemIds.Count == 0)
             {
-                _ = _ownedItemIds.Remove(owner);
+                if (_ownedItemIds.Remove(owner))
+                {
+                    ++_revision;
+                }
             }
             else
             {
                 _ownedItemIds[owner] = [.. itemIds];
+                ++_revision;
             }
 
             return true;
@@ -87,7 +131,10 @@ internal sealed class SceneIdentityRegistry : ISceneIdentityRegistry
         ArgumentNullException.ThrowIfNull(owner);
         lock (_stateLock)
         {
-            _ = _ownedItemIds.Remove(owner);
+            if (_ownedItemIds.Remove(owner))
+            {
+                ++_revision;
+            }
         }
     }
 

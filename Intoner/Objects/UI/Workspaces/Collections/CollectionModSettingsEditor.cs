@@ -137,7 +137,7 @@ internal sealed class CollectionModSettingsEditor
         ImGui.Dummy(new Vector2(width, height));
         Vector2 endCursor = ImGui.GetCursorPos();
         ImDrawListPtr drawList = ImGui.GetWindowDrawList();
-        Vector4 settingsBackground = CollectionPanel.CollectionModStyle.Settings;
+        Vector4 settingsBackground = CollectionModStyle.Settings;
         settingsBackground.W *= entry.Enabled ? 1f : 0.72f;
         drawList.AddRectFilled(
             min,
@@ -146,7 +146,7 @@ internal sealed class CollectionModSettingsEditor
         drawList.AddLine(
             min,
             new Vector2(max.X, min.Y),
-            ImGui.GetColorU32(CollectionPanel.ObjectCollectionPanelStyle.Divider),
+            ImGui.GetColorU32(EditorColumnPanel.PanelStyle.Divider),
             EditorLayout.Scaled(1f));
         drawList.AddRectFilled(
             min,
@@ -339,7 +339,7 @@ internal sealed class CollectionModSettingsEditor
             new EditorSearchFieldOptions(
                 "Filter settings",
                 ThemeColors.AccentPrimary,
-                MaxLength: CollectionPanel.ObjectCollectionFilterMaxLength,
+                MaxLength: EditorColumnPanel.FilterMaxLength,
                 Width: searchWidth,
                 Height: searchHeight));
 
@@ -450,7 +450,7 @@ internal sealed class CollectionModSettingsEditor
         using var child = EditorScrollList.Begin(
             "##objectCollectionModSettingsScroll",
             new Vector2(width, maxHeight),
-            _editorOverlayLayer.CreateScrollPanelOptions(CollectionPanel.CollectionModStyle.Settings, 0f, ThemeColors.AccentPrimary));
+            _editorOverlayLayer.CreateScrollPanelOptions(CollectionModStyle.Settings, 0f, ThemeColors.AccentPrimary));
         if (!child)
         {
             return false;
@@ -543,7 +543,7 @@ internal sealed class CollectionModSettingsEditor
         drawList.AddRectFilled(
             min,
             min + new Vector2(width, height),
-            ImGui.GetColorU32(CollectionPanel.CollectionModStyle.Setting));
+            ImGui.GetColorU32(CollectionModStyle.Setting));
         Vector2 textSize = ImGui.CalcTextSize(message);
         drawList.AddText(
             new Vector2(min.X + EditorLayout.Scaled(8f), min.Y + ((height - textSize.Y) * 0.5f)),
@@ -616,11 +616,11 @@ internal sealed class CollectionModSettingsEditor
         ImDrawListPtr drawList = ImGui.GetWindowDrawList();
         bool hovered = EditorInputUtility.IsMouseInside(layout.Min, layout.Max);
         Vector4 fill = hasOverride
-            ? CollectionPanel.CollectionModStyle.SettingChanged
-            : CollectionPanel.CollectionModStyle.Setting;
+            ? CollectionModStyle.SettingChanged
+            : CollectionModStyle.Setting;
         if (hovered && modEnabled)
         {
-            fill = CollectionPanel.CollectionModStyle.SettingHover;
+            fill = CollectionModStyle.SettingHover;
         }
 
         fill.W *= modEnabled ? 1f : 0.48f;
@@ -676,25 +676,25 @@ internal sealed class CollectionModSettingsEditor
             modEnabled ? ThemeColors.AccentPrimary : ThemeColors.AccentGrey);
         using var frameBg = ImRaii.PushColor(
             ImGuiCol.FrameBg,
-            CollectionPanel.CollectionModStyle.Field with
+            CollectionModStyle.Field with
             {
-                W = CollectionPanel.CollectionModStyle.Field.W * (modEnabled ? 1f : 0.50f),
+                W = CollectionModStyle.Field.W * (modEnabled ? 1f : 0.50f),
             });
         using var frameBgHovered = ImRaii.PushColor(
             ImGuiCol.FrameBgHovered,
                 modEnabled
-                    ? CollectionPanel.CollectionModStyle.FieldHover
-                    : CollectionPanel.CollectionModStyle.Field with { W = CollectionPanel.CollectionModStyle.Field.W * 0.50f });
+                    ? CollectionModStyle.FieldHover
+                    : CollectionModStyle.Field with { W = CollectionModStyle.Field.W * 0.50f });
         using var frameBgActive = ImRaii.PushColor(
             ImGuiCol.FrameBgActive,
                 modEnabled
-                    ? CollectionPanel.CollectionModStyle.FieldHover
-                    : CollectionPanel.CollectionModStyle.Field with { W = CollectionPanel.CollectionModStyle.Field.W * 0.50f });
+                    ? CollectionModStyle.FieldHover
+                    : CollectionModStyle.Field with { W = CollectionModStyle.Field.W * 0.50f });
         using var frameBorder = ImRaii.PushColor(
             ImGuiCol.Border,
-            CollectionPanel.CollectionModStyle.FieldBorder with
+            CollectionModStyle.FieldBorder with
             {
-                W = CollectionPanel.CollectionModStyle.FieldBorder.W * (modEnabled ? 1f : 0.42f),
+                W = CollectionModStyle.FieldBorder.W * (modEnabled ? 1f : 0.42f),
             });
         using var frameBorderSize = ImRaii.PushStyle(ImGuiStyleVar.FrameBorderSize, EditorLayout.Scaled(1f));
         using var frameRounding = ImRaii.PushStyle(ImGuiStyleVar.FrameRounding, EditorLayout.Scaled(3f));

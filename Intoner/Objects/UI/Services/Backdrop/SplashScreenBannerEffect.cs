@@ -89,10 +89,9 @@ internal sealed class SplashScreenBannerEffect
     }
 
     public SplashScreenBannerEffect(BackdropRenderer renderer)
-        : base(renderer)
+        : base(renderer, SplashScreenBannerShader)
     { }
 
-    protected override GpuShaderBytecode ShaderBytecode => SplashScreenBannerShader;
     protected override string FailureLogMessage => "splash screen banner shader processing failed";
 
     protected override SplashScreenBannerRequest CreateRequest(in BackdropRenderer.BackdropRegion region, Style style)
@@ -104,4 +103,3 @@ internal sealed class SplashScreenBannerEffect
     protected override SplashScreenBannerConstants CreateEffectConstants(in SplashScreenBannerRequest request)
         => new(request.TimeParams, request.ColorParams, request.FlowParams);
 }
-

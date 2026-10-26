@@ -112,7 +112,7 @@ internal static class CatalogLibraryTooltip
             (FontAwesomeIcon icon, string detail) = ResolveLocationContent(location);
             contentWidth = MathF.Max(
                 contentWidth,
-                IntonerTooltipContent.MeasureHeaderWidth(icon, location.Name, detail));
+                IntonerTooltipContent.MeasureItemWidth(icon, location.Name, detail));
         }
 
         if (remaining > 0)
@@ -125,7 +125,7 @@ internal static class CatalogLibraryTooltip
         IntonerTooltip.DrawContentSized(
             () =>
             {
-                IntonerTooltipContent.Heading(
+                IntonerTooltipContent.Header(
                     FontAwesomeIcon.Star,
                     "Saved in Library",
                     summary,

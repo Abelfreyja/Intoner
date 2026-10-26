@@ -17,7 +17,7 @@ internal sealed class TitleBarIconRenderer : IDisposable
     private IDalamudTextureWrap? _icon;
     private bool _iconLoadAttempted;
 
-    public TitleBarIconRenderer(ILogger logger, UiSharedService uiSharedService, TitleBarIconOptions options)
+    public TitleBarIconRenderer(ILogger<TitleBarIconRenderer> logger, UiSharedService uiSharedService, TitleBarIconOptions options)
     {
         _logger = logger;
         _uiSharedService = uiSharedService;
@@ -122,4 +122,3 @@ internal sealed record TitleBarIconOptions(string Label, string EmbeddedResource
     public static TitleBarIconOptions Embedded(string label, string resourceName)
         => new(label, resourceName);
 }
-

@@ -45,13 +45,13 @@ internal sealed class PrimitiveGeometryBuilder
             AppendPointVertices(point, frame, ref pointVertexCount, ref diagnostics);
         }
 
-        var screenVertexCount = BuildScreenVertices(screens, antiAlias);
+        var screenVertexCount = BuildScreenVertices(screens, antiAlias, frame);
 
         return new PrimitiveGeometryBuildResult(lineInstanceCount, pointVertexCount, screenVertexCount);
     }
 
-    public PrimitiveGeometryBuildResult BuildScreens(ReadOnlySpan<ScreenCommand> screens, PrimitiveAntiAliasParameters antiAlias)
-        => new(0, 0, BuildScreenVertices(screens, antiAlias));
+    public PrimitiveGeometryBuildResult BuildScreens(ReadOnlySpan<ScreenCommand> screens, PrimitiveAntiAliasParameters antiAlias, SceneProjection? projection = null)
+        => new(0, 0, BuildScreenVertices(screens, antiAlias, projection));
 
     public void ResetStorage()
     {
@@ -325,12 +325,30 @@ internal sealed class PrimitiveGeometryBuilder
     private static PrimitiveVertex CreatePointVertex(PrimitiveProjectedPoint point, Vector2 screen, uint color)
         => new(screen, point.ViewDepth, point.InvClipW, color, screen, screen, 0f, 0f);
 
-    private int BuildScreenVertices(ReadOnlySpan<ScreenCommand> screens, PrimitiveAntiAliasParameters antiAlias)
+    private int BuildScreenVertices(ReadOnlySpan<ScreenCommand> screens, PrimitiveAntiAliasParameters antiAlias, SceneProjection? projection)
     {
         var screenVertexCount = 0;
         foreach (ScreenCommand screen in screens)
         {
-            AppendScreenPrimitive(screen, antiAlias, ref screenVertexCount);
+            ScreenCommand command = screen;
+            if (screen.Anchor is { } anchor)
+            {
+                if (projection is not { } frame || !anchor.TryResolveOffset(frame, out Vector2 offset))
+                {
+                    continue;
+                }
+
+                command = screen with
+                {
+                    First = screen.First + offset,
+                    Second = screen.Second + offset,
+                    Third = screen.Third + offset,
+                    Previous = screen.Previous + offset,
+                    Next = screen.Next + offset,
+                };
+            }
+
+            AppendScreenPrimitive(command, antiAlias, ref screenVertexCount);
         }
 
         return screenVertexCount;

@@ -1,5 +1,6 @@
 using Dalamud.Plugin;
 using Dalamud.Plugin.Ipc;
+using Intoner.Logging;
 using Intoner.Objects.Api.Ipc;
 using Microsoft.Extensions.Logging;
 
@@ -30,7 +31,7 @@ internal sealed class EventProvider<T> : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Exception thrown on IPC event {Label}", _label);
+            DiagnosticLog.Write(() => _logger.LogError(ex, "Exception thrown on IPC event {Label}", _label));
         }
     }
 
@@ -112,7 +113,7 @@ internal sealed class EventSubscriber<T> : IDisposable
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "Exception invoking IPC event {Label}", _label);
+                    DiagnosticLog.Write(() => _logger.LogError(ex, "Exception invoking IPC event {Label}", _label));
                 }
             }
 

@@ -4,7 +4,27 @@ namespace Intoner.Objects.Utils;
 
 internal static class ObjectFolderSceneStateUtility
 {
-    public static ObjectFolderSceneState AddFolder(ObjectFolderSceneState state, string folderPath)
+    public static IReadOnlyList<ObjectFolderSnapshot> GetFolders(ObjectFolderSceneState state, Guid? layoutId)
+        => layoutId.HasValue ? state.LayoutFolders.GetValueOrDefault(layoutId.Value, []) : state.StandaloneFolders;
+
+    private static ObjectFolderSceneState WithFolders(
+        ObjectFolderSceneState state,
+        Guid? layoutId,
+        IReadOnlyList<ObjectFolderSnapshot> folders)
+    {
+        if (!layoutId.HasValue)
+        {
+            return state with { StandaloneFolders = folders };
+        }
+
+        Dictionary<Guid, IReadOnlyList<ObjectFolderSnapshot>> owners = new(state.LayoutFolders)
+        {
+            [layoutId.Value] = folders,
+        };
+        return state with { LayoutFolders = owners };
+    }
+
+    public static ObjectFolderSceneState AddFolder(ObjectFolderSceneState state, Guid? layoutId, string folderPath)
     {
         var sanitizedFolderPath = ObjectFolderUtility.SanitizeFolderPath(folderPath);
         if (string.IsNullOrEmpty(sanitizedFolderPath))
@@ -12,30 +32,21 @@ internal static class ObjectFolderSceneStateUtility
             return state;
         }
 
-        return AddFolders(state, [new ObjectFolderSnapshot(sanitizedFolderPath)]);
+        return AddFolders(state, layoutId, [new ObjectFolderSnapshot(sanitizedFolderPath)]);
     }
 
     public static ObjectFolderSceneState AddFolders(
         ObjectFolderSceneState state,
+        Guid? layoutId,
         IEnumerable<ObjectFolderSnapshot> folders)
     {
-        IReadOnlyList<ObjectFolderSnapshot> currentFolders = state.DefaultLayoutId.HasValue
-            ? state.DefaultLayoutFolders
-            : state.StandaloneFolders;
+        IReadOnlyList<ObjectFolderSnapshot> currentFolders = GetFolders(state, layoutId);
         IReadOnlyList<ObjectFolderSnapshot> nextFolders = ObjectFolderUtility.OrderFolderEntries(currentFolders.Concat(folders));
 
-        return state.DefaultLayoutId.HasValue
-            ? state with
-            {
-                DefaultLayoutFolders = nextFolders,
-            }
-            : state with
-            {
-                StandaloneFolders = nextFolders,
-            };
+        return WithFolders(state, layoutId, nextFolders);
     }
 
-    public static ObjectFolderSceneState RenameFolder(ObjectFolderSceneState state, string sourceFolderPath, string nextFolderPath)
+    public static ObjectFolderSceneState RenameFolder(ObjectFolderSceneState state, Guid? layoutId, string sourceFolderPath, string nextFolderPath)
     {
         var sanitizedSourceFolderPath = ObjectFolderUtility.SanitizeFolderPath(sourceFolderPath);
         var sanitizedNextFolderPath = ObjectFolderUtility.SanitizeFolderPath(nextFolderPath);
@@ -48,6 +59,7 @@ internal static class ObjectFolderSceneStateUtility
 
         return TransformFolderPaths(
             state,
+            layoutId,
             path => ObjectFolderUtility.RebaseFolderPath(
                 path,
                 sanitizedSourceFolderPath,
@@ -56,6 +68,7 @@ internal static class ObjectFolderSceneStateUtility
 
     public static ObjectFolderSceneState DissolveFolder(
         ObjectFolderSceneState state,
+        Guid? layoutId,
         string folderPath,
         IReadOnlyDictionary<string, string> pathMap)
     {
@@ -67,21 +80,23 @@ internal static class ObjectFolderSceneStateUtility
 
         return TransformFolderPaths(
             state,
+            layoutId,
             path => ObjectFolderUtility.ApplyFolderPathMap(path, pathMap),
             path => !string.Equals(path, sanitizedFolderPath, StringComparison.OrdinalIgnoreCase));
     }
 
-    public static ObjectFolderSceneState RemoveFolderSubtree(ObjectFolderSceneState state, string folderPath)
+    public static ObjectFolderSceneState RemoveFolderSubtree(ObjectFolderSceneState state, Guid? layoutId, string folderPath)
     {
         string sanitizedFolderPath = ObjectFolderUtility.SanitizeFolderPath(folderPath);
         return sanitizedFolderPath.Length == 0
             ? state
             : TransformFolderPaths(
                 state,
+                layoutId,
                 path => ObjectFolderUtility.IsSameOrDescendant(path, sanitizedFolderPath) ? null : path);
     }
 
-    public static ObjectFolderSceneState SetFolderColor(ObjectFolderSceneState state, string folderPath, string colorValue)
+    public static ObjectFolderSceneState SetFolderColor(ObjectFolderSceneState state, Guid? layoutId, string folderPath, string colorValue)
     {
         var sanitizedFolderPath = ObjectFolderUtility.SanitizeFolderPath(folderPath);
         if (string.IsNullOrEmpty(sanitizedFolderPath))
@@ -92,24 +107,16 @@ internal static class ObjectFolderSceneStateUtility
         var sanitizedColorValue = ObjectFolderUtility.SanitizeFolderColorValue(colorValue);
         var nextState = string.IsNullOrEmpty(sanitizedColorValue)
             ? state
-            : AddFolder(state, sanitizedFolderPath);
-        return nextState with
-        {
-            StandaloneFolders = ApplyFolderColor(
-                nextState.StandaloneFolders,
-                sanitizedFolderPath,
-                sanitizedColorValue),
-            DefaultLayoutFolders = ApplyFolderColor(
-                nextState.DefaultLayoutFolders,
-                sanitizedFolderPath,
-                sanitizedColorValue),
-        };
+            : AddFolder(state, layoutId, sanitizedFolderPath);
+        return WithFolders(nextState, layoutId,
+            ApplyFolderColor(GetFolders(nextState, layoutId), sanitizedFolderPath, sanitizedColorValue));
     }
 
     public static bool StatesMatch(ObjectFolderSceneState left, ObjectFolderSceneState right)
-        => left.DefaultLayoutId == right.DefaultLayoutId
-            && ObjectFolderUtility.FolderEntriesMatch(left.StandaloneFolders, right.StandaloneFolders)
-            && ObjectFolderUtility.FolderEntriesMatch(left.DefaultLayoutFolders, right.DefaultLayoutFolders);
+        => ObjectFolderUtility.FolderEntriesMatch(left.StandaloneFolders, right.StandaloneFolders)
+            && left.LayoutFolders.Count == right.LayoutFolders.Count
+            && left.LayoutFolders.All(owner => right.LayoutFolders.TryGetValue(owner.Key, out IReadOnlyList<ObjectFolderSnapshot>? folders)
+                && ObjectFolderUtility.FolderEntriesMatch(owner.Value, folders));
 
     private static IReadOnlyList<ObjectFolderSnapshot> ApplyFolderColor(
         IReadOnlyList<ObjectFolderSnapshot> folders,
@@ -125,13 +132,10 @@ internal static class ObjectFolderSceneStateUtility
 
     private static ObjectFolderSceneState TransformFolderPaths(
         ObjectFolderSceneState state,
+        Guid? layoutId,
         Func<string, string?> transform,
         Func<string, bool>? includeColor = null)
-        => state with
-        {
-            StandaloneFolders = TransformFolderSet(state.StandaloneFolders, transform, includeColor),
-            DefaultLayoutFolders = TransformFolderSet(state.DefaultLayoutFolders, transform, includeColor),
-        };
+        => WithFolders(state, layoutId, TransformFolderSet(GetFolders(state, layoutId), transform, includeColor));
 
     private static IReadOnlyList<ObjectFolderSnapshot> TransformFolderSet(
         IReadOnlyList<ObjectFolderSnapshot> folders,
@@ -155,5 +159,42 @@ internal static class ObjectFolderSceneStateUtility
 
         return ObjectFolderUtility.OrderFolderEntries(transformedFolders);
     }
-}
+    public static bool TryMergeChanges(ObjectFolderSceneState current, ObjectFolderSceneState before,
+        ObjectFolderSceneState after, out ObjectFolderSceneState merged)
+    {
+        merged = current;
 
+        if (!ObjectFolderUtility.FolderEntriesMatch(before.StandaloneFolders, after.StandaloneFolders))
+        {
+            if (!ObjectFolderUtility.FolderEntriesMatch(current.StandaloneFolders, before.StandaloneFolders))
+            {
+                return false;
+            }
+
+            merged = merged with { StandaloneFolders = after.StandaloneFolders };
+        }
+
+        Dictionary<Guid, IReadOnlyList<ObjectFolderSnapshot>> folders = new(current.LayoutFolders);
+        foreach (Guid id in before.LayoutFolders.Keys.Concat(after.LayoutFolders.Keys).Distinct())
+        {
+            IReadOnlyList<ObjectFolderSnapshot> expected = before.LayoutFolders.GetValueOrDefault(id, []);
+            IReadOnlyList<ObjectFolderSnapshot> next = after.LayoutFolders.GetValueOrDefault(id, []);
+
+            if (ObjectFolderUtility.FolderEntriesMatch(expected, next))
+            {
+                continue;
+            }
+
+            if (!current.LayoutFolders.TryGetValue(id, out IReadOnlyList<ObjectFolderSnapshot>? saved)
+                || !ObjectFolderUtility.FolderEntriesMatch(saved, expected))
+            {
+                return false;
+            }
+
+            folders[id] = next;
+        }
+
+        merged = merged with { LayoutFolders = folders };
+        return true;
+    }
+}

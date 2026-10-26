@@ -1,5 +1,6 @@
 using Intoner.Objects.Models;
 using Intoner.Objects.Runtime;
+using Intoner.Services.Serialization;
 using System.Text.Json;
 
 namespace Intoner.Objects.Api;
@@ -7,8 +8,12 @@ namespace Intoner.Objects.Api;
 /// <summary> converts layout json and prepared imports without file access or editor mutation </summary>
 internal sealed class ObjectLayoutTransferCodec(
     MakePlaceImportMapper makePlaceImportMapper,
-    MakePlaceExportMapper makePlaceExportMapper)
+    MakePlaceExportMapper makePlaceExportMapper,
+    IObjectKindService objectKinds)
 {
+    public bool TryRecover(string json, out ObjectLayoutImportPayload payload, out string errorMessage)
+        => ObjectLayoutRecoveryReader.TryRead(json, objectKinds, out payload, out errorMessage);
+
     public bool TryDecode(
         string json,
         string sourceName,
@@ -18,7 +23,7 @@ internal sealed class ObjectLayoutTransferCodec(
         out string errorMessage)
     {
         payload = null!;
-        using JsonDocument document = JsonDocument.Parse(json);
+        using JsonDocument document = JsonDocumentUtility.Parse(json);
         JsonElement root = document.RootElement;
         if (!TryResolveImportKind(root, fileKind, out ObjectLayoutFileKind resolvedKind, out errorMessage))
         {
@@ -36,7 +41,10 @@ internal sealed class ObjectLayoutTransferCodec(
                 layout.Name,
                 layout.Objects.Select(static snapshot => snapshot with { LayoutId = null }).ToList(),
                 layout.Folders,
-                $"Imported layout '{layout.Name}' from json.");
+                $"Imported layout '{layout.Name}' from json.")
+            {
+                Groups = layout.Groups.Select(static group => group with { LayoutId = null }).ToArray(),
+            };
             return true;
         }
 

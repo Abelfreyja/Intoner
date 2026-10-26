@@ -1,4 +1,6 @@
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine;
+using Intoner.Objects.Models;
+using Intoner.Objects.Resources;
 using Intoner.Objects.Utils;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -9,46 +11,53 @@ internal static class TerritoryLayoutAssetResolver
 {
     internal sealed class AssetInfo(
         IReadOnlyList<string> bgObjectModelPaths,
-        IReadOnlyList<string> referencedLayoutPaths,
-        IReadOnlyList<string> referencedSharedGroupPaths,
-        IReadOnlyList<ResolvedVfxPath> resolvedVfxPaths)
+        IReadOnlyList<ResolvedVfxPath> resolvedVfxPaths,
+        AssetReferenceSources sources,
+        bool bgObjectsComplete = true,
+        bool vfxComplete = true)
     {
         public IReadOnlyList<string> BgObjectModelPaths { get; } = bgObjectModelPaths;
-        public IReadOnlyList<string> ReferencedLayoutPaths { get; } = referencedLayoutPaths;
-        public IReadOnlyList<string> ReferencedSharedGroupPaths { get; } = referencedSharedGroupPaths;
         public IReadOnlyList<ResolvedVfxPath> ResolvedVfxPaths { get; } = resolvedVfxPaths;
+        public AssetReferenceSources Sources { get; } = sources;
+        public bool BgObjectsComplete { get; } = bgObjectsComplete;
+        public bool VfxComplete { get; } = vfxComplete;
+        public bool IsComplete => BgObjectsComplete && VfxComplete;
+        public IReadOnlyDictionary<string, IReadOnlyList<BgColliderDefinition>> ColliderDefinitions { get; init; } = new Dictionary<string, IReadOnlyList<BgColliderDefinition>>(StringComparer.OrdinalIgnoreCase);
     }
 
     private static readonly uint LvbSectionMagic = MakeSectionMagic('S', 'C', 'N', '1');
     private static readonly uint LgbSectionMagic = MakeSectionMagic('L', 'G', 'P', '1');
-    private static readonly uint TmlbSectionMagic = MakeSectionMagic('T', 'M', 'L', 'B');
 
     [StructLayout(LayoutKind.Explicit, Size = 0x5C)]
-    private unsafe struct FileLayerGroupInstanceVfx
+    private struct FileLayerGroupInstanceVfx
     {
         [FieldOffset(0x00)] public FileLayerGroupInstance Base;
         [FieldOffset(0x30)] public int OffsetPath;
-
-        public byte* Path => OffsetPath > 0 ? (byte*)Unsafe.AsPointer(ref this) + OffsetPath : null;
     }
 
-    public static AssetInfo AnalyzeTerritoryLayout(IObjectAssetGameData gameData, string territoryLayoutPath)
+    public static AssetInfo AnalyzeTerritoryLayout(IObjectAssetGameData gameData, string territoryLayoutPath, CancellationToken cancellationToken = default)
+        => AnalyzeTerritoryLayout(gameData, new ObjectAssetSharedGroupCache(gameData),
+            new Dictionary<string, SharedGroupAssetInfo>(StringComparer.OrdinalIgnoreCase), territoryLayoutPath, cancellationToken);
+
+    internal static AssetInfo AnalyzeTerritoryLayout(
+        IObjectAssetGameData gameData,
+        ObjectAssetSharedGroupCache sharedGroupCache,
+        Dictionary<string, SharedGroupAssetInfo> sharedGroups,
+        string territoryLayoutPath,
+        CancellationToken cancellationToken)
     {
-        string normalizedPath = GameAssetPathRules.NormalizeGamePath(territoryLayoutPath);
-        if (string.IsNullOrWhiteSpace(normalizedPath)
-         || !normalizedPath.EndsWith(".lvb", StringComparison.OrdinalIgnoreCase)
-         || !gameData.FileExists(normalizedPath))
+        cancellationToken.ThrowIfCancellationRequested();
+        string normalizedPath = ObjectResolvedPath.FromGamePath(territoryLayoutPath).Path;
+
+        if (!normalizedPath.EndsWith(".lvb", StringComparison.OrdinalIgnoreCase))
         {
-            return new AssetInfo([], [], [], []);
+            return new AssetInfo([], [], AssetReferenceSources.Empty, bgObjectsComplete: false, vfxComplete: false);
         }
 
-        byte[]? fileData = gameData.GetFile(normalizedPath)?.Data;
-        if (fileData is null || fileData.Length < Unsafe.SizeOf<FileHeader>())
-        {
-            return new AssetInfo([], [], [], []);
-        }
-
-        return new TerritoryLayoutAssetCollector(gameData).Collect(normalizedPath, fileData);
+        ObjectAssetFileData file = ObjectAssetFileUtility.ReadGameFile(gameData, normalizedPath, cancellationToken);
+        return file.Data is null
+            ? new AssetInfo([], [], AssetReferenceSources.Empty, bgObjectsComplete: file.IsComplete, vfxComplete: file.IsComplete)
+            : new TerritoryLayoutAssetCollector(gameData, sharedGroupCache, sharedGroups, cancellationToken).Collect(normalizedPath, file.Data);
     }
 
     private static uint MakeSectionMagic(char a, char b, char c, char d)
@@ -57,81 +66,92 @@ internal static class TerritoryLayoutAssetResolver
          | ((uint)(byte)c << 16)
          | ((uint)(byte)d << 24);
 
-    private sealed unsafe class TerritoryLayoutAssetCollector(IObjectAssetGameData gameData)
+    private sealed class TerritoryLayoutAssetCollector(
+        IObjectAssetGameData gameData,
+        ObjectAssetSharedGroupCache sharedGroupCache,
+        Dictionary<string, SharedGroupAssetInfo> sharedGroups,
+        CancellationToken cancellationToken)
     {
         private readonly IObjectAssetGameData _gameData = gameData;
-        private readonly VfxTimelineReferenceCache _timelineReferenceCache = new(gameData);
+        private readonly CancellationToken _cancellationToken = cancellationToken;
+        private readonly VfxTimelineReferenceCache _timelineReferenceCache = new();
         private readonly List<string> _bgObjectModelPaths = [];
-        private readonly List<string> _referencedLayoutPaths = [];
-        private readonly List<string> _referencedSharedGroupPaths = [];
+        private readonly BgColliderDefinitionSet _colliderDefinitions = new();
+        private readonly AssetReferenceSources.Builder _sources = new();
+        private readonly ObjectAssetSharedGroupCache _sharedGroupCache = sharedGroupCache;
+        private readonly Dictionary<string, SharedGroupAssetInfo> _sharedGroups = sharedGroups;
+        private readonly Dictionary<string, HashSet<string>> _sharedGroupSources = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, ResolvedVfxPathAccumulator> _resolvedVfxPaths = new(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> _seenBgObjectModels = new(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> _seenLayoutPaths = new(StringComparer.OrdinalIgnoreCase);
-        private readonly HashSet<string> _seenSharedGroupPaths = new(StringComparer.OrdinalIgnoreCase);
-        private readonly HashSet<string> _seenTimelinePaths = new(StringComparer.OrdinalIgnoreCase);
+        private bool _bgObjectsComplete = true;
+        private bool _vfxComplete = true;
 
         public AssetInfo Collect(string territoryLayoutPath, byte[] fileData)
         {
             CollectLvb(territoryLayoutPath, fileData);
+            _cancellationToken.ThrowIfCancellationRequested();
             return new AssetInfo(
                 _bgObjectModelPaths,
-                _referencedLayoutPaths,
-                _referencedSharedGroupPaths,
-                ResolvedVfxPathAccumulator.BuildSnapshot(_resolvedVfxPaths.Values));
+                ResolvedVfxPathAccumulator.BuildSnapshot(_resolvedVfxPaths.Values),
+                _sources.Build(),
+                _bgObjectsComplete,
+                _vfxComplete) { ColliderDefinitions = _colliderDefinitions.Build() };
         }
 
         private void CollectLvb(string territoryLayoutPath, byte[] fileData)
         {
-            if (!_seenLayoutPaths.Add(territoryLayoutPath))
+            if (_seenLayoutPaths.Add(territoryLayoutPath))
             {
-                return;
+                CollectSections(territoryLayoutPath, fileData, LvbSectionMagic);
             }
+        }
 
-            _referencedLayoutPaths.Add(territoryLayoutPath);
-
-            fixed (byte* dataPointer = fileData)
+        private void CollectSections(string sourcePath, byte[] fileData, uint sectionMagic)
+        {
+            LayoutFileReader file = new(fileData, sourcePath);
+            file.VisitSections((reader, magic) =>
             {
-                if (fileData.Length < Unsafe.SizeOf<FileHeader>())
+                if (magic != sectionMagic)
                 {
                     return;
                 }
 
-                FileHeader* fileHeader = (FileHeader*)dataPointer;
-                foreach (FileSectionHeader* section in fileHeader->Sections)
+                if (magic == LvbSectionMagic)
                 {
-                    if (section->Magic != LvbSectionMagic)
+                    FileSceneHeader sceneHeader = reader.Read<FileSceneHeader>(0);
+                    reader.VisitSceneInstances(CollectInstance, _cancellationToken);
+                    CollectReferencedLayerGroups(reader, sceneHeader);
+                    try
                     {
-                        continue;
+                        CollectSceneTimelines(reader, sceneHeader);
                     }
-
-                    FileSceneHeader* sceneHeader = section->Data<FileSceneHeader>();
-                    CollectEmbeddedLayerGroups(sceneHeader);
-                    CollectReferencedLayerGroups(sceneHeader);
-                    CollectSceneTimelines(territoryLayoutPath, sceneHeader);
+                    catch (Exception ex) when (ObjectAssetFileUtility.IsReadFailure(ex))
+                    {
+                        _cancellationToken.ThrowIfCancellationRequested();
+                        _vfxComplete = false;
+                    }
                 }
-            }
+                else
+                {
+                    reader.VisitLayerGroup(0, CollectInstance, _cancellationToken);
+                }
+            }, _cancellationToken);
         }
 
-        private void CollectEmbeddedLayerGroups(FileSceneHeader* sceneHeader)
+        private void CollectReferencedLayerGroups(LayoutFileReader reader, in FileSceneHeader sceneHeader)
         {
-            Span<FileLayerGroupHeader> embeddedLayerGroups = sceneHeader->EmbeddedLayerGroups;
-            for (int i = 0; i < embeddedLayerGroups.Length; i++)
+            int arrayOffset = reader.ArrayOffset<int>(
+                0, sceneHeader.OffsetLayerGroupResources, sceneHeader.NumLayerGroupResources);
+            for (int i = 0; i < sceneHeader.NumLayerGroupResources; i++)
             {
-                FileLayerGroupHeader* layerGroup = (FileLayerGroupHeader*)Unsafe.AsPointer(ref embeddedLayerGroups[i]);
-                CollectLayerGroup(layerGroup);
-            }
-        }
+                _cancellationToken.ThrowIfCancellationRequested();
+                int pathOffset = reader.Read<int>(arrayOffset + (long)i * sizeof(int));
+                string referencedLayoutPath = ObjectResolvedPath.FromGamePath(
+                    reader.ReadString(reader.RelativeOffset(arrayOffset, pathOffset, 1))).Path;
 
-        private void CollectReferencedLayerGroups(FileSceneHeader* sceneHeader)
-        {
-            Span<int> layerGroupResourceOffsets = sceneHeader->LayerGroupResourceOffsets;
-            for (int i = 0; i < layerGroupResourceOffsets.Length; i++)
-            {
-                string referencedLayoutPath = GameAssetPathRules.NormalizeGamePath(
-                    ReadCString(sceneHeader->LayerGroupResource(layerGroupResourceOffsets[i])));
                 if (string.IsNullOrWhiteSpace(referencedLayoutPath)
-                 || !referencedLayoutPath.EndsWith(".lgb", StringComparison.OrdinalIgnoreCase)
-                 || !_gameData.FileExists(referencedLayoutPath))
+                 || !referencedLayoutPath.EndsWith(".lgb", StringComparison.OrdinalIgnoreCase))
                 {
                     continue;
                 }
@@ -142,233 +162,219 @@ internal static class TerritoryLayoutAssetResolver
 
         private void CollectLgb(string layoutGroupPath)
         {
-            if (!_seenLayoutPaths.Add(layoutGroupPath))
+            if (_seenLayoutPaths.Contains(layoutGroupPath))
             {
                 return;
             }
 
-            _referencedLayoutPaths.Add(layoutGroupPath);
-
-            byte[]? fileData = _gameData.GetFile(layoutGroupPath)?.Data;
-            if (fileData is null || fileData.Length < Unsafe.SizeOf<FileHeader>())
+            try
             {
-                return;
-            }
-
-            fixed (byte* dataPointer = fileData)
-            {
-                FileHeader* fileHeader = (FileHeader*)dataPointer;
-                foreach (FileSectionHeader* section in fileHeader->Sections)
+                ObjectAssetFileData file = ObjectAssetFileUtility.ReadGameFile(_gameData, layoutGroupPath, _cancellationToken);
+                if (file.Data is null)
                 {
-                    if (section->Magic != LgbSectionMagic)
+                    if (file.IsComplete)
                     {
-                        continue;
+                        _seenLayoutPaths.Add(layoutGroupPath);
+                    }
+                    else
+                    {
+                        _bgObjectsComplete = false;
+                        _vfxComplete = false;
                     }
 
-                    CollectLayerGroup(section->Data<FileLayerGroupHeader>());
+                    return;
                 }
-            }
-        }
 
-        private void CollectLayerGroup(FileLayerGroupHeader* layerGroup)
-        {
-            Span<int> layerOffsets = layerGroup->LayerOffsets;
-            for (int i = 0; i < layerOffsets.Length; i++)
+                _seenLayoutPaths.Add(layoutGroupPath);
+                CollectSections(layoutGroupPath, file.Data, LgbSectionMagic);
+            }
+            catch (Exception ex) when (ObjectAssetFileUtility.IsReadFailure(ex))
             {
-                CollectLayer(layerGroup->Layer(layerOffsets[i]));
+                _cancellationToken.ThrowIfCancellationRequested();
+                _bgObjectsComplete = false;
+                _vfxComplete = false;
             }
         }
 
-        private void CollectLayer(FileLayerGroupLayer* layer)
+        private void CollectInstance(LayoutFileReader reader, int instanceOffset, FileLayerGroupInstance instance)
         {
-            Span<int> instanceOffsets = layer->InstanceOffsets;
-            for (int i = 0; i < instanceOffsets.Length; i++)
+            switch (instance.Type)
             {
-                FileLayerGroupInstance* instance = layer->Instance(instanceOffsets[i]);
-                switch (instance->Type)
-                {
-                    case InstanceType.BgPart:
-                        CollectBgPart((FileLayerGroupInstanceBgPart*)instance);
-                        break;
-                    case InstanceType.Vfx:
-                        CollectVfx((FileLayerGroupInstanceVfx*)instance);
-                        break;
-                    case InstanceType.LineVfx:
-                        break;
-                    case InstanceType.SharedGroup:
-                    case InstanceType.HelperObject:
-                        CollectSharedGroup((FileLayerGroupInstanceSharedGroup*)instance);
-                        break;
-                }
+                case InstanceType.BgPart:
+                    CollectBgPart(reader, instanceOffset);
+                    break;
+                case InstanceType.Vfx:
+                    CollectVfx(reader, instanceOffset);
+                    break;
+                case InstanceType.SharedGroup:
+                case InstanceType.HelperObject:
+                    CollectSharedGroup(reader, instanceOffset);
+                    break;
             }
         }
 
-        private void CollectBgPart(FileLayerGroupInstanceBgPart* bgPart)
+        private void CollectBgPart(LayoutFileReader reader, int instanceOffset)
         {
-            string modelPath = GameAssetPathRules.NormalizeGamePath(ReadCString(bgPart->PathMdl));
+            FileLayerGroupInstanceBgPart bgPart = reader.Read<FileLayerGroupInstanceBgPart>(instanceOffset);
+            string modelPath = ObjectResolvedPath.FromGamePath(reader.ReadOptionalString(instanceOffset, bgPart.OffsetPathMdl)).Path;
+
             if (!ObjectAssetPathRules.IsCatalogModelPath(modelPath)
-             || !_gameData.FileExists(modelPath)
-             || !_seenBgObjectModels.Add(modelPath))
+             || !_gameData.FileExists(modelPath))
             {
                 return;
             }
 
-            _bgObjectModelPaths.Add(modelPath);
-        }
-
-        private void CollectVfx(FileLayerGroupInstanceVfx* vfx)
-        {
-            _ = TryMergeResolvedVfxPath(
-                ReadCString(vfx->Path),
-                RuntimeVfxEvidence.LayoutInstance,
-                AssetPathSource.GameData,
-                AssetPathContract.ParsedFileReference,
-                SearchTermUtility.BuildStableTerms("layout vfx", ReadCString(vfx->Base.Name)));
-        }
-
-        private void CollectSharedGroup(FileLayerGroupInstanceSharedGroup* sharedGroupInstance)
-        {
-            string sharedGroupPath = GameAssetPathRules.NormalizeGamePath(ReadCString(sharedGroupInstance->Path));
-            if (!ObjectAssetPathRules.IsCatalogSharedGroupPath(sharedGroupPath)
-             || !_gameData.FileExists(sharedGroupPath)
-             || !_seenSharedGroupPaths.Add(sharedGroupPath))
+            _sources.Add(modelPath, reader.FilePath);
+            try
             {
-                return;
+                _colliderDefinitions.Add(BgColliderDefinitionReader.Read(reader, instanceOffset, modelPath));
+            }
+            catch (InvalidDataException)
+            {
+                _bgObjectsComplete = false;
             }
 
-            _referencedSharedGroupPaths.Add(sharedGroupPath);
-
-            SharedGroupAssetInfo sharedGroupAssets = SharedGroupAssetResolver.AnalyzeSharedGroup(_gameData, sharedGroupPath);
-            foreach (string modelPath in sharedGroupAssets.BgObjectModelPaths.Where(_seenBgObjectModels.Add))
+            if (_seenBgObjectModels.Add(modelPath))
             {
                 _bgObjectModelPaths.Add(modelPath);
             }
-
-            foreach (string nestedSharedGroupPath in sharedGroupAssets.NestedSharedGroupPaths.Where(_seenSharedGroupPaths.Add))
-            {
-                _referencedSharedGroupPaths.Add(nestedSharedGroupPath);
-            }
-
-            IReadOnlyList<string> searchTerms = SearchTermUtility.BuildStableTerms("shared group autoplay", sharedGroupPath);
-            foreach (string vfxPath in sharedGroupAssets.ReferencedVfxPaths)
-            {
-                _ = TryMergeResolvedVfxPath(
-                    vfxPath,
-                    RuntimeVfxEvidence.LayoutInstance,
-                    AssetPathSource.SharedGroup,
-                    AssetPathContract.ParsedFileReference,
-                    SearchTermUtility.BuildStableTerms("shared group vfx", "shared group", sharedGroupPath));
-            }
-
-            foreach (string vfxPath in sharedGroupAssets.StandaloneVfxPaths)
-            {
-                _ = TryMergeResolvedVfxPath(
-                    vfxPath,
-                    RuntimeVfxEvidence.LayoutAutoplay,
-                    AssetPathSource.SharedGroup,
-                    AssetPathContract.ParsedFileReference,
-                    searchTerms);
-            }
         }
 
-        private void CollectSceneTimelines(string territoryLayoutPath, FileSceneHeader* sceneHeader)
+        private void CollectVfx(LayoutFileReader reader, int instanceOffset)
         {
-            FileSceneTimelineList* timelines = sceneHeader->Timelines;
-            if (timelines is null)
+            FileLayerGroupInstanceVfx vfx = reader.Read<FileLayerGroupInstanceVfx>(instanceOffset);
+            _ = VfxResolvedPathUtility.TryMergeResolvedPath(
+                _resolvedVfxPaths,
+                _gameData,
+                reader.ReadOptionalString(instanceOffset, vfx.OffsetPath),
+                sqpackIndexSnapshot: null,
+                KnownVfxFamily.None,
+                RuntimeVfxEvidence.LayoutInstance,
+                AssetPathSource.GameData,
+                AssetPathContract.ParsedFileReference,
+                SearchTermUtility.BuildStableTerms("layout vfx", reader.FilePath, reader.ReadOptionalString(instanceOffset, vfx.Base.OffsetName)));
+        }
+
+        private void CollectSharedGroup(LayoutFileReader reader, int instanceOffset)
+        {
+            FileLayerGroupInstanceSharedGroup sharedGroup = reader.Read<FileLayerGroupInstanceSharedGroup>(instanceOffset);
+            string sharedGroupPath = ObjectResolvedPath.FromGamePath(reader.ReadOptionalString(instanceOffset, sharedGroup.OffsetPath)).Path;
+
+            if (!ObjectAssetPathRules.IsCatalogSharedGroupPath(sharedGroupPath))
             {
                 return;
             }
 
-            Span<FileSceneTimeline> entries = timelines->Entries;
-            for (int i = 0; i < entries.Length; i++)
+            if (_sharedGroupCache.GetOrAnalyze(_sharedGroups, sharedGroupPath, _cancellationToken) is not { } sharedGroupAssets)
             {
-                FileSceneTimeline* timeline = (FileSceneTimeline*)Unsafe.AsPointer(ref entries[i]);
-                CollectSceneTimeline(territoryLayoutPath, timeline);
+                _bgObjectsComplete = false;
+                _vfxComplete = false;
+                return;
+            }
+
+            _bgObjectsComplete &= sharedGroupAssets.IsComplete;
+            _vfxComplete &= sharedGroupAssets.IsComplete;
+
+            if (sharedGroupAssets.IsComplete)
+            {
+                if (!_sharedGroupSources.TryGetValue(sharedGroupPath, out HashSet<string>? sourcePaths))
+                {
+                    sourcePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    _sharedGroupSources.Add(sharedGroupPath, sourcePaths);
+                }
+
+                if (!sourcePaths.Add(reader.FilePath))
+                {
+                    return;
+                }
+            }
+
+            foreach (IReadOnlyList<BgColliderDefinition> definitions in sharedGroupAssets.ColliderDefinitions.Values)
+            {
+                _colliderDefinitions.AddRange(definitions);
+            }
+
+            foreach (string modelPath in sharedGroupAssets.BgObjectModelPaths)
+            {
+                _cancellationToken.ThrowIfCancellationRequested();
+                _sources.Add(modelPath, reader.FilePath);
+                _sources.Add(modelPath, sharedGroupAssets.Sources[modelPath]);
+
+                if (_seenBgObjectModels.Add(modelPath))
+                {
+                    _bgObjectModelPaths.Add(modelPath);
+                }
+            }
+
+            VfxResolvedPathUtility.MergeSharedGroupPaths(_resolvedVfxPaths, _gameData, sharedGroupAssets, [reader.FilePath]);
+        }
+
+        private void CollectSceneTimelines(LayoutFileReader reader, in FileSceneHeader sceneHeader)
+        {
+            if (sceneHeader.OffsetTimelines == 0)
+            {
+                return;
+            }
+
+            int listOffset = reader.RelativeOffset(0, sceneHeader.OffsetTimelines, Unsafe.SizeOf<FileSceneTimelineList>());
+            FileSceneTimelineList timelines = reader.Read<FileSceneTimelineList>(listOffset);
+            int arrayOffset = reader.ArrayOffset<FileSceneTimeline>(listOffset, timelines.OffsetEntries, timelines.NumEntries);
+            for (int i = 0; i < timelines.NumEntries; i++)
+            {
+                _cancellationToken.ThrowIfCancellationRequested();
+                int timelineOffset = arrayOffset + i * Unsafe.SizeOf<FileSceneTimeline>();
+                FileSceneTimeline timeline = reader.Read<FileSceneTimeline>(timelineOffset);
+                try
+                {
+                    CollectSceneTimeline(reader, timelineOffset, timeline);
+                }
+                catch (Exception ex) when (ObjectAssetFileUtility.IsReadFailure(ex))
+                {
+                    _cancellationToken.ThrowIfCancellationRequested();
+                    _vfxComplete = false;
+                }
             }
         }
 
-        private void CollectSceneTimeline(string territoryLayoutPath, FileSceneTimeline* timeline)
+        private void CollectSceneTimeline(LayoutFileReader reader, int timelineOffset, in FileSceneTimeline timeline)
         {
-            if (GameDataAssetPathUtility.TryBuildActionTimelinePath(ReadCString(timeline->ActionTimelineKey.Value), out string actionTimelinePath))
+            if (GameDataAssetPathUtility.TryBuildActionTimelinePath(
+                    reader.ReadOptionalString(timelineOffset, timeline.OffsetActionTimelineKey), out string actionTimelinePath))
             {
                 CollectTimelineReferences(
                     actionTimelinePath,
-                    RuntimeVfxEvidence.LayoutTimeline,
-                    SearchTermUtility.BuildStableTerms("layout timeline", territoryLayoutPath, actionTimelinePath));
+                    SearchTermUtility.BuildStableTerms("layout timeline", reader.FilePath, actionTimelinePath));
             }
 
-            if (timeline->OffsetTmlb == 0)
+            if (timeline.OffsetTmlb == 0)
             {
                 return;
             }
 
-            FileSceneTimelineDescription* timelineDescription = (FileSceneTimelineDescription*)timeline->Tmlb;
-            if (timelineDescription is null
-             || timelineDescription->Tag != (int)TmlbSectionMagic
-             || timelineDescription->Size <= 0)
+            ReadOnlySpan<byte> tmlbData = reader.ReadEmbeddedTimeline(timelineOffset, timeline.OffsetTmlb);
+
+            if (!TmbVfxReferenceReader.TryCollectReferences(_gameData, tmlbData, out TmbVfxReferenceCollection collection, _cancellationToken))
             {
+                _vfxComplete = false;
                 return;
             }
 
-            byte[] tmlbData = new ReadOnlySpan<byte>(timelineDescription, timelineDescription->Size).ToArray();
-            IReadOnlyList<string> searchTerms = SearchTermUtility.BuildStableTerms("layout timeline", territoryLayoutPath, "embedded tmlb");
-            foreach (TmbVfxReference reference in VfxAssetAnalyzer.CollectTmbVfxReferences(_gameData, tmlbData))
-            {
-                _ = TryMergeResolvedVfxPath(
-                    reference.Path,
-                    RuntimeVfxEvidence.LayoutTimeline | reference.Evidence,
-                    AssetPathSource.GameData,
-                    AssetPathContract.ParsedFileReference,
-                    SearchTermUtility.MergeTerms(searchTerms, reference.SearchTerms));
-            }
+            MergeTimelineReferences(collection, SearchTermUtility.BuildStableTerms("layout timeline", reader.FilePath, "embedded tmlb"));
         }
 
-        private void CollectTimelineReferences(
-            string timelinePath,
-            RuntimeVfxEvidence sourceEvidence,
-            IReadOnlyList<string> searchTerms)
+        private void CollectTimelineReferences(string timelinePath, IReadOnlyList<string> searchTerms)
         {
-            string normalizedTimelinePath = GameAssetPathRules.NormalizeGamePath(timelinePath);
-            if (!GameAssetPathRules.IsFileKind(normalizedTimelinePath, GameAssetFileKind.Tmb)
-             || !_gameData.FileExists(normalizedTimelinePath)
-             || !_seenTimelinePaths.Add(normalizedTimelinePath))
-            {
-                return;
-            }
-
-            foreach (TmbVfxReference reference in _timelineReferenceCache.Get(normalizedTimelinePath))
-            {
-                _ = TryMergeResolvedVfxPath(
-                    reference.Path,
-                    sourceEvidence | reference.Evidence,
-                    AssetPathSource.GameData,
-                    AssetPathContract.ParsedFileReference,
-                    SearchTermUtility.MergeTerms([.. searchTerms, normalizedTimelinePath], reference.SearchTerms));
-            }
+            TmbVfxReferenceCollection collection = _timelineReferenceCache.Get(_gameData, timelinePath, _cancellationToken);
+            MergeTimelineReferences(collection, SearchTermUtility.MergeTerms(searchTerms, [timelinePath]));
         }
 
-        private bool TryMergeResolvedVfxPath(
-            string path,
-            RuntimeVfxEvidence evidence,
-            AssetPathSource source,
-            AssetPathContract contract,
-            IReadOnlyList<string> searchTerms)
-            => VfxResolvedPathUtility.TryMergeResolvedPath(
+        private void MergeTimelineReferences(TmbVfxReferenceCollection collection, IReadOnlyList<string> searchTerms)
+            => _vfxComplete &= VfxResolvedPathUtility.MergeTimelinePaths(
                 _resolvedVfxPaths,
                 _gameData,
-                path,
-                sqpackIndexSnapshot: null,
-                KnownVfxFamily.None,
-                evidence,
-                source,
-                contract,
-                searchTerms);
-
-        private static string ReadCString(byte* pointer)
-            => pointer is null
-                ? string.Empty
-                : TextUtility.TrimOrEmpty(Marshal.PtrToStringUTF8((nint)pointer));
+                collection,
+                RuntimeVfxEvidence.LayoutTimeline,
+                searchTerms,
+                cancellationToken: _cancellationToken);
     }
 }
-
-

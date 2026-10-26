@@ -1,3 +1,4 @@
+using Intoner.Services.Serialization;
 using Dalamud.Plugin.Services;
 using Intoner.Objects.Models;
 using Intoner.Objects.Runtime;
@@ -26,6 +27,9 @@ internal interface IObjectLayoutFileService
     /// <param name="cancellationToken">cancels pending work before the import is applied</param>
     /// <returns>the import result and saved layout when successful</returns>
     Task<ObjectLayoutTransferResult> ImportLayoutAsync(string? path, ObjectLayoutFileKind? fileKind, CancellationToken cancellationToken);
+
+    /// <summary> recovers valid entries into a separate layout without modifying the source file </summary>
+    Task<ObjectLayoutTransferResult> RecoverLayoutAsync(string? path, CancellationToken cancellationToken);
 }
 
 internal sealed class ObjectLayoutFileService(
@@ -34,7 +38,8 @@ internal sealed class ObjectLayoutFileService(
     IObjectRuntimeLocationService locationService,
     IPluginFileSystem fileSystem,
     ObjectLayoutTransferCodec codec,
-    ObjectLayoutImportService importService) : IObjectLayoutFileService
+    ObjectLayoutImportService importService,
+    IObjectWorkspaceHistory workspaceHistory) : IObjectLayoutFileService
 {
     public async Task<ObjectLayoutTransferResult> ExportLayoutAsync(
         ObjectLayoutSnapshot? layout,
@@ -66,7 +71,7 @@ internal sealed class ObjectLayoutFileService(
                 }
 
                 cancellationToken.ThrowIfCancellationRequested();
-                fileSystem.WriteAllTextAtomic(path, json);
+                JsonDocumentUtility.WriteFile(fileSystem, path, json);
                 return new ObjectLayoutTransferResult(true, null, successMessage);
             }, cancellationToken).ConfigureAwait(false);
         }
@@ -81,10 +86,14 @@ internal sealed class ObjectLayoutFileService(
         }
     }
 
-    public async Task<ObjectLayoutTransferResult> ImportLayoutAsync(
-        string? path,
-        ObjectLayoutFileKind? fileKind,
-        CancellationToken cancellationToken)
+    public Task<ObjectLayoutTransferResult> ImportLayoutAsync(string? path, ObjectLayoutFileKind? fileKind, CancellationToken cancellationToken)
+        => ImportAsync(path, fileKind, cancellationToken, recover: false);
+
+    public Task<ObjectLayoutTransferResult> RecoverLayoutAsync(string? path, CancellationToken cancellationToken)
+        => ImportAsync(path, ObjectLayoutFileKind.ObjectLayout, cancellationToken, recover: true);
+
+    private async Task<ObjectLayoutTransferResult> ImportAsync(
+        string? path, ObjectLayoutFileKind? fileKind, CancellationToken cancellationToken, bool recover)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (string.IsNullOrWhiteSpace(path))
@@ -104,25 +113,28 @@ internal sealed class ObjectLayoutFileService(
                     return ((ObjectLayoutImportPayload?)null, "The selected layout file no longer exists.");
                 }
 
-                string json = fileSystem.ReadAllText(path);
+                string json = JsonDocumentUtility.ReadFile(fileSystem, path);
                 cancellationToken.ThrowIfCancellationRequested();
-                return codec.TryDecode(json, path, fileKind, location, out ObjectLayoutImportPayload decoded, out string errorMessage)
-                    ? (decoded, string.Empty)
-                    : ((ObjectLayoutImportPayload?)null, errorMessage);
+                ObjectLayoutImportPayload decoded;
+                string errorMessage;
+                bool success = recover
+                    ? codec.TryRecover(json, out decoded, out errorMessage)
+                    : codec.TryDecode(json, path, fileKind, location, out decoded, out errorMessage);
+                return success ? (decoded, string.Empty) : ((ObjectLayoutImportPayload?)null, errorMessage);
             }, cancellationToken).ConfigureAwait(false);
 
             return payload is null
                 ? ObjectLayoutTransferResult.Failure(error)
-                : await RunOnFrameworkAsync(() => importService.Apply(payload), cancellationToken).ConfigureAwait(false);
+                : await RunOnFrameworkAsync(() => workspaceHistory.Execute(recover ? "Recover Layout" : "Import Layout", () => importService.Apply(payload), static result => result.Success), cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
-        catch (JsonException ex)
+        catch (Exception ex) when (ex is JsonException or InvalidDataException)
         {
             logger.LogWarning(ex, "Failed to parse object layout file {Path}", path);
-            return ObjectLayoutTransferResult.Failure("The selected layout file is not valid json for a supported layout format.");
+            return ObjectLayoutTransferResult.Failure(ex.Message);
         }
         catch (Exception ex)
         {

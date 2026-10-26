@@ -10,14 +10,22 @@ namespace Intoner.Objects.UI;
 
 internal sealed partial class ObjectLibraryBrowser
 {
-    internal bool CanSavePlacedFolderAsPrefab(int objectCount)
+    internal bool CanSavePlacedObjectsAsPrefab(int objectCount)
         => objectCount > 0
-        && _sceneView.GetCurrentLocationContext().Scope.IsValid;
+        && _sceneView.GetCurrentLocationContext().IsAssigned;
 
-    internal void OpenSaveLibraryPrefabDialog(string folderPath, string displayLabel, int objectCount)
+    internal void OpenSaveLibraryPrefabDialog(Guid? layoutId, string folderPath, string displayLabel, int objectCount)
+        => OpenSaveLibraryPrefabDialog("Save Folder to Library", displayLabel, objectCount,
+            (name, scope) => TrySavePlacedFolderToLibrary(layoutId, folderPath, name, scope));
+
+    internal void OpenSaveGroupAsPrefabDialog(SceneGroupSnapshot group, int objectCount)
+        => OpenSaveLibraryPrefabDialog("Save Group to Library", group.Name, objectCount,
+            (name, scope) => TrySavePlacedGroupToLibrary(group.Id, name, scope));
+
+    private void OpenSaveLibraryPrefabDialog(string title, string displayLabel, int objectCount, Func<string, SceneCreationContext, bool> save)
     {
         SceneCreationContext context = _sceneView.GetCurrentLocationContext();
-        if (objectCount == 0 || !context.Scope.IsValid)
+        if (objectCount == 0 || !context.IsAssigned)
         {
             return;
         }
@@ -25,9 +33,9 @@ internal sealed partial class ObjectLibraryBrowser
         string objectCountLabel = objectCount == 1 ? "1 object" : $"{objectCount} objects";
         _interaction.OpenDialog(EditorDialog.Request.TextInput(
             "object-library-prefab-save",
-            "Save Folder to Library",
+            title,
             "Save Prefab",
-            input => TrySavePlacedFolderToLibrary(folderPath, input, context.Scope)) with
+            input => save(input, context)) with
         {
             Icon = FontAwesomeIcon.LayerGroup,
             Accent = ThemeColors.AccentPrimary,
@@ -39,17 +47,30 @@ internal sealed partial class ObjectLibraryBrowser
         });
     }
 
-    private bool TrySavePlacedFolderToLibrary(string folderPath, string name, SceneLocationScope expectedScope)
+    private bool TrySavePlacedGroupToLibrary(Guid groupId, string name, SceneCreationContext expectedContext)
     {
         SceneCreationContext context = _sceneView.GetCurrentLocationContext();
-        if (context.Scope != expectedScope)
+        SceneGroupSnapshot? group = _sceneView.GetPlacedGroups().FirstOrDefault(snapshot => snapshot.Id == groupId);
+        if (!context.HasSameLocation(expectedContext) || group is null)
+        {
+            return false;
+        }
+
+        ObjectSnapshot[] members = _sceneView.GetPlacedObjectSnapshots().Where(snapshot => snapshot.GroupId == groupId).ToArray();
+        return members.Length > 0 && _objectLibrary.TryCreatePrefab(name, string.Empty, context, members, parentFolderId: null, out _);
+    }
+
+    private bool TrySavePlacedFolderToLibrary(Guid? layoutId, string folderPath, string name, SceneCreationContext expectedContext)
+    {
+        SceneCreationContext context = _sceneView.GetCurrentLocationContext();
+        if (!context.HasSameLocation(expectedContext))
         {
             return false;
         }
 
         string normalizedFolderPath = ObjectFolderUtility.SanitizeFolderPath(folderPath);
         IReadOnlyList<ObjectSnapshot> snapshots = _sceneView.GetPlacedObjectSnapshots()
-            .Where(snapshot => ObjectFolderUtility.IsSameOrDescendant(snapshot.FolderPath, normalizedFolderPath))
+            .Where(snapshot => snapshot.LayoutId == layoutId && ObjectFolderUtility.IsSameOrDescendant(snapshot.FolderPath, normalizedFolderPath))
             .ToArray();
         if (snapshots.Count == 0)
         {
@@ -57,9 +78,7 @@ internal sealed partial class ObjectLibraryBrowser
         }
 
         ObjectFolderSceneState folderState = _objectFolderService.CaptureSceneState();
-        IReadOnlyList<ObjectFolderSnapshot> folders = folderState.DefaultLayoutId.HasValue
-            ? folderState.DefaultLayoutFolders
-            : folderState.StandaloneFolders;
+        IReadOnlyList<ObjectFolderSnapshot> folders = ObjectFolderSceneStateUtility.GetFolders(folderState, layoutId);
         string color = folders.FirstOrDefault(folder => string.Equals(
             folder.Path, normalizedFolderPath, StringComparison.OrdinalIgnoreCase))?.Color ?? string.Empty;
         return _objectLibrary.TryCreatePrefab(
@@ -75,55 +94,36 @@ internal sealed partial class ObjectLibraryBrowser
         => group.Source is ObjectLibraryPrefab
         && group.AllEntries.All(entry => _createActions.CanPlaceObjectPreset(entry.Preset));
 
-    private bool CanRestoreLibraryPrefabAtWorldPosition(LibraryBrowserView.Group group)
-        => group.Source is ObjectLibraryPrefab prefab
-        && ObjectLibraryPrefabPlacementResolver.CanRestoreWorldPosition(
-            prefab,
-            _sceneView.GetCurrentLocationContext());
+    private void DrawPrefabPlacementMenu(LibraryBrowserView.Group group, bool atPlayer)
+    {
+        using EditorContextMenu.SubMenuScope menu = EditorContextMenu.BeginSubMenu(
+            $"objectLibraryPlacePrefab:{group.Source.Id}:{atPlayer}",
+            atPlayer ? FontAwesomeIcon.User : FontAwesomeIcon.Globe,
+            atPlayer ? "Place at Your Position" : "Place at World Position");
+        if (!menu)
+            return;
 
-    private bool TryPlaceLibraryPrefab(LibraryBrowserView.Group group, bool atPlayer)
+        if (EditorContextMenu.DrawItem(FontAwesomeIcon.ObjectGroup, "As Group"))
+            _ = TryPlaceLibraryPrefab(group, atPlayer, PrefabPlacementContainer.Group);
+        if (EditorContextMenu.DrawItem(FontAwesomeIcon.Folder, "As Folder"))
+            _ = TryPlaceLibraryPrefab(group, atPlayer, PrefabPlacementContainer.Folder);
+    }
+
+    private bool TryPlaceLibraryPrefab(LibraryBrowserView.Group group, bool atPlayer, PrefabPlacementContainer container)
     {
         if (!TryResolvePrefabPlacements(group, atPlayer, out IReadOnlyList<ObjectLibraryPrefabPlacement> placements))
         {
             return false;
         }
 
-        ObjectFolderSceneState beforeFolderState = _objectFolderService.CaptureSceneState();
-        string folderPath = ObjectFolderUtility.ResolveAvailableFolderPath(
-            group.Source.Name,
-            _sceneView.GetPlacedFolders());
-        if (folderPath.Length == 0)
-        {
-            return false;
-        }
-
+        Guid? layoutId = _sceneView.GetCreationLayoutId();
+        IReadOnlyList<string> placedFolders = _sceneView.GetPlacedFolders(layoutId);
+        string parentFolder = _draft.ResolveCreatePlacementFolderPath(layoutId, placedFolders);
         IReadOnlyList<ObjectSnapshot> snapshots = BuildPrefabSnapshots(
             placements,
-            folderPath,
-            beforeFolderState.DefaultLayoutId);
-
-        ObjectFolderSceneState afterFolderState = ObjectFolderSceneStateUtility.AddFolder(
-            beforeFolderState,
-            folderPath);
-        if (!string.IsNullOrEmpty(group.Source.Color))
-        {
-            afterFolderState = ObjectFolderSceneStateUtility.SetFolderColor(
-                afterFolderState,
-                folderPath,
-                group.Source.Color);
-        }
-
-        Guid[] selectionBefore = _interaction.CaptureSelection();
-        Guid[] createdIds = snapshots.Select(static snapshot => snapshot.Id).ToArray();
-        return _sceneCommands.TryApplyFolderChangeWithHistory(
-            $"Place {group.Source.Name}",
-            [],
-            snapshots,
-            beforeFolderState,
-            afterFolderState,
-            SceneHistoryKind.Create,
-            createdIds,
-            selectionBefore);
+            parentFolder,
+            layoutId);
+        return _sceneCommands.TryPlacePrefab(group.Source.Name, snapshots, container, group.Source.Color);
     }
 
     private bool TryResolvePrefabPlacements(
@@ -131,8 +131,7 @@ internal sealed partial class ObjectLibraryBrowser
         bool atPlayer,
         out IReadOnlyList<ObjectLibraryPrefabPlacement> placements)
     {
-        if (group.Source is not ObjectLibraryPrefab
-         || group.AllEntries.Any(entry => !_createActions.CanPlaceObjectPreset(entry.Preset)))
+        if (!CanPlaceLibraryPrefab(group))
         {
             placements = [];
             return false;
@@ -149,12 +148,6 @@ internal sealed partial class ObjectLibraryBrowser
 
             targetAnchor = playerPlacement.Position;
         }
-        else if (!CanRestoreLibraryPrefabAtWorldPosition(group))
-        {
-            placements = [];
-            return false;
-        }
-
         return ObjectLibraryPrefabPlacementResolver.TryResolve(
             group.AllEntries,
             targetAnchor,

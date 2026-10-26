@@ -10,6 +10,7 @@ internal sealed class PreviewGeometryCache(PreviewMaterialResolver materialResol
 
     private readonly Lock _lock = new();
     private readonly Dictionary<string, PreviewAssetState.GeometryEntry> _entries = new(StringComparer.Ordinal);
+    private bool _disposed;
 
     [StructLayout(LayoutKind.Auto)]
     internal readonly record struct Snapshot(int Count, long ByteCount, int ActiveUseCount);
@@ -24,17 +25,26 @@ internal sealed class PreviewGeometryCache(PreviewMaterialResolver materialResol
 
     public PreviewAssetState.GeometryEntry GetOrCreate(
         string cacheKey,
-        ModelPreviewGeometryReader.PreviewGeometry geometry)
+        ModelPreviewGeometryReader.PreviewGeometry geometry,
+        IReadOnlyList<PreviewAssetState.MaterialRequest>? missingMaterials,
+        int modelCount,
+        IReadOnlySet<int> loadedModelIndices)
     {
         lock (_lock)
         {
-            if (_entries.TryGetValue(cacheKey, out PreviewAssetState.GeometryEntry? existingEntry))
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (_entries.TryGetValue(cacheKey, out PreviewAssetState.GeometryEntry? existingEntry)
+             && (!existingEntry.HasMissingModels || loadedModelIndices.Count <= existingEntry.LoadedModelIndices.Count
+              || !existingEntry.LoadedModelIndices.IsSubsetOf(loadedModelIndices)))
             {
                 return existingEntry;
             }
 
-            PreviewAssetState.GeometryEntry entry = new(cacheKey, geometry);
-            _entries.Add(cacheKey, entry);
+            PreviewAssetState.GeometryEntry entry = new(cacheKey, geometry, missingMaterials, modelCount, loadedModelIndices)
+            {
+                NextTextureRetryAtMs = materialResolver.GetNextTextureRetryAtMs(geometry, Environment.TickCount64),
+            };
+            _entries[cacheKey] = entry;
             return entry;
         }
     }
@@ -71,7 +81,8 @@ internal sealed class PreviewGeometryCache(PreviewMaterialResolver materialResol
     {
         lock (entry.SyncRoot)
         {
-            entry.ActiveUseCount++;
+            ObjectDisposedException.ThrowIf(_disposed, this);
+
             if (mode == PreviewRender.Mode.Thumbnail)
             {
                 entry.LastThumbnailAccessAtMs = now;
@@ -81,7 +92,109 @@ internal sealed class PreviewGeometryCache(PreviewMaterialResolver materialResol
                 entry.LastDetailAccessAtMs = now;
             }
 
-            materialResolver.EnsureTextures(entry.Geometry);
+            entry.ActiveUseCount++;
+        }
+    }
+
+    public PreviewAssetState.GeometryEntry RefreshResources(PreviewAssetState.GeometryEntry entry, long now)
+    {
+        ModelPreviewGeometryReader.PreviewGeometry snapshot;
+        List<PreviewAssetState.MaterialRequest> missingMaterials;
+        bool refreshMaterials;
+
+        lock (_lock)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+
+            if (!_entries.TryGetValue(entry.CacheKey, out PreviewAssetState.GeometryEntry? current))
+            {
+                return entry;
+            }
+
+            if (!ReferenceEquals(current, entry))
+            {
+                return current;
+            }
+
+            lock (entry.SyncRoot)
+            {
+                snapshot = entry.Geometry.CreateRenderSnapshot();
+                missingMaterials = [.. entry.MissingMaterials];
+                refreshMaterials = missingMaterials.Count > 0 && now >= entry.NextMaterialRetryAtMs;
+                entry.ActiveUseCount++;
+            }
+        }
+
+        using PreviewAssetState.GeometryLease lease = new(entry);
+
+        if (refreshMaterials)
+        {
+            materialResolver.RefreshMaterials(snapshot, missingMaterials);
+        }
+
+        materialResolver.EnsureTextures(snapshot);
+        long nextTextureRetryAtMs = materialResolver.GetNextTextureRetryAtMs(snapshot, now);
+        PreviewAssetState.GeometryEntry replacement;
+
+        lock (entry.SyncRoot)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            long nextMaterialRetryAtMs = entry.NextMaterialRetryAtMs;
+
+            if (refreshMaterials)
+            {
+                nextMaterialRetryAtMs = missingMaterials.Count > 0
+                    ? now + (long)ObjectAssetFileUtility.AssetReadRetryDelay.TotalMilliseconds : 0;
+            }
+
+            bool changed = missingMaterials.Count != entry.MissingMaterials.Count;
+
+            for (int index = 0; !changed && index < snapshot.Materials.Length; ++index)
+            {
+                changed = !ReferenceEquals(snapshot.Materials[index].DiffuseTexture, entry.Geometry.Materials[index].DiffuseTexture);
+            }
+
+            if (!changed)
+            {
+                entry.NextMaterialRetryAtMs = nextMaterialRetryAtMs;
+                entry.NextTextureRetryAtMs = nextTextureRetryAtMs;
+                return entry;
+            }
+
+            replacement = new(entry.CacheKey, snapshot, missingMaterials, entry.ModelCount, entry.LoadedModelIndices)
+            {
+                NextMaterialRetryAtMs = nextMaterialRetryAtMs,
+                NextTextureRetryAtMs = nextTextureRetryAtMs,
+            };
+        }
+
+        if (TryReplace(entry, replacement))
+        {
+            return replacement;
+        }
+
+        return TryGet(entry.CacheKey, out PreviewAssetState.GeometryEntry? latest) && latest is not null ? latest : entry;
+    }
+
+    private bool TryReplace(PreviewAssetState.GeometryEntry expected, PreviewAssetState.GeometryEntry replacement)
+    {
+        lock (_lock)
+        {
+            if (_disposed || !_entries.TryGetValue(expected.CacheKey, out PreviewAssetState.GeometryEntry? current)
+             || !ReferenceEquals(current, expected))
+            {
+                return false;
+            }
+
+            lock (expected.SyncRoot)
+            {
+                replacement.NextModelRetryAtMs = expected.NextModelRetryAtMs;
+                replacement.LastThumbnailAccessAtMs = expected.LastThumbnailAccessAtMs;
+                replacement.LastDetailAccessAtMs = expected.LastDetailAccessAtMs;
+            }
+
+            _entries[expected.CacheKey] = replacement;
+            return true;
         }
     }
 
@@ -130,11 +243,15 @@ internal sealed class PreviewGeometryCache(PreviewMaterialResolver materialResol
     {
         lock (_lock)
         {
+            _disposed = true;
             foreach (PreviewAssetState.GeometryEntry entry in _entries.Values)
             {
                 lock (entry.SyncRoot)
                 {
                     PreviewMaterialResolver.ReleaseTextures(entry.Geometry);
+                    entry.MissingMaterials.Clear();
+                    entry.NextMaterialRetryAtMs = 0;
+                    entry.NextTextureRetryAtMs = 0;
                     entry.ActiveUseCount = 0;
                 }
             }
@@ -156,13 +273,16 @@ internal sealed class PreviewGeometryCache(PreviewMaterialResolver materialResol
             lock (entry.SyncRoot)
             {
                 if (entry.ActiveUseCount > 0
-                 || !IsExpired(entry.LastThumbnailAccessAtMs, now, PreviewCachePolicy.ThumbnailTextureRetention)
-                 || !IsExpired(entry.LastDetailAccessAtMs, now, PreviewCachePolicy.DetailGeometryRetention))
+                 || !PreviewCachePolicy.IsExpired(entry.LastThumbnailAccessAtMs, now, PreviewCachePolicy.ThumbnailTextureRetention)
+                 || !PreviewCachePolicy.IsExpired(entry.LastDetailAccessAtMs, now, PreviewCachePolicy.DetailGeometryRetention))
                 {
                     continue;
                 }
 
-                PreviewMaterialResolver.ReleaseTextures(entry.Geometry);
+                if (PreviewMaterialResolver.ReleaseTextures(entry.Geometry))
+                {
+                    entry.NextTextureRetryAtMs = now;
+                }
             }
         }
     }
@@ -252,18 +372,8 @@ internal sealed class PreviewGeometryCache(PreviewMaterialResolver materialResol
 
     private static bool CanTrim(PreviewAssetState.GeometryEntry entry, long now)
         => entry.ActiveUseCount == 0
-            && IsExpired(entry.LastThumbnailAccessAtMs, now, PreviewCachePolicy.ThumbnailWorkRetention)
-            && IsExpired(entry.LastDetailAccessAtMs, now, PreviewCachePolicy.DetailGeometryRetention);
-
-    private static bool IsExpired(long lastAccessAtMs, long now, TimeSpan retention)
-    {
-        if (lastAccessAtMs <= 0)
-        {
-            return true;
-        }
-
-        return now - lastAccessAtMs >= retention.TotalMilliseconds;
-    }
+            && PreviewCachePolicy.IsExpired(entry.LastThumbnailAccessAtMs, now, PreviewCachePolicy.ThumbnailWorkRetention)
+            && PreviewCachePolicy.IsExpired(entry.LastDetailAccessAtMs, now, PreviewCachePolicy.DetailGeometryRetention);
 
     [StructLayout(LayoutKind.Auto)]
     private readonly record struct TrimCandidate(PreviewAssetState.GeometryEntry Entry, long LastAccessAtMs);

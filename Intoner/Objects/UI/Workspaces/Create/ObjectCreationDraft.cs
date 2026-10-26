@@ -21,6 +21,7 @@ internal sealed class ObjectCreationDraft
     public LightCreateState Light { get; } = new();
 
     private string _createPlacementFolderPath = string.Empty;
+    private Guid? _createPlacementLayoutId;
 
     public ObjectCreationDraft(ObjectEditorCatalog catalogInfo, CreateBrowserSelection browserSelection)
     {
@@ -66,8 +67,13 @@ internal sealed class ObjectCreationDraft
         };
     }
 
-    internal string ResolveCreatePlacementFolderPath(IReadOnlyList<string> placedFolders)
+    internal string ResolveCreatePlacementFolderPath(Guid? layoutId, IReadOnlyList<string> placedFolders)
     {
+        if (_createPlacementLayoutId != layoutId)
+        {
+            _createPlacementLayoutId = layoutId;
+            _createPlacementFolderPath = string.Empty;
+        }
         var sanitizedFolderPath = ObjectFolderUtility.SanitizeFolderPath(_createPlacementFolderPath);
         if (string.IsNullOrEmpty(sanitizedFolderPath))
         {
@@ -85,8 +91,9 @@ internal sealed class ObjectCreationDraft
         return string.Empty;
     }
 
-    internal void SetCreatePlacementFolderPath(string folderPath)
+    internal void SetCreatePlacementFolderPath(Guid? layoutId, string folderPath)
     {
+        _createPlacementLayoutId = layoutId;
         _createPlacementFolderPath = ObjectFolderUtility.SanitizeFolderPath(folderPath);
     }
 
@@ -100,14 +107,7 @@ internal sealed class ObjectCreationDraft
         }
 
         preset = CaptureCreatePreset();
-        name = preset.Model switch
-        {
-            BgObjectModel bgObject => _catalogInfo.ResolveCatalogName(ObjectCatalogKind.BgObject, bgObject.ModelPath, "Background Object"),
-            FurnitureModel furniture => _catalogInfo.ResolveFurnitureCatalogName(furniture.SharedGroupPath, furniture.HousingRowId, furniture.ItemRowId),
-            VfxModel vfx => _catalogInfo.ResolveCatalogName(ObjectCatalogKind.Vfx, vfx.VfxPath, "VFX"),
-            LightModel light => ObjectEditorCatalog.ResolveLightTypeName(light.LightType),
-            _ => throw new InvalidOperationException($"unsupported draft kind {_browserSelection.Kind}"),
-        };
+        name = _catalogInfo.ResolveObjectName(preset.Model);
         return true;
     }
 
@@ -117,7 +117,7 @@ internal sealed class ObjectCreationDraft
         {
             case BgObjectModel bgObject:
                 _browserSelection.ApplyPresetKind(DraftKind.BgObject);
-                BgObject.Model = bgObject;
+                BgObject.Model = _catalogInfo.ApplyBgObjectDefaults(bgObject);
                 BgObject.Visible = preset.Visible;
                 BgObject.Scale = preset.Scale;
                 break;

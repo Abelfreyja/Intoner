@@ -7,21 +7,19 @@ namespace Intoner.Objects.Assets.Cache;
 internal sealed class ObjectAssetCachePayloadReader
 {
     private readonly ILogger<ObjectAssetCachePayloadReader> _logger;
-    private readonly IPluginStoragePaths _pathService;
     private readonly IPluginFileSystem _fileSystem;
 
     public ObjectAssetCachePayloadReader(
         ILogger<ObjectAssetCachePayloadReader> logger,
-        IPluginStoragePaths pathService,
         IPluginFileSystem fileSystem)
     {
         _logger = logger;
-        _pathService = pathService;
         _fileSystem = fileSystem;
     }
 
     public bool TryReadSectionPayloads(
         ObjectAssetCacheManifest manifest,
+        string payloadPath,
         ObjectAssetCacheSectionSet sections,
         [NotNullWhen(true)] out Dictionary<ObjectAssetCacheSectionKind, ObjectAssetCacheSerializer.ObjectAssetCacheSectionPayload>? loadedSectionPayloads)
     {
@@ -38,57 +36,21 @@ internal sealed class ObjectAssetCachePayloadReader
             return false;
         }
 
-        if (manifestSections.Keys.All(kind => sections.Contains(kind)))
+        if (_fileSystem.GetFileLength(payloadPath) != manifest.PayloadLength)
         {
-            return TryReadFromWholePayload(sections, manifestSections, out loadedSectionPayloads);
+            _logger.LogInformation("ignoring object asset cache with unexpected payload length");
+            loadedSectionPayloads = null;
+            return false;
         }
 
-        ReadRequestedSections(sections, manifestSections, manifest.PayloadLength, loadedSectionPayloads);
-        return true;
-    }
-
-    private bool TryReadFromWholePayload(
-        ObjectAssetCacheSectionSet sections,
-        IReadOnlyDictionary<ObjectAssetCacheSectionKind, ObjectAssetCacheManifestSection> manifestSections,
-        [NotNullWhen(true)] out Dictionary<ObjectAssetCacheSectionKind, ObjectAssetCacheSerializer.ObjectAssetCacheSectionPayload>? loadedSectionPayloads)
-    {
-        loadedSectionPayloads = [];
-        byte[] payload = _fileSystem.ReadAllBytes(_pathService.AssetCachePayloadPath);
+        byte[]? payload = manifestSections.Keys.All(kind => sections.Contains(kind))
+            ? _fileSystem.ReadAllBytes(payloadPath)
+            : null;
+        long payloadLength = payload?.LongLength ?? manifest.PayloadLength;
 
         foreach ((ObjectAssetCacheSectionKind kind, ObjectAssetCacheManifestSection section) in manifestSections)
         {
             if (!sections.Contains(kind))
-            {
-                continue;
-            }
-
-            if (!TrySliceSectionPayload(payload, section, out ReadOnlyMemory<byte> sectionPayload))
-            {
-                _logger.LogInformation("ignoring object asset cache section {SectionKind} with invalid payload range", section.Kind);
-                continue;
-            }
-
-            if (!ValidateSectionHash(section, sectionPayload.Span))
-            {
-                _logger.LogInformation("ignoring object asset cache section {SectionKind} with hash mismatch", section.Kind);
-                continue;
-            }
-
-            loadedSectionPayloads[kind] = new ObjectAssetCacheSerializer.ObjectAssetCacheSectionPayload(kind, section.Count, sectionPayload);
-        }
-
-        return true;
-    }
-
-    private void ReadRequestedSections(
-        ObjectAssetCacheSectionSet requestedSections,
-        IReadOnlyDictionary<ObjectAssetCacheSectionKind, ObjectAssetCacheManifestSection> manifestSections,
-        long payloadLength,
-        Dictionary<ObjectAssetCacheSectionKind, ObjectAssetCacheSerializer.ObjectAssetCacheSectionPayload> loadedSectionPayloads)
-    {
-        foreach ((ObjectAssetCacheSectionKind kind, ObjectAssetCacheManifestSection section) in manifestSections)
-        {
-            if (!requestedSections.Contains(kind))
             {
                 continue;
             }
@@ -99,11 +61,11 @@ internal sealed class ObjectAssetCachePayloadReader
                 continue;
             }
 
-            byte[] sectionPayload = _fileSystem.ReadBytes(
-                _pathService.AssetCachePayloadPath,
-                section.Offset,
-                section.Length);
-            if (!ValidateSectionHash(section, sectionPayload))
+            ReadOnlyMemory<byte> sectionPayload = payload is not null
+                ? payload.AsMemory((int)section.Offset, section.Length)
+                : _fileSystem.ReadBytes(payloadPath, section.Offset, section.Length);
+
+            if (!ValidateSectionHash(section, sectionPayload.Span))
             {
                 _logger.LogInformation("ignoring object asset cache section {SectionKind} with hash mismatch", section.Kind);
                 continue;
@@ -111,20 +73,7 @@ internal sealed class ObjectAssetCachePayloadReader
 
             loadedSectionPayloads[kind] = new ObjectAssetCacheSerializer.ObjectAssetCacheSectionPayload(kind, section.Count, sectionPayload);
         }
-    }
 
-    private static bool TrySliceSectionPayload(
-        ReadOnlyMemory<byte> payload,
-        ObjectAssetCacheManifestSection section,
-        out ReadOnlyMemory<byte> sectionPayload)
-    {
-        sectionPayload = ReadOnlyMemory<byte>.Empty;
-        if (!TryValidateSectionRange(payload.Length, section))
-        {
-            return false;
-        }
-
-        sectionPayload = payload.Slice((int)section.Offset, section.Length);
         return true;
     }
 

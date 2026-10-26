@@ -6,11 +6,13 @@ using FFXIVClientStructs.FFXIV.Client.System.Resource.Handle;
 using FFXIVClientStructs.FFXIV.Client.System.Scheduler.Base;
 using FFXIVClientStructs.FFXIV.Client.System.Scheduler.Instance;
 using FFXIVClientStructs.FFXIV.Client.System.Scheduler.Resource;
+using InteropGenerator.Runtime;
+using Intoner.Objects.Interop;
 using Intoner.Objects.Utils;
 using Intoner.Services.Interop;
 using Intoner.Utils;
 using Microsoft.Extensions.Logging;
-using Penumbra.String;
+using Penumbra.Api.Enums;
 using System.Globalization;
 using SceneBgObject = FFXIVClientStructs.FFXIV.Client.Graphics.Scene.BgObject;
 
@@ -29,19 +31,43 @@ internal interface IObjectResourceLoader : IDisposable
     bool CanResolveCollectionResources(ObjectRootPathKind kind);
 
     /// <summary>
+    /// Enables shared group callbacks before native furniture creation.
+    /// </summary>
+    /// <returns>true when shared group loads can be observed</returns>
+    bool EnableSharedGroupLoads();
+
+    /// <summary>
     /// Enters one temporary object resource load scope for the given collection id.
     /// Nested native resource requests during that scope may resolve through the object collection.
     /// </summary>
     /// <param name="resourceCollectionId">the active object collection id</param>
-    /// <returns>a disposable scope that restores the previous object collection context</returns>
-    IDisposable EnterRootLoadScope(string resourceCollectionId);
+    /// <returns>a disposable scope that restores the previous object collection and root cache context, or an empty scope during shutdown</returns>
+    ObjectResourceLoadScopeToken EnterRootLoadScope(string resourceCollectionId);
+
+    /// <summary>
+    /// Restores the retained resource generation for a shared group.
+    /// </summary>
+    /// <param name="instance">the owning shared group</param>
+    /// <param name="canLoad">false when its resource ownership is invalid or unavailable</param>
+    /// <returns>the retained collection scope, or a suspended scope for vanilla resources</returns>
+    unsafe ObjectResourceLoadScopeToken EnterSharedGroupLoadScope(SharedGroupLayoutInstance* instance, out bool canLoad);
 
     /// <summary>
     /// Enters one temporary root cache isolation scope that keeps the real game path but prevents the game's native cache reuse.
     /// </summary>
     /// <param name="rootPath">the game resource path being passed to native creation</param>
-    /// <returns>a disposable scope that restores the previous root cache isolation context</returns>
-    IDisposable EnterRootCacheIsolation(string rootPath);
+    /// <returns>a scope with the isolated hash, or an empty scope when isolation is unavailable</returns>
+    ObjectRootCacheIsolationScope EnterRootCacheIsolation(string rootPath);
+}
+
+/// <summary> keeps a root cache identity alive until native creation returns </summary>
+internal readonly struct ObjectRootCacheIsolationScope(IDisposable scope, uint resourceHash) : IDisposable
+{
+    /// <summary> native hash for a full root read, or null when no isolation was established </summary>
+    public uint? ResourceHash { get; } = resourceHash;
+
+    public void Dispose()
+        => scope?.Dispose();
 }
 
 internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
@@ -62,6 +88,7 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         MissingResolvedPath,
         UnsupportedLocalFile,
         UnsupportedMemoryResource,
+        InvalidNativePath,
     }
 
     private readonly record struct ScopedResourceRequest(
@@ -74,40 +101,10 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         string HandlePath,
         string TrackedPath);
 
-    private sealed class RootCacheIsolation(
-        string path,
-        long loadId,
-        RootCacheIsolation? previousScope)
-    {
-        private int _threadScopeActive = 1;
-        private int _disposed;
-
-        public string Path { get; } = path;
-        public long LoadId { get; } = loadId;
-        public RootCacheIsolation? PreviousScope { get; } = previousScope;
-
-        public bool IsActive
-            => Volatile.Read(ref _disposed) == 0
-            && Path.Length > 0
-            && LoadId > 0;
-
-        public void RestoreThreadScope(ObjectResourceLoader owner)
-        {
-            if (Interlocked.Exchange(ref _threadScopeActive, 0) != 0)
-            {
-                owner.TryWriteRootCacheIsolation(PreviousScope);
-            }
-        }
-
-        public void Release(ObjectResourceLoader owner)
-        {
-            RestoreThreadScope(owner);
-            Deactivate();
-        }
-
-        public void Deactivate()
-            => _ = Interlocked.Exchange(ref _disposed, 1);
-    }
+    private readonly record struct ResourceRequestPlan(
+        ResolvedResourceLoad? Load = null,
+        uint? CacheIsolationHash = null,
+        string? RejectedPath = null);
 
     private readonly record struct RedirectResolution(
         RedirectResolutionStatus Status,
@@ -125,7 +122,7 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
             => new(RedirectResolutionStatus.Rejected, default, reason, rejectedPath);
     }
 
-    private readonly struct ResourceRequest(
+    internal readonly struct ResourceRequest(
         bool isSync,
         ResourceManager* resourceManager,
         ResourceHandleType* handleType,
@@ -137,38 +134,22 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         byte* file,
         uint line)
     {
-        public readonly bool IsSync = isSync;
-        public readonly ResourceManager* ResourceManager = resourceManager;
-        public readonly ResourceHandleType* HandleType = handleType;
-        public readonly uint* ResourceType = resourceType;
-        public readonly uint* ResourceHash = resourceHash;
-        public readonly byte* Path = path;
-        public readonly ObjectGetResourceParameters* Parameters = parameters;
-        public readonly byte HasHandleLock = hasHandleLock;
-        public readonly byte* File = file;
-        public readonly uint Line = line;
+        public bool IsSync { get; init; } = isSync;
+        public ResourceManager* ResourceManager { get; init; } = resourceManager;
+        public ResourceHandleType* HandleType { get; init; } = handleType;
+        public uint* ResourceType { get; init; } = resourceType;
+        public uint* ResourceHash { get; init; } = resourceHash;
+        public byte* Path { get; init; } = path;
+        public ObjectGetResourceParameters* Parameters { get; init; } = parameters;
+        public byte HasHandleLock { get; init; } = hasHandleLock;
+        public byte* File { get; init; } = file;
+        public uint Line { get; init; } = line;
 
         public bool HasLockedHandle
             => HasHandleLock != 0;
 
         public uint Type
             => ResourceType == null ? 0 : *ResourceType;
-    }
-
-    private enum ResourceType : uint
-    {
-        Atex = 0x61746578,
-        Avfx = 0x61766678,
-        Eid = 0x00656964,
-        Mdl = 0x006D646C,
-        Mtrl = 0x6D74726C,
-        Pap = 0x00706170,
-        Scd = 0x00736364,
-        Sgb = 0x00736762,
-        Shpk = 0x7368706B,
-        Sklb = 0x736B6C62,
-        Tex = 0x00746578,
-        Tmb = 0x00746D62,
     }
 
     private const int SharedGroupResourceEventListenerOffset = 0x30;
@@ -178,12 +159,11 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
     private readonly ObjectFileReadService _fileReadService;
     private readonly ObjectResourceTracker _resourceTracker;
     private readonly ObjectResourceLoadScope _loadScope;
-    private readonly ThreadLocal<RootCacheIsolation?> _rootCacheIsolation = new(static () => default);
+    private readonly ObjectCollisionOwnership _collisionOwnership;
     private readonly ObjectResourceIncRefGuard _incRefGuard;
     private readonly ResolveResourceHandleTypeDelegate? _resolveResourceHandleType;
     private readonly ObjectResourceHooks _hooks;
     private readonly DisposalState _disposeState = new();
-    private long _nextRootCacheIsolationId;
 
     public ObjectResourceLoader(
         ILogger<ObjectResourceLoader> logger,
@@ -191,6 +171,7 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         ObjectFileReadService fileReadService,
         ObjectResourceTracker resourceTracker,
         ObjectResourceLoadScope loadScope,
+        ObjectCollisionOwnership collisionOwnership,
         IGameInteropProvider gameInteropProvider,
         ISigScanner sigScanner)
     {
@@ -199,33 +180,42 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         _fileReadService = fileReadService;
         _resourceTracker = resourceTracker;
         _loadScope = loadScope;
+        _collisionOwnership = collisionOwnership;
         _incRefGuard = new ObjectResourceIncRefGuard(_logger);
-        _resolveResourceHandleType = InteropHookUtility.CreateDelegate<ResolveResourceHandleTypeDelegate>(
-            _logger,
-            sigScanner,
-            IntonerSignatures.ResourceHandleTypeFromPath);
+        try
+        {
+            _resolveResourceHandleType = InteropHookUtility.CreateDelegate<ResolveResourceHandleTypeDelegate>(
+                _logger,
+                sigScanner,
+                IntonerSignatures.ResourceHandleTypeFromPath);
 
-        _hooks = new ObjectResourceHooks(
-            _logger,
-            gameInteropProvider,
-            sigScanner,
-            GetResourceSyncDetour,
-            GetResourceAsyncDetour,
-            ModelResourceLoadDetour,
-            ModelResourceLoadMaterialsDetour,
-            MaterialResourceLoadTexFilesDetour,
-            MaterialResourceLoadShpkFilesDetour,
-            ApricotResourceLoadDetour,
-            BgObjectLoadAnimationDataDetour,
-            SharedGroupLayoutResourceLoadDetour,
-            LayoutSharedGroupInsertObjectDetour,
-            ResourceHandleIncRefDetour,
-            ResourceHandleDestructorDetour,
-            SchedulerTimelineLoadResourcesDetour,
-            GetCachedScheduleResourceDetour);
+            _hooks = new ObjectResourceHooks(
+                _logger,
+                gameInteropProvider,
+                sigScanner,
+                GetResourceSyncDetour,
+                GetResourceAsyncDetour,
+                ModelResourceLoadDetour,
+                ModelResourceLoadMaterialsDetour,
+                MaterialResourceLoadTexFilesDetour,
+                MaterialResourceLoadShpkFilesDetour,
+                ApricotResourceLoadDetour,
+                BgObjectLoadAnimationDataDetour,
+                SharedGroupLayoutResourceLoadDetour,
+                LayoutSharedGroupInsertObjectDetour,
+                ResourceHandleIncRefDetour,
+                ResourceHandleDestructorDetour,
+                SchedulerTimelineLoadResourcesDetour,
+                GetCachedScheduleResourceDetour);
+        }
+        catch
+        {
+            Dispose();
+            throw;
+        }
     }
 
-    public IDisposable EnterRootLoadScope(string resourceCollectionId)
+    public ObjectResourceLoadScopeToken EnterRootLoadScope(string resourceCollectionId)
     {
         if (IsDisposing)
         {
@@ -236,43 +226,39 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         ObjectResourceLoadScopeToken scope = normalizedCollectionId.Length == 0
             ? _loadScope.Suspend()
             : EnterCollectionScopeToken(normalizedCollectionId);
-        _logger.LogDebug("object resource root scope entered; collection={CollectionId}; generation={ResourceScopeId}; revision={Revision}; active={Active}",
-            normalizedCollectionId, scope.Collection?.ResourceScopeId ?? 0, scope.Collection?.Revision ?? 0, scope.IsActive);
-        return scope;
+
+        try
+        {
+            _logger.LogDebug("object resource root scope entered; collection={CollectionId}; generation={ResourceScopeId}; revision={Revision}; active={Active}",
+                normalizedCollectionId, scope.Collection?.ResourceScopeId ?? 0, scope.Collection?.Revision ?? 0, scope.IsActive);
+            return scope;
+        }
+        catch
+        {
+            scope.Dispose();
+            throw;
+        }
     }
 
-    public IDisposable EnterRootCacheIsolation(string rootPath)
+    public ObjectRootCacheIsolationScope EnterRootCacheIsolation(string rootPath)
     {
         if (IsDisposing
          || !_hooks.CanResolveResourceRequests()
-         || !TryNormalizeRootCacheIsolationPath(rootPath, out string normalizedPath)
-         || !ObjectThreadLocalUtility.TryRead(_rootCacheIsolation, null, out RootCacheIsolation? previousScope))
+         || !TryNormalizeRootCacheIsolationPath(rootPath, out string normalizedPath))
         {
-            return default(RootCacheIsolationScopeToken);
+            return default;
         }
 
-        _hooks.Enable();
-        var isolation = new RootCacheIsolation(
-            normalizedPath,
-            Interlocked.Increment(ref _nextRootCacheIsolationId),
-            previousScope);
-        if (TryWriteRootCacheIsolation(isolation))
+        if (!_hooks.Enable())
         {
-            return new RootCacheIsolationScopeToken(this, isolation);
+            return default;
         }
 
-        isolation.Deactivate();
-        return default(RootCacheIsolationScopeToken);
-    }
+        long loadId = ObjectResourceIdentity.Next();
+        uint resourceHash = unchecked((uint)ComputeRootCacheIsolationHash(normalizedPath, loadId, null));
+        ObjectResourceLoadScope.RootCacheIsolation? isolation = _loadScope.EnterRootCacheIsolation(normalizedPath, loadId);
 
-    private bool TryWriteRootCacheIsolation(RootCacheIsolation? isolation)
-    {
-        if (IsDisposing)
-        {
-            return false;
-        }
-
-        return ObjectThreadLocalUtility.TryWrite(_rootCacheIsolation, isolation);
+        return isolation is null ? default : new ObjectRootCacheIsolationScope(isolation, resourceHash);
     }
 
     public bool CanResolveCollectionResources(ObjectRootPathKind kind)
@@ -284,20 +270,22 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
             return false;
         }
 
-        _hooks.Enable();
-        return true;
+        return _hooks.Enable();
     }
 
     public void Dispose()
     {
-        if (!_disposeState.TryBeginDispose())
+        if (!_disposeState.TryBeginDispose() && _hooks?.IsDisposed != false)
         {
             return;
         }
 
-        _hooks.Dispose();
-        _rootCacheIsolation.Dispose();
-        _incRefGuard.Dispose();
+        _hooks?.Dispose();
+
+        if (_hooks?.IsDisposed != false)
+        {
+            _incRefGuard.Dispose();
+        }
     }
 
     private bool IsDisposing
@@ -316,160 +304,136 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
 
     private TResult CallWithRegisteredResourceScope<TState, TResult>(
         ResourceHandle* handle,
+        string hook,
         TState state,
         ObjectResourcePathEncoding.TemporaryHandlePathAction<TState, TResult> callOriginal)
     {
-        using var scope = EnterRegisteredHandleScopeToken((nint)handle, out bool canLoad);
-        if (!canLoad)
-        {
-            return default!;
-        }
-
-        if (!ObjectResourcePathEncoding.TryReadActualScopedHandlePath(handle, out string actualPath))
-        {
-            return callOriginal(state);
-        }
-
-        return ObjectResourcePathEncoding.WithTemporaryHandlePath(
-            handle,
-            actualPath,
-            state,
-            callOriginal);
-    }
-
-    private byte ModelResourceLoadDetour(ModelResourceHandle* handle, void* contents, byte flag)
-    {
+        using InteropHookCollection.CallbackScope callback = _hooks.EnterCallback();
+        using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferNativeWrites();
         try
         {
-            var resourceHandle = (ResourceHandle*)handle;
-            using var scope = EnterRegisteredHandleScopeToken((nint)resourceHandle, out bool canLoad);
+            using ObjectResourceLoadScopeToken scope = EnterRegisteredHandleScopeToken((nint)handle, out bool canLoad);
+
+            if (!canLoad)
+            {
+                return default!;
+            }
+
+            return ObjectResourcePathEncoding.TryReadActualScopedHandlePath(handle, out string actualPath)
+                ? ObjectResourcePathEncoding.WithTemporaryHandlePath(handle, actualPath, state, callOriginal)
+                : callOriginal(state);
+        }
+        catch (Exception ex)
+        {
+            LogNativeHookFailure(ex, hook, handle);
+            return default!;
+        }
+    }
+
+    private byte ModelResourceLoadDetour(ResourceHandle* handle, void* contents, byte flag)
+    {
+        using InteropHookCollection.CallbackScope callback = _hooks.EnterCallback();
+        using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferNativeWrites();
+        try
+        {
+            using var scope = EnterRegisteredHandleScopeToken((nint)handle, out bool canLoad);
             if (!canLoad)
             {
                 return ObjectModelResourceLoadGuard.FailureResult;
             }
 
-            bool hasScopedPath = ObjectResourcePathEncoding.TryReadActualScopedHandlePath(resourceHandle, out string actualPath);
-            if ((scope.IsActive || hasScopedPath) && !TryValidateModelResource(handle, resourceHandle, actualPath))
+            bool hasScopedPath = ObjectResourcePathEncoding.TryReadActualScopedHandlePath(handle, out string actualPath);
+            if ((scope.IsActive || hasScopedPath) && !TryValidateModelResource(handle, actualPath))
             {
                 return ObjectModelResourceLoadGuard.FailureResult;
             }
 
             if (!hasScopedPath)
             {
-                return _hooks.ModelResourceLoadHook!.Original(handle, contents, flag);
+                return _hooks.ModelResourceLoadHook!.OriginalDisposeSafe(handle, contents, flag);
             }
 
             return ObjectResourcePathEncoding.WithTemporaryHandlePath(
-                resourceHandle,
+                handle,
                 actualPath,
-                (Hooks: _hooks, Handle: (nint)handle, Contents: (nint)contents, Flag: flag),
-                static state => state.Hooks.ModelResourceLoadHook!.Original(
-                    (ModelResourceHandle*)state.Handle,
+                (Hook: _hooks.ModelResourceLoadHook!, Handle: (nint)handle, Contents: (nint)contents, Flag: flag),
+                static state => state.Hook.OriginalDisposeSafe(
+                    (ResourceHandle*)state.Handle,
                     (void*)state.Contents,
                     state.Flag));
         }
         catch (Exception ex)
         {
-            LogNativeHookFailure(ex, "model resource load", (ResourceHandle*)handle);
-            return IsObjectScopedHandle((ResourceHandle*)handle)
-                ? ObjectModelResourceLoadGuard.FailureResult
-                : _hooks.ModelResourceLoadHook!.Original(handle, contents, flag);
+            LogNativeHookFailure(ex, "model resource load", handle);
+            return ObjectModelResourceLoadGuard.FailureResult;
         }
     }
 
     private bool ModelResourceLoadMaterialsDetour(ModelResourceHandle* handle)
-    {
-        try
-        {
-            return CallWithRegisteredResourceScope(
-                (ResourceHandle*)handle,
-                (Hooks: _hooks, Handle: (nint)handle),
-                static state => state.Hooks.ModelResourceLoadMaterialsHook!.Original((ModelResourceHandle*)state.Handle));
-        }
-        catch (Exception ex)
-        {
-            LogNativeHookFailure(ex, "model material load", (ResourceHandle*)handle);
-            return !IsObjectScopedHandle((ResourceHandle*)handle)
-                && _hooks.ModelResourceLoadMaterialsHook!.Original(handle);
-        }
-    }
+        => CallWithRegisteredResourceScope(
+            (ResourceHandle*)handle,
+            "model material load",
+            (Hook: _hooks.ModelResourceLoadMaterialsHook!, Handle: (nint)handle),
+            static state => state.Hook.OriginalDisposeSafe((ModelResourceHandle*)state.Handle));
 
-    private byte ApricotResourceLoadDetour(ResourceHandle* handle, nint unknown0, byte flag)
-    {
-        try
-        {
-            return CallWithRegisteredResourceScope(
-                handle,
-                (Hooks: _hooks, Handle: (nint)handle, Unknown0: unknown0, Flag: flag),
-                static state => state.Hooks.ApricotResourceLoadHook!.Original(
-                    (ResourceHandle*)state.Handle,
-                    state.Unknown0,
-                    state.Flag));
-        }
-        catch (Exception ex)
-        {
-            LogNativeHookFailure(ex, "apricot resource load", handle);
-            return IsObjectScopedHandle(handle)
-                ? (byte)0
-                : _hooks.ApricotResourceLoadHook!.Original(handle, unknown0, flag);
-        }
-    }
+    private byte ApricotResourceLoadDetour(ResourceHandle* handle, void* contents, byte flag)
+        => CallWithRegisteredResourceScope(
+            handle,
+            "apricot resource load",
+            (Hook: _hooks.ApricotResourceLoadHook!, Handle: (nint)handle, Contents: (nint)contents, Flag: flag),
+            static state => state.Hook.OriginalDisposeSafe((ResourceHandle*)state.Handle, (void*)state.Contents, state.Flag));
 
-    private bool BgObjectLoadAnimationDataDetour(SceneBgObject* bgObject, byte* modelPath)
+    private bool BgObjectLoadAnimationDataDetour(SceneBgObject* bgObject, CStringPointer modelPath)
     {
+        using InteropHookCollection.CallbackScope callback = _hooks.EnterCallback();
+        using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferNativeWrites();
         try
         {
             using var scope = EnterBgObjectModelScopeToken(bgObject, out bool canLoad);
-            return canLoad && _hooks.BgObjectLoadAnimationDataHook!.Original(bgObject, modelPath);
+            return canLoad && _hooks.BgObjectLoadAnimationDataHook!.OriginalDisposeSafe(bgObject, modelPath);
         }
         catch (Exception ex)
         {
             LogNativeHookFailure(ex, "bgobject animation load", bgObject == null ? null : (ResourceHandle*)bgObject->ModelResourceHandle);
-            return _hooks.BgObjectLoadAnimationDataHook!.Original(bgObject, modelPath);
+            return false;
         }
     }
 
     private byte MaterialResourceLoadTexFilesDetour(MaterialResourceHandle* handle)
-    {
-        try
-        {
-            return CallWithRegisteredResourceScope(
-                (ResourceHandle*)handle,
-                (Hooks: _hooks, Handle: (nint)handle),
-                static state => state.Hooks.MaterialResourceLoadTexFilesHook!.Original((MaterialResourceHandle*)state.Handle));
-        }
-        catch (Exception ex)
-        {
-            LogNativeHookFailure(ex, "material texture load", (ResourceHandle*)handle);
-            return IsObjectScopedHandle((ResourceHandle*)handle)
-                ? (byte)0
-                : _hooks.MaterialResourceLoadTexFilesHook!.Original(handle);
-        }
-    }
+        => CallWithRegisteredResourceScope(
+            (ResourceHandle*)handle,
+            "material texture load",
+            (Hook: _hooks.MaterialResourceLoadTexFilesHook!, Handle: (nint)handle),
+            static state => state.Hook.OriginalDisposeSafe((MaterialResourceHandle*)state.Handle));
 
     private byte MaterialResourceLoadShpkFilesDetour(MaterialResourceHandle* handle)
-    {
-        try
-        {
-            return CallWithRegisteredResourceScope(
-                (ResourceHandle*)handle,
-                (Hooks: _hooks, Handle: (nint)handle),
-                static state => state.Hooks.MaterialResourceLoadShpkFilesHook!.Original((MaterialResourceHandle*)state.Handle));
-        }
-        catch (Exception ex)
-        {
-            LogNativeHookFailure(ex, "material shader load", (ResourceHandle*)handle);
-            return IsObjectScopedHandle((ResourceHandle*)handle)
-                ? (byte)0
-                : _hooks.MaterialResourceLoadShpkFilesHook!.Original(handle);
-        }
-    }
+        => CallWithRegisteredResourceScope(
+            (ResourceHandle*)handle,
+            "material shader load",
+            (Hook: _hooks.MaterialResourceLoadShpkFilesHook!, Handle: (nint)handle),
+            static state => state.Hook.OriginalDisposeSafe((MaterialResourceHandle*)state.Handle));
+
+    public bool EnableSharedGroupLoads()
+        => _hooks.EnableSharedGroupLoads();
 
     private void SharedGroupLayoutResourceLoadDetour(ResourceEventListener* listener, ResourceHandle* handle)
     {
+        using InteropHookCollection.CallbackScope callback = _hooks.EnterSharedGroupCallback();
+
+        if (!callback.IsActive)
+        {
+            _hooks.SharedGroupLayoutResourceLoadHook!.OriginalDisposeSafe(listener, handle);
+            return;
+        }
+
+        SharedGroupLayoutInstance* sharedGroup = ResolveSharedGroupInstance(listener);
+        using ObjectCollisionOwnership.Scope collisionScope = _collisionOwnership.EnterInstance((ILayoutInstance*)sharedGroup);
+        using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferNativeWrites();
+        bool nativeCallStarted = false;
+        bool canForward = false;
         try
         {
-            SharedGroupLayoutInstance* sharedGroup = ResolveSharedGroupInstance(listener);
+            canForward = _collisionOwnership.CurrentOwner is null && !IsOwnedSharedGroupResource(sharedGroup, handle);
             using ObjectResourceLoadScopeToken scope = EnterSharedGroupResourceLoadScopeToken(sharedGroup, handle, out bool canLoad);
             if (!canLoad)
             {
@@ -478,17 +442,19 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
 
             if (!ObjectResourcePathEncoding.TryReadActualScopedHandlePath(handle, out string actualPath))
             {
-                _hooks.SharedGroupLayoutResourceLoadHook!.Original(listener, handle);
+                nativeCallStarted = true;
+                _hooks.SharedGroupLayoutResourceLoadHook!.OriginalDisposeSafe(listener, handle);
                 return;
             }
 
+            nativeCallStarted = true;
             _ = ObjectResourcePathEncoding.WithTemporaryHandlePath(
                 handle,
                 actualPath,
-                (Hooks: _hooks, Listener: (nint)listener, Handle: (nint)handle),
+                (Hook: _hooks.SharedGroupLayoutResourceLoadHook!, Listener: (nint)listener, Handle: (nint)handle),
                 static state =>
                 {
-                    state.Hooks.SharedGroupLayoutResourceLoadHook!.Original(
+                    state.Hook.OriginalDisposeSafe(
                         (ResourceEventListener*)state.Listener,
                         (ResourceHandle*)state.Handle);
                     return true;
@@ -497,33 +463,57 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         catch (Exception ex)
         {
             LogNativeHookFailure(ex, "shared group resource load", handle);
-            if (!IsObjectScopedHandle(handle))
+            if (!nativeCallStarted && canForward)
             {
-                _hooks.SharedGroupLayoutResourceLoadHook!.Original(listener, handle);
+                using ObjectResourceLoadScopeToken suspended = _loadScope.Suspend();
+                _hooks.SharedGroupLayoutResourceLoadHook!.OriginalDisposeSafe(listener, handle);
             }
         }
     }
 
     private void LayoutSharedGroupInsertObjectDetour(LayoutSharedGroupObject* instance, ILayoutInstance* layoutInstance)
     {
+        using InteropHookCollection.CallbackScope callback = _hooks.EnterCallback();
+
+        if (!callback.IsActive)
+        {
+            _hooks.LayoutSharedGroupInsertObjectHook!.OriginalDisposeSafe(instance, layoutInstance);
+            return;
+        }
+
+        using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferNativeWrites();
+        bool nativeCallStarted = false;
+        bool canForward = false;
+        ResourceHandle* handle = null;
         try
         {
             SharedGroupLayoutInstance* sharedGroup = instance != null ? instance->Instance : null;
-            using ObjectResourceLoadScopeToken scope = EnterSharedGroupInstanceScopeToken(sharedGroup, out bool canLoad);
+            handle = sharedGroup == null ? null : sharedGroup->ResourceHandle;
+            canForward = !IsOwnedSharedGroupResource(sharedGroup, handle);
+            using ObjectResourceLoadScopeToken scope = EnterSharedGroupResourceLoadScopeToken(sharedGroup, handle, out bool canLoad);
+
             if (canLoad)
             {
-                _hooks.LayoutSharedGroupInsertObjectHook!.Original(instance, layoutInstance);
+                nativeCallStarted = true;
+                _hooks.LayoutSharedGroupInsertObjectHook!.OriginalDisposeSafe(instance, layoutInstance);
             }
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "object shared group insert hook failed");
-            _hooks.LayoutSharedGroupInsertObjectHook!.Original(instance, layoutInstance);
+            ObjectResourceLog.Write(() => _logger.LogError(ex, "object shared group insert hook failed"));
+
+            if (!nativeCallStarted && canForward)
+            {
+                using ObjectResourceLoadScopeToken suspended = _loadScope.Suspend();
+                _hooks.LayoutSharedGroupInsertObjectHook!.OriginalDisposeSafe(instance, layoutInstance);
+            }
         }
     }
 
     private nint ResourceHandleDestructorDetour(ResourceHandle* handle)
     {
+        using InteropHookCollection.CallbackScope callback = _hooks.EnterCallback();
+        using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferNativeWrites();
         try
         {
             _resourceTracker.RemoveTrackedHandle((nint)handle, "native destruction");
@@ -536,32 +526,38 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         return _hooks.ResourceHandleDestructorHook!.OriginalDisposeSafe(handle);
     }
 
-    private nint ResourceHandleIncRefDetour(ResourceHandle* handle)
+    private ResourceHandle* ResourceHandleIncRefDetour(ResourceHandle* handle)
     {
+        using InteropHookCollection.CallbackScope callback = _hooks.EnterCallback();
+        using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferNativeWrites();
+        ObjectResourceIncRefGuard.Scope scope = default;
         try
         {
-            if (IsDisposing || handle == null || handle->RefCount != 0)
+            if (!IsDisposing && handle != null && handle->RefCount == 0)
             {
-                return _hooks.ResourceHandleIncRefHook!.OriginalDisposeSafe(handle);
+                scope = _incRefGuard.EnterScope();
             }
-
-            using var scope = _incRefGuard.EnterScope();
-            return _hooks.ResourceHandleIncRefHook!.OriginalDisposeSafe(handle);
         }
         catch (Exception ex)
         {
             LogNativeHookFailure(ex, "resource handle inc ref", handle);
+        }
+
+        using (scope)
+        {
             return _hooks.ResourceHandleIncRefHook!.OriginalDisposeSafe(handle);
         }
     }
 
     private ulong SchedulerTimelineLoadResourcesDetour(SchedulerTimeline* timeline)
     {
+        using InteropHookCollection.CallbackScope callback = _hooks.EnterCallback();
+        using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferNativeWrites();
         try
         {
             if (IsDisposing)
             {
-                return _hooks.SchedulerTimelineLoadResourcesHook!.Original(timeline);
+                return _hooks.SchedulerTimelineLoadResourcesHook!.OriginalDisposeSafe(timeline);
             }
 
             using ObjectResourceLoadScopeToken scope = EnterSchedulerTimelineResourceScopeToken(timeline, out bool canLoad);
@@ -581,7 +577,7 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         catch (Exception ex)
         {
             LogNativeHookFailure(ex, "scheduler timeline load", ResolveSchedulerTimelineResourceHandle(timeline));
-            return _hooks.SchedulerTimelineLoadResourcesHook!.Original(timeline);
+            return 0;
         }
     }
 
@@ -590,20 +586,23 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         ScheduleResourceLoadData* loadData,
         byte useMap)
     {
+        using InteropHookCollection.CallbackScope callback = _hooks.EnterCallback();
+        using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferNativeWrites();
         try
         {
-            if (TryReadActiveCollectionId(out string activeCollectionId) && activeCollectionId.Length > 0)
+            if (!IsDisposing && _loadScope.TryReadActiveCollection(out ObjectCollectionResolveData collection)
+                && collection.Redirects.Count > 0)
             {
                 return null;
             }
 
-            return _hooks.GetCachedScheduleResourceHook!.Original(resourceManagement, loadData, useMap);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "object scheduler cache hook failed");
-            return _hooks.GetCachedScheduleResourceHook!.Original(resourceManagement, loadData, useMap);
+            ObjectResourceLog.Write(() => _logger.LogError(ex, "object scheduler cache hook failed"));
         }
+
+        return _hooks.GetCachedScheduleResourceHook!.OriginalDisposeSafe(resourceManagement, loadData, useMap);
     }
 
     private ResourceHandle* GetResourceSyncDetour(
@@ -649,80 +648,202 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
             file,
             line));
 
-    private ResourceHandle* GetResourceDetour(ResourceRequest request)
+    internal ResourceHandle* GetResourceDetour(ResourceRequest request)
     {
+        using InteropHookCollection.CallbackScope callback = _hooks.EnterCallback();
+        using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferNativeWrites();
+        ObjectResourceLoadScopeToken scope = default;
+
         try
         {
-            return GetResourceDetourCore(request);
+            ResourceRequestPlan plan = PrepareResourceRequest(request, ref scope);
+
+            if (plan.RejectedPath is string rejectedPath)
+            {
+                using ObjectResourceLoadScopeToken suspended = _loadScope.Suspend();
+                return CallOriginalWithPath(request, rejectedPath);
+            }
+
+            if (plan.CacheIsolationHash is uint hash)
+            {
+                return CallOriginalWithHash(request, hash);
+            }
+
+            if (plan.Load is not ResolvedResourceLoad load)
+            {
+                return CallUnscopedOriginal(request);
+            }
+
+            ResourceHandle* handle = CallOriginalWithPath(request, load.HandlePath);
+
+            if (handle == null)
+            {
+                uint resourceType = request.Type;
+                ObjectResourceLog.Write(() => _logger.LogWarning("object resource request returned null; collection={CollectionId}; generation={ResourceScopeId}; resolved={ResolvedPath}; resourceType=0x{ResourceType:X8}",
+                    load.Collection.CollectionId, load.Collection.ResourceScopeId, load.TrackedPath, resourceType));
+            }
+
+            RegisterLoadedHandle(handle, load, request.Type);
+            return handle;
+        }
+        finally
+        {
+            scope.Dispose();
+        }
+    }
+
+    private ResourceRequestPlan PrepareResourceRequest(ResourceRequest request, ref ObjectResourceLoadScopeToken scope)
+    {
+        ScopedResourceRequest? admittedCollision = null;
+        try
+        {
+            if (IsDisposing)
+            {
+                if (!ObjectResourcePathEncoding.TryReadNativePath(request.Path, out string disposedPath))
+                {
+                    return default;
+                }
+
+                if (ObjectResourcePathUtility.IsOwnedResourcePath(disposedPath))
+                {
+                    return RejectPrivateRequest(disposedPath);
+                }
+
+                if ((ResourceType)request.Type == ResourceType.Pcb
+                 && _loadScope.TryConsumeCollisionRequest(disposedPath, out ObjectCollectionResolveData? disposedCollection)
+                 && disposedCollection is not null)
+                {
+                    admittedCollision = new ScopedResourceRequest(disposedCollection, disposedPath, WasScoped: false);
+                    return RejectPrivateRequest(admittedCollision.Value);
+                }
+
+                return default;
+            }
+
+            if (_incRefGuard.ShouldBypassRedirect(
+                    request.IsSync,
+                    request.HandleType,
+                    request.ResourceType,
+                    request.ResourceHash,
+                    request.Path,
+                    request.Parameters,
+                    request.HasLockedHandle))
+            {
+                return default;
+            }
+
+            if (!ObjectResourcePathEncoding.TryReadNativePath(request.Path, out string requestedPath)
+                || IsForeignResourceRequest(requestedPath))
+            {
+                return default;
+            }
+
+            if (ObjectMemoryResourcePathUtility.IsMemoryResourcePath(requestedPath)
+             && !ObjectMemoryResourcePathUtility.TryParse(requestedPath, out _))
+            {
+                return RejectPrivateRequest(requestedPath);
+            }
+
+            ObjectCollectionResolveData? collisionCollection = null;
+            bool privateCollision = (ResourceType)request.Type == ResourceType.Pcb
+                && !ObjectScopedResourcePathUtility.IsObjectScopedPath(requestedPath);
+
+            if (privateCollision
+             && (!_loadScope.TryConsumeCollisionRequest(requestedPath, out collisionCollection) || collisionCollection is null))
+            {
+                return default;
+            }
+
+            if (!privateCollision && TryResolveRootCacheIsolation(requestedPath, request, out uint cacheIsolationHash))
+            {
+                ObjectResourceLog.Write(() => _logger.LogDebug("using temporary root resource hash for {Path}: 0x{ResourceHash:X8}", requestedPath, cacheIsolationHash));
+                return new(CacheIsolationHash: cacheIsolationHash);
+            }
+
+            ScopedResourceRequest scopedRequest;
+            if (privateCollision)
+            {
+                scopedRequest = new(collisionCollection!, requestedPath, WasScoped: false);
+                admittedCollision = scopedRequest;
+                scope = _loadScope.EnterResourceScope(scopedRequest.Collection.ResourceScopeId);
+            }
+            else
+            {
+                scope = EnterResourceRequestScope(requestedPath, out scopedRequest);
+            }
+
+            if (!scope.IsActive)
+            {
+                if (privateCollision)
+                {
+                    return RejectPrivateRequest(scopedRequest);
+                }
+
+                return ObjectScopedResourcePathUtility.IsObjectScopedPath(requestedPath)
+                    ? RejectPrivateRequest(requestedPath) : default;
+            }
+
+            RedirectResolution redirect = ResolveResourceLoad(scopedRequest, request.Type);
+            if (redirect.Status == RedirectResolutionStatus.NotFound)
+            {
+                return default;
+            }
+
+            if (redirect.Status == RedirectResolutionStatus.Rejected)
+            {
+                LogRejectedResourceRedirect(scopedRequest, request.Type, redirect);
+                return RejectPrivateRequest(scopedRequest);
+            }
+
+            return new(Load: redirect.ResolvedLoad);
         }
         catch (Exception ex)
         {
             LogNativePathHookFailure(ex, "resource request", request.Path);
-            return ObjectResourcePathEncoding.TryReadNativePath(request.Path, out string requestedPath)
-                && ObjectScopedResourcePathUtility.IsObjectScopedPath(requestedPath)
-                ? null
-                : CallUnscopedOriginal(request);
+
+            if (admittedCollision is { } admitted)
+            {
+                return RejectPrivateRequest(admitted);
+            }
+
+            if (!ObjectResourcePathEncoding.TryReadNativePath(request.Path, out string requestedPath))
+            {
+                return default;
+            }
+
+            if (ObjectResourcePathUtility.IsOwnedResourcePath(requestedPath))
+            {
+                return RejectPrivateRequest(requestedPath);
+            }
+
+            if ((ResourceType)request.Type == ResourceType.Pcb && !scope.IsActive)
+            {
+                return default;
+            }
+
+            if (IsForeignResourceRequest(requestedPath))
+            {
+                return default;
+            }
+
+            return _loadScope.TryReadActiveCollection(out ObjectCollectionResolveData collection)
+                && collection.Redirects.Count > 0
+                    ? new(RejectedPath: ObjectScopedResourcePathUtility.CreateRejected(collection.ResourceScopeId, requestedPath))
+                : default;
         }
     }
 
-    private ResourceHandle* GetResourceDetourCore(ResourceRequest request)
-    {
-        if (IsDisposing
-            || _incRefGuard.ShouldBypassRedirect(
-                request.IsSync,
-                request.HandleType,
-                request.ResourceType,
-                request.ResourceHash,
-                request.Path,
-                request.Parameters,
-                request.HasLockedHandle))
-        {
-            return CallUnscopedOriginal(request);
-        }
+    private static ResourceRequestPlan RejectPrivateRequest(ScopedResourceRequest request)
+        => new(RejectedPath: ObjectScopedResourcePathUtility.CreateRejected(request.Collection.ResourceScopeId, request.RequestedPath));
 
-        if (!ObjectResourcePathEncoding.TryReadNativePath(request.Path, out string requestedPath)
-            || ObjectScopedResourcePathUtility.IsForeignScopedPath(requestedPath))
-        {
-            return CallUnscopedOriginal(request);
-        }
+    private static ResourceRequestPlan RejectPrivateRequest(string requestedPath)
+        => ObjectScopedResourcePathUtility.TryParse(requestedPath, out ObjectScopedResourcePath path)
+            ? new(RejectedPath: ObjectScopedResourcePathUtility.CreateRejected(path.ResourceScopeId, path.Path))
+            : new(RejectedPath: ObjectScopedResourcePathUtility.CreateRejected(0, requestedPath));
 
-        if (TryResolveRootCacheIsolation(requestedPath, request, out uint cacheIsolationHash))
-        {
-            _logger.LogDebug("using temporary root resource hash for {Path}: 0x{ResourceHash:X8}", requestedPath, cacheIsolationHash);
-            return CallOriginalWithHash(request, cacheIsolationHash);
-        }
-
-        using ObjectResourceLoadScopeToken scope = EnterResourceRequestScope(requestedPath, out ScopedResourceRequest scopedRequest);
-        if (!scope.IsActive)
-        {
-            return ObjectScopedResourcePathUtility.IsObjectScopedPath(requestedPath)
-                ? null
-                : CallUnscopedOriginal(request);
-        }
-
-        RedirectResolution redirect = ResolveResourceLoad(scopedRequest, request.Type);
-        if (redirect.Status == RedirectResolutionStatus.NotFound)
-        {
-            return CallUnscopedOriginal(request);
-        }
-
-        if (redirect.Status == RedirectResolutionStatus.Rejected)
-        {
-            LogRejectedResourceRedirect(scopedRequest, request.Type, redirect);
-            return null;
-        }
-
-        ResourceHandle* resourceHandle = CallOriginalWithPath(request, redirect.ResolvedLoad.HandlePath);
-        if (resourceHandle == null)
-        {
-            _logger.LogWarning("object resource request returned null; collection={CollectionId}; generation={ResourceScopeId}; requested={RequestedPath}; resolved={ResolvedPath}; resourceType=0x{ResourceType:X8}",
-                scopedRequest.Collection.CollectionId, scopedRequest.Collection.ResourceScopeId, scopedRequest.RequestedPath,
-                redirect.ResolvedLoad.TrackedPath, request.Type);
-        }
-
-        RegisterLoadedHandle(resourceHandle, redirect.ResolvedLoad, request.Type);
-        return resourceHandle;
-    }
+    private static bool IsForeignResourceRequest(string path)
+        => ObjectScopedResourcePathUtility.IsForeignScopedPath(path)
+            || ObjectLocalFilePathUtility.IsLocalFilePath(path);
 
     private ResourceHandle* CallUnscopedOriginal(ResourceRequest request)
     {
@@ -732,10 +853,11 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
 
     private RedirectResolution ResolveResourceLoad(ScopedResourceRequest request, uint resourceType)
     {
-        string normalizedRequestedPath = ObjectResourcePathUtility.NormalizeTrackedPath(request.RequestedPath);
+        string normalizedRequestedPath = ObjectScopedResourcePathUtility.Create(0, request.RequestedPath);
+
         if (normalizedRequestedPath.Length == 0)
         {
-            return RedirectResolution.NotFound();
+            return RedirectResolution.Rejected(RedirectRejectionReason.InvalidNativePath, default);
         }
 
         bool requestedLocalFile = ObjectLocalFilePathUtility.IsLocalFilePath(normalizedRequestedPath);
@@ -746,14 +868,11 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
                 return RedirectResolution.NotFound();
             }
 
-            return RedirectResolution.Resolved(new ResolvedResourceLoad(
-                request.Collection,
-                CreateResourceHandlePath(request.Collection, normalizedRequestedPath, resourceType),
-                normalizedRequestedPath));
+            return ResolveResourceHandlePath(request.Collection, normalizedRequestedPath, resourceType);
         }
 
         string loadPath = normalizedRequestedPath;
-        string trackedPath = normalizedRequestedPath;
+
         if (!requestedLocalFile && request.Collection.TryResolvePath(normalizedRequestedPath, out ObjectResolvedPath redirectedPath))
         {
             if (!ObjectResourcePathUtility.IsSupportedRedirection(normalizedRequestedPath, redirectedPath))
@@ -767,7 +886,7 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
             }
 
             if (redirectedPath.IsLocalFile
-                && !_fileReadService.CanLoadLocalFilePath(redirectedPath.Path))
+                && !_fileReadService.CanLoadLocalFilePath(redirectedPath.Path, (ResourceType)resourceType))
             {
                 return RedirectResolution.Rejected(RedirectRejectionReason.UnsupportedLocalFile, redirectedPath);
             }
@@ -779,17 +898,27 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
             }
 
             loadPath = redirectedPath.Path;
-            trackedPath = redirectedPath.Path;
         }
-        else if (!request.WasScoped && !ShouldIsolateResourceCache(resourceType))
+        else if (!request.WasScoped && !RequiresCollectionScope(resourceType))
         {
             return RedirectResolution.NotFound();
         }
 
-        return RedirectResolution.Resolved(new ResolvedResourceLoad(
-            request.Collection,
-            CreateResourceHandlePath(request.Collection, loadPath, resourceType),
-            trackedPath));
+        return ResolveResourceHandlePath(request.Collection, loadPath, resourceType);
+    }
+
+    private static RedirectResolution ResolveResourceHandlePath(
+        ObjectCollectionResolveData collection, string loadPath, uint resourceType)
+    {
+        string handlePath = CreateResourceHandlePath(collection, loadPath, resourceType);
+
+        if (handlePath.Length == 0)
+        {
+            _ = ObjectResolvedPath.TryCreate(loadPath, out ObjectResolvedPath rejectedPath);
+            return RedirectResolution.Rejected(RedirectRejectionReason.InvalidNativePath, rejectedPath);
+        }
+
+        return RedirectResolution.Resolved(new ResolvedResourceLoad(collection, handlePath, loadPath));
     }
 
     private ObjectResourceLoadScopeToken EnterResourceRequestScope(string requestedPath, out ScopedResourceRequest request)
@@ -824,23 +953,19 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
     {
         resourceHash = 0;
         if (!ShouldIsolateResourceCache(request.Type)
-         || ObjectScopedResourcePathUtility.IsObjectScopedPath(requestedPath)
-         || !ObjectThreadLocalUtility.TryRead(_rootCacheIsolation, null, out RootCacheIsolation? isolation)
-         || isolation is null
-         || !isolation.IsActive)
+         || ObjectScopedResourcePathUtility.IsObjectScopedPath(requestedPath))
         {
             return false;
         }
 
         string normalizedRequestedPath = ObjectResourcePathUtility.NormalizeTrackedPath(requestedPath);
         if (normalizedRequestedPath.Length == 0
-         || !string.Equals(normalizedRequestedPath, isolation.Path, StringComparison.OrdinalIgnoreCase))
+         || !_loadScope.TryConsumeRootCacheIsolation(normalizedRequestedPath, out long loadId))
         {
             return false;
         }
 
-        resourceHash = unchecked((uint)ComputeRootCacheIsolationHash(normalizedRequestedPath, isolation.LoadId, request.Parameters));
-        isolation.RestoreThreadScope(this);
+        resourceHash = unchecked((uint)ComputeRootCacheIsolationHash(normalizedRequestedPath, loadId, request.Parameters));
         return true;
     }
 
@@ -879,6 +1004,14 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
                 return _loadScope.Suspend();
             }
 
+            if (ObjectMemoryResourcePathUtility.IsMemoryResourcePath(handlePath)
+             && !ObjectMemoryResourcePathUtility.TryParse(handlePath, out _))
+            {
+                canLoad = false;
+                LogRejectedHandleScope("malformed memory path", resourceHandleAddress, handlePath);
+                return _loadScope.Suspend();
+            }
+
             if (ObjectScopedResourcePathUtility.IsForeignScopedPath(handlePath))
             {
                 return _loadScope.Suspend();
@@ -896,7 +1029,7 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
             return _loadScope.Suspend();
         }
 
-        if (!DoesTrackedHandleMatch(resourceHandleAddress, handleScope.ResolvedPath))
+        if (!DoesTrackedHandleMatch(resourceHandleAddress, handleScope))
         {
             LogRejectedHandleScope("path mismatch", resourceHandleAddress, handlePath, handleScope);
             _resourceTracker.RemoveTrackedHandle(resourceHandleAddress, "path mismatch");
@@ -930,10 +1063,13 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         return EnterRegisteredHandleScopeToken((nint)instance->ResourceHandle, out canLoad);
     }
 
+    public ObjectResourceLoadScopeToken EnterSharedGroupLoadScope(SharedGroupLayoutInstance* instance, out bool canLoad)
+        => EnterSharedGroupResourceLoadScopeToken(instance, instance != null ? instance->ResourceHandle : null, out canLoad);
+
     internal ObjectResourceLoadScopeToken EnterSharedGroupResourceLoadScopeToken(SharedGroupLayoutInstance* instance, ResourceHandle* handle, out bool canLoad)
     {
         if (instance == null || (ObjectResourcePathEncoding.TryReadHandlePath(handle, out string handlePath)
-         && (ObjectScopedResourcePathUtility.IsObjectScopedPath(handlePath)
+         && (ObjectResourcePathUtility.IsOwnedResourcePath(handlePath)
              || ObjectScopedResourcePathUtility.IsForeignScopedPath(handlePath))))
         {
             return EnterRegisteredHandleScopeToken((nint)handle, out canLoad);
@@ -978,7 +1114,7 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
             return isTracked;
         }
 
-        if (!DoesTrackedSharedGroupInstanceMatch(instance, instanceScope.ResolvedPath))
+        if (!DoesTrackedSharedGroupInstanceMatch(instance, instanceScope))
         {
             LogRejectedHandleScope("instance path mismatch", (nint)instance, string.Empty, instanceScope);
             _resourceTracker.RemoveTrackedInstance((nint)instance, "path mismatch");
@@ -1014,6 +1150,7 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         }
 
         ResourceHandle* resourceHandle = ResolveSchedulerTimelineResourceHandle(timeline);
+        // initial timeline loads request the TMB before assigning a resource handle
         return resourceHandle == null
             ? EnterActiveCollectionScopeToken()
             : EnterRegisteredHandleScopeToken((nint)resourceHandle, out canLoad);
@@ -1027,28 +1164,28 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
     private ObjectResourceLoadScopeToken EnterCollectionScopeToken(string resourceCollectionId)
         => IsDisposing ? default : _loadScope.EnterCollectionScope(resourceCollectionId);
 
-    private bool TryValidateModelResource(ModelResourceHandle* handle, ResourceHandle* resourceHandle, string actualPath)
+    private bool TryValidateModelResource(ResourceHandle* handle, string actualPath)
     {
-        ObjectModelResourceValidationResult validation = ObjectModelResourceLoadGuard.Validate(handle);
+        ObjectModelResourceValidationResult validation = ObjectModelResourceLoadGuard.Validate((ModelResourceHandle*)handle);
         if (validation.IsValid)
         {
             return true;
         }
 
-        string handlePath = ObjectResourcePathEncoding.TryReadHandlePath(resourceHandle, out string currentPath)
+        string handlePath = ObjectResourcePathEncoding.TryReadHandlePath(handle, out string currentPath)
             ? currentPath
             : string.Empty;
         string collectionId = TryReadActiveCollectionId(out string activeCollectionId)
             ? activeCollectionId
             : string.Empty;
-        _logger.LogWarning(
+        ObjectResourceLog.Write(() => _logger.LogWarning(
             "object model resource load rejected: {Reason}; collection={CollectionId}; path={Path}; actual={ActualPath}; length={Length}; version=0x{Version:X8}",
             validation.Reason,
             collectionId,
             handlePath,
             actualPath,
             validation.Length,
-            validation.Version);
+            validation.Version));
         return false;
     }
 
@@ -1057,22 +1194,32 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         ResourceHandle* resourceHandle = ResolveSchedulerTimelineResourceHandle(timeline);
         if (!ObjectResourcePathEncoding.TryReadActualScopedHandlePath(resourceHandle, out string actualPath))
         {
-            return _hooks.SchedulerTimelineLoadResourcesHook!.Original(timeline);
+            return _hooks.SchedulerTimelineLoadResourcesHook!.OriginalDisposeSafe(timeline);
         }
 
         return ObjectResourcePathEncoding.WithTemporaryHandlePath(
             resourceHandle,
             actualPath,
-            (Hooks: _hooks, Timeline: (nint)timeline),
-            static state => state.Hooks.SchedulerTimelineLoadResourcesHook!.Original((SchedulerTimeline*)state.Timeline));
+            (Hook: _hooks.SchedulerTimelineLoadResourcesHook!, Timeline: (nint)timeline),
+            static state => state.Hook.OriginalDisposeSafe((SchedulerTimeline*)state.Timeline));
     }
 
-    private static bool ShouldIsolateResourceCache(uint resourceType)
+    private static bool RequiresCollectionScope(uint resourceType)
         => (ResourceType)resourceType is ResourceType.Avfx
             or ResourceType.Mdl
             or ResourceType.Mtrl
             or ResourceType.Sgb
-            or ResourceType.Tmb;
+            or ResourceType.Tmb
+            or ResourceType.Sklb
+            or ResourceType.Pap
+            or ResourceType.Pcb;
+
+    private static bool ShouldIsolateResourceCache(uint resourceType)
+        => RequiresCollectionScope(resourceType)
+        || (ResourceType)resourceType is ResourceType.Tex
+            or ResourceType.Shpk
+            or ResourceType.Atex
+            or ResourceType.Scd;
 
     private static bool TryNormalizeRootCacheIsolationPath(string rootPath, out string normalizedPath)
     {
@@ -1090,50 +1237,10 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
             : loadPath;
     }
 
-    private static int ComputeResourceHash(string path, ObjectGetResourceParameters* getResourceParameters)
-    {
-        if (!CiByteString.FromString(path, out var gamePath, MetaDataComputation.Crc32))
-        {
-            throw new InvalidOperationException($"could not encode redirected resource path '{path}'");
-        }
-
-        try
-        {
-            if (getResourceParameters == null || !getResourceParameters->IsPartialRead)
-            {
-                return gamePath.Crc32;
-            }
-
-            var partialPath = string.Concat(
-                path,
-                ".",
-                getResourceParameters->SegmentOffset.ToString("x", CultureInfo.InvariantCulture),
-                ".",
-                getResourceParameters->SegmentLength.ToString("x", CultureInfo.InvariantCulture));
-            if (!CiByteString.FromString(partialPath, out var partialGamePath, MetaDataComputation.Crc32))
-            {
-                return gamePath.Crc32;
-            }
-
-            try
-            {
-                return partialGamePath.Crc32;
-            }
-            finally
-            {
-                partialGamePath.Dispose();
-            }
-        }
-        finally
-        {
-            gamePath.Dispose();
-        }
-    }
-
     private static int ComputeRootCacheIsolationHash(string path, long loadId, ObjectGetResourceParameters* getResourceParameters)
     {
-        string isolatedPath = string.Concat(path, ".intoner.", loadId.ToString("x", CultureInfo.InvariantCulture));
-        return ComputeResourceHash(isolatedPath, getResourceParameters);
+        string isolatedPath = string.Concat(path, ".intoner.process.", loadId.ToString("x", CultureInfo.InvariantCulture));
+        return ObjectResourcePathEncoding.ComputeResourceHash(isolatedPath, getResourceParameters);
     }
 
     private ResourceHandle* CallOriginalWithPath(ResourceRequest request, string resourcePath)
@@ -1142,39 +1249,25 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
             (Owner: this, Request: request, ResourcePath: resourcePath),
             static (pathPointer, _, state) =>
             {
-                ResourceHandleType resolvedHandleType = default;
-                ResourceHandleType* handleTypePointer = state.Owner.TryResolveResourceHandleType(
-                    state.Request.HandleType,
-                    state.ResourcePath,
-                    out resolvedHandleType)
+                ResourceHandleType resolvedHandleType = (ResourceHandleType)ResourceCategory.Common;
+                ResourceHandleType* handleTypePointer = ObjectScopedResourcePathUtility.IsRejectedPath(state.ResourcePath)
+                    || state.Owner.TryResolveResourceHandleType(
+                        state.Request.HandleType,
+                        state.ResourcePath,
+                        out resolvedHandleType)
                     ? &resolvedHandleType
                     : state.Request.HandleType;
-                var resourceHash = unchecked((uint)ComputeResourceHash(state.ResourcePath, state.Request.Parameters));
-                return (nint)state.Owner.CallOriginal(new ResourceRequest(
-                    state.Request.IsSync,
-                    state.Request.ResourceManager,
-                    handleTypePointer,
-                    state.Request.ResourceType,
-                    &resourceHash,
-                    pathPointer,
-                    state.Request.Parameters,
-                    state.Request.HasHandleLock,
-                    state.Request.File,
-                    state.Request.Line));
+                var resourceHash = unchecked((uint)ObjectResourcePathEncoding.ComputeResourceHash(state.ResourcePath, state.Request.Parameters));
+                return (nint)state.Owner.CallOriginal(state.Request with
+                {
+                    HandleType = handleTypePointer,
+                    ResourceHash = &resourceHash,
+                    Path = pathPointer,
+                });
             });
 
     private ResourceHandle* CallOriginalWithHash(ResourceRequest request, uint resourceHash)
-        => CallOriginal(new ResourceRequest(
-            request.IsSync,
-            request.ResourceManager,
-            request.HandleType,
-            request.ResourceType,
-            &resourceHash,
-            request.Path,
-            request.Parameters,
-            request.HasHandleLock,
-            request.File,
-            request.Line));
+        => CallOriginal(request with { ResourceHash = &resourceHash });
 
     private bool TryResolveResourceHandleType(
         ResourceHandleType* currentHandleType,
@@ -1182,7 +1275,8 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         out ResourceHandleType resolvedHandleType)
     {
         resolvedHandleType = default;
-        if (currentHandleType == null || _resolveResourceHandleType == null)
+        if (currentHandleType == null || _resolveResourceHandleType == null
+            || ObjectScopedResourcePathUtility.IsRejectedPath(resourcePath))
         {
             return false;
         }
@@ -1244,7 +1338,7 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
 
     private void RegisterSchedulerTimelineResource(SchedulerTimeline* timeline, ObjectCollectionResolveData collection)
     {
-        if (IsDisposing)
+        if (IsDisposing || collection.Redirects.Count == 0)
         {
             return;
         }
@@ -1284,34 +1378,13 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
             ? null
             : timeline->SchedulerResource->Resource;
 
-    private static bool DoesTrackedHandleMatch(nint resourceHandleAddress, string resolvedPath)
+    private static bool DoesTrackedHandleMatch(nint resourceHandleAddress, ObjectResourceScope scope)
+        => ObjectResourcePathEncoding.TryReadHandlePath((ResourceHandle*)resourceHandleAddress, out string handlePath)
+            && scope.MatchesPath(handlePath);
+
+    private static bool DoesTrackedSharedGroupInstanceMatch(SharedGroupLayoutInstance* instance, ObjectResourceScope scope)
     {
-        var resourceHandle = (ResourceHandle*)resourceHandleAddress;
-        if (resourceHandle == null)
-        {
-            return false;
-        }
-
-        if (!ObjectResourcePathEncoding.TryReadHandlePath(resourceHandle, out string handlePath))
-        {
-            return false;
-        }
-
-        string currentPath = ObjectResourcePathUtility.NormalizeTrackedPath(handlePath);
-        string trackedPath = ObjectResourcePathUtility.NormalizeTrackedPath(resolvedPath);
-        if (currentPath.Length == 0)
-        {
-            return false;
-        }
-
-        return string.Equals(currentPath, trackedPath, StringComparison.OrdinalIgnoreCase)
-            || (ObjectMemoryResourcePathUtility.TryParse(trackedPath, out ObjectMemoryResourcePath memoryPath)
-                && string.Equals(currentPath, memoryPath.GamePath, StringComparison.OrdinalIgnoreCase));
-    }
-
-    private static bool DoesTrackedSharedGroupInstanceMatch(SharedGroupLayoutInstance* instance, string resolvedPath)
-    {
-        if (instance == null || string.IsNullOrWhiteSpace(resolvedPath))
+        if (instance == null)
         {
             return false;
         }
@@ -1322,21 +1395,24 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
             return false;
         }
 
-        string currentPath = ObjectResourcePathUtility.NormalizeTrackedPath(primaryPath.ToString());
-        return currentPath.Length > 0
-            && string.Equals(currentPath, ObjectResourcePathUtility.NormalizeTrackedPath(resolvedPath), StringComparison.OrdinalIgnoreCase);
+        return scope.MatchesPath(primaryPath.ToString());
     }
 
-    private static bool IsObjectScopedHandle(ResourceHandle* handle)
-        => ObjectResourcePathEncoding.TryReadHandlePath(handle, out string handlePath)
-            && ObjectScopedResourcePathUtility.IsObjectScopedPath(handlePath);
+    private bool IsOwnedSharedGroupResource(SharedGroupLayoutInstance* instance, ResourceHandle* handle)
+    {
+        _resourceTracker.TryGetInstanceScope((nint)instance, out _, out bool instanceTracked);
+        _resourceTracker.TryGetHandleScope((nint)handle, out _, out bool handleTracked);
+        return instanceTracked || handleTracked
+            || (ObjectResourcePathEncoding.TryReadHandlePath(handle, out string handlePath)
+                && ObjectResourcePathUtility.IsOwnedResourcePath(handlePath));
+    }
 
     private void LogRejectedResourceRedirect(
         ScopedResourceRequest request,
         uint resourceType,
         RedirectResolution redirect)
     {
-        _logger.LogWarning(
+        ObjectResourceLog.Write(() => _logger.LogWarning(
             "object resource redirect rejected: {Reason}; collection={CollectionId}; revision={Revision}; requested={RequestedPath}; resolved={ResolvedPath}; resolvedKind={ResolvedKind}; resourceType=0x{ResourceType:X8}; scoped={WasScoped}",
             redirect.RejectionReason,
             request.Collection.CollectionId,
@@ -1345,19 +1421,20 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
             redirect.RejectedPath.Path,
             redirect.RejectedPath.Kind,
             resourceType,
-            request.WasScoped);
+            request.WasScoped));
     }
 
     private void LogRejectedHandleScope(string reason, nint address, string path, ObjectResourceScope scope = default)
-        => _logger.LogWarning("object resource callback rejected; reason={Reason}; address=0x{Address:X}; path={Path}; collection={CollectionId}; generation={ResourceScopeId}; expectedPath={ExpectedPath}",
-            reason, (ulong)address, path, scope.ResourceCollectionId, scope.ResourceScopeId, scope.ResolvedPath);
+        => ObjectResourceLog.Write(() => _logger.LogWarning("object resource callback rejected; reason={Reason}; address=0x{Address:X}; path={Path}; collection={CollectionId}; generation={ResourceScopeId}; expectedPath={ExpectedPath}",
+            reason, (ulong)address, path, scope.ResourceCollectionId, scope.ResourceScopeId, scope.ResolvedPath));
 
     internal void LogNativeHookFailure(Exception exception, string hook, ResourceHandle* handle)
         => ObjectResourceLog.LogHookFailure(_logger, _resourceTracker, exception, hook, (nint)handle);
 
     private void LogNativePathHookFailure(Exception exception, string hook, byte* path)
     {
-        _logger.LogError(exception, "object resource {Hook} hook failed; pathAddress=0x{PathAddress:X}", hook, (ulong)path);
+        nint pathAddress = (nint)path;
+        ObjectResourceLog.Write(() => _logger.LogError(exception, "object resource {Hook} hook failed; pathAddress=0x{PathAddress:X}", hook, (ulong)pathAddress));
     }
 
     private ResourceHandle* CallOriginal(ResourceRequest request)
@@ -1381,16 +1458,4 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
                 request.HasHandleLock,
                 request.File,
                 request.Line);
-
-    private readonly struct RootCacheIsolationScopeToken(ObjectResourceLoader? owner, RootCacheIsolation? isolation) : IDisposable
-    {
-        public void Dispose()
-        {
-            if (owner is not null && isolation is not null)
-            {
-                isolation.Release(owner);
-            }
-        }
-    }
 }
-

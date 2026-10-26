@@ -71,18 +71,8 @@ internal sealed partial class ObjectLibraryBrowser
                 enabled: canPlacePrefab);
             if (placeMenu)
             {
-                if (EditorContextMenu.DrawItem(FontAwesomeIcon.User, "Place at Your Position"))
-                {
-                    _ = TryPlaceLibraryPrefab(group, atPlayer: true);
-                }
-
-                if (EditorContextMenu.DrawItem(
-                        FontAwesomeIcon.Globe,
-                        "Place at World Position",
-                        enabled: canPlacePrefab && CanRestoreLibraryPrefabAtWorldPosition(group)))
-                {
-                    _ = TryPlaceLibraryPrefab(group, atPlayer: false);
-                }
+                DrawPrefabPlacementMenu(group, atPlayer: true);
+                DrawPrefabPlacementMenu(group, atPlayer: false);
             }
         }
         else

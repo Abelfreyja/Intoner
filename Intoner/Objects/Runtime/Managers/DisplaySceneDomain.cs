@@ -21,6 +21,23 @@ internal sealed class DisplaySceneDomain : ISceneItemDomain
             _state.Revision,
             _runtimes.BoundsRevision);
 
+    public long StoredRevision => _state.Revision;
+    public IReadOnlyList<SceneItemSnapshot> GetStoredItems() => _state.GetSnapshots();
+    public SceneHistoryResult ValidateStoredOwner(SceneItemSnapshot snapshot) => SceneHistoryResult.Success;
+
+    public SceneMutationStatus ApplyStoredChanges(IReadOnlyList<SceneItemSnapshotChange> changes)
+    {
+        if (!_state.TryApplyChanges(changes))
+        {
+            return SceneMutationStatus.Rejected;
+        }
+
+        _runtimes.RequestPreviewRecovery();
+        return SceneMutationStatus.Applied;
+    }
+
+    public void ReconcileStoredChanges() => _runtimes.ReconcileAfterMutation();
+
     public SceneItemManipulationPolicy Manipulation
         => DisplayManipulation.Instance;
 

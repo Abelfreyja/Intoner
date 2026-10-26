@@ -22,43 +22,56 @@ internal static class ViewportMeshUploader
         Dictionary<string, GpuTextureView> texturesByPath = new(StringComparer.OrdinalIgnoreCase);
         List<GpuTextureView> ownedTextures = [];
 
-        foreach ((int materialIndex, List<int> triangleIndices) in trianglesByMaterial.OrderBy(static pair => pair.Key))
+        Buffer? vertexBuffer = null;
+        bool transferred = false;
+        try
         {
-            ModelPreviewGeometryReader.PreviewMaterial? material = ResolveMaterial(geometry, materialIndex);
-            List<ViewportMesh.DrawRange> targetRanges = IsTransparentMaterial(material)
-                ? transparentRanges
-                : opaqueRanges;
-            int startVertex = vertices.Count;
-            AppendTriangleVertices(vertices, geometry, triangleIndices);
-            int vertexCount = vertices.Count - startVertex;
-            if (vertexCount == 0)
+            foreach ((int materialIndex, List<int> triangleIndices) in trianglesByMaterial.OrderBy(static pair => pair.Key))
             {
-                continue;
+                ModelPreviewGeometryReader.PreviewMaterial? material = ResolveMaterial(geometry, materialIndex);
+                List<ViewportMesh.DrawRange> targetRanges = IsTransparentMaterial(material)
+                    ? transparentRanges
+                    : opaqueRanges;
+                int startVertex = vertices.Count;
+                AppendTriangleVertices(vertices, geometry, triangleIndices);
+                int vertexCount = vertices.Count - startVertex;
+                if (vertexCount == 0)
+                {
+                    continue;
+                }
+
+                GpuTextureView texture = ResolveDiffuseTexture(device, material, whiteTexture, texturesByPath, ownedTextures);
+                targetRanges.Add(new ViewportMesh.DrawRange(
+                    startVertex,
+                    vertexCount,
+                    texture.View,
+                    material?.DiffuseTexture is not null,
+                    material?.ApplyAlphaClip ?? false,
+                    material?.Transparency ?? 1f,
+                    untexturedDiffuseColor));
             }
 
-            GpuTextureView texture = ResolveDiffuseTexture(device, material, whiteTexture, texturesByPath, ownedTextures);
-            targetRanges.Add(new ViewportMesh.DrawRange(
-                startVertex,
-                vertexCount,
-                texture.View,
-                material?.DiffuseTexture is not null,
-                material?.ApplyAlphaClip ?? false,
-                material?.Transparency ?? 1f,
-                untexturedDiffuseColor));
-        }
-
-        if (vertices.Count == 0)
-        {
-            foreach (GpuTextureView ownedTexture in ownedTextures)
+            if (vertices.Count == 0)
             {
-                ownedTexture.Dispose();
+                throw new InvalidOperationException("preview mesh did not contain drawable vertices");
             }
 
-            throw new InvalidOperationException("preview mesh did not contain drawable vertices");
+            vertexBuffer = Buffer.Create(device, BindFlags.VertexBuffer, vertices.ToArray());
+            ViewportMesh mesh = new(vertexBuffer, opaqueRanges, transparentRanges, ownedTextures);
+            transferred = true;
+            return mesh;
         }
-
-        Buffer vertexBuffer = Buffer.Create(device, BindFlags.VertexBuffer, vertices.ToArray());
-        return new ViewportMesh(vertexBuffer, opaqueRanges, transparentRanges, ownedTextures);
+        finally
+        {
+            if (!transferred)
+            {
+                vertexBuffer?.Dispose();
+                foreach (GpuTextureView texture in ownedTextures)
+                {
+                    texture.Dispose();
+                }
+            }
+        }
     }
 
     private static Dictionary<int, List<int>> BuildTriangleGroups(ModelPreviewGeometryReader.PreviewGeometry geometry)
@@ -174,8 +187,8 @@ internal static class ViewportMeshUploader
         }
 
         texture = CreateTexture(device, material.DiffuseTexture);
-        texturesByPath.Add(material.DiffuseTexturePath, texture);
         ownedTextures.Add(texture);
+        texturesByPath.Add(material.DiffuseTexturePath, texture);
         return texture;
     }
 

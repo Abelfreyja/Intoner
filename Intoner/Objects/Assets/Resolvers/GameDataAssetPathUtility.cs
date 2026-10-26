@@ -1,3 +1,4 @@
+using Intoner.Objects.Resources;
 using Lumina.Excel.Sheets;
 
 namespace Intoner.Objects.Assets;
@@ -6,7 +7,7 @@ internal static class GameDataAssetPathUtility
 {
     public static bool TryBuildHousingInteriorSourcePath(HousingInterior row, out string path)
     {
-        string directPath = GameAssetPathRules.NormalizeGamePath(row.Unknown0.ExtractText());
+        string directPath = ObjectResolvedPath.FromGamePath(row.Unknown0.ExtractText()).Path;
         if (ObjectAssetPathRules.IsCatalogSharedGroupPath(directPath)
          || ObjectAssetPathRules.IsCatalogModelPath(directPath))
         {
@@ -32,7 +33,7 @@ internal static class GameDataAssetPathUtility
 
     public static string BuildTerritoryLayoutPath(string bgToken)
     {
-        string normalizedToken = GameAssetPathRules.NormalizeGamePath(bgToken);
+        string normalizedToken = ObjectResolvedPath.FromGamePath(bgToken).Path;
         if (string.IsNullOrWhiteSpace(normalizedToken))
         {
             return string.Empty;
@@ -43,14 +44,15 @@ internal static class GameDataAssetPathUtility
             return normalizedToken;
         }
 
-        return normalizedToken.StartsWith("bg/", StringComparison.OrdinalIgnoreCase)
+        string path = normalizedToken.StartsWith("bg/", StringComparison.OrdinalIgnoreCase)
             ? $"{normalizedToken}.lvb"
             : $"bg/{normalizedToken}.lvb";
+        return ObjectResolvedPath.FromGamePath(path).Path;
     }
 
     public static bool TryBuildCommonEffectVfxPath(string token, out string path)
     {
-        string normalizedToken = GameAssetPathRules.NormalizeGamePath(token);
+        string normalizedToken = ObjectResolvedPath.FromGamePath(token).Path;
         if (string.IsNullOrWhiteSpace(normalizedToken))
         {
             path = string.Empty;
@@ -63,19 +65,38 @@ internal static class GameDataAssetPathUtility
             return true;
         }
 
-        if (normalizedToken.StartsWith("vfx/", StringComparison.OrdinalIgnoreCase))
+        return TryBuildVfxFamilyPath("vfx/common/eff", normalizedToken, out path);
+    }
+
+    public static bool TryBuildVfxFamilyPath(string prefix, string token, out string path)
+    {
+        string normalizedPrefix = ObjectResolvedPath.FromGamePath(prefix).Path;
+        string normalizedToken = ObjectResolvedPath.FromGamePath(token).Path;
+        if (string.IsNullOrWhiteSpace(normalizedPrefix) || string.IsNullOrWhiteSpace(normalizedToken))
         {
-            path = $"{normalizedToken}.avfx";
-            return true;
+            path = string.Empty;
+            return false;
         }
 
-        path = $"vfx/common/eff/{normalizedToken}.avfx";
-        return true;
+        bool hasExtension = GameAssetPathRules.IsFileKind(normalizedToken, GameAssetFileKind.Avfx);
+        if (normalizedToken.StartsWith("vfx/", StringComparison.OrdinalIgnoreCase))
+        {
+            path = hasExtension ? normalizedToken : $"{normalizedToken}.avfx";
+        }
+        else
+        {
+            path = hasExtension
+                ? $"{normalizedPrefix}/{normalizedToken}"
+                : $"{normalizedPrefix}/{normalizedToken}.avfx";
+        }
+
+        path = ObjectResolvedPath.FromGamePath(path).Path;
+        return path.Length > 0;
     }
 
     public static bool TryBuildActionTimelinePath(string key, out string path)
     {
-        string normalizedKey = GameAssetPathRules.NormalizeGamePath(key);
+        string normalizedKey = ObjectResolvedPath.FromGamePath(key).Path;
         if (string.IsNullOrWhiteSpace(normalizedKey)
          || normalizedKey.Contains("[SKL_ID]", StringComparison.OrdinalIgnoreCase))
         {
@@ -91,12 +112,11 @@ internal static class GameDataAssetPathUtility
 
         if (normalizedKey.StartsWith("chara/action/", StringComparison.OrdinalIgnoreCase))
         {
-            path = $"{normalizedKey}.tmb";
-            return true;
+            path = ObjectResolvedPath.FromGamePath($"{normalizedKey}.tmb").Path;
+            return path.Length > 0;
         }
 
-        path = $"chara/action/{normalizedKey}.tmb";
-        return true;
+        path = ObjectResolvedPath.FromGamePath($"chara/action/{normalizedKey}.tmb").Path;
+        return path.Length > 0;
     }
 }
-

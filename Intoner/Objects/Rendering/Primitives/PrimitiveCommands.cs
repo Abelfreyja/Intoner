@@ -1,3 +1,4 @@
+using Intoner.Objects.Rendering.Drawing;
 using System.Numerics;
 
 namespace Intoner.Objects.Rendering.Primitives;
@@ -15,5 +16,7 @@ internal readonly record struct ScreenCommand(
     float Thickness,
     ScreenLineCaps Caps,
     Vector2 Previous,
-    Vector2 Next);
+    Vector2 Next,
+    ScreenAnchor? Anchor = null);
 
+internal readonly record struct TextCommand(Vector2 Position, PrimitiveTexture Texture, ScreenAnchor? Anchor);

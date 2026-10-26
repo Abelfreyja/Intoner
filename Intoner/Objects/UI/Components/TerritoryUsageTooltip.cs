@@ -103,10 +103,9 @@ internal static class TerritoryUsageTooltip
         IntonerTooltip.Draw(
             () =>
             {
-                IntonerTooltipContent.Heading(
+                IntonerTooltipContent.Header(
                     FontAwesomeIcon.MapMarkerAlt,
-                    "Found In",
-                    separatorTopSpacing: 3f);
+                    "Found In");
                 using var spacing = ImRaii.PushStyle(
                     ImGuiStyleVar.ItemSpacing,
                     new Vector2(ImGui.GetStyle().ItemSpacing.X, 0f));

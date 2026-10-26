@@ -9,15 +9,18 @@ internal sealed class NativeRenderer : IRenderer, IDisposable
     private readonly PrimitiveService            _primitives;
     private readonly IIntonerConfigurationService _configurationService;
     private readonly PrimitiveCommandEncoder     _encoder = new();
+    private readonly NativeTextTextureCache      _textTextures;
 
     private bool _disposed;
 
     public NativeRenderer(
         PrimitiveService primitives,
-        IIntonerConfigurationService configurationService)
+        IIntonerConfigurationService configurationService,
+        NativeTextTextureCache textTextures)
     {
         _primitives            = primitives;
         _configurationService  = configurationService;
+        _textTextures          = textTextures;
     }
 
     public void BeginFrame()
@@ -79,7 +82,7 @@ internal sealed class NativeRenderer : IRenderer, IDisposable
 
     private bool TryCommitNativePrimitives(in DrawContext context, DrawBatch batch, PrimitiveDrawState state)
     {
-        if (!_encoder.Append(context, batch))
+        if (!_encoder.Append(context, batch, _textTextures))
         {
             return false;
         }
@@ -87,4 +90,3 @@ internal sealed class NativeRenderer : IRenderer, IDisposable
         return _primitives.Commit(_encoder.Commands, state);
     }
 }
-

@@ -1,13 +1,14 @@
 using Dalamud.Plugin.Services;
 using Dalamud.Utility;
 using Intoner.Objects.Assets;
+using Intoner.Objects.Resources;
 using Lumina.Data.Files;
 using Microsoft.Extensions.Logging;
 using System.Runtime.InteropServices;
 
 namespace Intoner.Objects.Preview.Assets;
 
-internal sealed class PreviewTextureCache(ILogger logger, IDataManager gameData)
+internal sealed class PreviewTextureCache(ILogger logger, IDataManager gameData) : IDisposable
 {
     private const int MaxPreviewTextureDimension = 512;
     private const long MaxPreviewTextureCacheBytes = 32L * 1024 * 1024;
@@ -21,36 +22,55 @@ internal sealed class PreviewTextureCache(ILogger logger, IDataManager gameData)
     {
         public ModelPreviewGeometryReader.PreviewTexture? Texture { get; } = texture;
         public long ByteCount { get; } = byteCount;
+        public long LastLoadAttemptAtMs { get; } = lastAccessAtMs;
         public long LastAccessAtMs { get; set; } = lastAccessAtMs;
     }
 
     private readonly Lock _lock = new();
     private readonly Dictionary<string, Entry> _entries = new(StringComparer.OrdinalIgnoreCase);
+    private bool _disposed;
 
     [StructLayout(LayoutKind.Auto)]
     internal readonly record struct Snapshot(int Count, long ByteCount);
 
     public ModelPreviewGeometryReader.PreviewTexture? GetOrLoad(string texturePath)
+        => GetOrLoad(texturePath, GetNowMilliseconds());
+
+    internal ModelPreviewGeometryReader.PreviewTexture? GetOrLoad(string texturePath, long now)
     {
-        string normalizedTexturePath = GameAssetPathRules.NormalizeGamePath(texturePath);
+        string normalizedTexturePath = ObjectResolvedPath.FromGamePath(texturePath).Path;
         if (string.IsNullOrWhiteSpace(normalizedTexturePath))
         {
             return null;
         }
 
-        long now = GetNowMilliseconds();
         lock (_lock)
         {
+            ObjectDisposedException.ThrowIf(_disposed, this);
             if (_entries.TryGetValue(normalizedTexturePath, out Entry? entry))
             {
                 entry.LastAccessAtMs = now;
-                return entry.Texture;
+
+                if (entry.Texture is not null
+                 || !PreviewCachePolicy.IsExpired(entry.LastLoadAttemptAtMs, now, ObjectAssetFileUtility.AssetReadRetryDelay))
+                {
+                    return entry.Texture;
+                }
+
+                _entries.Remove(normalizedTexturePath);
             }
         }
 
         ModelPreviewGeometryReader.PreviewTexture? previewTexture = LoadTexture(normalizedTexturePath);
         lock (_lock)
         {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (_entries.TryGetValue(normalizedTexturePath, out Entry? existing) && existing.Texture is not null)
+            {
+                existing.LastAccessAtMs = now;
+                return existing.Texture;
+            }
+
             _entries[normalizedTexturePath] = new Entry(
                 previewTexture,
                 previewTexture?.RgbaPixels.LongLength ?? 0,
@@ -58,6 +78,24 @@ internal sealed class PreviewTextureCache(ILogger logger, IDataManager gameData)
         }
 
         return previewTexture;
+    }
+
+    public long GetNextRetryAtMs(string texturePath, long now)
+    {
+        string normalizedPath = ObjectResolvedPath.FromGamePath(texturePath).Path;
+
+        if (normalizedPath.Length == 0)
+        {
+            return 0;
+        }
+
+        lock (_lock)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            return _entries.TryGetValue(normalizedPath, out Entry? entry) && entry.Texture is null
+                ? entry.LastLoadAttemptAtMs + (long)ObjectAssetFileUtility.AssetReadRetryDelay.TotalMilliseconds
+                : now;
+        }
     }
 
     public Snapshot GetSnapshot()
@@ -96,7 +134,9 @@ internal sealed class PreviewTextureCache(ILogger logger, IDataManager gameData)
 
             foreach ((string key, Entry entry) in candidates)
             {
-                bool shouldRemove = IsExpired(entry.LastAccessAtMs, now, PreviewTextureCacheRetention)
+                long retainedAtMs = entry.Texture is null ? entry.LastLoadAttemptAtMs : entry.LastAccessAtMs;
+                TimeSpan retention = entry.Texture is null ? ObjectAssetFileUtility.AssetReadRetryDelay : PreviewTextureCacheRetention;
+                bool shouldRemove = PreviewCachePolicy.IsExpired(retainedAtMs, now, retention)
                     || totalBytes > MaxPreviewTextureCacheBytes;
                 if (!shouldRemove)
                 {
@@ -109,10 +149,11 @@ internal sealed class PreviewTextureCache(ILogger logger, IDataManager gameData)
         }
     }
 
-    public void Clear()
+    public void Dispose()
     {
         lock (_lock)
         {
+            _disposed = true;
             _entries.Clear();
         }
     }
@@ -129,8 +170,14 @@ internal sealed class PreviewTextureCache(ILogger logger, IDataManager gameData)
 
             int width = texFile.Header.Width;
             int height = texFile.Header.Height;
+            long requiredBytes = (long)width * height * 4;
+            if (width <= 0 || height <= 0 || requiredBytes > Array.MaxLength)
+            {
+                return null;
+            }
+
             byte[] pixels = texFile.GetRgbaImageData();
-            if (pixels.Length < width * height * 4)
+            if (pixels.LongLength < requiredBytes)
             {
                 return null;
             }
@@ -182,14 +229,4 @@ internal sealed class PreviewTextureCache(ILogger logger, IDataManager gameData)
 
     private static long GetNowMilliseconds()
         => Environment.TickCount64;
-
-    private static bool IsExpired(long lastAccessAtMs, long now, TimeSpan retention)
-    {
-        if (lastAccessAtMs <= 0)
-        {
-            return true;
-        }
-
-        return now - lastAccessAtMs >= retention.TotalMilliseconds;
-    }
 }

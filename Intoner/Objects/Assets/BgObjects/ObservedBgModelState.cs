@@ -1,4 +1,5 @@
 using Intoner.Objects.Assets.Cache;
+using Intoner.Objects.Resources;
 using Intoner.Objects.Utils;
 
 namespace Intoner.Objects.Assets;
@@ -13,6 +14,7 @@ internal sealed class ObservedBgModelState(string path)
     ];
 
     private IReadOnlyList<string>? _searchTerms;
+    private readonly HashSet<string> _additionalSearchTerms = new(StringComparer.OrdinalIgnoreCase);
     private readonly ObjectTerritoryMetadataSet _territoryMetadata = new();
 
     public string Path { get; } = path;
@@ -55,15 +57,28 @@ internal sealed class ObservedBgModelState(string path)
         return changed;
     }
 
+    public bool AddSearchTerms(IReadOnlyList<string> searchTerms)
+    {
+        bool changed = SearchTermUtility.AddTerms(_additionalSearchTerms, searchTerms);
+
+        if (changed)
+        {
+            _searchTerms = null;
+        }
+
+        return changed;
+    }
+
     public static ObservedBgModelState FromCache(ObjectAssetCacheBgModel bgModel)
     {
-        ObservedBgModelState asset = new(bgModel.Path);
+        ObservedBgModelState asset = new(ObjectResolvedPath.FromGamePath(bgModel.Path).Path);
         foreach (string source in bgModel.Sources.Where(static source => !string.IsNullOrWhiteSpace(source)))
         {
             _ = asset.AddSource(source);
         }
 
         _ = asset.AddTerritoryMetadata(bgModel.TerritoryIds, bgModel.TerritoryNames);
+        _ = asset.AddSearchTerms(bgModel.SearchTerms);
         if (asset.Sources.Count == 0)
         {
             _ = asset.AddSource(ObjectAssetCaptureSources.ObservedResource);
@@ -77,20 +92,18 @@ internal sealed class ObservedBgModelState(string path)
             Path,
             Sources.OrderBy(static source => source, StringComparer.OrdinalIgnoreCase).ToArray(),
             BuildStableTerritoryIds(),
-            BuildStableTerritoryNames());
+            BuildStableTerritoryNames(),
+            SearchTermUtility.BuildStableTerms(_additionalSearchTerms));
 
-    public CacheSaveCapture CaptureForSave()
-        => new(
-            ToCacheModel(),
-            IsRuntimeObserved);
-
-    public ObservedBgAsset ToAsset(PathKnowledgeBase knowledgeBase)
+    public BgObjectAsset ToAsset()
         => new(
             Path,
             GetPrimarySource(),
+            0,
+            Path,
             BuildStableTerritoryIds(),
             BuildStableTerritoryNames(),
-            SearchTermUtility.MergeTerms(BuildSearchTerms(), knowledgeBase.GetSearchTerms(Path)));
+            BuildSearchTerms());
 
     private string GetPrimarySource()
     {
@@ -107,6 +120,7 @@ internal sealed class ObservedBgModelState(string path)
 
         HashSet<string> searchTerms = SearchTermUtility.CreateSet(Path);
         _ = SearchTermUtility.AddTerms(searchTerms, Sources);
+        _ = SearchTermUtility.AddTerms(searchTerms, _additionalSearchTerms);
         _ = SearchTermUtility.AddPathSegments(searchTerms, Path);
         _territoryMetadata.AddSearchTerms(searchTerms);
 
@@ -119,9 +133,4 @@ internal sealed class ObservedBgModelState(string path)
 
     private IReadOnlyList<string> BuildStableTerritoryNames()
         => _territoryMetadata.BuildStableNames();
-
-    public readonly record struct CacheSaveCapture(
-        ObjectAssetCacheBgModel CacheModel,
-        bool IsRuntimeObserved);
 }
-

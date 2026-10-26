@@ -20,6 +20,7 @@ internal readonly record struct EditorScrollListOptions
     public ImDrawFlags? CornerFlags { get; init; }
     public EditorScrollListScrollbarLayout ScrollbarLayout { get; init; }
     public bool ShowEdgeCueArrow { get; init; }
+    public bool HideEdgeFade { get; init; }
     public IUiOverlayTarget? OverlayTarget { get; init; }
 
     public static EditorScrollListOptions Panel(Vector4 edgeColor, float rounding, Vector4? accent = null)
@@ -169,6 +170,7 @@ internal static class EditorScrollList
         ImDrawFlags CornerFlags,
         EditorScrollListScrollbarLayout ScrollbarLayout,
         bool ShowEdgeCueArrow,
+        bool HideEdgeFade,
         IUiOverlayTarget? OverlayTarget);
 
 
@@ -180,6 +182,7 @@ internal static class EditorScrollList
             options.CornerFlags ?? ImDrawFlags.RoundCornersAll,
             options.ScrollbarLayout,
             options.ShowEdgeCueArrow,
+            options.HideEdgeFade,
             options.OverlayTarget);
 
     private static Vector4 ResolveDefaultEdgeColor()
@@ -189,6 +192,4 @@ internal static class EditorScrollList
             ? childBg
             : ThemeColors.WindowBg;
     }
-
 }
-

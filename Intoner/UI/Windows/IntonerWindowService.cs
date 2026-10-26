@@ -15,6 +15,7 @@ internal sealed class IntonerWindowService : IDisposable
     private readonly IntonerUiPerformanceService _uiPerformance;
     private readonly WindowVisibilityService _visibilityService;
     private readonly WindowSystem _windowSystem = new("Intoner");
+    private readonly Lock _lock = new();
     private bool _started;
     private bool _disposed;
 
@@ -36,29 +37,47 @@ internal sealed class IntonerWindowService : IDisposable
 
     public void AddWindow(Window window)
     {
-        ThrowIfDisposed();
-        _windowSystem.AddWindow(window);
+        lock (_lock)
+        {
+            ThrowIfDisposed();
+            _windowSystem.AddWindow(window);
+        }
     }
 
     public void RemoveWindow(Window window)
-        => _windowSystem.RemoveWindow(window);
+    {
+        lock (_lock)
+        {
+            _windowSystem.RemoveWindow(window);
+        }
+    }
 
     public void Start()
     {
-        ThrowIfDisposed();
-
-        if (_started)
+        lock (_lock)
         {
-            return;
-        }
+            ThrowIfDisposed();
+            if (_started)
+            {
+                return;
+            }
 
-        _visibilityService.Start();
-        _started = true;
-        _uiBuilder.Draw += Draw;
-        _logger.LogTrace("Intoner window service started");
+            _visibilityService.Start();
+            _started = true;
+            _uiBuilder.Draw += Draw;
+            _logger.LogTrace("Intoner window service started");
+        }
     }
 
     public void Stop()
+    {
+        lock (_lock)
+        {
+            StopLocked();
+        }
+    }
+
+    private void StopLocked()
     {
         if (!_started)
         {
@@ -73,22 +92,33 @@ internal sealed class IntonerWindowService : IDisposable
 
     public void Dispose()
     {
-        if (_disposed)
+        lock (_lock)
         {
-            return;
-        }
+            if (_disposed)
+            {
+                return;
+            }
 
-        _disposed = true;
-        Stop();
-        _windowSystem.RemoveAllWindows();
+            _disposed = true;
+            StopLocked();
+            _windowSystem.RemoveAllWindows();
+        }
     }
 
     private void Draw()
     {
-        using IntonerUiPerformanceService.Scope timing = _uiPerformance.Measure("IntonerWindowService.Draw");
-        using IntonerThemeStyle.Scope style = _themeStyle.Push();
-        _windowSystem.Draw();
-        _fileDialogManager.Draw();
+        lock (_lock)
+        {
+            if (!_started)
+            {
+                return;
+            }
+
+            using IntonerUiPerformanceService.Scope timing = _uiPerformance.Measure("IntonerWindowService.Draw");
+            using IntonerThemeStyle.Scope style = _themeStyle.Push();
+            _windowSystem.Draw();
+            _fileDialogManager.Draw();
+        }
     }
 
     private void ThrowIfDisposed()

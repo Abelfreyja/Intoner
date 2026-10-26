@@ -99,18 +99,18 @@ internal static class PenumbraModResolver
         return editableGroups;
     }
 
-    public static IReadOnlyList<ObjectPathRedirection> ResolveRedirections(
+    public static PreparedRedirects PrepareRedirections(
         PenumbraModMetadata metadata,
         string modRootPath,
         ObjectCollectionModSettings entry,
-        IReadOnlySet<string> requestedPaths,
         ICollection<string> warnings,
         CancellationToken cancellationToken)
     {
-        Dictionary<string, ObjectResolvedPath> redirects = new(StringComparer.OrdinalIgnoreCase);
+        cancellationToken.ThrowIfCancellationRequested();
         string normalizedModRootPath = PenumbraModPath.NormalizeRoot(modRootPath);
         AddMissingGroupWarnings(metadata.Groups, entry, warnings);
         SettingsState state = ResolveSettings(metadata, entry, warnings);
+        List<PenumbraModData> selectedData = [];
 
         foreach ((PenumbraModGroup group, int groupIndex) in metadata.Groups
                      .Select(static (group, index) => (group, index))
@@ -118,31 +118,85 @@ internal static class PenumbraModResolver
                      .ThenByDescending(static data => data.index))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!IsConditionMet(group.Condition, state.EnabledOptionIds))
-            {
-                continue;
-            }
 
-            ApplyGroup(
-                group,
-                state.GroupSelections[groupIndex],
-                state.EnabledOptionIds,
-                entry,
-                requestedPaths,
-                normalizedModRootPath,
-                redirects,
-                warnings);
+            if (IsConditionMet(group.Condition, state.EnabledOptionIds))
+            {
+                AppendSelectedData(group, state.GroupSelections[groupIndex], state.EnabledOptionIds, selectedData, entry.ModDirectory, warnings);
+            }
         }
 
-        ApplyData(
-            metadata.DefaultData,
-            requestedPaths,
-            normalizedModRootPath,
-            redirects,
-            entry.ModDirectory,
-            warnings);
-        return ObjectPathRedirectionUtility.CreateStableList(
-            redirects.Select(static pair => new ObjectPathRedirection(pair.Key, pair.Value)));
+        AddSelectedData(metadata.DefaultData, selectedData, entry.ModDirectory, warnings);
+        cancellationToken.ThrowIfCancellationRequested();
+        return new PreparedRedirects(normalizedModRootPath, selectedData.ToArray());
+    }
+
+    internal sealed class PreparedRedirects(string normalizedModRootPath, PenumbraModData[] selectedData)
+    {
+        public bool TryResolveNormalizedPath(
+            string requestedPath,
+            out ObjectResolvedPath resolvedPath,
+            CancellationToken cancellationToken)
+        {
+            resolvedPath = default;
+
+            foreach (PenumbraModData data in selectedData)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (TryCreateLocalFileRedirect(data, requestedPath, normalizedModRootPath, out resolvedPath)
+                 || TryCreateFileSwapRedirect(data, requestedPath, out resolvedPath))
+                {
+                    return true;
+                }
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            return false;
+        }
+
+        private static bool TryCreateLocalFileRedirect(
+            PenumbraModData data,
+            string requestedPath,
+            string normalizedModRootPath,
+            out ObjectResolvedPath resolvedPath)
+        {
+            resolvedPath = default;
+            if (!data.Files.TryGetValue(requestedPath, out string? relativePath))
+            {
+                return false;
+            }
+
+            string normalizedRelativePath = relativePath.Replace('/', Path.DirectorySeparatorChar);
+            string localFilePath;
+            try
+            {
+                localFilePath = Path.GetFullPath(Path.Combine(normalizedModRootPath, normalizedRelativePath));
+            }
+            catch
+            {
+                return false;
+            }
+
+            if (!PenumbraModPath.Contains(normalizedModRootPath, localFilePath))
+            {
+                return false;
+            }
+
+            resolvedPath = ObjectResolvedPath.FromLocalFile(localFilePath);
+            return ObjectResourcePathUtility.IsSupportedRedirection(requestedPath, resolvedPath);
+        }
+
+        private static bool TryCreateFileSwapRedirect(
+            PenumbraModData data,
+            string requestedPath,
+            out ObjectResolvedPath resolvedPath)
+        {
+            resolvedPath = default;
+            return data.FileSwaps.TryGetValue(requestedPath, out string? redirectedPath)
+                && ObjectResolvedPath.TryCreate(redirectedPath, out resolvedPath)
+                && !resolvedPath.IsMemory
+                && ObjectResourcePathUtility.IsSupportedRedirection(requestedPath, resolvedPath);
+        }
     }
 
     private static SettingsState ResolveSettings(
@@ -177,124 +231,47 @@ internal static class PenumbraModResolver
         return new SettingsState(selections, enabledOptionIds, addressableGroupIndexes);
     }
 
-    private static void ApplyGroup(
+    private static void AppendSelectedData(
         PenumbraModGroup group,
         GroupSelection selection,
         IReadOnlySet<Guid> enabledOptionIds,
-        ObjectCollectionModSettings entry,
-        IReadOnlySet<string> requestedPaths,
-        string normalizedModRootPath,
-        Dictionary<string, ObjectResolvedPath> redirects,
-        ICollection<string> warnings)
-    {
-        switch (group.Type)
-        {
-            case PenumbraModGroupType.Single:
-                ApplySingleGroup(
-                    selection,
-                    enabledOptionIds,
-                    requestedPaths,
-                    normalizedModRootPath,
-                    redirects,
-                    entry.ModDirectory,
-                    warnings);
-                break;
-            case PenumbraModGroupType.Multi:
-                ApplyMultiGroup(
-                    selection,
-                    enabledOptionIds,
-                    requestedPaths,
-                    normalizedModRootPath,
-                    redirects,
-                    entry.ModDirectory,
-                    warnings);
-                break;
-            case PenumbraModGroupType.Combining:
-                ApplyCombiningGroup(
-                    group,
-                    selection,
-                    enabledOptionIds,
-                    requestedPaths,
-                    normalizedModRootPath,
-                    redirects,
-                    entry.ModDirectory,
-                    warnings);
-                break;
-            case PenumbraModGroupType.Imc:
-                warnings.Add(
-                    $"Penumbra mod '{entry.ModDirectory}' group '{group.Name}' uses IMC manipulations, which object collections do not apply");
-                break;
-        }
-    }
-
-    private static void ApplySingleGroup(
-        GroupSelection selection,
-        IReadOnlySet<Guid> enabledOptionIds,
-        IReadOnlySet<string> requestedPaths,
-        string normalizedModRootPath,
-        Dictionary<string, ObjectResolvedPath> redirects,
+        List<PenumbraModData> selectedData,
         string modDirectory,
         ICollection<string> warnings)
     {
-        if (!selection.IsValid || selection.SelectedOptions.Count == 0)
+        if (group.Type == PenumbraModGroupType.Imc)
         {
+            warnings.Add(
+                $"Penumbra mod '{modDirectory}' group '{group.Name}' uses IMC manipulations, which object collections do not apply");
             return;
         }
 
-        PenumbraModOption option = selection.SelectedOptions[0].Option;
-        if (IsConditionMet(option.Condition, enabledOptionIds))
-        {
-            ApplyData(option.Data, requestedPaths, normalizedModRootPath, redirects, modDirectory, warnings);
-        }
-    }
-
-    private static void ApplyMultiGroup(
-        GroupSelection selection,
-        IReadOnlySet<Guid> enabledOptionIds,
-        IReadOnlySet<string> requestedPaths,
-        string normalizedModRootPath,
-        Dictionary<string, ObjectResolvedPath> redirects,
-        string modDirectory,
-        ICollection<string> warnings)
-    {
         if (!selection.IsValid)
         {
             return;
         }
 
-        foreach (SelectedOption selectedOption in selection.SelectedOptions
-                     .Where(option => IsConditionMet(option.Option.Condition, enabledOptionIds))
-                     .OrderByDescending(static option => option.Option.Priority)
-                     .ThenBy(static option => option.Index))
+        if (group.Type is PenumbraModGroupType.Single or PenumbraModGroupType.Multi)
         {
-            ApplyData(
-                selectedOption.Option.Data,
-                requestedPaths,
-                normalizedModRootPath,
-                redirects,
-                modDirectory,
-                warnings);
-        }
-    }
+            foreach (SelectedOption selectedOption in selection.SelectedOptions
+                         .Where(option => IsConditionMet(option.Option.Condition, enabledOptionIds))
+                         .OrderByDescending(static option => option.Option.Priority)
+                         .ThenBy(static option => option.Index))
+            {
+                AddSelectedData(selectedOption.Option.Data, selectedData, modDirectory, warnings);
+            }
 
-    private static void ApplyCombiningGroup(
-        PenumbraModGroup group,
-        GroupSelection selection,
-        IReadOnlySet<Guid> enabledOptionIds,
-        IReadOnlySet<string> requestedPaths,
-        string normalizedModRootPath,
-        Dictionary<string, ObjectResolvedPath> redirects,
-        string modDirectory,
-        ICollection<string> warnings)
-    {
-        if (!selection.IsValid)
+            return;
+        }
+
+        if (group.Type != PenumbraModGroupType.Combining)
         {
             return;
         }
 
         ulong availableMask = 0;
         int optionCount = group.Options.Count;
-        for (var optionIndex = 0; optionIndex < optionCount; ++optionIndex)
+        for (int optionIndex = 0; optionIndex < optionCount; ++optionIndex)
         {
             if (IsConditionMet(group.Options[optionIndex].Condition, enabledOptionIds))
             {
@@ -303,18 +280,11 @@ internal static class PenumbraModResolver
         }
 
         ulong effectiveSetting = selection.SettingValue & availableMask;
-        if (effectiveSetting >= (ulong)group.Containers.Count)
-        {
-            return;
-        }
 
-        ApplyData(
-            group.Containers[(int)effectiveSetting],
-            requestedPaths,
-            normalizedModRootPath,
-            redirects,
-            modDirectory,
-            warnings);
+        if (effectiveSetting < (ulong)group.Containers.Count)
+        {
+            AddSelectedData(group.Containers[(int)effectiveSetting], selectedData, modDirectory, warnings);
+        }
     }
 
     private static GroupSelection ResolveGroupSelection(
@@ -498,78 +468,26 @@ internal static class PenumbraModResolver
         return false;
     }
 
-    private static void ApplyData(
+    private static void AddSelectedData(
         PenumbraModData data,
-        IReadOnlySet<string> requestedPaths,
-        string normalizedModRootPath,
-        Dictionary<string, ObjectResolvedPath> redirects,
+        List<PenumbraModData> selectedData,
         string modDirectory,
         ICollection<string> warnings)
     {
         if (data.HasManipulations)
         {
             string warning = $"Penumbra mod '{modDirectory}' uses selected meta manipulations, which object collections do not apply";
+
             if (!warnings.Contains(warning))
             {
                 warnings.Add(warning);
             }
         }
 
-        foreach (string requestedPath in requestedPaths)
+        if (data.Files.Count > 0 || data.FileSwaps.Count > 0)
         {
-            if (TryCreateLocalFileRedirect(data, requestedPath, normalizedModRootPath, out ObjectResolvedPath localFile))
-            {
-                redirects.TryAdd(requestedPath, localFile);
-            }
-
-            if (TryCreateFileSwapRedirect(data, requestedPath, out ObjectResolvedPath fileSwap))
-            {
-                redirects.TryAdd(requestedPath, fileSwap);
-            }
+            selectedData.Add(data);
         }
-    }
-
-    private static bool TryCreateLocalFileRedirect(
-        PenumbraModData data,
-        string requestedPath,
-        string normalizedModRootPath,
-        out ObjectResolvedPath resolvedPath)
-    {
-        resolvedPath = default;
-        if (!data.Files.TryGetValue(requestedPath, out string? relativePath))
-        {
-            return false;
-        }
-
-        string normalizedRelativePath = relativePath.Replace('/', Path.DirectorySeparatorChar);
-        string localFilePath;
-        try
-        {
-            localFilePath = Path.GetFullPath(Path.Combine(normalizedModRootPath, normalizedRelativePath));
-        }
-        catch
-        {
-            return false;
-        }
-
-        if (!PenumbraModPath.Contains(normalizedModRootPath, localFilePath))
-        {
-            return false;
-        }
-
-        resolvedPath = ObjectResolvedPath.FromLocalFile(localFilePath);
-        return ObjectResourcePathUtility.IsSupportedRedirection(requestedPath, resolvedPath);
-    }
-
-    private static bool TryCreateFileSwapRedirect(
-        PenumbraModData data,
-        string requestedPath,
-        out ObjectResolvedPath resolvedPath)
-    {
-        resolvedPath = default;
-        return data.FileSwaps.TryGetValue(requestedPath, out string? redirectedPath)
-            && ObjectResolvedPath.TryCreate(redirectedPath, out resolvedPath)
-            && ObjectResourcePathUtility.IsSupportedRedirection(requestedPath, resolvedPath);
     }
 
     private static bool UsesBitmaskSelection(PenumbraModGroupType groupType)

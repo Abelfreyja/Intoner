@@ -26,7 +26,17 @@ internal static class UiVirtualList
         IReadOnlyList<TItem> items,
         UiVirtualListOptions options,
         Action<TItem, int> drawItem)
-        => DrawIndices(items.Count, options, index => drawItem(items[index], index));
+    {
+        using Scope list = Begin(items.Count, options);
+        while (list.Step())
+        {
+            for (int index = list.DisplayStart; index < list.DisplayEnd; ++index)
+            {
+                drawItem(items[index], index);
+                list.FinishItem(index);
+            }
+        }
+    }
 
     public static void DrawTableRows<TItem>(
         IReadOnlyList<TItem> items,
@@ -108,6 +118,7 @@ internal static class UiVirtualList
         private readonly int _count;
         private readonly int _focusIndex;
         private readonly float _itemSpacingY;
+        private readonly float _previousContentMaxY;
         private readonly ImRaii.StyleDisposable? _spacingStyle;
         private ImGuiListClipperPtr _clipper;
         private bool _active;
@@ -120,6 +131,7 @@ internal static class UiVirtualList
                 ? options.FocusIndex
                 : -1;
             _itemSpacingY = MathF.Max(0f, options.ItemSpacingY);
+            _previousContentMaxY = ImGuiP.GetCurrentWindow().DC.CursorMaxPos.Y;
             _spacingStyle = default;
             _clipper = default;
             _active = _count > 0;
@@ -172,8 +184,16 @@ internal static class UiVirtualList
             }
 
             _active = false;
+            bool removeTrailingSpacing = !_options.DrawTrailingSpacing && _itemSpacingY > 0f && _clipper.DisplayStart >= 0;
             _clipper.End();
             _clipper.Destroy();
+            if (removeTrailingSpacing)
+            {
+                ImGuiWindowPtr window = ImGuiP.GetCurrentWindow();
+                ImGui.SetCursorPosY(ImGui.GetCursorPosY() - _itemSpacingY);
+                window.DC.CursorMaxPos.Y = MathF.Max(_previousContentMaxY, window.DC.CursorMaxPos.Y - _itemSpacingY);
+                window.DC.PrevLineSize.Y = MathF.Max(0f, window.DC.PrevLineSize.Y - _itemSpacingY);
+            }
             _spacingStyle?.Dispose();
         }
     }

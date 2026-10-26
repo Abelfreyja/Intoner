@@ -9,7 +9,7 @@ internal readonly record struct EditorFrame(
     ObjectCatalogData Catalog,
     IReadOnlyList<ObjectKindInfo> KindInfos,
     IReadOnlyList<ObjectLayoutSnapshot> Layouts,
-    Guid? DefaultLayoutId)
+    Guid? CreationLayoutId)
 {
     public EditorSceneState.EditorSceneData Scene => SceneFrame.Scene;
 

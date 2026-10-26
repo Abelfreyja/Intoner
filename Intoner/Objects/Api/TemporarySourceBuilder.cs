@@ -1,9 +1,10 @@
-using System.Security.Cryptography;
-using System.Text;
 using Intoner.Objects.Collections;
 using Intoner.Objects.Models;
 using Intoner.Objects.Resources;
+using Intoner.Objects.Runtime;
 using Intoner.Objects.Utils;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace Intoner.Objects.Api;
 
@@ -21,28 +22,22 @@ internal interface ITemporarySourceBuilder
 
 internal sealed class TemporarySourceBuilder : ITemporarySourceBuilder
 {
-    private readonly record struct ResolveCacheKey(
-        string CollectionId,
-        ObjectKind Kind,
-        string RootPath);
-
     private sealed record ResolvedCollection(
         ObjectCollectionResolveResult Result,
-        IReadOnlyList<ObjectPathRedirection> Redirects);
-
-    private sealed record GeneratedCollection(
-        string CollectionId,
-        ObjectTemporaryCollectionData Collection);
+        IReadOnlyDictionary<string, CollectionResourceView> ResourceViews);
 
     private readonly IObjectCollectionManager  _collectionManager;
     private readonly IObjectCollectionResolver _collectionResolver;
+    private readonly IObjectKindService        _objectKindService;
 
     public TemporarySourceBuilder(
         IObjectCollectionManager collectionManager,
-        IObjectCollectionResolver collectionResolver)
+        IObjectCollectionResolver collectionResolver,
+        IObjectKindService objectKindService)
     {
         _collectionManager  = collectionManager;
         _collectionResolver = collectionResolver;
+        _objectKindService  = objectKindService;
     }
 
     public async Task<TemporarySourceBuildResult> BuildTemporarySourceAsync(
@@ -60,95 +55,94 @@ internal sealed class TemporarySourceBuilder : ITemporarySourceBuilder
             return CreateInvalidResult("source id, session id, and positive revision are required");
         }
 
-        if (!ObjectApiMapper.TryToDetachedSnapshots(request.Objects, out List<ObjectSnapshot> snapshots))
+        if (!TryPrepareSnapshots(request.Objects, cancellationToken, out List<ObjectSnapshot> snapshots))
         {
             return CreateInvalidResult("temporary source build contains invalid objects");
         }
 
-        string sourceName = TextUtility.TrimOrEmpty(request.Name);
-        List<ObjectSnapshot> payloadSnapshots = new(snapshots.Count);
+        Dictionary<string, ObjectCollection?> collections = CaptureCollections(snapshots, cancellationToken);
+        Dictionary<string, ResolvedCollection> resolvedCollections = await ResolveCollectionsAsync(
+            snapshots, collections, cancellationToken).ConfigureAwait(false);
         List<TemporarySourceBuildDiagnostic> diagnostics = [];
-        Dictionary<ResolveCacheKey, ResolvedCollection> resolvedCollectionCache = [];
-        Dictionary<string, GeneratedCollection> generatedCollectionsBySignature = new(StringComparer.Ordinal);
+        Dictionary<string, TemporaryObjectCollection> generatedCollectionsBySignature = new(StringComparer.Ordinal);
+        Dictionary<(string Collection, ObjectResourceRoots Roots), string> collectionIdsByView = [];
         SortedSet<string> localFilePaths = new(StringComparer.OrdinalIgnoreCase);
 
-        foreach (ObjectSnapshot snapshot in snapshots)
+        for (int index = 0; index < snapshots.Count; ++index)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            ObjectSnapshot snapshot = snapshots[index];
+            string authoredCollectionId = snapshot.CollectionId;
 
-            string authoredCollectionId = ObjectCollectionKeyUtility.NormalizeCollectionId(snapshot.CollectionId);
             if (authoredCollectionId.Length == 0)
             {
-                AddWithoutCollection(payloadSnapshots, snapshot);
                 continue;
             }
 
-            if (!_collectionManager.TryGetCollection(authoredCollectionId, out ObjectCollectionSnapshot authoredCollection))
+            ObjectCollection? authoredCollection = collections[authoredCollectionId];
+            if (authoredCollection is null)
             {
                 diagnostics.Add(CreateDiagnostic(
                     snapshot,
-                    authoredCollectionId,
                     TemporarySourceBuildDiagnosticSeverity.Error,
                     "assigned object collection was not found"));
                 continue;
             }
 
-            string rootPath = ObjectSnapshotUtility.GetRootResourcePath(snapshot);
+            ObjectResourceRoots roots = ObjectResourceRoots.FromModel(snapshot.Model);
+            string rootPath = roots.Primary;
             if (rootPath.Length == 0)
             {
                 diagnostics.Add(CreateDiagnostic(
                     snapshot,
-                    authoredCollectionId,
                     TemporarySourceBuildDiagnosticSeverity.Info,
                     "object kind has no resource collection scope"));
-                AddWithoutCollection(payloadSnapshots, snapshot);
+                snapshots[index] = snapshot with { CollectionId = string.Empty };
                 continue;
             }
 
-            ResolveCacheKey resolveCacheKey = CreateResolveCacheKey(authoredCollectionId, snapshot.Kind, rootPath);
-            if (!resolvedCollectionCache.TryGetValue(resolveCacheKey, out ResolvedCollection? resolvedCollection))
-            {
-                ObjectCollectionResolveResult result = await _collectionResolver
-                    .ResolveAsync(authoredCollection.Record, [snapshot], cancellationToken)
-                    .ConfigureAwait(false);
-                resolvedCollection = new ResolvedCollection(result, ObjectPathRedirectionUtility.CreateStableList(result.Redirects));
-                resolvedCollectionCache[resolveCacheKey] = resolvedCollection;
-            }
+            ResolvedCollection resolvedCollection = resolvedCollections[authoredCollectionId];
 
-            AddResolveDiagnostics(snapshot, authoredCollectionId, resolvedCollection.Result, diagnostics);
-            if (HasResolveFailure(resolvedCollection.Result))
+            if (!ValidateResolution(snapshot, resolvedCollection.Result, diagnostics))
             {
                 continue;
             }
 
-            if (resolvedCollection.Redirects.Count == 0)
+            if (resolvedCollection.Result.Redirects.Count == 0)
             {
-                AddWithoutCollection(payloadSnapshots, snapshot);
+                snapshots[index] = snapshot with { CollectionId = string.Empty };
                 continue;
             }
 
-            string redirectSignature = BuildRedirectSignature(resolvedCollection.Redirects);
-            if (!generatedCollectionsBySignature.TryGetValue(redirectSignature, out GeneratedCollection? generatedCollection))
+            if (!resolvedCollection.ResourceViews.TryGetValue(rootPath, out CollectionResourceView? view))
             {
-                string temporaryCollectionId = CreateTemporaryCollectionId(redirectSignature);
-                generatedCollection = new GeneratedCollection(
-                    temporaryCollectionId,
-                    new ObjectTemporaryCollectionData
+                diagnostics.Add(CreateDiagnostic(snapshot, TemporarySourceBuildDiagnosticSeverity.Error,
+                    "resolved collection has no resource view for this object"));
+                continue;
+            }
+
+            var viewKey = (authoredCollectionId, roots);
+            if (!collectionIdsByView.TryGetValue(viewKey, out string? collectionId))
+            {
+                IReadOnlyList<ObjectPathRedirection> redirects = view.Redirects;
+                if (roots.Collision.Length > 0)
+                {
+                    if (!resolvedCollection.ResourceViews.TryGetValue(roots.Collision, out CollectionResourceView? collisionView))
                     {
-                        CollectionId = temporaryCollectionId,
-                        Name = TextUtility.TrimOrFallback(authoredCollection.Record.Name, temporaryCollectionId),
-                        Redirects = resolvedCollection.Redirects
-                            .Select(ToTemporaryRedirect)
-                            .ToList(),
-                    });
-                generatedCollectionsBySignature[redirectSignature] = generatedCollection;
+                        diagnostics.Add(CreateDiagnostic(snapshot, TemporarySourceBuildDiagnosticSeverity.Error,
+                            "resolved collection has no resource view for this object's collider"));
+                        continue;
+                    }
+
+                    redirects = view.Redirects.Concat(collisionView.Redirects)
+                        .DistinctBy(static redirect => redirect.RequestedPath, StringComparer.OrdinalIgnoreCase).ToArray();
+                }
+
+                collectionId = GetTemporaryCollectionId(authoredCollection.Name, redirects);
+                collectionIdsByView.Add(viewKey, collectionId);
             }
 
-            localFilePaths.UnionWith(resolvedCollection.Redirects
-                .Where(static redirect => redirect.ResolvedPath.IsLocalFile)
-                .Select(static redirect => redirect.ResolvedPath.Path));
-
-            payloadSnapshots.Add(snapshot with { CollectionId = generatedCollection.CollectionId });
+            snapshots[index] = snapshot with { CollectionId = collectionId };
         }
 
         if (diagnostics.Any(static diagnostic => diagnostic.Severity == TemporarySourceBuildDiagnosticSeverity.Error))
@@ -161,12 +155,11 @@ internal sealed class TemporarySourceBuilder : ITemporarySourceBuilder
                 diagnostics);
         }
 
-        List<WorldObject> payloadObjects = payloadSnapshots
-            .Select(ObjectApiMapper.ToWorldObject)
-            .ToList();
+        cancellationToken.ThrowIfCancellationRequested();
+
+        List<WorldObject> payloadObjects = snapshots.Select(ObjectApiMapper.ToWorldObject).ToList();
         List<TemporaryObjectCollection> payloadCollections = generatedCollectionsBySignature.Values
             .OrderBy(static collection => collection.CollectionId, StringComparer.OrdinalIgnoreCase)
-            .Select(static collection => ObjectApiMapper.ToTemporaryCollection(collection.Collection))
             .ToList();
 
         TemporarySourceBuildStatus status = diagnostics.Any(static diagnostic =>
@@ -174,18 +167,135 @@ internal sealed class TemporarySourceBuilder : ITemporarySourceBuilder
             ? TemporarySourceBuildStatus.CompletedWithWarnings
             : TemporarySourceBuildStatus.Success;
 
+        string message = $"built {payloadObjects.Count} objects, {payloadCollections.Count} temporary collections, and {localFilePaths.Count} local files";
         return new TemporarySourceBuildResult(
             status,
-            BuildSummary(payloadObjects.Count, payloadCollections.Count, localFilePaths.Count, diagnostics.Count),
+            diagnostics.Count == 0 ? message : $"{message} with {diagnostics.Count} diagnostics",
             new TemporarySourceApplyRequest(
                 sourceId,
                 request.SessionId,
-                sourceName,
+                TextUtility.TrimOrEmpty(request.Name),
                 request.Revision,
                 payloadObjects,
                 payloadCollections),
             localFilePaths.ToList(),
             diagnostics);
+
+        string GetTemporaryCollectionId(string name, IReadOnlyList<ObjectPathRedirection> redirects)
+        {
+            if (redirects.Count == 0)
+            {
+                return string.Empty;
+            }
+
+            ObjectPathRedirection[] orderedRedirects = redirects
+                .OrderBy(static redirect => redirect.RequestedPath, StringComparer.OrdinalIgnoreCase).ToArray();
+            string signature = BuildRedirectSignature(orderedRedirects);
+
+            if (generatedCollectionsBySignature.TryGetValue(signature, out TemporaryObjectCollection? existing))
+            {
+                return existing.CollectionId;
+            }
+
+            Span<byte> hash = stackalloc byte[32];
+            SHA256.HashData(Encoding.UTF8.GetBytes(signature), hash);
+            string collectionId = $"tempcoll_{Convert.ToHexString(hash[..16]).ToLowerInvariant()}";
+            generatedCollectionsBySignature.Add(signature, new TemporaryObjectCollection(
+                collectionId,
+                TextUtility.TrimOrFallback(name, collectionId),
+                orderedRedirects.Select(ToTemporaryRedirect).ToArray()));
+            localFilePaths.UnionWith(orderedRedirects
+                .Where(static redirect => redirect.ResolvedPath.IsLocalFile)
+                .Select(static redirect => redirect.ResolvedPath.Path));
+            return collectionId;
+        }
+    }
+
+    private bool TryPrepareSnapshots(
+        IReadOnlyList<WorldObject> objects,
+        CancellationToken cancellationToken,
+        out List<ObjectSnapshot> snapshots)
+    {
+        snapshots = new List<ObjectSnapshot>(objects.Count);
+        HashSet<Guid> objectIds = [];
+        foreach (WorldObject? dto in objects)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (!ObjectApiMapper.TryToDetachedSnapshot(dto, out ObjectSnapshot snapshot)
+                || !objectIds.Add(snapshot.Id)
+                || !_objectKindService.TrySanitizeSnapshot(snapshot, out snapshot))
+            {
+                snapshots = [];
+                return false;
+            }
+
+            snapshots.Add(snapshot);
+        }
+
+        return true;
+    }
+
+    private Dictionary<string, ObjectCollection?> CaptureCollections(
+        IReadOnlyList<ObjectSnapshot> snapshots,
+        CancellationToken cancellationToken)
+    {
+        Dictionary<string, ObjectCollection?> collections = new(StringComparer.OrdinalIgnoreCase);
+        foreach (string collectionId in snapshots.Select(static snapshot => snapshot.CollectionId))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (collectionId.Length > 0 && !collections.ContainsKey(collectionId))
+            {
+                collections.Add(collectionId,
+                    _collectionManager.TryGetCollection(collectionId, out ObjectCollectionSnapshot collection) ? collection.Record : null);
+            }
+        }
+
+        return collections;
+    }
+
+    private async Task<Dictionary<string, ResolvedCollection>> ResolveCollectionsAsync(
+        IReadOnlyList<ObjectSnapshot> snapshots,
+        IReadOnlyDictionary<string, ObjectCollection?> collections,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        Dictionary<string, ResolvedCollection> resolved = new(StringComparer.OrdinalIgnoreCase);
+        foreach (IGrouping<string, ObjectSnapshot> usage in snapshots
+                     .Where(static snapshot => snapshot.CollectionId.Length > 0
+                         && ObjectSnapshotUtility.GetRootResourcePath(snapshot).Length > 0)
+                     .GroupBy(static snapshot => snapshot.CollectionId, StringComparer.OrdinalIgnoreCase))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ObjectCollection? collection = collections[usage.Key];
+
+            if (collection is null)
+            {
+                continue;
+            }
+
+            ObjectCollectionResolveResult result;
+            try
+            {
+                result = await _collectionResolver.ResolveAsync(collection, usage.ToArray(), cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                result = new ObjectCollectionResolveResult
+                {
+                    IsComplete = false,
+                    ResolveState = ObjectCollectionResolveState.ResolveFailed,
+                    StatusText = "Penumbra mods changed while building the source; build it again",
+                };
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            resolved.Add(usage.Key, new ResolvedCollection(result,
+                result.ResourceViews.ToDictionary(static view => view.RootPath, StringComparer.OrdinalIgnoreCase)));
+        }
+
+        return resolved;
     }
 
     private static TemporarySourceBuildResult CreateInvalidResult(string message)
@@ -200,54 +310,38 @@ internal sealed class TemporarySourceBuilder : ITemporarySourceBuilder
                 TemporarySourceBuildDiagnosticSeverity.Error,
                 message)]);
 
-    private static void AddResolveDiagnostics(
+    private static bool ValidateResolution(
         ObjectSnapshot snapshot,
-        string collectionId,
         ObjectCollectionResolveResult result,
         List<TemporarySourceBuildDiagnostic> diagnostics)
     {
-        bool failed = HasResolveFailure(result);
+        bool failed = !result.IsComplete || result.KeepLastGoodSnapshot
+            || result.ResolveState is not (ObjectCollectionResolveState.Ready or ObjectCollectionResolveState.Inactive);
         foreach (string warning in result.Warnings)
         {
             diagnostics.Add(CreateDiagnostic(
                 snapshot,
-                collectionId,
                 failed ? TemporarySourceBuildDiagnosticSeverity.Error : TemporarySourceBuildDiagnosticSeverity.Warning,
                 warning));
         }
 
-        if (!failed)
+        if (failed)
         {
-            return;
+            diagnostics.Add(CreateDiagnostic(snapshot, TemporarySourceBuildDiagnosticSeverity.Error, result.StatusText));
         }
 
-        diagnostics.Add(CreateDiagnostic(
-            snapshot,
-            collectionId,
-            TemporarySourceBuildDiagnosticSeverity.Error,
-            result.StatusText));
+        return !failed;
     }
-
-    private static bool HasResolveFailure(ObjectCollectionResolveResult result)
-        => !result.IsComplete || result.KeepLastGoodSnapshot
-         || result.ResolveState is not (ObjectCollectionResolveState.Ready or ObjectCollectionResolveState.Inactive);
 
     private static TemporarySourceBuildDiagnostic CreateDiagnostic(
         ObjectSnapshot snapshot,
-        string collectionId,
         TemporarySourceBuildDiagnosticSeverity severity,
         string message)
         => new(
             snapshot.Id,
-            collectionId,
+            snapshot.CollectionId,
             severity,
             TextUtility.TrimOrFallback(message, "temporary source build issue"));
-
-    private static void AddWithoutCollection(List<ObjectSnapshot> snapshots, ObjectSnapshot snapshot)
-        => snapshots.Add(snapshot with { CollectionId = string.Empty });
-
-    private static ResolveCacheKey CreateResolveCacheKey(string collectionId, ObjectKind kind, string rootPath)
-        => new(collectionId, kind, rootPath.ToLowerInvariant());
 
     private static string BuildRedirectSignature(IReadOnlyList<ObjectPathRedirection> redirects)
     {
@@ -266,39 +360,15 @@ internal sealed class TemporarySourceBuilder : ITemporarySourceBuilder
         return builder.ToString();
     }
 
-    private static string CreateTemporaryCollectionId(string redirectSignature)
-    {
-        Span<byte> hash = stackalloc byte[32];
-        SHA256.HashData(Encoding.UTF8.GetBytes(redirectSignature), hash);
-        return $"tempcoll_{Convert.ToHexString(hash[..16]).ToLowerInvariant()}";
-    }
-
-    private static ObjectTemporaryCollectionRedirectData ToTemporaryRedirect(ObjectPathRedirection redirect)
-        => new()
+    private static TemporaryObjectCollectionRedirect ToTemporaryRedirect(ObjectPathRedirection redirect)
+        => new(redirect.RequestedPath, new TemporaryCollectionReplacement
         {
-            RequestedPath = redirect.RequestedPath,
-            Replacement = ToTemporaryReplacement(redirect.ResolvedPath),
-        };
-
-    private static ObjectTemporaryCollectionReplacementData ToTemporaryReplacement(ObjectResolvedPath resolvedPath)
-        => resolvedPath.Kind switch
-        {
-            ObjectResolvedPathKind.GamePath => new ObjectTemporaryCollectionReplacementData
+            Kind = redirect.ResolvedPath.Kind switch
             {
-                Kind = ObjectTemporaryCollectionReplacementKind.GamePath,
-                Path = resolvedPath.Path,
+                ObjectResolvedPathKind.GamePath => TemporaryCollectionReplacementKind.GamePath,
+                ObjectResolvedPathKind.LocalFile => TemporaryCollectionReplacementKind.LocalFile,
+                _ => throw new ArgumentOutOfRangeException(nameof(redirect), redirect.ResolvedPath.Kind, null),
             },
-            ObjectResolvedPathKind.LocalFile => new ObjectTemporaryCollectionReplacementData
-            {
-                Kind = ObjectTemporaryCollectionReplacementKind.LocalFile,
-                Path = resolvedPath.Path,
-            },
-            _ => throw new ArgumentOutOfRangeException(nameof(resolvedPath), resolvedPath.Kind, null),
-        };
-
-    private static string BuildSummary(int objectCount, int collectionCount, int localFileCount, int diagnosticCount)
-        => diagnosticCount == 0
-            ? $"built {objectCount} objects, {collectionCount} temporary collections, and {localFileCount} local files"
-            : $"built {objectCount} objects, {collectionCount} temporary collections, and {localFileCount} local files with {diagnosticCount} diagnostics";
+            Path = redirect.ResolvedPath.Path,
+        });
 }
-

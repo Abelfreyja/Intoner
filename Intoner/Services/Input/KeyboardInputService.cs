@@ -1,3 +1,4 @@
+using Intoner.Services.Interop;
 using Dalamud.Hooking;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.System.Input;
@@ -22,46 +23,81 @@ internal enum KeyboardModifiers
 [StructLayout(LayoutKind.Auto)]
 internal readonly record struct KeyboardGesture(
     SeVirtualKey Key,
-    KeyboardModifiers Modifiers = KeyboardModifiers.None);
+    KeyboardModifiers Modifiers = KeyboardModifiers.None)
+{
+    private static readonly int KeyboardKeyCount = new KeyboardInputData().KeyState.Length;
+
+    /// <summary> gets the modifier represented by the root key, if any </summary>
+    internal KeyboardModifiers ImplicitModifier => Key switch
+    {
+        SeVirtualKey.MENU => KeyboardModifiers.Alt,
+        SeVirtualKey.CONTROL => KeyboardModifiers.Control,
+        SeVirtualKey.SHIFT => KeyboardModifiers.Shift,
+        _ => KeyboardModifiers.None,
+    };
+
+    /// <summary> checks that the key and modifiers are valid for input </summary>
+    public bool IsValid()
+        => Key != SeVirtualKey.NO_KEY
+        && (int)Key < KeyboardKeyCount
+        && Enum.IsDefined(Key)
+        && (Modifiers & ImplicitModifier) == KeyboardModifiers.None
+        && (Modifiers & ~(KeyboardModifiers.Control | KeyboardModifiers.Shift | KeyboardModifiers.Alt)) == KeyboardModifiers.None;
+
+    /// <summary> checks the required modifiers, optionally allowing other modifiers to be held as well </summary>
+    internal bool MatchesModifiers(KeyboardModifiers modifiers, bool allowAdditionalModifiers)
+    {
+        KeyboardModifiers required = Modifiers | ImplicitModifier;
+        return allowAdditionalModifiers ? (modifiers & required) == required : modifiers == required;
+    }
+}
 
 /// <summary> one active keyboard input suppression and its queued key transitions </summary>
 internal interface IKeyboardInputLease : IDisposable
 {
+    /// <summary> checks whether a registered gesture is down in the latest input snapshot </summary>
+    bool IsHeld(KeyboardGesture gesture);
+
     /// <summary> returns and clears the number of matching pressed transitions </summary>
     int ConsumePressedCount(KeyboardGesture gesture);
 
     /// <summary> returns and clears every pressed transition for one key </summary>
     int ConsumePressedCount(SeVirtualKey key);
 
-    /// <summary> clears all queued transitions </summary>
+    /// <summary> clears all queued transitions without changing held state or suppression </summary>
     void ClearPending();
 }
 
 /// <summary> provides scoped native keyboard input suppression for plugin interactions </summary>
 internal interface IKeyboardInputService
 {
+    /// <summary> installs capture once and awaits framework initialization </summary>
+    Task StartAsync();
+
     /// <summary> gets whether the game is accepting keyboard text input </summary>
     bool IsTextInputActive { get; }
 
-    /// <summary> begins suppressing exact gestures while their modifiers match </summary>
-    IKeyboardInputLease BeginSuppression(IEnumerable<KeyboardGesture> gestures);
+    /// <summary> begins observing gestures and suppressing exact keys while their required modifiers match </summary>
+    /// <param name="gestures"> the gestures to observe </param>
+    /// <param name="allowAdditionalModifiers"> allow extra modifiers </param>
+    IKeyboardInputLease BeginSuppression(IEnumerable<KeyboardGesture> gestures, bool allowAdditionalModifiers = false);
 
-    /// <summary> begins suppressing keys regardless of held modifiers </summary>
+    /// <summary> begins observing keys and suppressing exact keys regardless of held modifiers </summary>
     IKeyboardInputLease BeginSuppression(IEnumerable<SeVirtualKey> keys);
 }
 
 /// <summary> owns native keyboard observation and temporary game input suppression </summary>
-internal sealed unsafe class KeyboardInputService : IKeyboardInputService, IDisposable
+internal sealed unsafe class KeyboardInputService : FrameworkNativeService, IKeyboardInputService
 {
-    private const KeyboardModifiers AllModifiers = KeyboardModifiers.Control
-        | KeyboardModifiers.Shift
-        | KeyboardModifiers.Alt;
-
-    private unsafe delegate byte InputIdStateDelegate(InputData* inputData, InputId inputId);
+    private delegate nint UpdateInputDelegate(UIInputData* inputData, GamepadInputData* gamepad,
+        CursorInputData* cursor, KeyboardInputData* keyboard, int cursorX, int cursorY, byte focusChanged, float deltaTime);
 
     private sealed class EmptyKeyboardInputLease : IKeyboardInputLease
     {
         public static EmptyKeyboardInputLease Instance { get; } = new EmptyKeyboardInputLease();
+
+        public bool IsHeld(KeyboardGesture gesture)
+            => false;
 
         public int ConsumePressedCount(KeyboardGesture gesture)
             => 0;
@@ -84,11 +120,15 @@ internal sealed unsafe class KeyboardInputService : IKeyboardInputService, IDisp
         private readonly object _registrationKey = new();
         private int _disposed;
 
-        public KeyboardInputLease(KeyboardInputService owner, KeyboardGesture[] gestures, bool matchModifiers)
+        public KeyboardInputLease(KeyboardInputService owner, KeyboardGesture[] gestures, bool matchModifiers,
+            bool allowAdditionalModifiers = false)
         {
             _owner = owner;
-            _owner.Register(_registrationKey, gestures, matchModifiers, this);
+            _owner.Register(_registrationKey, gestures, matchModifiers, allowAdditionalModifiers, this);
         }
+
+        public bool IsHeld(KeyboardGesture gesture)
+            => Volatile.Read(ref _disposed) == 0 && _owner.IsHeld(_registrationKey, gesture);
 
         public int ConsumePressedCount(KeyboardGesture gesture)
             => Volatile.Read(ref _disposed) != 0
@@ -124,55 +164,55 @@ internal sealed unsafe class KeyboardInputService : IKeyboardInputService, IDisp
         public required WeakReference<KeyboardInputLease> LeaseReference { get; init; }
         public required KeyboardGesture[] Gestures { get; init; }
         public required bool MatchModifiers { get; init; }
+        public required bool AllowAdditionalModifiers { get; init; }
         public Dictionary<KeyboardGesture, int> PendingPressCounts { get; } = [];
+        public HashSet<SeVirtualKey> HeldKeys { get; } = [];
+        public KeyboardModifiers HeldModifiers { get; set; }
         public HashSet<SeVirtualKey> KeysAwaitingRelease { get; } = [];
         public bool ReleasePending { get; set; }
     }
 
     private readonly IFramework _framework;
     private readonly ILogger<KeyboardInputService> _logger;
+    private readonly IGameInteropProvider? _gameInteropProvider;
+    private readonly ISigScanner? _sigScanner;
     private readonly Lock _stateLock = new();
     private readonly Dictionary<object, KeyboardInputRegistration> _registrationsByKey = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<SeVirtualKey, int> _activeKeyRefCounts = [];
-    private readonly Hook<InputIdStateDelegate>? _inputPressedHook;
-    private readonly Hook<InputIdStateDelegate>? _inputDownHook;
-    private readonly Hook<InputIdStateDelegate>? _inputHeldHook;
+    private Hook<UpdateInputDelegate>? _updateInputHook;
     private int _disposed;
 
     public KeyboardInputService(
         ILogger<KeyboardInputService> logger,
         IFramework framework,
-        IGameInteropProvider gameInteropProvider)
+        IGameInteropProvider gameInteropProvider,
+        ISigScanner sigScanner)
+        : base(framework, logger)
     {
         _framework = framework;
         _logger = logger;
-        try
-        {
-            _inputPressedHook = CreateInputHook(gameInteropProvider, (nint)InputData.MemberFunctionPointers.IsInputIdPressed, InputPressedDetour);
-            _inputDownHook = CreateInputHook(gameInteropProvider, (nint)InputData.MemberFunctionPointers.IsInputIdDown, InputDownDetour);
-            _inputHeldHook = CreateInputHook(gameInteropProvider, (nint)InputData.MemberFunctionPointers.IsInputIdHeld, InputHeldDetour);
-
-            _inputPressedHook?.Enable();
-            _inputDownHook?.Enable();
-            _inputHeldHook?.Enable();
-            _framework.Update += HandleFrameworkUpdate;
-
-            if (_inputPressedHook == null || _inputDownHook == null || _inputHeldHook == null)
-            {
-                logger.LogWarning("keyboard input service did not resolve all input detours");
-            }
-        }
-        catch
-        {
-            Dispose();
-            throw;
-        }
+        _gameInteropProvider = gameInteropProvider;
+        _sigScanner = sigScanner;
     }
 
     internal KeyboardInputService(IFramework framework)
+        : base(framework, NullLogger<KeyboardInputService>.Instance)
     {
         _framework = framework;
         _logger = NullLogger<KeyboardInputService>.Instance;
+    }
+
+    protected override void InitializeCore()
+    {
+        _updateInputHook = Hooks.Add(InteropHookUtility.CreateHook<UpdateInputDelegate>(_logger, _gameInteropProvider!, _sigScanner!,
+            IntonerSignatures.NativeUIInputDataUpdate, UpdateInputDetour));
+        Hooks.Enable();
+        _framework.Update += HandleFrameworkUpdate;
+
+        if (_updateInputHook is null)
+        {
+            _logger.LogWarning("native keyboard capture is unavailable");
+        }
     }
 
     public bool IsTextInputActive
@@ -190,14 +230,14 @@ internal sealed unsafe class KeyboardInputService : IKeyboardInputService, IDisp
         }
     }
 
-    public IKeyboardInputLease BeginSuppression(IEnumerable<KeyboardGesture> gestures)
+    public IKeyboardInputLease BeginSuppression(IEnumerable<KeyboardGesture> gestures, bool allowAdditionalModifiers = false)
     {
         ArgumentNullException.ThrowIfNull(gestures);
 
         KeyboardGesture[] normalizedGestures = NormalizeGestures(gestures);
         return normalizedGestures.Length == 0
             ? EmptyKeyboardInputLease.Instance
-            : new KeyboardInputLease(this, normalizedGestures, matchModifiers: true);
+            : new KeyboardInputLease(this, normalizedGestures, matchModifiers: true, allowAdditionalModifiers: allowAdditionalModifiers);
     }
 
     public IKeyboardInputLease BeginSuppression(IEnumerable<SeVirtualKey> keys)
@@ -212,58 +252,37 @@ internal sealed unsafe class KeyboardInputService : IKeyboardInputService, IDisp
             : new KeyboardInputLease(this, gestures, matchModifiers: false);
     }
 
-    public void Dispose()
+    protected override void DisposeCore()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) != 0)
-        {
-            return;
-        }
-
         try
         {
-            _framework.Update -= HandleFrameworkUpdate;
+            if (Interlocked.Exchange(ref _disposed, 1) == 0)
+            {
+                _framework.Update -= HandleFrameworkUpdate;
+            }
         }
         finally
         {
-            DisposeHooks(_logger, _inputHeldHook, _inputDownHook, _inputPressedHook);
-
-            lock (_stateLock)
-            {
-                _registrationsByKey.Clear();
-                _activeKeyRefCounts.Clear();
-            }
-        }
-    }
-
-    internal static void DisposeHooks(ILogger logger, params ReadOnlySpan<IDalamudHook?> hooks)
-    {
-        foreach (IDalamudHook? hook in hooks)
-        {
             try
             {
-                hook?.Dispose();
+                base.DisposeCore();
             }
-            catch (Exception ex)
+            finally
             {
-                logger.LogError(ex, "failed to dispose keyboard input hook");
+                lock (_stateLock)
+                {
+                    _registrationsByKey.Clear();
+                    _activeKeyRefCounts.Clear();
+                }
             }
         }
     }
-
-    private static Hook<InputIdStateDelegate>? CreateInputHook(
-        IGameInteropProvider gameInteropProvider,
-        nint address,
-        InputIdStateDelegate detour)
-        => address == nint.Zero
-            ? null
-            : gameInteropProvider.HookFromAddress<InputIdStateDelegate>(address, detour);
 
     private static KeyboardGesture[] NormalizeGestures(IEnumerable<KeyboardGesture> gestures)
     {
         KeyboardGesture[] normalized = gestures.Distinct().ToArray();
-        if (normalized.Any(static gesture => gesture.Key == SeVirtualKey.NO_KEY
-            || !Enum.IsDefined(gesture.Key)
-            || (gesture.Modifiers & ~AllModifiers) != KeyboardModifiers.None))
+
+        if (normalized.Any(static gesture => !gesture.IsValid()))
         {
             throw new ArgumentException("keyboard gestures require a valid key and modifiers", nameof(gestures));
         }
@@ -273,24 +292,51 @@ internal sealed unsafe class KeyboardInputService : IKeyboardInputService, IDisp
 
     private void HandleFrameworkUpdate(IFramework _)
     {
-        if (Volatile.Read(ref _disposed) != 0)
+        if (IsDisposing || UIInputData.Instance() is not null)
         {
             return;
         }
 
-        ProcessInput(UIInputData.Instance());
+        ProcessInput(null);
     }
 
-    internal void ProcessInput(UIInputData* input)
+    private nint UpdateInputDetour(UIInputData* inputData, GamepadInputData* gamepad,
+        CursorInputData* cursor, KeyboardInputData* keyboard, int cursorX, int cursorY, byte focusChanged, float deltaTime)
     {
-        if (input == null || Volatile.Read(ref _disposed) != 0)
+        using InteropHookCollection.CallbackScope callback = Hooks.EnterCallback();
+        nint result = _updateInputHook!.OriginalDisposeSafe(inputData, gamepad, cursor, keyboard,
+            cursorX, cursorY, focusChanged, deltaTime);
+
+        if (!callback.IsActive || IsDisposing)
+        {
+            return result;
+        }
+
+        ProcessInput(inputData, IsTextInputActive);
+        return result;
+    }
+
+    internal void ProcessInput(UIInputData* input, bool isTextInputActive = false)
+    {
+        if (IsDisposing)
         {
             return;
         }
 
         lock (_stateLock)
         {
+            if (input == null)
+            {
+                foreach (KeyboardInputRegistration registration in _registrationsByKey.Values)
+                {
+                    registration.HeldKeys.Clear();
+                }
+
+                return;
+            }
+
             PruneRegistrationsUnsafe(input);
+
             if (_registrationsByKey.Count == 0)
             {
                 return;
@@ -299,27 +345,46 @@ internal sealed unsafe class KeyboardInputService : IKeyboardInputService, IDisp
             KeyboardModifiers modifiers = ResolveModifiers((InputData*)input);
             foreach (KeyboardInputRegistration registration in _registrationsByKey.Values)
             {
-                if (registration.ReleasePending)
+                if (registration.ReleasePending || isTextInputActive)
                 {
+                    registration.HeldKeys.Clear();
+                    registration.PendingPressCounts.Clear();
                     continue;
                 }
 
+                registration.HeldKeys.Clear();
+                registration.HeldModifiers = modifiers;
                 foreach (KeyboardGesture configuredGesture in registration.Gestures)
                 {
-                    if (!input->IsKeyPressed(configuredGesture.Key)
-                        || (registration.MatchModifiers && configuredGesture.Modifiers != modifiers))
+                    KeyStateFlags state = input->GetKeyState(configuredGesture.Key);
+                    KeyboardModifiers implicitModifier = configuredGesture.ImplicitModifier;
+
+                    if (implicitModifier == KeyboardModifiers.None
+                        ? IsKeyDownOrHeld(state)
+                        : (modifiers & implicitModifier) != KeyboardModifiers.None)
+                    {
+                        registration.HeldKeys.Add(configuredGesture.Key);
+                    }
+
+                    if ((state & KeyStateFlags.Pressed) == KeyStateFlags.None
+                        || (registration.MatchModifiers
+                            && !configuredGesture.MatchesModifiers(modifiers, registration.AllowAdditionalModifiers)))
                     {
                         continue;
                     }
 
                     KeyboardGesture capturedGesture = registration.MatchModifiers
                         ? configuredGesture
-                        : configuredGesture with { Modifiers = modifiers };
+                        : configuredGesture with { Modifiers = modifiers & ~implicitModifier };
                     int currentCount = registration.PendingPressCounts.GetValueOrDefault(capturedGesture);
                     registration.PendingPressCounts[capturedGesture] = currentCount == int.MaxValue
                         ? currentCount
                         : currentCount + 1;
-                    registration.KeysAwaitingRelease.Add(configuredGesture.Key);
+
+                    if (implicitModifier == KeyboardModifiers.None)
+                    {
+                        registration.KeysAwaitingRelease.Add(configuredGesture.Key);
+                    }
                 }
             }
 
@@ -329,7 +394,7 @@ internal sealed unsafe class KeyboardInputService : IKeyboardInputService, IDisp
                 foreach (SeVirtualKey key in _activeKeyRefCounts.Keys)
                 {
                     if (input->GetKeyState(key) == KeyStateFlags.None
-                        || !ShouldSuppressKeyUnsafe(key, modifiers, rememberUntilRelease: true))
+                        || !ShouldSuppressKeyUnsafe(key, modifiers, allowNewCapture: !isTextInputActive))
                     {
                         continue;
                     }
@@ -343,66 +408,27 @@ internal sealed unsafe class KeyboardInputService : IKeyboardInputService, IDisp
         }
     }
 
+    private static bool IsKeyDownOrHeld(KeyStateFlags state)
+        => (state & (KeyStateFlags.Down | KeyStateFlags.Held)) != KeyStateFlags.None;
+
     private static KeyboardModifiers ResolveModifiers(InputData* input)
         => (KeyboardModifiers)input->CurrentKeyModifier;
-
-    private byte InputPressedDetour(InputData* inputData, InputId inputId)
-        => ShouldSuppressInput(inputData, inputId)
-            ? (byte)0
-            : _inputPressedHook!.Original(inputData, inputId);
-
-    private byte InputDownDetour(InputData* inputData, InputId inputId)
-        => ShouldSuppressInput(inputData, inputId)
-            ? (byte)0
-            : _inputDownHook!.Original(inputData, inputId);
-
-    private byte InputHeldDetour(InputData* inputData, InputId inputId)
-        => ShouldSuppressInput(inputData, inputId)
-            ? (byte)0
-            : _inputHeldHook!.Original(inputData, inputId);
-
-    private bool ShouldSuppressInput(InputData* inputData, InputId inputId)
-    {
-        if (inputData == null)
-        {
-            return false;
-        }
-
-        lock (_stateLock)
-        {
-            PruneStaleRegistrationsUnsafe();
-            if (_activeKeyRefCounts.Count == 0)
-            {
-                return false;
-            }
-
-            var keybind = inputData->GetKeybind(inputId);
-            if (keybind == null)
-            {
-                return false;
-            }
-
-            var keySettings = (KeySetting*)keybind;
-            KeyboardModifiers modifiers = ResolveModifiers(inputData);
-            return ShouldSuppressKeyUnsafe(keySettings[0].Key, modifiers)
-                || ShouldSuppressKeyUnsafe(keySettings[1].Key, modifiers);
-        }
-    }
 
     private void Register(
         object registrationKey,
         KeyboardGesture[] gestures,
         bool matchModifiers,
+        bool allowAdditionalModifiers,
         KeyboardInputLease lease)
     {
-        if (Volatile.Read(ref _disposed) != 0)
+        if (IsDisposing)
         {
             return;
         }
 
         lock (_stateLock)
         {
-            if (Volatile.Read(ref _disposed) != 0)
+            if (IsDisposing)
             {
                 return;
             }
@@ -413,19 +439,23 @@ internal sealed unsafe class KeyboardInputService : IKeyboardInputService, IDisp
                 LeaseReference = new WeakReference<KeyboardInputLease>(lease),
                 Gestures = gestures,
                 MatchModifiers = matchModifiers,
+                AllowAdditionalModifiers = allowAdditionalModifiers,
             };
             _registrationsByKey.Add(registrationKey, registration);
 
-            foreach (SeVirtualKey key in gestures.Select(static gesture => gesture.Key))
+            foreach (KeyboardGesture gesture in gestures)
             {
-                IncrementActiveKeyUnsafe(key);
+                if (gesture.ImplicitModifier == KeyboardModifiers.None)
+                {
+                    IncrementActiveKeyUnsafe(gesture.Key);
+                }
             }
         }
     }
 
     private void Release(object registrationKey)
     {
-        if (Volatile.Read(ref _disposed) != 0)
+        if (IsDisposing)
         {
             return;
         }
@@ -439,6 +469,8 @@ internal sealed unsafe class KeyboardInputService : IKeyboardInputService, IDisp
             }
 
             registration.PendingPressCounts.Clear();
+            registration.HeldKeys.Clear();
+
             if (registration.KeysAwaitingRelease.Count == 0)
             {
                 RemoveRegistrationUnsafe(registrationKey);
@@ -449,9 +481,31 @@ internal sealed unsafe class KeyboardInputService : IKeyboardInputService, IDisp
         }
     }
 
+    private bool IsHeld(object registrationKey, KeyboardGesture gesture)
+    {
+        if (IsDisposing)
+        {
+            return false;
+        }
+
+        lock (_stateLock)
+        {
+            if (!_registrationsByKey.TryGetValue(registrationKey, out KeyboardInputRegistration? registration)
+                || registration.ReleasePending
+                || !registration.HeldKeys.Contains(gesture.Key)
+                || (registration.MatchModifiers && !registration.Gestures.Contains(gesture)))
+            {
+                return false;
+            }
+
+            return gesture.MatchesModifiers(registration.HeldModifiers,
+                registration.AllowAdditionalModifiers || gesture.ImplicitModifier != KeyboardModifiers.None);
+        }
+    }
+
     private int ConsumePressedCount(object registrationKey, KeyboardGesture gesture)
     {
-        if (Volatile.Read(ref _disposed) != 0)
+        if (IsDisposing)
         {
             return 0;
         }
@@ -468,7 +522,7 @@ internal sealed unsafe class KeyboardInputService : IKeyboardInputService, IDisp
 
     private int ConsumePressedCount(object registrationKey, SeVirtualKey key)
     {
-        if (Volatile.Read(ref _disposed) != 0)
+        if (IsDisposing)
         {
             return 0;
         }
@@ -511,7 +565,7 @@ internal sealed unsafe class KeyboardInputService : IKeyboardInputService, IDisp
 
     private void ClearPending(object registrationKey)
     {
-        if (Volatile.Read(ref _disposed) != 0)
+        if (IsDisposing)
         {
             return;
         }
@@ -533,9 +587,12 @@ internal sealed unsafe class KeyboardInputService : IKeyboardInputService, IDisp
             return;
         }
 
-        foreach (SeVirtualKey key in registration.Gestures.Select(static gesture => gesture.Key))
+        foreach (KeyboardGesture gesture in registration.Gestures)
         {
-            DecrementActiveKeyUnsafe(key);
+            if (gesture.ImplicitModifier == KeyboardModifiers.None)
+            {
+                DecrementActiveKeyUnsafe(gesture.Key);
+            }
         }
     }
 
@@ -557,6 +614,7 @@ internal sealed unsafe class KeyboardInputService : IKeyboardInputService, IDisp
             if (pair.Value.KeysAwaitingRelease.Count > 0)
             {
                 pair.Value.PendingPressCounts.Clear();
+                pair.Value.HeldKeys.Clear();
                 pair.Value.ReleasePending = true;
                 continue;
             }
@@ -587,7 +645,7 @@ internal sealed unsafe class KeyboardInputService : IKeyboardInputService, IDisp
             List<SeVirtualKey>? releasedKeys = null;
             foreach (SeVirtualKey key in registration.KeysAwaitingRelease)
             {
-                if (input->IsKeyDown(key))
+                if (IsKeyDownOrHeld(input->GetKeyState(key)))
                 {
                     continue;
                 }
@@ -646,7 +704,7 @@ internal sealed unsafe class KeyboardInputService : IKeyboardInputService, IDisp
     private bool ShouldSuppressKeyUnsafe(
         SeVirtualKey key,
         KeyboardModifiers modifiers,
-        bool rememberUntilRelease = false)
+        bool allowNewCapture)
     {
         if (key == SeVirtualKey.NO_KEY || !_activeKeyRefCounts.ContainsKey(key))
         {
@@ -660,7 +718,7 @@ internal sealed unsafe class KeyboardInputService : IKeyboardInputService, IDisp
                 return true;
             }
 
-            if (registration.ReleasePending)
+            if (registration.ReleasePending || !allowNewCapture)
             {
                 continue;
             }
@@ -668,13 +726,9 @@ internal sealed unsafe class KeyboardInputService : IKeyboardInputService, IDisp
             foreach (KeyboardGesture gesture in registration.Gestures)
             {
                 if (gesture.Key == key
-                    && (!registration.MatchModifiers || gesture.Modifiers == modifiers))
+                    && (!registration.MatchModifiers || gesture.MatchesModifiers(modifiers, registration.AllowAdditionalModifiers)))
                 {
-                    if (rememberUntilRelease)
-                    {
-                        registration.KeysAwaitingRelease.Add(key);
-                    }
-
+                    registration.KeysAwaitingRelease.Add(key);
                     return true;
                 }
             }

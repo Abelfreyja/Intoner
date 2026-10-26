@@ -76,7 +76,7 @@ internal sealed partial class CollectionsWorkspace
             new EditorSearchFieldOptions(
                 "Filter installed mods",
                 accent,
-                MaxLength: CollectionPanel.ObjectCollectionFilterMaxLength));
+                MaxLength: EditorColumnPanel.FilterMaxLength));
 
         IReadOnlyList<ObjectAvailableMod> installedMods = _objectModDataSource.GetInstalledMods();
         IReadOnlyList<ObjectAvailableMod> previousMods = _objectCollectionFilteredMods;
@@ -153,12 +153,12 @@ internal sealed partial class CollectionsWorkspace
         ImDrawListPtr drawList = ImGui.GetWindowDrawList();
         bool hovered = canAdd && interaction.Hovered;
         _listCard.DrawFrame(drawList, interaction.Min, interaction.Max,
-            hovered ? CollectionPanel.CollectionModStyle.RowHover : CollectionPanel.CollectionModStyle.Row,
+            hovered ? CollectionModStyle.RowHover : CollectionModStyle.Row,
             Vector4.Zero, Vector4.Zero, EditorLayout.Scaled(4f), hovered, ImDrawFlags.RoundCornersAll);
 
         float padding = EditorLayout.Scaled(10f);
         float gap = EditorLayout.Scaled(8f);
-        float buttonSize = EditorLayout.Scaled(CollectionPanel.CollectionModStyle.ActionSize);
+        float buttonSize = EditorLayout.Scaled(CollectionModStyle.ActionSize);
         float centerY = (interaction.Min.Y + interaction.Max.Y) * 0.5f;
         Vector2 actionPos = new(interaction.Max.X - padding - buttonSize, centerY - buttonSize * 0.5f);
         float labelX = interaction.Min.X + padding;

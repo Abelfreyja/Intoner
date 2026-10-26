@@ -92,7 +92,8 @@ internal sealed class EditorSceneSelection
             SceneItemSnapshot item = clickedItems[0];
             if (!item.Locked)
             {
-                _interaction.SelectionChanged(_interaction.Selection.TrySelect(item.Id, pointer.ToggleSelection));
+                _interaction.SelectionChanged(_interaction.Selection.TrySelect(
+                    _interaction.Selection.ResolveWorldSelectionId(item.Id), pointer.ToggleSelection));
             }
 
             return;
@@ -136,7 +137,7 @@ internal sealed class EditorSceneSelection
         {
             if (!hit.Locked)
             {
-                ids.Add(hit.Id);
+                ids.Add(_interaction.Selection.ResolveWorldSelectionId(hit.Id));
             }
         }
 

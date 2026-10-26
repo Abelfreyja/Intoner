@@ -10,12 +10,18 @@ internal interface ObjectDataPatch
 internal sealed record BgObjectModelPatch : ObjectDataPatch
 {
     public string? ModelPath { get; init; }
+    public BgColliderDefinition? ColliderDefinition { get; init; }
+    public bool ClearColliderDefinition { get; init; }
+    public bool? CameraCollision { get; init; }
     public float? Transparency { get; init; }
     public Vector4? DyeColor { get; init; }
     public bool? IsCoveredFromRain { get; init; }
 
     public bool HasChanges
         => ModelPath is not null
+           || ColliderDefinition is not null
+           || ClearColliderDefinition
+           || CameraCollision.HasValue
            || Transparency.HasValue
            || DyeColor.HasValue
            || IsCoveredFromRain.HasValue;
@@ -36,12 +42,14 @@ internal sealed record FurnitureColorPatch
 internal sealed record FurnitureModelPatch : ObjectDataPatch
 {
     public string? SharedGroupPath { get; init; }
+    public bool? CameraCollision { get; init; }
     public FurnitureColorPatch? Color { get; init; }
     public float? Transparency { get; init; }
     public ObjectOutlineColor? OutlineColor { get; init; }
 
     public bool HasChanges
         => SharedGroupPath is not null
+           || CameraCollision.HasValue
            || Transparency.HasValue
            || OutlineColor.HasValue
            || Color?.HasChanges == true;
@@ -120,6 +128,7 @@ internal sealed record LightModelPatch : ObjectDataPatch
     public float? Intensity { get; init; }
     public LightShapePatch? Shape { get; init; }
     public LightShadowPatch? Shadow { get; init; }
+    public string? ProjectionTexturePath { get; init; }
 
     public bool HasChanges
         => Color.HasValue
@@ -128,5 +137,6 @@ internal sealed record LightModelPatch : ObjectDataPatch
            || Intensity.HasValue
            || Flags?.HasChanges == true
            || Shape?.HasChanges == true
-           || Shadow?.HasChanges == true;
+           || Shadow?.HasChanges == true
+           || ProjectionTexturePath is not null;
 }

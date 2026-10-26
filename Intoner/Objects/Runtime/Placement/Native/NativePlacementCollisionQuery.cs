@@ -1,11 +1,13 @@
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Common.Component.BGCollision;
+using Intoner.Objects.Interop;
 using Intoner.Objects.Utils;
 using Intoner.Scene;
 using Intoner.Services.Interop;
 using Microsoft.Extensions.Logging;
 using System.Numerics;
-using System.Runtime.InteropServices;
+using NativeRay = FFXIVClientStructs.FFXIV.Client.Graphics.Ray;
+using SphereBounds = FFXIVClientStructs.FFXIV.Common.Math.SphereBounds;
 
 namespace Intoner.Objects.Runtime;
 
@@ -44,7 +46,7 @@ internal sealed unsafe class NativePlacementCollisionQuery
             return false;
         }
 
-        NativePlacementRay ray = new()
+        NativeRay ray = new()
         {
             Origin = origin,
             Direction = normalizedDirection,
@@ -124,9 +126,9 @@ internal sealed unsafe class NativePlacementCollisionQuery
             return false;
         }
 
-        NativePlacementSphere sphere = new()
+        SphereBounds sphere = new()
         {
-            Origin = origin,
+            CenterPoint = origin,
             Radius = radius,
         };
 
@@ -176,7 +178,7 @@ internal sealed unsafe class NativePlacementCollisionQuery
             SceneSurfaceHitSource.Native);
 
     private delegate byte NativeRaycastDelegate(
-        NativePlacementRay* ray,
+        NativeRay* ray,
         float maxDistance,
         Vector3* hitPoint,
         Vector3* hitNormal,
@@ -184,26 +186,11 @@ internal sealed unsafe class NativePlacementCollisionQuery
         Collider** collider);
 
     private delegate byte NativeSweepSphereDelegate(
-        NativePlacementSphere* sphere,
+        SphereBounds* sphere,
         Vector3* direction,
         float maxDistance,
         Vector3* hitPoint,
         Vector3* hitNormal,
         ulong* material,
         Collider** collider);
-
-    [StructLayout(LayoutKind.Explicit, Size = 0x1C)]
-    private struct NativePlacementRay
-    {
-        [FieldOffset(0x00)] public Vector3 Origin;
-        [FieldOffset(0x10)] public Vector3 Direction;
-    }
-
-    [StructLayout(LayoutKind.Explicit, Size = 0x10)]
-    private struct NativePlacementSphere
-    {
-        [FieldOffset(0x00)] public Vector3 Origin;
-        [FieldOffset(0x0C)] public float Radius;
-    }
 }
-

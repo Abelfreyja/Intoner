@@ -1,4 +1,6 @@
 using System.Runtime.InteropServices;
+using Intoner.Utils;
+using Microsoft.Extensions.Logging;
 
 namespace Intoner.Objects.Runtime;
 
@@ -20,7 +22,7 @@ internal interface IObjectRevisionTracker
     long GetSceneRevision();
 
     /// <summary>
-    /// Gets the persistent scene revision for standalone objects and the default layout.
+    /// Gets the persistent scene revision for standalone objects and enabled layouts.
     /// </summary>
     /// <returns>The current persistent scene revision.</returns>
     long GetPersistentSceneRevision();
@@ -66,6 +68,7 @@ internal interface IObjectRevisionTracker
 
 internal sealed class ObjectRevisionTracker : IObjectRevisionTracker
 {
+    private readonly ILogger<ObjectRevisionTracker> _logger;
     private readonly Lock _stateLock;
     private Action? _sceneChanged;
     private Action? _persistentSceneChanged;
@@ -74,9 +77,10 @@ internal sealed class ObjectRevisionTracker : IObjectRevisionTracker
     private long _persistentSceneRevision = 1;
     private long _savedLayoutsRevision = 1;
 
-    public ObjectRevisionTracker(ObjectStateLock stateLock)
+    public ObjectRevisionTracker(ObjectStateLock stateLock, ILogger<ObjectRevisionTracker> logger)
     {
         _stateLock = stateLock.Value;
+        _logger = logger;
     }
 
     public long GetSceneRevision()
@@ -183,8 +187,8 @@ internal sealed class ObjectRevisionTracker : IObjectRevisionTracker
             }
         }
 
-        sceneChanged?.Invoke();
-        persistentSceneChanged?.Invoke();
+        CommittedChangeNotification.Publish(sceneChanged, _logger, "scene change");
+        CommittedChangeNotification.Publish(persistentSceneChanged, _logger, "persistent scene change");
     }
 
     public void IncrementSavedLayouts()
@@ -196,7 +200,6 @@ internal sealed class ObjectRevisionTracker : IObjectRevisionTracker
             savedLayoutsChanged = _savedLayoutsChanged;
         }
 
-        savedLayoutsChanged?.Invoke();
+        CommittedChangeNotification.Publish(savedLayoutsChanged, _logger, "saved layouts change");
     }
 }
-

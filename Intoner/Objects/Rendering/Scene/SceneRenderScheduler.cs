@@ -1,23 +1,26 @@
 using Dalamud.Hooking;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.STD;
+using Intoner.Logging;
 using Intoner.Services.Interop;
 using Intoner.Utils;
 using Microsoft.Extensions.Logging;
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using Context = FFXIVClientStructs.FFXIV.Client.Graphics.Kernel.Context;
+using ImmediateContext = FFXIVClientStructs.FFXIV.Client.Graphics.Kernel.ImmediateContext;
 using RenderCommandBufferGroup = FFXIVClientStructs.FFXIV.Client.Graphics.Kernel.RenderCommandBufferGroup;
+using RenderCommandCallback = FFXIVClientStructs.FFXIV.Client.Graphics.Kernel.RenderCommandCallback;
 using RenderCommandSetTarget = FFXIVClientStructs.FFXIV.Client.Graphics.Kernel.RenderCommandSetTarget;
 using RenderCommandType = FFXIVClientStructs.FFXIV.Client.Graphics.Kernel.RenderCommandType;
 using RenderManager = FFXIVClientStructs.FFXIV.Client.Graphics.Render.Manager;
+using Texture = FFXIVClientStructs.FFXIV.Client.Graphics.Kernel.Texture;
 
 namespace Intoner.Scene.Rendering;
 
 /// <summary> schedules scene phases at the game's native UI render boundaries </summary>
 internal sealed unsafe class SceneRenderScheduler : IDisposable
 {
-    private const int DrawCallbackCommandType = 0x0E;
     private const int ContextCommandListsOffset = 0x18;
     private const int MainSceneViewIndex = (int)RenderManager.RenderViews.Main;
 
@@ -32,22 +35,19 @@ internal sealed unsafe class SceneRenderScheduler : IDisposable
     private readonly ILogger _logger;
     private readonly IGameInteropProvider _gameInteropProvider;
     private readonly Func<SceneRenderPhase, bool> _hasWork;
-    private readonly Action<SceneRenderPhase> _execute;
+    private readonly Action<SceneRenderCommand> _execute;
     private readonly Lock _lifecycleLock = new();
     private readonly Lock _queueLock = new();
     private readonly DisposalState _disposeState = new();
     private readonly SceneRenderCommandTracker _trackedCommands = new();
 
-    private Hook<ContextSetRenderTargetsDelegate>? _setRenderTargetsHook;
-    private Hook<ImmediateContextSetTargetCommandDelegate>? _setTargetCommandHook;
-    private ContextSetRenderTargetsDelegate? _setRenderTargetsOriginal;
-    private ImmediateContextSetTargetCommandDelegate? _setTargetCommandOriginal;
+    private InteropHookCollection? _hooks;
+    private Context.Delegates.SetRenderTargets? _setRenderTargetsOriginal;
     private bool _startFailed;
     private int _active;
     private int _loggedDetourFailure;
     private int _loggedDispatchFailure;
     private int _loggedQueueFailure;
-    private int _loggedStopFailure;
     private int _loggedTargetLookupFailure;
     private int _loggedTrackingOverflow;
     private nint _callbackId;
@@ -57,7 +57,7 @@ internal sealed unsafe class SceneRenderScheduler : IDisposable
         ILogger logger,
         IGameInteropProvider gameInteropProvider,
         Func<SceneRenderPhase, bool> hasWork,
-        Action<SceneRenderPhase> execute)
+        Action<SceneRenderCommand> execute)
     {
         _logger = logger;
         _gameInteropProvider = gameInteropProvider;
@@ -83,77 +83,47 @@ internal sealed unsafe class SceneRenderScheduler : IDisposable
                 || IntonerSignatures.SceneRenderPushBackCommand.Address == nint.Zero)
             {
                 _startFailed = true;
-                _logger.LogWarning("scene rendering disabled because required render command functions were unavailable");
+                DiagnosticLog.Write(() => _logger.LogWarning("scene rendering disabled because required render command functions were unavailable"));
                 return false;
             }
 
-            Hook<ContextSetRenderTargetsDelegate>? setRenderTargetsHook =
-                InteropHookUtility.CreateHookFromAddress<ContextSetRenderTargetsDelegate>(
-                    _logger,
-                    _gameInteropProvider,
-                    IntonerSignatures.SceneRenderSetRenderTargets,
-                    SetRenderTargetsDetour);
-            Hook<ImmediateContextSetTargetCommandDelegate>? setTargetCommandHook =
-                InteropHookUtility.CreateHookFromAddress<ImmediateContextSetTargetCommandDelegate>(
-                    _logger,
-                    _gameInteropProvider,
-                    IntonerSignatures.SceneRenderSetTargetCommand,
-                    SetTargetCommandDetour);
-            ContextSetRenderTargetsDelegate? setRenderTargetsOriginal = setRenderTargetsHook?.Original;
-            ImmediateContextSetTargetCommandDelegate? setTargetCommandOriginal = setTargetCommandHook?.Original;
-            if (setRenderTargetsHook == null || setTargetCommandHook == null)
+            InteropHookCollection hooks = new(_logger);
+            _hooks = hooks;
+            Hook<Context.Delegates.SetRenderTargets>? setRenderTargetsHook = null;
+            Hook<ImmediateContext.Delegates.DoSetTargetCommand>? setTargetCommandHook = null;
+            setRenderTargetsHook = hooks.Add(InteropHookUtility.CreateHookFromAddress<Context.Delegates.SetRenderTargets>(
+                _logger, _gameInteropProvider, IntonerSignatures.SceneRenderSetRenderTargets,
+                (context, count, slots, depth, left, top, right, bottom) =>
+                    SetRenderTargetsDetour(hooks, setRenderTargetsHook!, context, count, slots, depth, left, top, right, bottom)));
+            setTargetCommandHook = hooks.Add(InteropHookUtility.CreateHookFromAddress<ImmediateContext.Delegates.DoSetTargetCommand>(
+                _logger, _gameInteropProvider, IntonerSignatures.SceneRenderSetTargetCommand,
+                (context, command) => SetTargetCommandDetour(hooks, setTargetCommandHook!, context, command)));
+
+            if (setRenderTargetsHook is null || setTargetCommandHook is null)
             {
-                CompleteHookRelease(
-                    setRenderTargetsHook,
-                    setRenderTargetsOriginal,
-                    TryDisposeHook(setRenderTargetsHook),
-                    ref _setRenderTargetsHook,
-                    ref _setRenderTargetsOriginal);
-                CompleteHookRelease(
-                    setTargetCommandHook,
-                    setTargetCommandOriginal,
-                    TryDisposeHook(setTargetCommandHook),
-                    ref _setTargetCommandHook,
-                    ref _setTargetCommandOriginal);
+                Stop();
                 _startFailed = true;
-                _logger.LogWarning("scene rendering disabled because required final target hooks were unavailable");
+                DiagnosticLog.Write(() => _logger.LogWarning("scene rendering disabled because required final target hooks were unavailable"));
                 return false;
             }
 
-            nint callbackId = RegisterCallback();
-            _setRenderTargetsHook = setRenderTargetsHook;
-            _setTargetCommandHook = setTargetCommandHook;
-            _setRenderTargetsOriginal = setRenderTargetsOriginal;
-            _setTargetCommandOriginal = setTargetCommandOriginal;
-            _callbackId = callbackId;
+            _setRenderTargetsOriginal = (context, count, slots, depth, left, top, right, bottom)
+                => setRenderTargetsHook.OriginalDisposeSafe(context, count, slots, depth, left, top, right, bottom);
+            _callbackId = RegisterCallback();
             try
             {
-                setTargetCommandHook.Enable();
-                setRenderTargetsHook.Enable();
+                hooks.Enable();
             }
             catch (Exception ex)
             {
-                Callbacks.TryRemove(callbackId, out _);
-                _callbackId = nint.Zero;
-                CompleteHookRelease(
-                    setRenderTargetsHook,
-                    setRenderTargetsOriginal,
-                    TryDisposeHook(setRenderTargetsHook),
-                    ref _setRenderTargetsHook,
-                    ref _setRenderTargetsOriginal);
-                CompleteHookRelease(
-                    setTargetCommandHook,
-                    setTargetCommandOriginal,
-                    TryDisposeHook(setTargetCommandHook),
-                    ref _setTargetCommandHook,
-                    ref _setTargetCommandOriginal);
+                Stop();
                 _startFailed = true;
-                _logger.LogWarning(ex, "scene rendering disabled because final target hooks could not be enabled");
+                DiagnosticLog.Write(() => _logger.LogWarning(ex, "scene rendering disabled because final target hooks could not be enabled"));
                 return false;
             }
 
             Volatile.Write(ref _active, 1);
-            _logger.LogInformation("scene rendering enabled through native game UI boundaries");
+            DiagnosticLog.Write(() => _logger.LogInformation("scene rendering enabled through native game UI boundaries"));
             return true;
         }
     }
@@ -163,33 +133,31 @@ internal sealed unsafe class SceneRenderScheduler : IDisposable
         lock (_lifecycleLock)
         {
             Volatile.Write(ref _active, 0);
-            DetachedHooks detached = DetachHooksLocked();
+            nint callbackId = _callbackId;
+            _callbackId = nint.Zero;
 
-            if (detached.CallbackId != nint.Zero)
+            if (callbackId != nint.Zero)
             {
-                Callbacks.TryRemove(detached.CallbackId, out _);
+                Callbacks.TryRemove(callbackId, out _);
             }
 
-            bool setRenderTargetsDisposed = TryDisposeHook(detached.SetRenderTargetsHook);
-            bool setTargetCommandDisposed = TryDisposeHook(detached.SetTargetCommandHook);
+            InteropHookCollection? hooks = _hooks;
+            _hooks = null;
+            hooks?.Dispose();
+
+            if (hooks is { IsDisposed: false })
+            {
+                _hooks = hooks;
+                _startFailed = true;
+            }
+
+            _setRenderTargetsOriginal = null;
             lock (_queueLock)
             {
                 _pendingBeforeGameUi3DCommand = default;
             }
 
             _trackedCommands.Clear();
-            CompleteHookRelease(
-                detached.SetRenderTargetsHook,
-                detached.SetRenderTargetsOriginal,
-                setRenderTargetsDisposed,
-                ref _setRenderTargetsHook,
-                ref _setRenderTargetsOriginal);
-            CompleteHookRelease(
-                detached.SetTargetCommandHook,
-                detached.SetTargetCommandOriginal,
-                setTargetCommandDisposed,
-                ref _setTargetCommandHook,
-                ref _setTargetCommandOriginal);
         }
     }
 
@@ -209,18 +177,23 @@ internal sealed unsafe class SceneRenderScheduler : IDisposable
     }
 
     private void SetRenderTargetsDetour(
-        nint context,
+        InteropHookCollection hooks,
+        Hook<Context.Delegates.SetRenderTargets> hook,
+        Context* context,
         int targetCount,
-        nint targetSlots,
-        nint depthTarget,
+        Texture** targetSlots,
+        Texture* depthTarget,
         short left,
         short top,
         short right,
         short bottom)
     {
-        ContextSetRenderTargetsDelegate? original = _setRenderTargetsOriginal;
-        if (original == null)
+        using InteropHookCollection.CallbackScope callback = hooks.EnterCallback();
+        Context.Delegates.SetRenderTargets original = hook.OriginalDisposeSafe;
+
+        if (!callback.IsActive || !ReferenceEquals(_hooks, hooks) || Volatile.Read(ref _active) == 0)
         {
+            original(context, targetCount, targetSlots, depthTarget, left, top, right, bottom);
             return;
         }
 
@@ -229,13 +202,12 @@ internal sealed unsafe class SceneRenderScheduler : IDisposable
         RenderCommandBufferGroup* previousWritePointer = null;
         try
         {
-            commandKey = context != nint.Zero ? ((Context*)context)->SortKey : 0;
-            isRenderBoundary = Volatile.Read(ref _active) != 0
-                               && IsRenderBoundary(commandKey)
+            commandKey = context != null ? context->SortKey : 0;
+            isRenderBoundary = IsRenderBoundary(commandKey)
                                && IsMainSceneFinalTargetBind(context, targetCount, targetSlots, depthTarget);
             if (isRenderBoundary)
             {
-                previousWritePointer = GetCommandWritePointer((Context*)context, MainSceneViewIndex);
+                previousWritePointer = GetCommandWritePointer(context, MainSceneViewIndex);
             }
         }
         catch (Exception ex)
@@ -252,10 +224,10 @@ internal sealed unsafe class SceneRenderScheduler : IDisposable
         try
         {
             TargetCommand targetCommand = GetAppendedFinalTargetCommand(
-                (Context*)context,
+                context,
                 previousWritePointer,
                 commandKey);
-            QueueActivePassCommands((Context*)context, targetSlots, commandKey, targetCommand);
+            QueueActivePassCommands(context, targetSlots, commandKey, targetCommand);
         }
         catch (Exception ex)
         {
@@ -263,20 +235,19 @@ internal sealed unsafe class SceneRenderScheduler : IDisposable
         }
     }
 
-    private void SetTargetCommandDetour(nint immediateContext, RenderCommandSetTarget* command)
+    private void SetTargetCommandDetour(InteropHookCollection hooks,
+        Hook<ImmediateContext.Delegates.DoSetTargetCommand> hook, ImmediateContext* immediateContext, RenderCommandSetTarget* command)
     {
-        ImmediateContextSetTargetCommandDelegate? original = _setTargetCommandOriginal;
-        if (original == null)
-        {
-            return;
-        }
+        using InteropHookCollection.CallbackScope callback = hooks.EnterCallback();
+        ImmediateContext.Delegates.DoSetTargetCommand original = hook.OriginalDisposeSafe;
 
         bool execute = false;
-        SceneRenderPhase phase = default;
+        SceneRenderCommand frame = default;
         try
         {
-            execute = Volatile.Read(ref _active) != 0
-                      && _trackedCommands.TryTake((nint)command, out phase)
+            execute = callback.IsActive && ReferenceEquals(_hooks, hooks)
+                      && Volatile.Read(ref _active) != 0
+                      && _trackedCommands.TryTake((nint)command, out frame)
                       && IsFinalTargetCommand(command);
         }
         catch (Exception ex)
@@ -287,13 +258,13 @@ internal sealed unsafe class SceneRenderScheduler : IDisposable
         original(immediateContext, command);
         if (execute)
         {
-            Execute(phase);
+            Execute(frame);
         }
     }
 
     private void QueueActivePassCommands(
         Context* context,
-        nint finalTargetSlots,
+        Texture** finalTargetSlots,
         uint commandKey,
         TargetCommand targetCommand)
     {
@@ -350,14 +321,14 @@ internal sealed unsafe class SceneRenderScheduler : IDisposable
 
             if (_hasWork(SceneRenderPhase.AfterGameUi))
             {
-                QueueAfterGameUiCommand(context, finalTargetSlots);
+                QueueAfterGameUiCommand(context, finalTargetSlots, targetCommand.Projection);
             }
         }
     }
 
-    private void QueueAfterGameUiCommand(Context* context, nint finalTargetSlots)
+    private void QueueAfterGameUiCommand(Context* context, Texture** finalTargetSlots, SceneProjection? projection)
     {
-        ContextSetRenderTargetsDelegate original = _setRenderTargetsOriginal!;
+        Context.Delegates.SetRenderTargets original = _setRenderTargetsOriginal!;
         nint callbackId = Volatile.Read(ref _callbackId);
         if (callbackId == nint.Zero)
         {
@@ -369,26 +340,28 @@ internal sealed unsafe class SceneRenderScheduler : IDisposable
         {
             context->ViewIndex = MainSceneViewIndex;
             context->SortKey = AfterGameUiTargetBindCommandKey;
-            original((nint)context, 1, finalTargetSlots, nint.Zero, 0, 0, 0, 0);
+            original(context, 1, finalTargetSlots, null, 0, 0, 0, 0);
 
             context->SortKey = AfterGameUiCallbackCommandKey;
-            var command = (NativeCallbackCommand*)context->AllocateCommand((ulong)sizeof(NativeCallbackCommand));
+            var command = (SceneCallbackCommand*)context->AllocateCommand((ulong)sizeof(SceneCallbackCommand));
             if (command == null)
             {
                 return;
             }
 
-            command->SwitchType = DrawCallbackCommandType;
-            command->Callback = &DrawCommandCallback;
-            command->Context = callbackId;
-            command->Flags = 0;
+            command->Header.Type = RenderCommandType.Callback;
+            command->Header.Function = &DrawCommandCallback;
+            command->Header.Argument = command;
+            command->Header.Flags = 0;
+            command->CallbackId = callbackId;
+            TrackCommand(new TargetCommand((nint)command, projection), SceneRenderPhase.AfterGameUi);
             context->PushBackCommand(command);
         }
         catch (Exception ex)
         {
             if (Interlocked.Exchange(ref _loggedQueueFailure, 1) == 0)
             {
-                _logger.LogWarning(ex, "scene render command queue failed");
+                DiagnosticLog.Write(() => _logger.LogWarning(ex, "scene render command queue failed"));
             }
         }
         finally
@@ -399,16 +372,16 @@ internal sealed unsafe class SceneRenderScheduler : IDisposable
     }
 
     private static bool IsMainSceneFinalTargetBind(
-        nint context,
+        Context* context,
         int targetCount,
-        nint targetSlots,
-        nint depthTarget)
-        => context != nint.Zero
+        Texture** targetSlots,
+        Texture* depthTarget)
+        => context != null
            && targetCount == 1
-           && targetSlots != nint.Zero
-           && depthTarget == nint.Zero
-           && ((Context*)context)->ViewIndex == MainSceneViewIndex
-           && SceneRenderTarget.IsFinalTargetBind(targetSlots);
+           && targetSlots != null
+           && depthTarget == null
+           && context->ViewIndex == MainSceneViewIndex
+           && SceneRenderTarget.IsFinalTargetBind((nint)targetSlots);
 
     private static bool IsRenderBoundary(uint commandKey)
         => commandKey is GameUi3DTargetBindCommandKey or FinalTargetBindCommandKey;
@@ -439,9 +412,14 @@ internal sealed unsafe class SceneRenderScheduler : IDisposable
         }
 
         RenderCommandSetTarget* command = commandRecord->SetTargetCommand;
-        return IsFinalTargetCommand(command)
-            ? new TargetCommand((nint)command)
-            : default;
+        if (!IsFinalTargetCommand(command))
+        {
+            return default;
+        }
+
+        // capture on the producer thread before the next framework camera update
+        SceneProjection? projection = SceneProjection.TryCapture(out SceneProjection captured) ? captured : null;
+        return new TargetCommand((nint)command, projection);
     }
 
     private static bool IsFinalTargetCommand(RenderCommandSetTarget* command)
@@ -463,10 +441,10 @@ internal sealed unsafe class SceneRenderScheduler : IDisposable
 
     private void TrackCommand(TargetCommand targetCommand, SceneRenderPhase phase)
     {
-        if (_trackedCommands.Track(targetCommand.Command, phase)
+        if (_trackedCommands.Track(targetCommand.Command, new SceneRenderCommand(phase, targetCommand.Projection))
             && Interlocked.Exchange(ref _loggedTrackingOverflow, 1) == 0)
         {
-            _logger.LogWarning("scene render command tracking reset after its pending command limit was exceeded");
+            DiagnosticLog.Write(() => _logger.LogWarning("scene render command tracking reset after its pending command limit was exceeded"));
         }
     }
 
@@ -474,7 +452,7 @@ internal sealed unsafe class SceneRenderScheduler : IDisposable
     {
         if (Interlocked.Exchange(ref _loggedTargetLookupFailure, 1) == 0)
         {
-            _logger.LogWarning("scene render {Boundary} target command could not be identified", boundary);
+            DiagnosticLog.Write(() => _logger.LogWarning("scene render {Boundary} target command could not be identified", boundary));
         }
     }
 
@@ -482,7 +460,7 @@ internal sealed unsafe class SceneRenderScheduler : IDisposable
     {
         if (Interlocked.Exchange(ref _loggedDetourFailure, 1) == 0)
         {
-            _logger.LogWarning(exception, "scene render target detour failed");
+            DiagnosticLog.Write(() => _logger.LogWarning(exception, "scene render target detour failed"));
         }
     }
 
@@ -490,11 +468,11 @@ internal sealed unsafe class SceneRenderScheduler : IDisposable
     {
         if (Interlocked.Exchange(ref _loggedDispatchFailure, 1) == 0)
         {
-            _logger.LogWarning(exception, "scene render phase dispatch failed");
+            DiagnosticLog.Write(() => _logger.LogWarning(exception, "scene render phase dispatch failed"));
         }
     }
 
-    private void Execute(SceneRenderPhase phase)
+    private void Execute(SceneRenderCommand command)
     {
         if (Volatile.Read(ref _active) == 0)
         {
@@ -503,7 +481,7 @@ internal sealed unsafe class SceneRenderScheduler : IDisposable
 
         try
         {
-            _execute(phase);
+            _execute(command);
         }
         catch (Exception ex)
         {
@@ -511,76 +489,35 @@ internal sealed unsafe class SceneRenderScheduler : IDisposable
         }
     }
 
-    private DetachedHooks DetachHooksLocked()
+    [UnmanagedCallersOnly]
+    private static void DrawCommandCallback(void* context)
     {
-        var detached = new DetachedHooks(
-            _setRenderTargetsHook,
-            _setTargetCommandHook,
-            _setRenderTargetsHook != null ? _setRenderTargetsOriginal : null,
-            _setTargetCommandHook != null ? _setTargetCommandOriginal : null,
-            _callbackId);
-        _setRenderTargetsHook = null;
-        _setTargetCommandHook = null;
-        _callbackId = nint.Zero;
-        return detached;
-    }
-
-    private bool TryDisposeHook<TDelegate>(Hook<TDelegate>? hook)
-        where TDelegate : Delegate
-    {
-        try
+        SceneCallbackCommand* command = (SceneCallbackCommand*)context;
+        if (!Callbacks.TryGetValue(command->CallbackId, out SceneRenderScheduler? scheduler))
         {
-            InteropHookUtility.DisposeHook(hook);
-            return true;
-        }
-        catch (Exception ex)
-        {
-            if (Interlocked.Exchange(ref _loggedStopFailure, 1) == 0)
-            {
-                _logger.LogWarning(ex, "scene render hook disposal failed");
-            }
-
-            return false;
-        }
-    }
-
-    private void CompleteHookRelease<TDelegate>(
-        Hook<TDelegate>? hook,
-        TDelegate? original,
-        bool disposed,
-        ref Hook<TDelegate>? currentHook,
-        ref TDelegate? currentOriginal)
-        where TDelegate : Delegate
-    {
-        if (disposed)
-        {
-            if (ReferenceEquals(currentHook, hook))
-            {
-                currentHook = null;
-            }
-
-            if (ReferenceEquals(currentOriginal, original))
-            {
-                currentOriginal = null;
-            }
-
             return;
         }
 
-        if (hook != null)
-        {
-            currentHook ??= hook;
-            currentOriginal ??= original;
-            _startFailed = true;
-        }
-    }
+        InteropHookCollection? hooks = scheduler._hooks;
 
-    [UnmanagedCallersOnly]
-    private static void DrawCommandCallback(nint callbackId)
-    {
-        if (Callbacks.TryGetValue(callbackId, out SceneRenderScheduler? scheduler))
+        if (hooks is null)
         {
-            scheduler.Execute(SceneRenderPhase.AfterGameUi);
+            return;
+        }
+
+        using InteropHookCollection.CallbackScope callback = hooks.EnterCallback();
+        try
+        {
+            if (callback.IsActive && ReferenceEquals(scheduler._hooks, hooks)
+                && command->CallbackId == Volatile.Read(ref scheduler._callbackId)
+                && scheduler._trackedCommands.TryTake((nint)context, out SceneRenderCommand frame))
+            {
+                scheduler.Execute(frame);
+            }
+        }
+        catch (Exception ex)
+        {
+            scheduler.LogDispatchFailure(ex);
         }
     }
 
@@ -588,40 +525,16 @@ internal sealed unsafe class SceneRenderScheduler : IDisposable
     private readonly record struct ContextState(uint SortKey, int ViewIndex);
 
     [StructLayout(LayoutKind.Auto)]
-    private readonly record struct TargetCommand(nint Command)
+    private readonly record struct TargetCommand(nint Command, SceneProjection? Projection)
     {
         public bool IsValid
             => Command != nint.Zero;
     }
 
-    [StructLayout(LayoutKind.Auto)]
-    private readonly record struct DetachedHooks(
-        Hook<ContextSetRenderTargetsDelegate>? SetRenderTargetsHook,
-        Hook<ImmediateContextSetTargetCommandDelegate>? SetTargetCommandHook,
-        ContextSetRenderTargetsDelegate? SetRenderTargetsOriginal,
-        ImmediateContextSetTargetCommandDelegate? SetTargetCommandOriginal,
-        nint CallbackId);
-
-    private unsafe delegate void ContextSetRenderTargetsDelegate(
-        nint context,
-        int targetCount,
-        nint targetSlots,
-        nint depthTarget,
-        short left,
-        short top,
-        short right,
-        short bottom);
-
-    private unsafe delegate void ImmediateContextSetTargetCommandDelegate(
-        nint immediateContext,
-        RenderCommandSetTarget* command);
-
-    [StructLayout(LayoutKind.Explicit, Size = 0x20)]
-    private struct NativeCallbackCommand
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SceneCallbackCommand
     {
-        [FieldOffset(0x00)] public int SwitchType;
-        [FieldOffset(0x08)] public delegate* unmanaged<nint, void> Callback;
-        [FieldOffset(0x10)] public nint Context;
-        [FieldOffset(0x18)] public int Flags;
+        public RenderCommandCallback Header;
+        public nint CallbackId;
     }
 }

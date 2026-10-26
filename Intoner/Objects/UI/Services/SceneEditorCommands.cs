@@ -1,4 +1,3 @@
-using Intoner.Displays;
 using Intoner.Objects.Api;
 using Intoner.Objects.Models;
 using Intoner.Objects.Runtime;
@@ -10,43 +9,42 @@ using ObjectPasteDestination = Intoner.Objects.Api.ObjectPasteDestination;
 
 namespace Intoner.Objects.UI;
 
-internal sealed class SceneEditorCommands
+internal sealed partial class SceneEditorCommands
 {
     private readonly IObjectSceneView             _sceneView;
     private readonly IObjectFolderService         _objectFolderService;
-    private readonly IObjectOrganizationService   _objectOrganizationService;
     private readonly IObjectClipboardService      _objectClipboard;
     private readonly IHistoryCoordinator          _historyCoordinator;
-    private readonly IDisplayService              _displayService;
     private readonly IScenePlacementService       _scenePlacementService;
+    private readonly ISceneLocationService        _sceneLocationService;
     private readonly EditorInteraction            _interaction;
     private readonly ILogger<SceneEditorCommands> _logger;
 
     public SceneEditorCommands(
         IObjectSceneView sceneView,
         IObjectFolderService objectFolderService,
-        IObjectOrganizationService objectOrganizationService,
         IObjectClipboardService objectClipboard,
         IHistoryCoordinator historyCoordinator,
-        IDisplayService displayService,
         IScenePlacementService scenePlacementService,
+        ISceneLocationService sceneLocationService,
         EditorInteraction interaction,
         ILogger<SceneEditorCommands> logger)
     {
         _sceneView                 = sceneView;
         _objectFolderService       = objectFolderService;
-        _objectOrganizationService = objectOrganizationService;
         _objectClipboard           = objectClipboard;
         _historyCoordinator        = historyCoordinator;
-        _displayService            = displayService;
         _scenePlacementService     = scenePlacementService;
+        _sceneLocationService      = sceneLocationService;
         _interaction               = interaction;
         _logger                    = logger;
     }
 
-    internal bool TryCutPlacedFolderToClipboard(string folderPath, IReadOnlyList<ObjectSnapshot> objects)
+    internal bool TryCutPlacedFolderToClipboard(Guid? layoutId, string folderPath, IReadOnlyList<ObjectSnapshot> objects)
     {
-        if (!_objectClipboard.CopyFolder(folderPath, objects))
+        IReadOnlyList<SceneItemSnapshot> items = [.. objects, .. _sceneView.GetPlacedGroups().Where(group => group.LayoutId == layoutId
+            && ObjectFolderUtility.IsSameOrDescendant(group.FolderPath, folderPath))];
+        if (!_objectClipboard.CopyFolder(layoutId, folderPath, items))
         {
             return false;
         }
@@ -54,52 +52,58 @@ internal sealed class SceneEditorCommands
         ObjectFolderSceneState beforeFolderState = _objectFolderService.CaptureSceneState();
         ObjectFolderSceneState afterFolderState = ObjectFolderSceneStateUtility.RemoveFolderSubtree(
             beforeFolderState,
+            layoutId,
             folderPath);
         Guid[] selectionBefore = _interaction.CaptureSelection();
-        return TryApplyFolderChangeWithHistory(
+        return _historyCoordinator.TryApplyFolderChange(
+            SceneHistoryKind.Remove,
             "Cut Folder",
-            objects,
+            items,
             [],
             beforeFolderState,
             afterFolderState,
-            SceneHistoryKind.Remove,
             [],
             selectionBefore);
     }
 
     internal bool PasteObjectsFromClipboard(ObjectPasteDestination destination)
+        => PasteObjectsFromClipboard(_sceneView.GetCreationLayoutId(), destination);
+
+    internal bool PasteObjectsFromClipboard(Guid? layoutId, ObjectPasteDestination destination)
     {
         ObjectFolderSceneState beforeFolderState = _objectFolderService.CaptureSceneState();
-        if (!_objectClipboard.TryPasteObjects(
-                _sceneView.GetCurrentLocationContext(),
-                beforeFolderState.DefaultLayoutId,
-                _sceneView.GetPlacedFolders(),
-                destination,
-                out ObjectTransferImport import))
+        if (!TryReadClipboardImport(layoutId, destination, out ObjectTransferImport import))
         {
             return false;
         }
 
         ObjectFolderSceneState afterFolderState = ObjectFolderSceneStateUtility.AddFolders(
             beforeFolderState,
+            layoutId,
             import.Folders);
         Guid[] selectionBefore = _interaction.CaptureSelection();
-        Guid[] createdIds = import.Objects.Select(static snapshot => snapshot.Id).ToArray();
+        IReadOnlyList<SceneItemSnapshot> importedItems = [.. import.Objects, .. import.Groups];
+        Guid[] createdIds = importedItems.Where(static item => item is not ObjectSnapshot { GroupId: not null })
+            .Select(static snapshot => snapshot.Id).ToArray();
         string title = ResolvePasteHistoryTitle(import, destination);
-        return TryApplyFolderChangeWithHistory(
+        return _historyCoordinator.TryApplyFolderChange(
+            SceneHistoryKind.Import,
             title,
             [],
-            import.Objects,
+            importedItems,
             beforeFolderState,
             afterFolderState,
-            SceneHistoryKind.Import,
             createdIds,
             selectionBefore);
     }
 
-    internal bool CutObjectsToClipboard(IReadOnlyList<ObjectSnapshot> snapshots)
+    internal bool CutObjectsToClipboard(IReadOnlyList<SceneItemSnapshot> snapshots)
         => _objectClipboard.CopyObjects(snapshots)
         && _historyCoordinator.TryRemoveSceneItems(snapshots);
+
+    private bool TryReadClipboardImport(Guid? layoutId, ObjectPasteDestination destination, out ObjectTransferImport import)
+        => _objectClipboard.TryPasteObjects(_sceneView.GetCurrentLocationContext(), layoutId,
+            _sceneView.GetPlacedFolders(layoutId), destination, out import);
 
     private static string ResolvePasteHistoryTitle(
         ObjectTransferImport import,
@@ -113,63 +117,11 @@ internal sealed class SceneEditorCommands
         return import.Objects.Count == 1 ? "Paste Object" : "Paste Objects";
     }
 
-    private sealed class OrganizationHistoryAction : SceneHistoryActionBase
-    {
-        private readonly IObjectOrganizationService _organization;
-        private readonly ObjectSnapshot[] _beforeSnapshots;
-        private readonly ObjectSnapshot[] _afterSnapshots;
-        private readonly ObjectFolderSceneState _beforeFolderState;
-        private readonly ObjectFolderSceneState _afterFolderState;
-
-        public OrganizationHistoryAction(
-            IObjectOrganizationService organization,
-            SceneHistoryKind kind,
-            string title,
-            IReadOnlyList<ObjectSnapshot> beforeSnapshots,
-            IReadOnlyList<ObjectSnapshot> afterSnapshots,
-            ObjectFolderSceneState beforeFolderState,
-            ObjectFolderSceneState afterFolderState)
-            : base(title, kind)
-        {
-            _organization = organization;
-            _beforeSnapshots = [.. beforeSnapshots];
-            _afterSnapshots = [.. afterSnapshots];
-            _beforeFolderState = beforeFolderState;
-            _afterFolderState = afterFolderState;
-        }
-
-        protected override void ApplyCore()
-        {
-            if (!_organization.ApplyFolderChange(
-                    _beforeSnapshots,
-                    _afterSnapshots,
-                    _beforeFolderState,
-                    _afterFolderState,
-                    out _).IsApplied())
-            {
-                throw new InvalidOperationException($"could not apply '{Title}' organization state");
-            }
-        }
-
-        protected override void RevertCore()
-        {
-            if (!_organization.ApplyFolderChange(
-                    _afterSnapshots,
-                    _beforeSnapshots,
-                    _afterFolderState,
-                    _beforeFolderState,
-                    out _).IsApplied())
-            {
-                throw new InvalidOperationException($"could not revert '{Title}' organization state");
-            }
-        }
-    }
-
-    internal bool TryCreateFolderWithHistory(string folderPath)
+    internal bool TryCreateFolderWithHistory(Guid? layoutId, string folderPath)
     {
         var sanitizedFolderPath = ObjectFolderUtility.SanitizeFolderPath(folderPath);
         if (string.IsNullOrEmpty(sanitizedFolderPath)
-         || _sceneView.GetPlacedFolders().Any(folder => string.Equals(
+         || _sceneView.GetPlacedFolders(layoutId).Any(folder => string.Equals(
              folder,
              sanitizedFolderPath,
              StringComparison.OrdinalIgnoreCase)))
@@ -178,11 +130,11 @@ internal sealed class SceneEditorCommands
         }
 
         var beforeState = _objectFolderService.CaptureSceneState();
-        var afterState = ObjectFolderSceneStateUtility.AddFolder(beforeState, sanitizedFolderPath);
-        return TryApplyFolderChangeWithHistory("Create Folder", [], [], beforeState, afterState);
+        var afterState = ObjectFolderSceneStateUtility.AddFolder(beforeState, layoutId, sanitizedFolderPath);
+        return _historyCoordinator.TryApplyFolderChange(SceneHistoryKind.Organization, "Create Folder", [], [], beforeState, afterState);
     }
 
-    internal bool TryRenameFolderWithHistory(string sourceFolderPath, string nextFolderPath)
+    internal bool TryRenameFolderWithHistory(Guid? layoutId, string sourceFolderPath, string nextFolderPath)
     {
         var sanitizedSourceFolderPath = ObjectFolderUtility.SanitizeFolderPath(sourceFolderPath);
         var sanitizedNextFolderPath = ObjectFolderUtility.SanitizeFolderPath(nextFolderPath);
@@ -190,7 +142,7 @@ internal sealed class SceneEditorCommands
             || string.IsNullOrEmpty(sanitizedNextFolderPath)
             || string.Equals(sanitizedSourceFolderPath, sanitizedNextFolderPath, StringComparison.OrdinalIgnoreCase)
             || ObjectFolderUtility.IsDescendantOf(sanitizedNextFolderPath, sanitizedSourceFolderPath)
-            || _sceneView.GetPlacedFolders().Any(folder => string.Equals(
+            || _sceneView.GetPlacedFolders(layoutId).Any(folder => string.Equals(
                 folder,
                 sanitizedNextFolderPath,
                 StringComparison.OrdinalIgnoreCase)
@@ -200,13 +152,9 @@ internal sealed class SceneEditorCommands
         }
 
         var beforeFolderState = _objectFolderService.CaptureSceneState();
-        var afterFolderState = ObjectFolderSceneStateUtility.RenameFolder(beforeFolderState, sanitizedSourceFolderPath, sanitizedNextFolderPath);
-        var beforeSnapshots = _sceneView.GetPlacedObjectSnapshots()
-            .Where(snapshot => ObjectFolderUtility.IsSameOrDescendant(
-                snapshot.FolderPath,
-                sanitizedSourceFolderPath))
-            .ToList();
-        IReadOnlyList<ObjectSnapshot> requestedSnapshots = beforeSnapshots
+        var afterFolderState = ObjectFolderSceneStateUtility.RenameFolder(beforeFolderState, layoutId, sanitizedSourceFolderPath, sanitizedNextFolderPath);
+        IReadOnlyList<ObjectSceneItemSnapshot> beforeSnapshots = GetFolderItems(layoutId, sanitizedSourceFolderPath);
+        IReadOnlyList<ObjectSceneItemSnapshot> requestedSnapshots = beforeSnapshots
             .Select(snapshot => snapshot with
             {
                 FolderPath = ObjectFolderUtility.RebaseFolderPath(
@@ -215,7 +163,8 @@ internal sealed class SceneEditorCommands
                     sanitizedNextFolderPath),
             })
             .ToList();
-        return TryApplyFolderChangeWithHistory(
+        return _historyCoordinator.TryApplyFolderChange(
+            SceneHistoryKind.Organization,
             "Rename Folder",
             beforeSnapshots,
             requestedSnapshots,
@@ -223,7 +172,7 @@ internal sealed class SceneEditorCommands
             afterFolderState);
     }
 
-    internal bool TryDissolveFolderWithHistory(string folderPath)
+    internal bool TryDissolveFolderWithHistory(Guid? layoutId, string folderPath)
     {
         var sanitizedFolderPath = ObjectFolderUtility.SanitizeFolderPath(folderPath);
         if (string.IsNullOrEmpty(sanitizedFolderPath))
@@ -234,21 +183,21 @@ internal sealed class SceneEditorCommands
         var beforeFolderState = _objectFolderService.CaptureSceneState();
         IReadOnlyDictionary<string, string> pathMap = ObjectFolderUtility.CreateDissolveFolderPathMap(
             sanitizedFolderPath,
-            _sceneView.GetPlacedFolders());
+            _sceneView.GetPlacedFolders(layoutId));
         var afterFolderState = ObjectFolderSceneStateUtility.DissolveFolder(
             beforeFolderState,
+            layoutId,
             sanitizedFolderPath,
             pathMap);
-        var beforeSnapshots = _sceneView.GetPlacedObjectSnapshots()
-            .Where(snapshot => ObjectFolderUtility.IsSameOrDescendant(snapshot.FolderPath, sanitizedFolderPath))
-            .ToList();
-        IReadOnlyList<ObjectSnapshot> requestedSnapshots = beforeSnapshots
+        IReadOnlyList<ObjectSceneItemSnapshot> beforeSnapshots = GetFolderItems(layoutId, sanitizedFolderPath);
+        IReadOnlyList<ObjectSceneItemSnapshot> requestedSnapshots = beforeSnapshots
             .Select(snapshot => snapshot with
             {
                 FolderPath = ObjectFolderUtility.ApplyFolderPathMap(snapshot.FolderPath, pathMap),
             })
             .ToList();
-        return TryApplyFolderChangeWithHistory(
+        return _historyCoordinator.TryApplyFolderChange(
+            SceneHistoryKind.Organization,
             "Dissolve Folder",
             beforeSnapshots,
             requestedSnapshots,
@@ -256,7 +205,12 @@ internal sealed class SceneEditorCommands
             afterFolderState);
     }
 
-    internal bool TrySetFolderColorWithHistory(string folderPath, string colorValue)
+    private IReadOnlyList<ObjectSceneItemSnapshot> GetFolderItems(Guid? layoutId, string folderPath)
+        => _sceneView.GetPlacedObjectSnapshots().Cast<ObjectSceneItemSnapshot>().Concat(_sceneView.GetPlacedGroups())
+            .Where(snapshot => snapshot.LayoutId == layoutId && ObjectFolderUtility.IsSameOrDescendant(snapshot.FolderPath, folderPath))
+            .ToList();
+
+    internal bool TrySetFolderColorWithHistory(Guid? layoutId, string folderPath, string colorValue)
     {
         var sanitizedFolderPath = ObjectFolderUtility.SanitizeFolderPath(folderPath);
         if (string.IsNullOrEmpty(sanitizedFolderPath))
@@ -266,112 +220,28 @@ internal sealed class SceneEditorCommands
 
         var sanitizedColorValue = ObjectFolderUtility.SanitizeFolderColorValue(colorValue);
         var beforeState = _objectFolderService.CaptureSceneState();
-        var afterState = ObjectFolderSceneStateUtility.SetFolderColor(beforeState, sanitizedFolderPath, sanitizedColorValue);
+        var afterState = ObjectFolderSceneStateUtility.SetFolderColor(beforeState, layoutId, sanitizedFolderPath, sanitizedColorValue);
         var title = string.IsNullOrEmpty(sanitizedColorValue)
             ? "Clear Folder Color"
             : "Set Folder Color";
-        return TryApplyFolderChangeWithHistory(title, [], [], beforeState, afterState);
+        return _historyCoordinator.TryApplyFolderChange(SceneHistoryKind.Organization, title, [], [], beforeState, afterState);
     }
 
-    internal bool TryApplyFolderChangeWithHistory(
-        string title,
-        IReadOnlyList<ObjectSnapshot> beforeSnapshots,
-        IReadOnlyList<ObjectSnapshot> requestedSnapshots,
-        ObjectFolderSceneState beforeFolderState,
-        ObjectFolderSceneState afterFolderState,
-        SceneHistoryKind kind = SceneHistoryKind.Organization,
-        IReadOnlyList<Guid>? selectionAfterApply = null,
-        IReadOnlyList<Guid>? selectionAfterRevert = null)
+    internal bool TrySetObjectDestinationWithHistory(IReadOnlyList<SceneItemSnapshot> snapshots, Guid? layoutId, string folderPath)
     {
-        if (SceneItemHistoryChanges.Build(beforeSnapshots, requestedSnapshots).Count == 0
-            && ObjectFolderSceneStateUtility.StatesMatch(beforeFolderState, afterFolderState))
-        {
-            return false;
-        }
-
-        _historyCoordinator.PrepareForMutation();
-        SceneMutationStatus status = _objectOrganizationService.ApplyFolderChange(
-            beforeSnapshots,
-            requestedSnapshots,
-            beforeFolderState,
-            afterFolderState,
-            out IReadOnlyList<ObjectSnapshot> afterSnapshots);
-        if (!status.IsApplied())
-        {
-            return false;
-        }
-
-        return TryRecordOrganizationHistoryAction(
-            title,
-            beforeSnapshots,
-            afterSnapshots,
-            beforeFolderState,
-            afterFolderState,
-            kind,
-            selectionAfterApply,
-            selectionAfterRevert);
-    }
-
-    private bool TryRecordOrganizationHistoryAction(
-        string title,
-        IReadOnlyList<ObjectSnapshot> beforeSnapshots,
-        IReadOnlyList<ObjectSnapshot> afterSnapshots,
-        ObjectFolderSceneState beforeFolderState,
-        ObjectFolderSceneState afterFolderState,
-        SceneHistoryKind kind = SceneHistoryKind.Organization,
-        IReadOnlyList<Guid>? selectionAfterApply = null,
-        IReadOnlyList<Guid>? selectionAfterRevert = null)
-    {
-        IReadOnlyList<SceneItemSnapshotChange> snapshotChanges = SceneItemHistoryChanges.Build(
-            beforeSnapshots,
-            afterSnapshots);
-        if (snapshotChanges.Count == 0
-            && ObjectFolderSceneStateUtility.StatesMatch(beforeFolderState, afterFolderState))
-        {
-            return false;
-        }
-
-        ISceneHistoryAction action = new OrganizationHistoryAction(
-            _objectOrganizationService,
-            kind,
-            title,
-            beforeSnapshots,
-            afterSnapshots,
-            beforeFolderState,
-            afterFolderState);
-        if (selectionAfterApply is not null || selectionAfterRevert is not null)
-        {
-            action = new SelectionHistoryAction(action, selectionAfterApply, selectionAfterRevert);
-        }
-
-        _historyCoordinator.RecordCompletedAction(action);
-        return true;
-    }
-
-    internal bool TrySetObjectFolderWithHistory(IReadOnlyList<ObjectSnapshot> snapshots, string folderPath)
-    {
-        var sanitizedFolderPath = ObjectFolderUtility.SanitizeFolderPath(folderPath);
         if (snapshots.Count == 0
-            || snapshots.All(snapshot => string.Equals(snapshot.FolderPath, sanitizedFolderPath, StringComparison.OrdinalIgnoreCase)))
+            || snapshots.Any(static snapshot => snapshot is not ObjectSceneItemSnapshot))
         {
             return false;
         }
 
-        return _historyCoordinator.TryApplySelectedSnapshotUpdate(
+        HashSet<Guid> groupIds = snapshots.OfType<SceneGroupSnapshot>().Select(static group => group.Id).ToHashSet();
+        return _historyCoordinator.TryApplySceneItemUpdate(
             SceneHistoryKind.Organization,
-            ResolveObjectFolderHistoryTitle(string.IsNullOrEmpty(sanitizedFolderPath), snapshots.Count),
+            snapshots.Count == 1 ? "Move Object" : "Move Objects",
             snapshots,
-            entry => entry with { FolderPath = sanitizedFolderPath });
-    }
-
-    private static string ResolveObjectFolderHistoryTitle(bool ungroup, int objectCount)
-    {
-        if (ungroup)
-        {
-            return objectCount == 1 ? "Ungroup Object" : "Ungroup Objects";
-        }
-
-        return objectCount == 1 ? "Set Object Folder" : "Set Object Folders";
+            entry => ObjectOrganizationUtility.WithDestination((ObjectSceneItemSnapshot)entry, layoutId, folderPath,
+                entry is ObjectSnapshot { GroupId: Guid id } && groupIds.Contains(id)));
     }
 
     internal void AddDisplay()
@@ -381,29 +251,26 @@ internal sealed class SceneEditorCommands
             return;
         }
 
-        _historyCoordinator.PrepareForMutation();
-        Guid[] selectionBefore = _interaction.CaptureSelection();
-        if (!_displayService.TryCreate(new DisplaySettings(), transform, true, out DisplaySnapshot created))
-        {
-            return;
-        }
-
-        _interaction.SelectionChanged(_interaction.Selection.TrySelect(created.Id, false));
-        _ = _historyCoordinator.TryRecordCompletedAction(
-            SceneHistoryKind.Create,
-            "Create Display",
-            [],
-            [created],
-            [created.Id],
-            selectionBefore);
+        _ = _historyCoordinator.TryCreateDisplay(transform);
     }
 
     internal bool TrySetSceneItemsVisibleWithHistory(IReadOnlyList<SceneItemSnapshot> snapshots, bool visible)
-        => _historyCoordinator.TryApplySceneItemUpdate(
+    {
+        IReadOnlyList<SceneItemSnapshot> targets = snapshots;
+        if (visible)
+        {
+            HashSet<Guid> memberGroups = snapshots.OfType<ObjectSnapshot>().Where(static snapshot => snapshot.GroupId.HasValue)
+                .Select(static snapshot => snapshot.GroupId!.Value).ToHashSet();
+            HashSet<Guid> selectedIds = snapshots.Select(static snapshot => snapshot.Id).ToHashSet();
+            targets = [.. snapshots, .. _sceneView.GetPlacedGroups().Where(group => !group.Visible
+                && memberGroups.Contains(group.Id) && !selectedIds.Contains(group.Id))];
+        }
+        return _historyCoordinator.TryApplySceneItemUpdate(
             SceneHistoryKind.Visibility,
             ResolveSceneItemActionTitle(visible ? "Show" : "Hide", snapshots.Count),
-            snapshots,
+            targets,
             item => item with { Visible = visible });
+    }
 
     internal bool TrySetSceneItemsLockedWithHistory(IReadOnlyList<SceneItemSnapshot> snapshots, bool locked)
         => _historyCoordinator.TryApplySceneItemUpdate(

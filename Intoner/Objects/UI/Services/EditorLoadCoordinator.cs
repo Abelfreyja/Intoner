@@ -29,7 +29,8 @@ internal sealed class EditorLoadCoordinator(
         [NotNullWhen(true)] out EditorLoadData? data,
         out LoadStatus status)
     {
-        if (_data is not null)
+        bool hasCatalog = catalogService.TryGetCatalog(out ObjectCatalogData? catalog);
+        if (_data is not null && hasCatalog)
         {
             data = _data;
             status = ReadyStatus;
@@ -37,7 +38,6 @@ internal sealed class EditorLoadCoordinator(
         }
 
         status = _loading.Status;
-        bool hasCatalog = catalogService.TryGetCatalog(out ObjectCatalogData? catalog);
         bool hasStains = stainService.TryGetStains(out IReadOnlyList<FurnitureStainOption>? stains);
 
         if (!hasCatalog || catalog is null || !hasStains || stains is null)

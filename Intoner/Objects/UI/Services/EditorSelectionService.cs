@@ -1,11 +1,21 @@
 using Intoner.Scene;
+using Intoner.Objects.Models;
 
 namespace Intoner.Objects.UI.Services;
+
+internal enum EditorSelectionRole
+{
+    None,
+    Secondary,
+    Primary,
+}
 
 internal sealed class EditorSelectionService
 {
     private readonly HashSet<Guid> _selectedIds = [];
     private readonly List<Guid> _selectionOrder = [];
+    private readonly Dictionary<Guid, Guid[]> _groupMembers = [];
+    private readonly Dictionary<Guid, Guid> _memberGroups = [];
     private Guid? _rangeAnchorId;
     private int _revision = 1;
 
@@ -30,7 +40,43 @@ internal sealed class EditorSelectionService
     /// <param name="id">the item id to check</param>
     /// <returns>true when the item is selected</returns>
     public bool Contains(Guid id)
-        => _selectedIds.Contains(id);
+        => _selectedIds.Contains(id)
+        || _memberGroups.TryGetValue(id, out Guid groupId) && _selectedIds.Contains(groupId);
+
+    /// <summary> updates selection membership from the current persistent scene </summary>
+    public void UpdateGroups(IReadOnlyList<SceneItemSnapshot> items)
+    {
+        _groupMembers.Clear();
+        _memberGroups.Clear();
+        ILookup<Guid?, ObjectSnapshot> members = items.OfType<ObjectSnapshot>()
+            .Where(static snapshot => snapshot.GroupId.HasValue)
+            .ToLookup(static snapshot => snapshot.GroupId);
+        foreach (Guid groupId in items.OfType<SceneGroupSnapshot>().Select(static group => group.Id))
+        {
+            Guid[] ids = members[groupId].Select(static snapshot => snapshot.Id).ToArray();
+            _groupMembers.Add(groupId, ids);
+            foreach (Guid id in ids)
+                _memberGroups.Add(id, groupId);
+        }
+
+        Guid[] normalized = _selectionOrder.Where(id => !_memberGroups.TryGetValue(id, out Guid groupId)
+            || !_selectedIds.Contains(groupId)).ToArray();
+        TryApplySelection(normalized);
+    }
+
+    /// <summary> resolves a world selection hit to its editing group while list children remain individually selectable </summary>
+    public Guid ResolveWorldSelectionId(Guid id)
+        => _memberGroups.GetValueOrDefault(id, id);
+
+    public EditorSelectionRole GetRole(Guid id)
+    {
+        if (id == PrimaryItemId || _memberGroups.TryGetValue(id, out Guid groupId) && groupId == PrimaryItemId)
+        {
+            return EditorSelectionRole.Primary;
+        }
+
+        return Contains(id) ? EditorSelectionRole.Secondary : EditorSelectionRole.None;
+    }
 
     /// <summary> selects one item or toggles it into the current selection </summary>
     /// <param name="id">the item id to select</param>
@@ -88,7 +134,7 @@ internal sealed class EditorSelectionService
     /// <returns>true when the selection changed</returns>
     public bool TryReplaceSelection(IEnumerable<Guid> itemIds)
     {
-        var ids = BuildDistinctSelectionOrder(itemIds);
+        List<Guid> ids = itemIds.Distinct().ToList();
         _rangeAnchorId = ids.Count > 0 ? ids[^1] : null;
         return TryApplySelection(ids);
     }
@@ -98,7 +144,7 @@ internal sealed class EditorSelectionService
     /// <returns> true when the selection changed </returns>
     public bool TryToggleSelection(IEnumerable<Guid> itemIds)
     {
-        List<Guid> toggledIds = BuildDistinctSelectionOrder(itemIds);
+        List<Guid> toggledIds = itemIds.Distinct().ToList();
         if (toggledIds.Count == 0)
         {
             return false;
@@ -170,12 +216,28 @@ internal sealed class EditorSelectionService
         }
 
         var selectedItems = new List<TSnapshot>(Count);
-        foreach (var id in _selectionOrder)
+        foreach (Guid id in _selectionOrder)
         {
-            if (itemLookup.TryGetValue(id, out var snapshot))
+            if (!itemLookup.TryGetValue(id, out TSnapshot? snapshot))
             {
-                selectedItems.Add(snapshot);
+                continue;
             }
+            if (_groupMembers.TryGetValue(id, out Guid[]? members))
+            {
+                int start = selectedItems.Count;
+                foreach (Guid member in members)
+                {
+                    if (!itemLookup.TryGetValue(member, out TSnapshot? memberSnapshot))
+                        break;
+                    selectedItems.Add(memberSnapshot);
+                }
+                if (selectedItems.Count - start != members.Length)
+                {
+                    selectedItems.RemoveRange(start, selectedItems.Count - start);
+                    continue;
+                }
+            }
+            selectedItems.Add(snapshot);
         }
 
         return selectedItems;
@@ -197,12 +259,13 @@ internal sealed class EditorSelectionService
         => !HasSingleSelection(id) && ApplySelection([id]);
 
     private bool TryToggleSelection(Guid id)
-        => Contains(id)
+        => _selectedIds.Contains(id)
             ? TryRemoveSelectedId(id)
             : TryAddSelectedId(id);
 
     private bool TryAddSelectedId(Guid id)
     {
+        RemoveOverlappingSelection(id, _selectedIds, _selectionOrder);
         if (!_selectedIds.Add(id))
         {
             return false;
@@ -226,7 +289,18 @@ internal sealed class EditorSelectionService
     }
 
     private bool TryApplySelection(IReadOnlyList<Guid> ids)
-        => !HasSameSelectionOrder(ids) && ApplySelection(ids);
+    {
+        List<Guid> normalized = new(ids.Count);
+        HashSet<Guid> selected = [];
+        foreach (Guid id in ids)
+        {
+            RemoveOverlappingSelection(id, selected, normalized);
+            if (selected.Add(id))
+                normalized.Add(id);
+        }
+
+        return !_selectionOrder.SequenceEqual(normalized) && ApplySelection(normalized);
+    }
 
     private bool ApplySelection(IReadOnlyList<Guid> ids)
     {
@@ -243,46 +317,27 @@ internal sealed class EditorSelectionService
         return true;
     }
 
+    private void RemoveOverlappingSelection(Guid id, HashSet<Guid> selected, List<Guid> order)
+    {
+        if (_memberGroups.TryGetValue(id, out Guid groupId) && selected.Remove(groupId))
+        {
+            order.Remove(groupId);
+        }
+        if (_groupMembers.TryGetValue(id, out Guid[]? members))
+        {
+            bool removed = false;
+            foreach (Guid member in members)
+                removed |= selected.Remove(member);
+            if (removed)
+                order.RemoveAll(member => _memberGroups.TryGetValue(member, out Guid owner) && owner == id);
+        }
+    }
+
     private void IncrementRevision()
         => _revision++;
 
     private bool HasSingleSelection(Guid id)
         => _selectionOrder.Count == 1 && _selectionOrder[0] == id;
-
-    private bool HasSameSelectionOrder(IReadOnlyList<Guid> ids)
-    {
-        if (_selectionOrder.Count != ids.Count)
-        {
-            return false;
-        }
-
-        for (var index = 0; index < ids.Count; ++index)
-        {
-            if (_selectionOrder[index] != ids[index])
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-    private static List<Guid> BuildDistinctSelectionOrder(IEnumerable<Guid> ids)
-    {
-        var nextIds = new List<Guid>();
-        var nextSet = new HashSet<Guid>();
-        foreach (var id in ids)
-        {
-            if (!nextSet.Add(id))
-            {
-                continue;
-            }
-
-            nextIds.Add(id);
-        }
-
-        return nextIds;
-    }
 
     private List<Guid> BuildRangeSelectionOrder(
         IReadOnlyList<Guid> orderedItemIds,

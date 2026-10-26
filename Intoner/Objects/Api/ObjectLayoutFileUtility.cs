@@ -1,3 +1,4 @@
+using Intoner.Services.Serialization;
 using Intoner.Objects.Utils;
 using System.Text.Json;
 
@@ -32,15 +33,15 @@ internal static class ObjectLayoutFileUtility
 
     public static bool LooksLikeObjectLayout(JsonElement root)
         => root.ValueKind == JsonValueKind.Object
-           && root.TryGetProperty(nameof(ObjectLayoutFileDocument.DocumentKind), out JsonElement documentKind)
+           && root.TryGetPropertyIgnoreCase(nameof(ObjectLayoutFileDocument.DocumentKind), out JsonElement documentKind)
            && documentKind.ValueKind == JsonValueKind.String
            && string.Equals(documentKind.GetString(), ObjectLayoutFileDocument.DocumentKindValue, StringComparison.Ordinal)
-           && root.TryGetProperty(nameof(ObjectLayoutFileDocument.FormatVersion), out _)
-           && root.TryGetProperty(nameof(ObjectLayoutFileDocument.Objects), out _);
+           && root.TryGetPropertyIgnoreCase(nameof(ObjectLayoutFileDocument.FormatVersion), out _)
+           && root.TryGetPropertyIgnoreCase(nameof(ObjectLayoutFileDocument.Objects), out _);
 
     public static bool LooksLikeMakePlaceLayout(JsonElement root)
         => root.ValueKind == JsonValueKind.Object
-           && (root.TryGetProperty("interiorFurniture", out _)
-               || root.TryGetProperty("exteriorFurniture", out _));
+           && (root.TryGetPropertyIgnoreCase("interiorFurniture", out _)
+               || root.TryGetPropertyIgnoreCase("exteriorFurniture", out _));
 }
 

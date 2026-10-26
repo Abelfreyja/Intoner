@@ -1,6 +1,7 @@
 using Dalamud.Plugin;
 using Dalamud.Plugin.Ipc;
 using Dalamud.Plugin.Services;
+using Intoner.Logging;
 using Intoner.Objects.Api.Ipc;
 using Intoner.Utils;
 using Microsoft.Extensions.Logging;
@@ -89,7 +90,7 @@ internal sealed class CallGateProviderCollection : IDisposable
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error unregistering IPC provider");
+                DiagnosticLog.Write(() => _logger.LogError(ex, "Error unregistering IPC provider"));
             }
         }
 
@@ -121,7 +122,7 @@ internal sealed class CallGateProviderCollection : IDisposable
                 }
                 catch (Exception cleanupException)
                 {
-                    _logger.LogWarning(cleanupException, "Error cleaning up IPC provider for {Label}", label);
+                    DiagnosticLog.Write(() => _logger.LogWarning(cleanupException, "Error cleaning up IPC provider for {Label}", label));
                 }
             }
 

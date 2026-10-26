@@ -37,7 +37,7 @@ internal static class PreviewCachePolicy
         PreviewCacheState.Render renderState,
         long now)
         => assetState.HasLoadedGeometry
-            && assetState.GeometryEntry is not null
+            && !assetState.LoadQueued && !assetState.LoadRunning
             && renderState.HasRequestedRequest
             && !renderState.RenderRunning
             && !IsThumbnailWorkExpired(renderState.LastAccessAtMs, now)
@@ -49,28 +49,38 @@ internal static class PreviewCachePolicy
     public static long GetRenderRetryDelayMilliseconds(int failureCount)
         => GetRetryDelayMilliseconds(failureCount, RenderFailureRetryBaseDelay, MaxRenderFailureRetryDelay);
 
+    public static void RecordRenderFailure(
+        PreviewCacheState.Render renderState,
+        PreviewRender.Request request,
+        long now,
+        string error)
+    {
+        renderState.LastRenderedRequest = request;
+        renderState.HasRenderedRequest = true;
+        renderState.LastRenderSucceeded = false;
+        renderState.RenderFailureCount++;
+        renderState.NextRenderRetryAtMs = now + GetRenderRetryDelayMilliseconds(renderState.RenderFailureCount);
+        renderState.Error = error;
+    }
+
     private static bool HasQueueInterest(long lastAccessAtMs, long now)
         => !IsExpired(lastAccessAtMs, now, ThumbnailWorkRetention);
 
     private static bool NeedsRender(PreviewCacheState.Render renderState, PreviewRender.Request request, long now)
     {
-        if (!renderState.HasRenderedRequest || renderState.LastRenderedRequest != request)
-        {
-            return true;
-        }
-
         if (renderState.PendingTexture is { } pendingTexture)
         {
             return pendingTexture.Request != request;
         }
 
-        if (renderState.Texture is not null)
+        if (!renderState.HasRenderedRequest || renderState.LastRenderedRequest != request)
         {
-            return false;
+            return true;
         }
 
         return renderState.LastRenderSucceeded
-            || now >= renderState.NextRenderRetryAtMs;
+            ? renderState.Texture is null || (renderState.NextAssetRetryAtMs > 0 && now >= renderState.NextAssetRetryAtMs)
+            : now >= renderState.NextRenderRetryAtMs;
     }
 
     private static long GetRetryDelayMilliseconds(int failureCount, TimeSpan baseDelay, TimeSpan maxDelay)
@@ -80,7 +90,7 @@ internal static class PreviewCachePolicy
         return Math.Min(scaledDelay, (long)maxDelay.TotalMilliseconds);
     }
 
-    private static bool IsExpired(long lastAccessAtMs, long now, TimeSpan retention)
+    public static bool IsExpired(long lastAccessAtMs, long now, TimeSpan retention)
     {
         if (lastAccessAtMs <= 0)
         {

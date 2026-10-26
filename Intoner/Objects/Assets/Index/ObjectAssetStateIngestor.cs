@@ -1,5 +1,6 @@
 using Dalamud.Plugin.Services;
 using Intoner.Objects.Assets.Cache;
+using Intoner.Objects.Resources;
 using Intoner.Objects.Utils;
 using Intoner.Scene;
 using Intoner.Services.Loading;
@@ -27,19 +28,18 @@ internal sealed class ObjectAssetStateIngestor(
     {
         foreach (ObjectAssetCacheBgModel bgModel in snapshot.BgModels)
         {
-            if (!ObjectAssetPathRules.IsCatalogModelPath(bgModel.Path))
+            if (!ObjectAssetPathRules.IsCatalogModelPath(ObjectResolvedPath.FromGamePath(bgModel.Path).Path))
             {
                 continue;
             }
 
             ObservedBgModelState asset = ObservedBgModelState.FromCache(bgModel);
             state.BgModels[asset.Path] = asset;
-            _ = AddKnowledgePath(state, asset.Path, AssetPathSource.Persisted, AssetPathContract.PersistedCache, asset.Sources);
         }
 
         foreach (ObjectAssetCacheTimelineReferencedVfxEntry timelineReferencedVfx in snapshot.TimelineReferencedVfxEntries)
         {
-            string normalizedPath = GameAssetPathRules.NormalizeGamePath(timelineReferencedVfx.Path);
+            string normalizedPath = ObjectResolvedPath.FromGamePath(timelineReferencedVfx.Path).Path;
             if (!GameAssetPathRules.IsFileKind(normalizedPath, GameAssetFileKind.Avfx))
             {
                 continue;
@@ -55,9 +55,9 @@ internal sealed class ObjectAssetStateIngestor(
                 runtimeObserved: true);
         }
 
-        foreach (ObjectAssetCacheStandaloneVfx vfxAsset in snapshot.StandaloneVfxAssets)
+        foreach (ObjectAssetCacheRuntimeVfx vfxAsset in snapshot.RuntimeVfxAssets)
         {
-            string normalizedPath = GameAssetPathRules.NormalizeGamePath(vfxAsset.Path);
+            string normalizedPath = ObjectResolvedPath.FromGamePath(vfxAsset.Path).Path;
             if (!GameAssetPathRules.IsFileKind(normalizedPath, GameAssetFileKind.Avfx))
             {
                 continue;
@@ -75,13 +75,32 @@ internal sealed class ObjectAssetStateIngestor(
         }
     }
 
-    public ObservationApplyResult ApplyObservation(CatalogAssetState state, ObjectAssetObservation observation)
+    public ObjectTerritoryMetadata CaptureObservationTerritory(IReadOnlyList<ObjectAssetObservation> observations)
+    {
+        foreach (ObjectAssetObservation observation in observations)
+        {
+            if (observation.Kind != ObjectAssetObservationKind.ResourceLoad)
+            {
+                continue;
+            }
+
+            string path = ObjectResolvedPath.FromGamePath(observation.Path).Path;
+
+            if (ObjectAssetPathRules.IsCatalogSharedGroupPath(path) || ObjectAssetPathRules.IsCatalogModelPath(path))
+            {
+                return ObjectTerritoryMetadataUtility.BuildForTerritoryId(_locationService.GetCurrentLocationScope().TerritoryId, _dataManager);
+            }
+        }
+
+        return ObjectTerritoryMetadata.Empty;
+    }
+
+    public ObservationApplyResult ApplyObservation(CatalogAssetState state, ObjectAssetObservation observation, ObjectTerritoryMetadata territoryMetadata)
         => observation.Kind switch
         {
-            ObjectAssetObservationKind.ResourceLoad => ApplyResourceLoad(state, observation.Path),
+            ObjectAssetObservationKind.ResourceLoad => ApplyResourceLoad(state, observation.Path, territoryMetadata),
             ObjectAssetObservationKind.StaticVfxCreate => _standaloneVfxCatalog.ObserveStaticCreate(state, observation.Path),
             ObjectAssetObservationKind.ActorVfxCreate => _standaloneVfxCatalog.ObserveActorCreate(state, observation.Path),
-            ObjectAssetObservationKind.TriggerUse => _standaloneVfxCatalog.ObserveTriggerUse(state, observation.Path),
             _ => ObservationApplyResult.None,
         };
 
@@ -97,6 +116,7 @@ internal sealed class ObjectAssetStateIngestor(
             : snapshot.GameVersion;
         state.StaticCollisionPaths.Clear();
         state.StaticTimelineReferencedVfx.Clear();
+        bool hadGameDataBgObjects = state.GameDataBgObjects.Count > 0;
         state.GameDataBgObjects.Clear();
         state.StaticResolvedVfxPaths.Clear();
         int seededCollisionPathCount = 0;
@@ -114,31 +134,23 @@ internal sealed class ObjectAssetStateIngestor(
         {
             cancellationToken.ThrowIfCancellationRequested();
             _ = state.StaticCollisionPaths.Add(collisionPath);
-            _ = ApplySqpackSeedPath(state, collisionPath);
+            _ = ApplySqpackSeedPath(state, collisionPath, cancellationToken);
             seededCollisionPathCount++;
             progress.ReportItems(++completedAssetCount, totalAssetCount);
         }
 
-        foreach (GameDataBgObjectAsset gameDataBgObjectAsset in snapshot.StaticGameDataBgObjects.Values)
+        foreach (BgObjectAsset gameDataBgObjectAsset in snapshot.StaticGameDataBgObjects.Values)
         {
             cancellationToken.ThrowIfCancellationRequested();
             state.GameDataBgObjects[gameDataBgObjectAsset.ModelPath] = gameDataBgObjectAsset;
-            _ = AddKnowledgePath(
-                state,
-                gameDataBgObjectAsset.ModelPath,
-                AssetPathSource.GameData,
-                AssetPathContract.None,
-                gameDataBgObjectAsset.SearchTerms);
             progress.ReportItems(++completedAssetCount, totalAssetCount);
         }
-        if (snapshot.StaticGameDataBgObjects.Count > 0)
+        if (hadGameDataBgObjects || snapshot.StaticGameDataBgObjects.Count > 0)
         {
             MarkGameDataBgChanged(state);
         }
 
-        ObjectAssetCacheSectionSet overlayDirtySections = ObjectAssetBgModelCatalog.RemoveGameDataDuplicates(state)
-            ? ObjectAssetCacheSectionSet.BgModels
-            : ObjectAssetCacheSectionSet.None;
+        ObjectAssetCacheSectionSet overlayDirtySections = ObjectAssetCacheSectionSet.None;
 
         foreach (ResolvedVfxPath resolvedVfxPath in snapshot.StaticResolvedVfxPaths.Values)
         {
@@ -153,6 +165,20 @@ internal sealed class ObjectAssetStateIngestor(
             bool hadRuntimeObservedStandalone = state.VfxAssets.TryGetValue(resolvedVfxPath.Path, out RuntimeVfxAssetState? existingStandalone)
                 && existingStandalone.SeenFromRuntime;
             state.StaticResolvedVfxPaths[resolvedVfxPath.Path] = resolvedVfxPath;
+            VfxTimelineReferenceInfo timelineReference = new(resolvedVfxPath.Evidence, resolvedVfxPath.TimelineContext);
+
+            if (timelineReference.HasEvidence)
+            {
+                _ = _standaloneVfxCatalog.MergeTimelineReference(
+                    state,
+                    resolvedVfxPath.Path,
+                    timelineReference,
+                    resolvedVfxPath.Sources,
+                    resolvedVfxPath.Contracts,
+                    resolvedVfxPath.SearchTerms,
+                    runtimeObserved: false);
+            }
+
             resolvedVfxCount++;
             if (resolvedVfxPath.Analysis is not null)
             {
@@ -170,7 +196,7 @@ internal sealed class ObjectAssetStateIngestor(
             if (promotionResult != ObservationApplyResult.None
              && (hadRuntimeObservedStandalone || hasRuntimeObservedStandalone))
             {
-                overlayDirtySections |= ObjectAssetCacheSectionSet.StandaloneVfx;
+                overlayDirtySections |= ObjectAssetCacheSectionSet.RuntimeVfx;
             }
 
             progress.ReportItems(++completedAssetCount, totalAssetCount);
@@ -191,9 +217,9 @@ internal sealed class ObjectAssetStateIngestor(
         return overlayDirtySections;
     }
 
-    private ObservationApplyResult ApplyResourceLoad(CatalogAssetState state, string path)
+    private ObservationApplyResult ApplyResourceLoad(CatalogAssetState state, string path, ObjectTerritoryMetadata territoryMetadata)
     {
-        ObjectTerritoryMetadata territoryMetadata = GetCurrentTerritoryMetadata();
+        path = ObjectResolvedPath.FromGamePath(path).Path;
         if (ObjectAssetPathRules.IsCatalogSharedGroupPath(path))
         {
             _ = AddKnowledgePath(state, path, AssetPathSource.RuntimeObserved, AssetPathContract.RuntimeObservation, [ObjectAssetCaptureSources.ObservedSharedGroup]);
@@ -205,8 +231,6 @@ internal sealed class ObjectAssetStateIngestor(
             return ObjectAssetBgModelCatalog.ObservePath(
                 state,
                 path,
-                AssetPathSource.RuntimeObserved,
-                AssetPathContract.RuntimeObservation,
                 [ObjectAssetCaptureSources.ObservedResource],
                 ObjectAssetCaptureSources.ObservedResource,
                 territoryMetadata);
@@ -238,7 +262,7 @@ internal sealed class ObjectAssetStateIngestor(
         return ObservationApplyResult.None;
     }
 
-    private bool ApplySqpackSeedPath(CatalogAssetState state, string path)
+    private bool ApplySqpackSeedPath(CatalogAssetState state, string path, CancellationToken cancellationToken)
     {
         if (ObjectAssetPathRules.IsCatalogSharedGroupPath(path))
         {
@@ -248,7 +272,7 @@ internal sealed class ObjectAssetStateIngestor(
                 AssetPathSource.SqpackCollision,
                 AssetPathContract.SqpackNamedLeak,
                 [ObjectAssetCaptureSources.SqpackSharedGroup, ObjectAssetCaptureSources.SqpackCollision]);
-            return ObserveSharedGroup(state, path, ObjectAssetCaptureSources.SqpackSharedGroup, ObjectTerritoryMetadata.Empty) != ObservationApplyResult.None;
+            return ObserveSharedGroup(state, path, ObjectAssetCaptureSources.SqpackSharedGroup, ObjectTerritoryMetadata.Empty, cancellationToken) != ObservationApplyResult.None;
         }
 
         if (ObjectAssetPathRules.IsCatalogModelPath(path))
@@ -256,8 +280,6 @@ internal sealed class ObjectAssetStateIngestor(
             return ObjectAssetBgModelCatalog.ObservePath(
                 state,
                 path,
-                AssetPathSource.SqpackCollision,
-                AssetPathContract.SqpackNamedLeak,
                 [ObjectAssetCaptureSources.SqpackCollision],
                 ObjectAssetCaptureSources.SqpackCollision,
                 ObjectTerritoryMetadata.Empty) != ObservationApplyResult.None;
@@ -271,7 +293,7 @@ internal sealed class ObjectAssetStateIngestor(
                 path,
                 AssetPathSource.SqpackCollision,
                 ["sqpack collision", "timeline referenced"],
-                runtimeObserved: false) != ObservationApplyResult.None;
+                runtimeObserved: false, cancellationToken) != ObservationApplyResult.None;
         }
 
         if (GameAssetPathRules.IsFileKind(path, GameAssetFileKind.Avfx) || GameAssetPathRules.IsFileKind(path, GameAssetFileKind.Eid))
@@ -286,9 +308,10 @@ internal sealed class ObjectAssetStateIngestor(
         CatalogAssetState state,
         string sharedGroupPath,
         string source,
-        in ObjectTerritoryMetadata territoryMetadata)
+        in ObjectTerritoryMetadata territoryMetadata,
+        CancellationToken cancellationToken = default)
     {
-        if (!_sharedGroupCache.TryGetOrAnalyzeFromState(state, sharedGroupPath, out SharedGroupAssetInfo? sharedGroupAssets))
+        if (_sharedGroupCache.GetOrAnalyze(state.SharedGroups, sharedGroupPath, cancellationToken) is not { Exists: true } sharedGroupAssets)
         {
             return ObservationApplyResult.None;
         }
@@ -301,8 +324,6 @@ internal sealed class ObjectAssetStateIngestor(
                 ObjectAssetBgModelCatalog.ObservePath(
                     state,
                     modelPath,
-                    AssetPathSource.SharedGroup,
-                    AssetPathContract.ParsedFileReference,
                     [source, "shared group"],
                     source,
                     territoryMetadata));
@@ -325,7 +346,7 @@ internal sealed class ObjectAssetStateIngestor(
             result = Combine(result, ObservationApplyResult.MetadataChanged);
         }
 
-        foreach (string vfxPath in sharedGroupAssets.StandaloneVfxPaths)
+        foreach (string vfxPath in sharedGroupAssets.AutoplayVfxPaths)
         {
             result = Combine(
                 result,
@@ -347,16 +368,24 @@ internal sealed class ObjectAssetStateIngestor(
         string tmbPath,
         AssetPathSource source,
         IReadOnlyList<string> searchTerms,
-        bool runtimeObserved)
+        bool runtimeObserved,
+        CancellationToken cancellationToken = default)
     {
-        string normalizedPath = GameAssetPathRules.NormalizeGamePath(tmbPath);
-        if (!state.ProcessedTimelinePaths.Add(normalizedPath))
+        string normalizedPath = ObjectResolvedPath.FromGamePath(tmbPath).Path;
+        if (!GameAssetPathRules.IsFileKind(normalizedPath, GameAssetFileKind.Tmb))
         {
             return ObservationApplyResult.None;
         }
 
+        state.ProcessedTimelinePaths.TryGetValue(normalizedPath, out AssetPathSource processedSources);
+        if ((processedSources & source) == source)
+        {
+            return ObservationApplyResult.None;
+        }
+
+        TmbVfxReferenceCollection collection = state.TimelineReferences.Get(_gameData, normalizedPath, cancellationToken);
         ObservationApplyResult result = ObservationApplyResult.None;
-        foreach (TmbVfxReference reference in VfxAssetAnalyzer.CollectTmbVfxReferences(_gameData, normalizedPath))
+        foreach (TmbVfxReference reference in collection.References)
         {
             result = Combine(
                 result,
@@ -368,6 +397,11 @@ internal sealed class ObjectAssetStateIngestor(
                     AssetPathContract.ParsedFileReference,
                     SearchTermUtility.MergeTerms(searchTerms, reference.SearchTerms),
                     runtimeObserved));
+        }
+
+        if (collection.IsComplete)
+        {
+            state.ProcessedTimelinePaths[normalizedPath] = processedSources | source;
         }
 
         return result;
@@ -383,7 +417,11 @@ internal sealed class ObjectAssetStateIngestor(
         bool removedAny = false;
         foreach (string path in state.StaticTimelineReferencedVfx.Keys)
         {
-            removedAny |= state.RuntimeTimelineReferencedVfx.Remove(path);
+            if (state.RuntimeTimelineReferencedVfx.TryGetValue(path, out VfxTimelineReferenceInfo runtimeReference)
+             && runtimeReference.IsCoveredBy(state.StaticTimelineReferencedVfx[path]))
+            {
+                removedAny |= state.RuntimeTimelineReferencedVfx.Remove(path);
+            }
         }
 
         if (removedAny)
@@ -393,9 +431,4 @@ internal sealed class ObjectAssetStateIngestor(
 
         return removedAny;
     }
-
-    private ObjectTerritoryMetadata GetCurrentTerritoryMetadata()
-        => ObjectTerritoryMetadataUtility.BuildForTerritoryId(
-            _locationService.GetCurrentLocationScope().TerritoryId,
-            _dataManager);
 }

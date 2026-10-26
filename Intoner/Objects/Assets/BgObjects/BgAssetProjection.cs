@@ -1,30 +1,39 @@
+using Intoner.Objects.Utils;
+
 namespace Intoner.Objects.Assets;
 
 internal static class BgAssetProjection
 {
-    public static ObservedBgAsset[] BuildObservedSnapshot(
-        IReadOnlyCollection<ObservedBgModelState> assets,
-        PathKnowledgeBase knowledgeBase,
-        IComparer<ObservedBgAsset> comparer)
+    public static BgObjectAsset[] BuildSnapshot(CatalogAssetState state, IComparer<BgObjectAsset> comparer)
     {
-        ObservedBgAsset[] snapshot = new ObservedBgAsset[assets.Count];
-        var index = 0;
-        foreach (ObservedBgModelState asset in assets)
+        List<BgObjectAsset> assets = new(state.GameDataBgObjects.Count + state.BgModels.Count);
+        foreach (BgObjectAsset asset in state.GameDataBgObjects.Values)
         {
-            snapshot[index++] = asset.ToAsset(knowledgeBase);
+            BgObjectAsset projected = asset;
+
+            if (state.BgModels.TryGetValue(asset.ModelPath, out ObservedBgModelState? overlay))
+            {
+                BgObjectAsset observed = overlay.ToAsset();
+                ObjectTerritoryMetadataSet territories = new();
+                _ = territories.Add(asset.TerritoryIds, asset.TerritoryNames);
+                _ = territories.Add(observed.TerritoryIds, observed.TerritoryNames);
+                projected = asset with
+                {
+                    TerritoryIds = territories.BuildStableIds(),
+                    TerritoryNames = territories.BuildStableNames(),
+                    SearchTerms = SearchTermUtility.MergeTerms(asset.SearchTerms, observed.SearchTerms),
+                };
+            }
+
+            assets.Add(projected);
         }
 
-        Array.Sort(snapshot, comparer);
-        return snapshot;
-    }
+        foreach (ObservedBgModelState observed in state.BgModels.Values.Where(observed => !state.GameDataBgObjects.ContainsKey(observed.Path)))
+        {
+            assets.Add(observed.ToAsset());
+        }
 
-    public static GameDataBgObjectAsset[] BuildGameDataSnapshot(
-        IReadOnlyCollection<GameDataBgObjectAsset> assets,
-        IComparer<GameDataBgObjectAsset> comparer)
-    {
-        GameDataBgObjectAsset[] snapshot = [.. assets];
-        Array.Sort(snapshot, comparer);
-        return snapshot;
+        assets.Sort(comparer);
+        return assets.ToArray();
     }
 }
-

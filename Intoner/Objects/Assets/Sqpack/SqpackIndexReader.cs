@@ -84,6 +84,7 @@ internal sealed class SqpackIndexFile
 
     public static SqpackIndexFile Read(string path, CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         int indexId = ParseIndexId(path);
         using FileStream stream = File.OpenRead(path);
         SqpackByteOrder byteOrder = ResolveByteOrder(stream);
@@ -96,7 +97,7 @@ internal sealed class SqpackIndexFile
         }
 
         HeaderFileInfo fileInfo = HeaderFileInfo.Read(reader);
-        fileInfo.Validate(stream.Length);
+        fileInfo.Validate(stream.Length, stream.Position);
 
         IReadOnlyList<SqpackIndex1EntryKey> index1Entries = fileInfo.IndexType == 0
             ? ReadIndex1Entries(reader, fileInfo, indexId, cancellationToken)
@@ -104,13 +105,11 @@ internal sealed class SqpackIndexFile
         IReadOnlyList<SqpackIndex2EntryKey> index2Entries = fileInfo.IndexType == 2
             ? ReadIndex2Entries(reader, fileInfo, indexId, cancellationToken)
             : [];
-        IReadOnlyList<SqpackNamedPath> namedPaths = fileInfo.IndexType switch
-        {
-            0 => ReadNamedPaths64(reader, fileInfo, cancellationToken),
-            2 => ReadNamedPaths32(reader, fileInfo, cancellationToken),
-            _ => [],
-        };
+        IReadOnlyList<SqpackNamedPath> namedPaths = fileInfo.IndexType is 0 or 2
+            ? ReadNamedPaths(reader, fileInfo, cancellationToken)
+            : [];
 
+        cancellationToken.ThrowIfCancellationRequested();
         return new SqpackIndexFile(indexId, index1Entries, index2Entries, namedPaths);
     }
 
@@ -202,49 +201,34 @@ internal sealed class SqpackIndexFile
         return entries;
     }
 
-    private static IReadOnlyList<SqpackNamedPath> ReadNamedPaths64(
+    private static IReadOnlyList<SqpackNamedPath> ReadNamedPaths(
         SqpackBinaryReader reader,
         HeaderFileInfo fileInfo,
         CancellationToken cancellationToken)
     {
         int namedPathCount = checked((int)(fileInfo.CollisionSize / NamedPathRecordSize));
         List<SqpackNamedPath> namedPaths = new(namedPathCount);
-
+        bool index2 = fileInfo.IndexType == 2;
+        ulong sentinel = index2 ? uint.MaxValue : ulong.MaxValue;
         reader.BaseStream.Seek(fileInfo.CollisionOffset, SeekOrigin.Begin);
         for (int i = 0; i < namedPathCount; i++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            Collision64 entry = Collision64.Read(reader);
-            if (entry.Hash == ulong.MaxValue || string.IsNullOrWhiteSpace(entry.Path))
+            ulong hash = index2 ? reader.ReadUInt32() : reader.ReadUInt64();
+
+            if (index2)
             {
-                continue;
+                _ = reader.ReadUInt32(); // unknown
             }
 
-            namedPaths.Add(new SqpackNamedPath(entry.Path));
-        }
+            _ = reader.ReadUInt32(); // data
+            _ = reader.ReadUInt32(); // index
+            string path = ReadPath(reader);
 
-        return namedPaths;
-    }
-
-    private static IReadOnlyList<SqpackNamedPath> ReadNamedPaths32(
-        SqpackBinaryReader reader,
-        HeaderFileInfo fileInfo,
-        CancellationToken cancellationToken)
-    {
-        int namedPathCount = checked((int)(fileInfo.CollisionSize / NamedPathRecordSize));
-        List<SqpackNamedPath> namedPaths = new(namedPathCount);
-
-        reader.BaseStream.Seek(fileInfo.CollisionOffset, SeekOrigin.Begin);
-        for (int i = 0; i < namedPathCount; i++)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            Collision32 entry = Collision32.Read(reader);
-            if (entry.Hash == uint.MaxValue || string.IsNullOrWhiteSpace(entry.Path))
+            if (hash != sentinel && !string.IsNullOrWhiteSpace(path))
             {
-                continue;
+                namedPaths.Add(new SqpackNamedPath(path));
             }
-
-            namedPaths.Add(new SqpackNamedPath(entry.Path));
         }
 
         return namedPaths;
@@ -269,6 +253,7 @@ internal sealed class SqpackIndexFile
             reader.BaseStream.Seek(3, SeekOrigin.Current);
 
             uint fileSize = reader.ReadUInt32();
+            ValidateHeader(0, fileSize, reader.BaseStream.Length, "version");
             uint version = reader.ReadUInt32();
             uint type = reader.ReadUInt32();
 
@@ -278,13 +263,14 @@ internal sealed class SqpackIndexFile
             _ = reader.ReadUInt32(); // language id
             _ = ReadExactBytes(reader, 920);
             _ = ReadExactBytes(reader, SectionHashLength);
-            reader.BaseStream.Seek(SectionPaddingLength, SeekOrigin.Current);
+            _ = ReadExactBytes(reader, SectionPaddingLength);
 
             if (reader.BaseStream.Position != SqpackHeaderSize)
             {
                 throw new InvalidDataException("sqpack version header did not end at the expected offset");
             }
 
+            reader.BaseStream.Position = fileSize;
             return new VersionInfo(platformId, fileSize, version, type);
         }
     }
@@ -297,40 +283,45 @@ internal sealed class SqpackIndexFile
         uint DataFileCount,
         uint CollisionOffset,
         uint CollisionSize,
+        uint EmptyBlockOffset,
+        uint EmptyBlockSize,
         uint DirectoryOffset,
         uint DirectorySize,
         uint IndexType)
     {
         public static HeaderFileInfo Read(SqpackBinaryReader reader)
         {
+            long headerStart = reader.BaseStream.Position;
             uint size = reader.ReadUInt32();
+            ValidateHeader(headerStart, size, reader.BaseStream.Length, "file info");
             uint version = reader.ReadUInt32();
             uint indexDataOffset = reader.ReadUInt32();
             uint indexDataSize = reader.ReadUInt32();
             _ = ReadExactBytes(reader, SectionHashLength);
-            reader.BaseStream.Seek(SectionPaddingLength, SeekOrigin.Current);
+            _ = ReadExactBytes(reader, SectionPaddingLength);
 
             uint dataFileCount = reader.ReadUInt32();
             uint collisionOffset = reader.ReadUInt32();
             uint collisionSize = reader.ReadUInt32();
             _ = ReadExactBytes(reader, SectionHashLength);
-            reader.BaseStream.Seek(SectionPaddingLength, SeekOrigin.Current);
+            _ = ReadExactBytes(reader, SectionPaddingLength);
 
-            _ = reader.ReadUInt32(); // empty block offset
-            _ = reader.ReadUInt32(); // empty block size
+            uint emptyBlockOffset = reader.ReadUInt32(); // empty block offset
+            uint emptyBlockSize = reader.ReadUInt32(); // empty block size
             _ = ReadExactBytes(reader, SectionHashLength);
-            reader.BaseStream.Seek(SectionPaddingLength, SeekOrigin.Current);
+            _ = ReadExactBytes(reader, SectionPaddingLength);
 
             uint directoryOffset = reader.ReadUInt32();
             uint directorySize = reader.ReadUInt32();
             _ = ReadExactBytes(reader, SectionHashLength);
-            reader.BaseStream.Seek(SectionPaddingLength, SeekOrigin.Current);
+            _ = ReadExactBytes(reader, SectionPaddingLength);
 
             uint indexType = reader.ReadUInt32();
             _ = ReadExactBytes(reader, FileInfoUnknownDataLength);
             _ = ReadExactBytes(reader, SectionHashLength);
-            reader.BaseStream.Seek(SectionPaddingLength, SeekOrigin.Current);
+            _ = ReadExactBytes(reader, SectionPaddingLength);
 
+            reader.BaseStream.Position = headerStart + size;
             return new HeaderFileInfo(
                 size,
                 version,
@@ -339,22 +330,48 @@ internal sealed class SqpackIndexFile
                 dataFileCount,
                 collisionOffset,
                 collisionSize,
+                emptyBlockOffset,
+                emptyBlockSize,
                 directoryOffset,
                 directorySize,
                 indexType);
         }
 
-        public void Validate(long streamLength)
+        public void Validate(long streamLength, long metadataEnd)
         {
             if (IndexType is not 0 and not 2)
             {
                 throw new InvalidDataException($"unsupported sqpack index type {IndexType}");
             }
 
-            ValidateSection(streamLength, IndexDataOffset, IndexDataSize, "index data");
-            if (CollisionSize > 0)
+            (uint Offset, uint Size, string Name)[] sections =
+            [
+                (IndexDataOffset, IndexDataSize, "index data"),
+                (CollisionOffset, CollisionSize, "named path data"),
+                (EmptyBlockOffset, EmptyBlockSize, "empty block data"),
+                (DirectoryOffset, DirectorySize, "directory data"),
+            ];
+            for (int i = 0; i < sections.Length; i++)
             {
-                ValidateSection(streamLength, CollisionOffset, CollisionSize, "named path data");
+                (uint offset, uint size, string name) = sections[i];
+                ValidateSection(streamLength, metadataEnd, offset, size, name);
+
+                if (size == 0)
+                {
+                    continue;
+                }
+
+                for (int j = 0; j < i; j++)
+                {
+                    (uint previousOffset, uint previousSize, string previousName) = sections[j];
+
+                    if (previousSize != 0
+                     && (ulong)offset < (ulong)previousOffset + previousSize
+                     && (ulong)previousOffset < (ulong)offset + size)
+                    {
+                        throw new InvalidDataException($"sqpack {name} section overlaps {previousName}");
+                    }
+                }
             }
 
             if (IndexDataSize % (IndexType == 0 ? Index1EntrySize : Index2EntrySize) != 0)
@@ -368,38 +385,29 @@ internal sealed class SqpackIndexFile
             }
         }
 
-        private static void ValidateSection(long streamLength, uint offset, uint size, string sectionName)
+        private static void ValidateSection(long streamLength, long metadataEnd, uint offset, uint size, string sectionName)
         {
+            if (offset == 0 && size == 0)
+            {
+                return;
+            }
+
             ulong sectionEnd = (ulong)offset + size;
-            if (offset < SqpackHeaderSize || sectionEnd > (ulong)streamLength)
+
+            if (offset < metadataEnd || sectionEnd > (ulong)streamLength)
             {
                 throw new InvalidDataException($"sqpack {sectionName} section is outside the file bounds");
             }
         }
     }
 
-    private readonly record struct Collision32(uint Hash, string Path)
+    private static void ValidateHeader(long offset, uint size, long streamLength, string name)
     {
-        public static Collision32 Read(SqpackBinaryReader reader)
-        {
-            uint hash = reader.ReadUInt32();
-            _ = reader.ReadUInt32(); // unknown
-            _ = reader.ReadUInt32(); // data
-            _ = reader.ReadUInt32(); // index
-            string path = ReadPath(reader);
-            return new Collision32(hash, path);
-        }
-    }
+        long headerEnd = offset + size;
 
-    private readonly record struct Collision64(ulong Hash, string Path)
-    {
-        public static Collision64 Read(SqpackBinaryReader reader)
+        if (size < SqpackHeaderSize || headerEnd < offset || headerEnd > streamLength)
         {
-            ulong hash = reader.ReadUInt64();
-            _ = reader.ReadUInt32(); // data
-            _ = reader.ReadUInt32(); // index
-            string path = ReadPath(reader);
-            return new Collision64(hash, path);
+            throw new InvalidDataException($"sqpack {name} header is outside the file bounds");
         }
     }
 
@@ -423,4 +431,3 @@ internal sealed class SqpackIndexFile
         return bytes;
     }
 }
-

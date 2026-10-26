@@ -10,6 +10,12 @@ namespace Intoner.Objects.UI.Components;
 internal static class EditorSearchField
 {
     private const float FieldHeight = 30f;
+    private const float SearchInset = 12f;
+    private const float InputGap = 4f;
+    private const float StatusInset = 12f;
+
+    [StructLayout(LayoutKind.Auto)]
+    private readonly record struct ActionLayout(float StatusRightInset, float Width);
 
     public static float Height => ResolveHeight();
 
@@ -30,45 +36,29 @@ internal static class EditorSearchField
         Vector2 fieldSize = new(width, ResolveHeight(options.Height));
         Vector2 fieldMax = fieldMin + fieldSize;
         ImDrawListPtr drawList = ImGui.GetWindowDrawList();
-        float rounding = Scaled(5f);
         string before = text;
-        EditorIcon.Metrics searchIconMetrics = EditorIcon.Measure(FontAwesomeIcon.Search);
-        EditorIcon.Metrics clearIconMetrics = EditorIcon.Measure(FontAwesomeIcon.Times);
+        Vector2 statusSize = options.StatusText.Length > 0 ? ImGui.CalcTextSize(options.StatusText) : Vector2.Zero;
+        bool hasText = text.Length > 0;
+        ActionLayout actions = MeasureActions(statusSize, hasText, fieldSize.Y);
 
-        drawList.AddRectFilled(
-            fieldMin,
-            fieldMax,
-            ImGui.GetColorU32(ThemeColors.ButtonDefault with { W = 0.48f }),
-            rounding);
+        EditorFieldFrame.DrawFill(drawList, fieldMin, fieldMax);
 
         bool inputActive;
         using (ImRaii.PushId(id))
         {
-            inputActive = DrawInput(fieldMin, fieldSize, options, clearIconMetrics.Size.X, ref text);
-            DrawActions(drawList, fieldMin, fieldSize, options, searchIconMetrics, clearIconMetrics, ref text);
+            inputActive = DrawInput(fieldMin, fieldSize, actions.Width, options, ref text);
+
+            if (hasText != (text.Length > 0))
+            {
+                actions = MeasureActions(statusSize, text.Length > 0, fieldSize.Y);
+            }
+
+            DrawActions(drawList, fieldMin, fieldSize, statusSize, actions, options, ref text);
         }
 
         bool active = inputActive || ImGui.IsItemActive();
         bool hovered = ImGui.IsMouseHoveringRect(fieldMin, fieldMax, true);
-        Vector4 borderColor;
-        if (active)
-        {
-            borderColor = options.Accent with { W = 0.52f };
-        }
-        else
-        {
-            borderColor = hovered
-                ? ThemeColors.Border with { W = 0.54f }
-                : ThemeColors.Border with { W = 0.30f };
-        }
-
-        drawList.AddRect(
-            fieldMin,
-            fieldMax,
-            ImGui.GetColorU32(borderColor),
-            rounding,
-            ImDrawFlags.None,
-            Scaled(1f));
+        EditorFieldFrame.DrawBorder(drawList, fieldMin, fieldMax, options.Accent, active, hovered);
         ImGui.SetCursorPos(startCursorPos);
         ImGui.Dummy(fieldSize);
 
@@ -78,15 +68,13 @@ internal static class EditorSearchField
     private static bool DrawInput(
         Vector2 fieldMin,
         Vector2 fieldSize,
+        float actionWidth,
         EditorSearchFieldOptions options,
-        float clearIconWidth,
         ref string text)
     {
-        float leftInset = Scaled(34f);
+        float leftInset = fieldSize.Y + Scaled(InputGap);
         float inputPaddingY = MathF.Max(0f, (fieldSize.Y - ImGui.GetTextLineHeight()) * 0.5f);
-        float inputWidth = MathF.Max(
-            1f,
-            fieldSize.X - leftInset - ResolveActionAreaWidth(options.StatusText, text.Length > 0, clearIconWidth));
+        float inputWidth = MathF.Max(1f, fieldSize.X - leftInset - actionWidth);
         bool inputActive;
 
         ImGui.SetCursorScreenPos(new Vector2(fieldMin.X + leftInset, fieldMin.Y));
@@ -102,6 +90,7 @@ internal static class EditorSearchField
         {
             ImGui.InputTextWithHint("##input", options.Hint, ref text, options.MaxLength);
             inputActive = ImGui.IsItemActive();
+
             if (ImGui.IsItemFocused() && ImGui.IsKeyPressed(ImGuiKey.Escape) && text.Length > 0)
             {
                 text = string.Empty;
@@ -115,14 +104,15 @@ internal static class EditorSearchField
         ImDrawListPtr drawList,
         Vector2 fieldMin,
         Vector2 fieldSize,
+        Vector2 statusSize,
+        ActionLayout actions,
         EditorSearchFieldOptions options,
-        EditorIcon.Metrics searchIconMetrics,
-        EditorIcon.Metrics clearIconMetrics,
         ref string text)
     {
+        EditorIcon.Metrics searchIconMetrics = EditorIcon.Measure(FontAwesomeIcon.Search);
         Vector2 searchIconPos = new(
-            fieldMin.X + Scaled(12f),
-            CenterY(fieldMin.Y, fieldSize.Y, searchIconMetrics.Size.Y));
+            fieldMin.X + Scaled(SearchInset),
+            EditorLayout.CenterY(fieldMin.Y, fieldSize.Y, searchIconMetrics.Size.Y));
         EditorIcon.Draw(
             drawList,
             FontAwesomeIcon.Search,
@@ -130,18 +120,17 @@ internal static class EditorSearchField
             searchIconPos,
             ThemeColors.TextDisabled with { W = 0.78f });
 
-        float right = fieldMin.X + fieldSize.X - Scaled(12f);
+        float right = fieldMin.X + fieldSize.X;
+
         if (options.StatusText.Length > 0)
         {
-            Vector2 statusSize = ImGui.CalcTextSize(options.StatusText);
             Vector2 statusPos = new(
-                right - statusSize.X,
-                CenterY(fieldMin.Y, fieldSize.Y, statusSize.Y));
+                right - actions.StatusRightInset - statusSize.X,
+                EditorLayout.CenterY(fieldMin.Y, fieldSize.Y, statusSize.Y));
             Vector4 statusColor = options.StatusIsWarning
                 ? ThemeColors.DimRed with { W = 0.88f }
                 : ThemeColors.TextDisabled with { W = 0.72f };
             drawList.AddText(statusPos, ImGui.GetColorU32(statusColor), options.StatusText);
-            right = statusPos.X - Scaled(10f);
         }
 
         if (text.Length == 0)
@@ -149,14 +138,15 @@ internal static class EditorSearchField
             return;
         }
 
-        float buttonWidth = clearIconMetrics.Size.X + Scaled(12f);
+        EditorIcon.Metrics clearIconMetrics = EditorIcon.Measure(FontAwesomeIcon.Times);
+        float buttonWidth = fieldSize.Y;
         Vector2 buttonMin = new(right - buttonWidth, fieldMin.Y);
         ImGui.SetCursorScreenPos(buttonMin);
         bool clearClicked = ImGui.InvisibleButton("##clear", new Vector2(buttonWidth, fieldSize.Y));
         bool clearHovered = ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenBlockedByActiveItem);
         Vector2 clearPos = new(
             buttonMin.X + ((buttonWidth - clearIconMetrics.Size.X) * 0.5f),
-            CenterY(fieldMin.Y, fieldSize.Y, clearIconMetrics.Size.Y));
+            EditorLayout.CenterY(fieldMin.Y, fieldSize.Y, clearIconMetrics.Size.Y));
         EditorIcon.Draw(
             drawList,
             FontAwesomeIcon.Times,
@@ -175,24 +165,19 @@ internal static class EditorSearchField
         }
     }
 
-    private static float ResolveActionAreaWidth(string statusText, bool hasText, float clearIconWidth)
+    private static ActionLayout MeasureActions(Vector2 statusSize, bool hasText, float iconAreaWidth)
     {
-        float width = Scaled(12f);
-        if (statusText.Length > 0)
+        float gap = Scaled(InputGap);
+        float statusInset = hasText ? iconAreaWidth + gap : Scaled(StatusInset);
+        float width = hasText ? iconAreaWidth + gap : gap;
+
+        if (statusSize.X > 0f)
         {
-            width += ImGui.CalcTextSize(statusText).X + Scaled(10f);
+            width = statusSize.X + statusInset + gap;
         }
 
-        if (hasText)
-        {
-            width += clearIconWidth + Scaled(12f);
-        }
-
-        return width;
+        return new ActionLayout(statusInset, width);
     }
-
-    private static float CenterY(float top, float height, float contentHeight)
-        => top + MathF.Max(0f, (height - contentHeight) * 0.5f);
 
     private static float ResolveHeight(float requestedHeight = 0f)
     {

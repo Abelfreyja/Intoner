@@ -54,8 +54,13 @@ internal sealed class GizmoSurfaceDragSession
 
     public Vector3 LastResolvedRotationDegrees { get; private set; }
 
+    public SceneSurfaceHit? LastAppliedHit { get; private set; }
+
     public bool Matches(Guid itemId)
         => IsDragging && ItemId == itemId;
+
+    public bool MatchesSelection(IReadOnlyList<SceneItemSnapshot> snapshots)
+        => _snapshots.MatchesSelection(snapshots);
 
     public bool IsSingleSelection
         => SelectionEntries.Count == 1;
@@ -97,18 +102,20 @@ internal sealed class GizmoSurfaceDragSession
         AppendRotationStep(GizmoSurfaceDragRotationAxis.Pitch, pitchSteps);
     }
 
-    public void RecordSingleApply(Vector3 resolvedPosition, Vector3 resolvedRotationDegrees, SceneItemSnapshot appliedSnapshot)
+    public void RecordSingleApply(SceneItemSnapshot appliedSnapshot)
     {
         _snapshots.Record(appliedSnapshot);
-        LastResolvedPosition = resolvedPosition;
-        LastResolvedRotationDegrees = resolvedRotationDegrees;
+        LastResolvedPosition = appliedSnapshot.Transform.Position;
+        LastResolvedRotationDegrees = appliedSnapshot.Transform.RotationDegrees;
     }
 
-    public void RecordSelectionApply(Vector3 resolvedPivotPosition, Vector3 resolvedRotationDegrees, IReadOnlyList<SceneItemSnapshot> appliedSnapshots)
+    public void RecordSelectionApply(Vector3 resolvedPivotPosition, Vector3 resolvedRotationDegrees, SceneSurfaceHit hit,
+        IReadOnlyList<SceneItemSnapshot> appliedSnapshots)
     {
         _snapshots.Record(appliedSnapshots);
         LastResolvedPosition = resolvedPivotPosition;
         LastResolvedRotationDegrees = resolvedRotationDegrees;
+        LastAppliedHit = hit;
     }
 
     public bool TryGetHistorySnapshots(out SceneItemSnapshot[] beforeSnapshots, out SceneItemSnapshot[] afterSnapshots)
@@ -139,6 +146,7 @@ internal sealed class GizmoSurfaceDragSession
         TargetShape = SceneSurfaceTargetShape.Bounds;
         LastResolvedPosition = default;
         LastResolvedRotationDegrees = default;
+        LastAppliedHit = null;
     }
 
     private void AppendRotationStep(GizmoSurfaceDragRotationAxis axis, int stepCount)
@@ -167,4 +175,3 @@ internal sealed class GizmoSurfaceDragSession
         _rotationSteps.Add(new GizmoSurfaceDragRotationStep(axis, stepCount));
     }
 }
-

@@ -13,6 +13,8 @@ internal enum ObjectLayoutFileKind
 
 internal readonly record struct ObjectLayoutTransferResult(bool Success, ObjectLayoutSnapshot? Layout, string Message)
 {
+    public IReadOnlyList<string> RecoveryNotes { get; init; } = [];
+
     public static ObjectLayoutTransferResult Failure(string message)
         => new(false, null, message);
 }
@@ -23,7 +25,9 @@ internal sealed record ObjectLayoutImportPayload(
     IReadOnlyList<ObjectFolderSnapshot> Folders,
     string SuccessMessage)
 {
+    public IReadOnlyList<string> RecoveryNotes { get; init; } = [];
     public ObjectRuntimeLocationContext? RequiredLocation { get; init; }
+    public IReadOnlyList<SceneGroupSnapshot> Groups { get; init; } = [];
 }
 
 #pragma warning restore MA0048

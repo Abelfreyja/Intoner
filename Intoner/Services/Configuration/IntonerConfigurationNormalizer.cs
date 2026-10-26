@@ -9,15 +9,16 @@ internal static class IntonerConfigurationNormalizer
         ArgumentNullException.ThrowIfNull(configuration);
         ValidateVersion(configuration.Version);
 
-        ValidateSection(configuration.AssetCapture, nameof(configuration.AssetCapture));
-        ValidateSection(configuration.HousingMode, nameof(configuration.HousingMode));
-        ValidateSection(configuration.Layouts, nameof(configuration.Layouts));
-        ValidateSection(configuration.LayoutAutoSave, nameof(configuration.LayoutAutoSave));
-        ValidateSection(configuration.Logging, nameof(configuration.Logging));
-        ValidateSection(configuration.Rendering, nameof(configuration.Rendering));
-        ValidateSection(configuration.Ui, nameof(configuration.Ui));
+        configuration.AssetCapture ??= AssetCaptureConfiguration.CreateDefault();
+        configuration.HousingMode ??= HousingModeConfiguration.CreateDefault();
+        configuration.Layouts ??= LayoutConfiguration.CreateDefault();
+        configuration.LayoutAutoSave ??= LayoutAutoSaveConfiguration.CreateDefault();
+        configuration.Logging ??= LoggingConfiguration.CreateDefault();
+        configuration.Rendering ??= RenderingConfiguration.CreateDefault();
+        configuration.Ui ??= UiConfiguration.CreateDefault();
 
         NormalizeHousingMode(configuration.HousingMode);
+        NormalizeLayouts(configuration.Layouts);
         NormalizeLayoutAutoSave(configuration.LayoutAutoSave);
         NormalizeLogging(configuration.Logging);
         NormalizeRendering(configuration.Rendering);
@@ -32,20 +33,23 @@ internal static class IntonerConfigurationNormalizer
         }
     }
 
-    private static void ValidateSection<TSection>(TSection? section, string sectionName)
-        where TSection : class
+    private static void NormalizeLayouts(LayoutConfiguration configuration)
     {
-        if (section is null)
+        configuration.EnabledLayoutIds ??= [];
+        HashSet<Guid> seen = [];
+        configuration.EnabledLayoutIds.RemoveAll(id => id == Guid.Empty || !seen.Add(id));
+        if (configuration.CreationLayoutId.HasValue && !seen.Contains(configuration.CreationLayoutId.Value))
         {
-            throw new InvalidDataException($"Intoner configuration section '{sectionName}' is missing");
+            configuration.CreationLayoutId = null;
         }
     }
 
     private static void NormalizeHousingMode(HousingModeConfiguration configuration)
     {
-        ValidateEnum(configuration.Mode, nameof(configuration.Mode));
-        ValidateEnum(configuration.Size, nameof(configuration.Size));
-        ValidateEnum(configuration.Area, nameof(configuration.Area));
+        HousingModeConfiguration defaults = HousingModeConfiguration.CreateDefault();
+        configuration.Mode = NormalizeEnum(configuration.Mode, defaults.Mode);
+        configuration.Size = NormalizeEnum(configuration.Size, defaults.Size);
+        configuration.Area = NormalizeEnum(configuration.Area, defaults.Area);
         if (configuration.Size == ObjectHousingSize.Apartment)
         {
             configuration.Area = ObjectHousingArea.Indoor;
@@ -56,40 +60,46 @@ internal static class IntonerConfigurationNormalizer
         => configuration.IntervalSeconds = LayoutAutoSaveConfiguration.ClampIntervalSeconds(configuration.IntervalSeconds);
 
     private static void NormalizeLogging(LoggingConfiguration configuration)
-    {
-        ValidateEnum(configuration.DalamudMinimumLevel, nameof(configuration.DalamudMinimumLevel));
-        configuration.DalamudMinimumLevel = IntonerLogLevels.NormalizeDalamudMinimumLevel(configuration.DalamudMinimumLevel);
-    }
+        => configuration.DalamudMinimumLevel = IntonerLogLevels.NormalizeDalamudMinimumLevel(configuration.DalamudMinimumLevel);
 
     private static void NormalizeRendering(RenderingConfiguration configuration)
     {
-        ValidateEnum(configuration.DrawMode, nameof(configuration.DrawMode));
-        ValidateEnum(configuration.DepthMode, nameof(configuration.DepthMode));
+        RenderingConfiguration defaults = RenderingConfiguration.CreateDefault();
+        configuration.DrawMode = NormalizeEnum(configuration.DrawMode, defaults.DrawMode);
+        configuration.DepthMode = NormalizeEnum(configuration.DepthMode, defaults.DepthMode);
         configuration.AntiAliasing = RenderingConfiguration.ClampAntiAliasing(configuration.AntiAliasing);
-        ValidateSection(configuration.GizmoAppearance, nameof(configuration.GizmoAppearance));
-        ValidateEnum(configuration.GizmoAppearance.Preset, nameof(configuration.GizmoAppearance.Preset));
+        configuration.GizmoAppearance ??= new GizmoAppearanceConfiguration();
+        configuration.GizmoAppearance.Preset = NormalizeEnum(configuration.GizmoAppearance.Preset, defaults.GizmoAppearance.Preset);
         configuration.GizmoAppearance.Opacity = Math.Clamp(configuration.GizmoAppearance.Opacity,
             GizmoAppearanceConfiguration.MinimumOpacity, GizmoAppearanceConfiguration.MaximumOpacity);
     }
 
     private static void NormalizeUi(UiConfiguration configuration)
     {
-        ValidateSection(configuration.Theme, nameof(configuration.Theme));
-        ValidateSection(configuration.Theme.PrimaryColor, nameof(configuration.Theme.PrimaryColor));
-        ValidateEnum(configuration.Theme.PrimaryColor.Source, nameof(configuration.Theme.PrimaryColor.Source));
-        ValidateEnum(configuration.Theme.PrimaryColor.Preset, nameof(configuration.Theme.PrimaryColor.Preset));
-        ValidateEnum(configuration.PlacedListRowSize, nameof(configuration.PlacedListRowSize));
-        ValidateEnum(configuration.ToolbarPosition, nameof(configuration.ToolbarPosition));
+        UiConfiguration defaults = UiConfiguration.CreateDefault();
+        configuration.Theme ??= UiThemeConfiguration.CreateDefault();
+        configuration.Theme.PrimaryColor ??= UiThemeColorConfiguration.CreateDefault();
+        configuration.Theme.PrimaryColor.Source = NormalizeEnum(configuration.Theme.PrimaryColor.Source, defaults.Theme.PrimaryColor.Source);
+        configuration.Theme.PrimaryColor.Preset = NormalizeEnum(configuration.Theme.PrimaryColor.Preset, defaults.Theme.PrimaryColor.Preset);
+        configuration.PlacedListRowSize = NormalizeEnum(configuration.PlacedListRowSize, defaults.PlacedListRowSize);
+        configuration.PlacedLayoutView = NormalizeEnum(configuration.PlacedLayoutView, defaults.PlacedLayoutView);
+        configuration.ToolbarPosition = NormalizeEnum(configuration.ToolbarPosition, defaults.ToolbarPosition);
         configuration.WorkspaceSplits = configuration.WorkspaceSplits.Clamp();
-    }
-
-    private static void ValidateEnum<TEnum>(TEnum value, string propertyName)
-        where TEnum : struct, Enum
-    {
-        if (!Enum.IsDefined(value))
+        configuration.ShortcutOverrides ??= new(StringComparer.Ordinal);
+        foreach (string id in configuration.ShortcutOverrides.Keys.ToArray())
         {
-            throw new InvalidDataException($"Intoner configuration property '{propertyName}' has invalid value '{value}'");
+            if (string.IsNullOrWhiteSpace(id) || !string.Equals(id, id.Trim(), StringComparison.Ordinal))
+            {
+                configuration.ShortcutOverrides.Remove(id);
+            }
+            else if (configuration.ShortcutOverrides[id] is { } gesture && !gesture.IsValid())
+            {
+                configuration.ShortcutOverrides[id] = null;
+            }
         }
     }
-}
 
+    private static TEnum NormalizeEnum<TEnum>(TEnum value, TEnum fallback)
+        where TEnum : struct, Enum
+        => Enum.IsDefined(value) ? value : fallback;
+}

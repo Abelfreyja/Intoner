@@ -1,5 +1,7 @@
 using Intoner.Objects.Api;
+using Intoner.Objects.Filesystem.Watching;
 using Intoner.Objects.Models;
+using Intoner.Services.Serialization;
 using Intoner.Services.Storage;
 using Microsoft.Extensions.Logging;
 
@@ -23,58 +25,86 @@ internal interface IObjectLayoutRecoveryService
     bool TryLoadCurrentRecovery(out ObjectPersistentWorkspaceSnapshot workspace, out string errorMessage);
 }
 
-internal sealed class ObjectLayoutRecoveryService : IObjectLayoutRecoveryService
+internal sealed class ObjectLayoutRecoveryService : IObjectLayoutRecoveryService, IDisposable
 {
     private readonly ILogger<ObjectLayoutRecoveryService> _logger;
     private readonly IPluginStoragePaths                  _pathService;
     private readonly IPluginFileSystem                    _fileSystem;
+    private readonly IObjectFileWatchSubscription         _watchSubscription;
 
+    private readonly Lock _lock = new();
     private bool _sessionPrepared;
+    private bool _hasCurrentRecovery;
 
     public ObjectLayoutRecoveryService(
         ILogger<ObjectLayoutRecoveryService> logger,
         IPluginStoragePaths pathService,
-        IPluginFileSystem fileSystem)
+        IPluginFileSystem fileSystem,
+        IObjectFileWatcherService fileWatcherService)
     {
-        _logger      = logger;
-        _pathService = pathService;
-        _fileSystem  = fileSystem;
+        _logger            = logger;
+        _pathService       = pathService;
+        _fileSystem        = fileSystem;
+        _watchSubscription = fileWatcherService.Watch(
+            new ObjectFileWatchOptions(_pathService.ObjectAutosaveRootPath, "*.autosave.json",
+                IncludeSubdirectories: false, DebounceDelay: TimeSpan.FromMilliseconds(650)),
+            _ => RefreshRecoveryAvailability());
+        RefreshRecoveryAvailability();
     }
 
     public bool TryPrepareSession()
     {
-        if (_sessionPrepared)
+        lock (_lock)
         {
-            return true;
-        }
-
-        try
-        {
-            if (_fileSystem.FileExists(_pathService.ObjectAutosaveCurrentPath))
+            if (_sessionPrepared)
             {
-                string json = _fileSystem.ReadAllText(_pathService.ObjectAutosaveCurrentPath);
-                bool valid = ObjectLayoutJsonSerializer.TryDeserializeAutosave(json, out _, out string errorMessage);
-                string archivePath = valid ? _pathService.ObjectAutosaveRecoveryPath : _pathService.ObjectAutosaveRejectedPath;
-                _fileSystem.WriteAllTextAtomic(archivePath, json);
-                _fileSystem.DeleteFile(_pathService.ObjectAutosaveCurrentPath);
-                if (!valid)
-                {
-                    _logger.LogWarning("preserved rejected object layout autosave draft: {Reason}", errorMessage);
-                }
+                return true;
             }
 
-            _sessionPrepared = true;
-            return true;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "failed to preserve the previous object layout autosave draft");
-            return false;
+            try
+            {
+                if (_fileSystem.FileExists(_pathService.ObjectAutosaveCurrentPath))
+                {
+                    string json = JsonDocumentUtility.ReadFile(_fileSystem, _pathService.ObjectAutosaveCurrentPath);
+                    bool valid = ObjectLayoutJsonSerializer.TryDeserializeAutosave(json, out _, out string errorMessage);
+                    string archivePath = valid ? _pathService.ObjectAutosaveRecoveryPath : _pathService.ObjectAutosaveRejectedPath;
+                    JsonDocumentUtility.WriteFile(_fileSystem, archivePath, json);
+                    _fileSystem.DeleteFile(_pathService.ObjectAutosaveCurrentPath);
+
+                    if (!valid)
+                    {
+                        _logger.LogWarning("preserved rejected object layout autosave draft: {Reason}", errorMessage);
+                    }
+                }
+
+                _sessionPrepared = true;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "failed to preserve the previous object layout autosave draft");
+                return false;
+            }
+            finally
+            {
+                RefreshRecoveryAvailability();
+            }
         }
     }
 
     public bool HasCurrentRecovery()
-        => _fileSystem.FileExists(GetRecoveryPath());
+        => Volatile.Read(ref _hasCurrentRecovery);
+
+    public void Dispose()
+        => _watchSubscription.Dispose();
+
+    private void RefreshRecoveryAvailability()
+    {
+        lock (_lock)
+        {
+            Volatile.Write(ref _hasCurrentRecovery, _fileSystem.FileExists(GetRecoveryPath()));
+        }
+    }
 
     public bool TryLoadCurrentRecovery(out ObjectPersistentWorkspaceSnapshot workspace, out string errorMessage)
     {
@@ -101,7 +131,7 @@ internal sealed class ObjectLayoutRecoveryService : IObjectLayoutRecoveryService
 
         try
         {
-            string json = _fileSystem.ReadAllText(path);
+            string json = JsonDocumentUtility.ReadFile(_fileSystem, path);
             if (ObjectLayoutJsonSerializer.TryDeserializeAutosave(json, out workspace, out errorMessage))
             {
                 return true;
@@ -120,8 +150,12 @@ internal sealed class ObjectLayoutRecoveryService : IObjectLayoutRecoveryService
 
     // an archive failure leaves the previous sessions draft at the current path
     private string GetRecoveryPath()
-        => !_sessionPrepared && _fileSystem.FileExists(_pathService.ObjectAutosaveCurrentPath)
-            ? _pathService.ObjectAutosaveCurrentPath
-            : _pathService.ObjectAutosaveRecoveryPath;
+    {
+        lock (_lock)
+        {
+            return !_sessionPrepared && _fileSystem.FileExists(_pathService.ObjectAutosaveCurrentPath)
+                ? _pathService.ObjectAutosaveCurrentPath
+                : _pathService.ObjectAutosaveRecoveryPath;
+        }
+    }
 }
-

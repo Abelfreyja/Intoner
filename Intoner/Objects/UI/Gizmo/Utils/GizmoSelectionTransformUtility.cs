@@ -33,27 +33,13 @@ internal static class GizmoSelectionTransformUtility
         return entries;
     }
 
-    public static Quaternion ResolveRotationDelta(Quaternion startRotation, Quaternion targetRotation)
-    {
-        var normalizedStart = SceneTransformMath.NormalizeQuaternion(startRotation);
-        var normalizedTarget = SceneTransformMath.NormalizeQuaternion(targetRotation);
-        return SceneTransformMath.NormalizeQuaternion(normalizedTarget * Quaternion.Inverse(normalizedStart));
-    }
-
     public static SceneTransform ApplyRigidRotation(
         in GizmoSelectionEntry entry,
         Vector3 pivotPosition,
         Quaternion rotationDelta,
         Vector3 referenceRotationDegrees)
-    {
-        var normalizedRotationDelta = SceneTransformMath.NormalizeQuaternion(rotationDelta);
-        var nextRotation = SceneTransformMath.NormalizeQuaternion(normalizedRotationDelta * entry.StartRotationQuaternion);
-        return entry.Snapshot.Transform with
-        {
-            Position = pivotPosition + Vector3.Transform(entry.PivotOffset, normalizedRotationDelta),
-            RotationDegrees = SceneTransformMath.ToRotationDegrees(nextRotation, referenceRotationDegrees),
-        };
-    }
+        => SceneTransformMath.ApplyRigidRotation(entry.Snapshot.Transform, pivotPosition, entry.PivotOffset,
+            entry.StartRotationQuaternion, rotationDelta, referenceRotationDegrees);
 
     private static GizmoSelectionEntry CreateSelectionEntry(
         SceneItemSnapshot snapshot,
@@ -74,4 +60,3 @@ internal static class GizmoSelectionTransformUtility
         return new GizmoSelectionEntry(snapshot, pivotOffset, startRotationQuaternion, true, boundsCenterLocalOffset, boundsHalfExtents);
     }
 }
-

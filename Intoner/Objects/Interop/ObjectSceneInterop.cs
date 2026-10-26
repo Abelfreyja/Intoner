@@ -1,6 +1,7 @@
 using FFXIVClientStructs.FFXIV.Client.Graphics.Scene;
-using ObjectHighlightColor = FFXIVClientStructs.FFXIV.Client.Game.Object.ObjectHighlightColor;
+using Intoner.Objects.Utils;
 using AxisAlignedBounds = FFXIVClientStructs.FFXIV.Common.Math.AxisAlignedBounds;
+using ObjectHighlightColor = FFXIVClientStructs.FFXIV.Client.Game.Object.ObjectHighlightColor;
 using OrientedBounds = FFXIVClientStructs.FFXIV.Common.Math.OrientedBounds;
 using SceneObject = FFXIVClientStructs.FFXIV.Client.Graphics.Scene.Object;
 
@@ -74,30 +75,40 @@ internal static unsafe class ObjectSceneInterop
     public static bool TryGetDrawObjectOrientedBounds(DrawObject* drawObject, out OrientedBounds bounds)
     {
         bounds = default;
+
         if (!IsDrawObjectLoaded(drawObject))
         {
             return false;
         }
 
-        fixed (OrientedBounds* boundsPtr = &bounds)
+        OrientedBounds result = default;
+
+        if (drawObject->ComputeOrientedBounds(&result) == null || !ObjectShapeMath.IsValidBounds(result))
         {
-            return drawObject->ComputeOrientedBounds(boundsPtr) != null;
+            return false;
         }
+
+        bounds = result;
+        return true;
     }
 
     public static bool TryGetDrawObjectBounds(DrawObject* drawObject, out AxisAlignedBounds bounds)
     {
         bounds = default;
+
         if (!IsDrawObjectLoaded(drawObject))
         {
             return false;
         }
 
-        fixed (AxisAlignedBounds* boundsPtr = &bounds)
+        AxisAlignedBounds result = default;
+
+        if (drawObject->ComputeAxisAlignedBounds(&result) == null || !ObjectShapeMath.IsValidBounds(result))
         {
-            return drawObject->ComputeAxisAlignedBounds(boundsPtr) != null;
+            return false;
         }
+
+        bounds = result;
+        return true;
     }
 }
-
-

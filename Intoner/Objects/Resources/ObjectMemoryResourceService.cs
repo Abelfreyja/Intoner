@@ -2,7 +2,8 @@ using Dalamud.Hooking;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.System.Resource.Handle;
 using Intoner.Objects.Assets;
-using Intoner.Objects.Utils;
+using Intoner.Services.Interop;
+using Intoner.Utils;
 using Microsoft.Extensions.Logging;
 using System.Runtime.InteropServices;
 using ClientFileDescriptor = FFXIVClientStructs.FFXIV.Client.System.File.FileDescriptor;
@@ -10,9 +11,6 @@ using ClientFileHandle = FFXIVClientStructs.FFXIV.Client.System.File.FileHandle;
 using ClientFileHandleManager = FFXIVClientStructs.FFXIV.Client.System.File.FileHandleManager;
 using ClientFileInterface = FFXIVClientStructs.FFXIV.Client.System.File.FileInterface;
 using ClientFileMode = FFXIVClientStructs.FFXIV.Client.System.File.FileMode;
-
-using Intoner.Services.Interop;
-using Intoner.Utils;
 
 namespace Intoner.Objects.Resources;
 
@@ -28,6 +26,8 @@ internal interface IObjectMemoryResourceService : IDisposable
     /// <param name="gamePath">the real game path represented by the bytes</param>
     /// <param name="data">resource bytes to copy into the memory registry</param>
     /// <returns>the resolved memory path to use in object resource redirects</returns>
+    /// <exception cref="ArgumentException">the owner is empty, the game path is invalid or unsupported, or the data is empty</exception>
+    /// <exception cref="ObjectDisposedException">the service is shutting down or has been disposed</exception>
     ObjectResolvedPath RegisterResource(string ownerId, string gamePath, byte[] data);
 
     /// <summary>
@@ -80,106 +80,86 @@ internal interface IObjectMemoryResourceService : IDisposable
     /// </summary>
     /// <param name="handle">the texture resource handle</param>
     /// <param name="descriptor">the native file descriptor</param>
-    /// <param name="failedToOpen">whether the descriptor open failed</param>
+    /// <param name="resetPosition">whether the native reader resets the descriptor's file position</param>
     /// <param name="result">the native read result when handled</param>
     /// <returns>true when the read was handled by the memory loader</returns>
-    unsafe bool TryReadTextureResource(TextureResourceHandle* handle, ClientFileDescriptor* descriptor, bool failedToOpen, out byte result);
+    /// <remarks> returns true with a zero result for owned descriptors with a null or different resource handle; returns false for foreign descriptors </remarks>
+    unsafe bool TryReadTextureResource(TextureResourceHandle* handle, ClientFileDescriptor* descriptor, bool resetPosition, out byte result);
 
     /// <summary>
     /// Handles a sound resource read when the descriptor is memory backed.
     /// </summary>
     /// <param name="handle">the sound resource handle</param>
     /// <param name="descriptor">the native file descriptor</param>
-    /// <param name="failedToOpen">whether the descriptor open failed</param>
+    /// <param name="resetPosition">whether the native reader resets the descriptor's file position</param>
     /// <param name="result">the native read result when handled</param>
     /// <returns>true when the read was handled by the memory loader</returns>
-    unsafe bool TryReadSoundResource(ResourceHandle* handle, ClientFileDescriptor* descriptor, bool failedToOpen, out byte result);
+    /// <remarks> returns true with a zero result for owned descriptors with a null or different resource handle; returns false for foreign descriptors </remarks>
+    unsafe bool TryReadSoundResource(ResourceHandle* handle, ClientFileDescriptor* descriptor, bool resetPosition, out byte result);
 }
 
 internal sealed unsafe class ObjectMemoryResourceService : IObjectMemoryResourceService
 {
-    private const byte MemoryFileModeValue = 0x0F;
+    private const byte MemoryFileModeValue = 0x10;
     private const byte FileOpenSucceeded = 1;
     private const byte FileOpenMissing = unchecked((byte)-1);
     private const byte FileOperationCancelled = 2;
     private const byte FileReadInvalid = unchecked((byte)-10);
 
-    private enum MemoryResourceReadKind
-    {
-        Direct,
-        Model,
-        Texture,
-        Sound,
-    }
-
-    private delegate byte FileDescriptorReadDelegate(
-        ClientFileDescriptor* fileDescriptor,
-        byte* outputBuffer,
-        ulong length,
-        ulong start,
-        bool resetPosition);
-
-    private delegate byte ModelResourceReadDelegate(ModelResourceHandle* handle, ClientFileDescriptor* descriptor, bool failedToOpen);
-    private delegate byte ModelResourceReadUnpackedDelegate(ModelResourceHandle* handle, ClientFileDescriptor* descriptor, bool failedToOpen);
-    private delegate byte TextureResourceReadUnpackedDelegate(TextureResourceHandle* handle, int lodLevel, ClientFileDescriptor* descriptor, bool failedToOpen);
-    private delegate byte SoundResourceReadUnpackedDelegate(ResourceHandle* handle, ClientFileDescriptor* descriptor, bool failedToOpen);
-    private delegate void UpdateTextureCategoryDelegate(TextureResourceHandle* handle);
+    [ThreadStatic] private static nint _activeDescriptor;
+    [ThreadStatic] private static nint _activeFileInterface;
+    [ThreadStatic] private static nint _activeResourceHandle;
 
     private readonly ILogger<ObjectMemoryResourceService> _logger;
     private readonly ObjectTextureLodService _lodService;
     private readonly ObjectMemoryResourceRegistry _registry;
+    private readonly ObjectResourceReadBindings _readBindings;
     private readonly DisposalState _disposeState = new();
-    private readonly ObjectLockedOnce _enableOnce = new();
-    private readonly Hook<FileDescriptorReadDelegate>? _fileDescriptorReadHook;
-    private readonly Hook<ModelResourceReadDelegate>? _modelResourceReadHook;
-    private readonly ModelResourceReadUnpackedDelegate? _modelResourceReadUnpacked;
-    private readonly TextureResourceReadUnpackedDelegate? _textureResourceReadUnpacked;
-    private readonly SoundResourceReadUnpackedDelegate? _soundResourceReadUnpacked;
-    private readonly UpdateTextureCategoryDelegate? _updateTextureCategory;
+    private readonly InteropHookCollection _hooks;
+    private readonly Hook<ClientFileDescriptor.Delegates.Read>? _fileDescriptorReadHook;
+    private readonly Hook<ResourceHandle.Delegates.Read>? _modelResourceReadHook;
 
     public ObjectMemoryResourceService(
         ILogger<ObjectMemoryResourceService> logger,
         ObjectTextureLodService lodService,
         ObjectMemoryResourceRegistry registry,
+        ObjectResourceReadBindings readBindings,
         IGameInteropProvider gameInteropProvider,
         ISigScanner sigScanner)
     {
         _logger = logger;
         _lodService = lodService;
         _registry = registry;
+        _readBindings = readBindings;
+        _hooks = new InteropHookCollection(logger);
 
-        _fileDescriptorReadHook = InteropHookUtility.CreateHookFromAddress<FileDescriptorReadDelegate>(
-            _logger,
-            gameInteropProvider,
-            IntonerSignatures.ResourceFileDescriptorRead,
-            FileDescriptorReadDetour);
-        _modelResourceReadHook = InteropHookUtility.CreateHook<ModelResourceReadDelegate>(
-            _logger,
-            gameInteropProvider,
-            sigScanner,
-            IntonerSignatures.ResourceMemoryModelRead,
-            ModelResourceReadDetour);
-        _modelResourceReadUnpacked = InteropHookUtility.CreateDelegate<ModelResourceReadUnpackedDelegate>(
-            _logger,
-            sigScanner,
-            IntonerSignatures.ResourceLoadMdlFileLocal);
-        _textureResourceReadUnpacked = InteropHookUtility.CreateDelegate<TextureResourceReadUnpackedDelegate>(
-            _logger,
-            sigScanner,
-            IntonerSignatures.ResourceLoadTexFileLocal);
-        _soundResourceReadUnpacked = InteropHookUtility.CreateDelegate<SoundResourceReadUnpackedDelegate>(
-            _logger,
-            sigScanner,
-            IntonerSignatures.ResourceLoadScdFileLocal);
-        _updateTextureCategory = InteropHookUtility.CreateDelegate<UpdateTextureCategoryDelegate>(
-            _logger,
-            sigScanner,
-            IntonerSignatures.ResourceUpdateTextureCategory);
-
+        try
+        {
+            _fileDescriptorReadHook = _hooks.Add(InteropHookUtility.CreateHookFromAddress<ClientFileDescriptor.Delegates.Read>(
+                logger,
+                gameInteropProvider,
+                IntonerSignatures.ResourceFileDescriptorRead,
+                FileDescriptorReadDetour));
+            _modelResourceReadHook = _hooks.Add(InteropHookUtility.CreateHook<ResourceHandle.Delegates.Read>(
+                logger,
+                gameInteropProvider,
+                sigScanner,
+                IntonerSignatures.ResourceMemoryModelRead,
+                ModelResourceReadDetour));
+        }
+        catch
+        {
+            _hooks.Dispose();
+            throw;
+        }
     }
 
     public ObjectResolvedPath RegisterResource(string ownerId, string gamePath, byte[] data)
-        => _registry.RegisterResource(ownerId, gamePath, data);
+    {
+        using InteropHookCollection.CallbackScope operation = _hooks.EnterOperation();
+        ObjectDisposedException.ThrowIf(!operation.IsActive || IsDisposing, this);
+        return _registry.RegisterResource(ownerId, gamePath, data);
+    }
 
     public void ReleaseOwner(string ownerId)
         => _registry.ReleaseOwner(ownerId);
@@ -198,7 +178,7 @@ internal sealed unsafe class ObjectMemoryResourceService : IObjectMemoryResource
         => !IsDisposing
             && HasLoadableResourceShape(memoryResource)
             && TryEnableHooks()
-            && CanReadResourceKind(ClassifyReadKind(memoryResource.GamePath));
+            && CanReadResourceKind(ObjectAssetPathRules.ClassifyResourcePath(memoryResource.GamePath));
 
     public bool TryGetResource(string memoryResourcePath, out ObjectMemoryResource resource)
     {
@@ -208,7 +188,10 @@ internal sealed unsafe class ObjectMemoryResourceService : IObjectMemoryResource
 
     public byte ReadResource(ClientFileDescriptor* fileDescriptor, ObjectMemoryResource resource)
     {
-        if (IsDisposing
+        using InteropHookCollection.CallbackScope operation = _hooks.EnterOperation();
+
+        if (!operation.IsActive
+            || IsDisposing
             || fileDescriptor == null
             || fileDescriptor->ResourceHandle == null
             || !CanLoadMemoryResource(resource))
@@ -218,39 +201,27 @@ internal sealed unsafe class ObjectMemoryResourceService : IObjectMemoryResource
 
         return ObjectResourcePathEncoding.WithNullTerminatedUtf8(
             resource.GamePath,
-            (Owner: this, FileDescriptor: (nint)fileDescriptor, Data: resource.Data),
+            (FileDescriptor: (nint)fileDescriptor, Data: resource.Data),
             static (pathPointer, pathByteCount, state) =>
             {
                 var fileDescriptor = (ClientFileDescriptor*)state.FileDescriptor;
-                ClientFileMode originalFileMode = fileDescriptor->FileMode;
-                ClientFileInterface* originalFileInterface = fileDescriptor->FileInterface;
                 fixed (byte* resourceDataPointer = state.Data)
                 {
                     MemoryFileInterface memoryFile = new();
-                    fileDescriptor->FileMode = (ClientFileMode)MemoryFileModeValue;
-                    fileDescriptor->FileInterface = &memoryFile.FileInterface;
-
-                    try
-                    {
-                        using var resourcePath = new ObjectResourceHandlePathScope(
-                            fileDescriptor->ResourceHandle,
-                            pathPointer,
-                            pathByteCount);
-                        return state.Owner.ReadMemoryFile(
-                            fileDescriptor,
-                            resourceDataPointer,
-                            (ulong)state.Data.LongLength);
-                    }
-                    finally
-                    {
-                        fileDescriptor->FileMode = originalFileMode;
-                        fileDescriptor->FileInterface = originalFileInterface;
-                    }
+                    using MemoryDescriptorScope descriptorScope = new((nint)fileDescriptor, (nint)(&memoryFile.FileInterface));
+                    using var resourcePath = new ObjectResourceHandlePathScope(
+                        fileDescriptor->ResourceHandle,
+                        pathPointer,
+                        pathByteCount);
+                    return ReadMemoryFile(
+                        fileDescriptor,
+                        resourceDataPointer,
+                        (ulong)state.Data.LongLength);
                 }
             });
     }
 
-    public bool TryReadTextureResource(TextureResourceHandle* handle, ClientFileDescriptor* descriptor, bool failedToOpen, out byte result)
+    public bool TryReadTextureResource(TextureResourceHandle* handle, ClientFileDescriptor* descriptor, bool resetPosition, out byte result)
     {
         result = 0;
         if (!IsMemoryFileDescriptor(descriptor))
@@ -258,17 +229,17 @@ internal sealed unsafe class ObjectMemoryResourceService : IObjectMemoryResource
             return false;
         }
 
-        if (_textureResourceReadUnpacked == null)
+        if (!HasMatchingResourceHandle((ResourceHandle*)handle, descriptor) || _readBindings.LoadTexture == null)
         {
             return true;
         }
 
-        result = _textureResourceReadUnpacked(handle, _lodService.GetLod(handle), descriptor, failedToOpen);
-        _updateTextureCategory?.Invoke(handle);
+        result = _readBindings.LoadTexture(handle, _lodService.GetLod(handle), descriptor, resetPosition);
+        _readBindings.UpdateTextureCategory?.Invoke(handle);
         return true;
     }
 
-    public bool TryReadSoundResource(ResourceHandle* handle, ClientFileDescriptor* descriptor, bool failedToOpen, out byte result)
+    public bool TryReadSoundResource(ResourceHandle* handle, ClientFileDescriptor* descriptor, bool resetPosition, out byte result)
     {
         result = 0;
         if (!IsMemoryFileDescriptor(descriptor))
@@ -276,54 +247,63 @@ internal sealed unsafe class ObjectMemoryResourceService : IObjectMemoryResource
             return false;
         }
 
-        if (_soundResourceReadUnpacked == null)
+        if (!HasMatchingResourceHandle(handle, descriptor) || _readBindings.LoadSound == null)
         {
             return true;
         }
 
-        result = _soundResourceReadUnpacked(handle, descriptor, failedToOpen);
+        result = _readBindings.LoadSound(handle, descriptor, resetPosition ? (byte)1 : (byte)0);
         return true;
     }
 
     public void Dispose()
     {
-        if (!_disposeState.TryBeginDispose())
+        if (!_disposeState.TryBeginDispose() && _hooks.IsDisposed)
         {
             return;
         }
 
-        InteropHookUtility.DisposeHook(_modelResourceReadHook);
-        InteropHookUtility.DisposeHook(_fileDescriptorReadHook);
-        _registry.Clear();
+        _hooks.Dispose();
+
+        if (_hooks.IsDisposed)
+        {
+            _registry.Clear();
+        }
     }
 
     private bool IsDisposing
         => _disposeState.IsDisposing;
 
     private bool TryEnableHooks()
-        => _enableOnce.TryExecute(
-            () =>
-            {
-                _fileDescriptorReadHook?.Enable();
-                _modelResourceReadHook?.Enable();
-                return true;
-            },
-            () => !IsDisposing);
+        => !IsDisposing && _hooks.Enable();
 
-    private byte ModelResourceReadDetour(ModelResourceHandle* handle, ClientFileDescriptor* descriptor, bool failedToOpen)
+    private byte ModelResourceReadDetour(ResourceHandle* handle, ClientFileDescriptor* descriptor, bool failedToOpen)
     {
-        if (!IsMemoryFileDescriptor(descriptor))
-        {
-            return _modelResourceReadHook!.Original(handle, descriptor, failedToOpen);
-        }
+        using InteropHookCollection.CallbackScope callback = _hooks.EnterCallback();
+        using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferNativeWrites();
 
-        return _modelResourceReadUnpacked != null
-            ? _modelResourceReadUnpacked(handle, descriptor, failedToOpen: false)
-            : (byte)0;
+        try
+        {
+            if (!IsMemoryFileDescriptor(descriptor))
+            {
+                return _modelResourceReadHook!.OriginalDisposeSafe(handle, descriptor, failedToOpen);
+            }
+
+            return HasMatchingResourceHandle(handle, descriptor) && _readBindings.LoadModel != null
+                ? _readBindings.LoadModel(handle, descriptor, false)
+                : (byte)0;
+        }
+        catch (Exception ex)
+        {
+            ObjectResourceLog.Write(() => _logger.LogError(ex, "object memory model read hook failed"));
+            return 0;
+        }
     }
 
-    private byte ReadMemoryFile(ClientFileDescriptor* fileDescriptor, byte* resourceBytes, ulong resourceLength)
+    private static byte ReadMemoryFile(ClientFileDescriptor* fileDescriptor, byte* resourceBytes, ulong resourceLength)
     {
+        ResourceHandle* resourceHandle = fileDescriptor->ResourceHandle;
+        ClientFileInterface* borrowedFileInterface = fileDescriptor->FileInterface;
         ClientFileHandleManager* fileHandleManager = ClientFileHandleManager.Instance();
         if (fileHandleManager == null)
         {
@@ -342,11 +322,11 @@ internal sealed unsafe class ObjectMemoryResourceService : IObjectMemoryResource
         }
         else
         {
-            fileDescriptor->FileInterface->PlatformHandle = (nint)resourceBytes;
-            fileDescriptor->FileInterface->CachedFileSize = resourceLength;
-            fileDescriptor->FileInterface->IsFileOpen = true;
-            fileResult = ReadMemoryResource(fileDescriptor->ResourceHandle, fileDescriptor, fileLoadFailed: false);
-            fileDescriptor->FileInterface->IsFileOpen = false;
+            borrowedFileInterface->PlatformHandle = (nint)resourceBytes;
+            borrowedFileInterface->CachedFileSize = resourceLength;
+            borrowedFileInterface->IsFileOpen = true;
+            fileResult = ReadMemoryResource(resourceHandle, fileDescriptor);
+            borrowedFileInterface->IsFileOpen = false;
         }
 
         if (ReadFileHandleState(fileHandleManager, ref fileHandle) != 0)
@@ -355,11 +335,11 @@ internal sealed unsafe class ObjectMemoryResourceService : IObjectMemoryResource
         }
 
         ResetFileHandle(fileHandleManager, ref fileHandle, fileDescriptor, fileResult);
-        fileDescriptor->ResourceHandle->FinishLoad(fileDescriptor, fileResult, 0);
+        resourceHandle->FinishLoad(fileDescriptor, fileResult, 0);
         return FileOpenSucceeded;
     }
 
-    private byte ReadMemoryResource(ResourceHandle* resourceHandle, ClientFileDescriptor* fileDescriptor, bool fileLoadFailed)
+    private static byte ReadMemoryResource(ResourceHandle* resourceHandle, ClientFileDescriptor* fileDescriptor)
     {
         if (resourceHandle == null
             || fileDescriptor == null
@@ -386,8 +366,8 @@ internal sealed unsafe class ObjectMemoryResourceService : IObjectMemoryResource
 
         resourceHandle->FileSize = readSize;
         return InterlockedRead(ref resourceHandle->OtherState) == 1
-            ? resourceHandle->Reread(fileDescriptor, fileLoadFailed)
-            : resourceHandle->Read(fileDescriptor, fileLoadFailed);
+            ? resourceHandle->Reread(fileDescriptor, false)
+            : resourceHandle->Read(fileDescriptor, false);
     }
 
     private byte FileDescriptorReadDetour(
@@ -397,54 +377,63 @@ internal sealed unsafe class ObjectMemoryResourceService : IObjectMemoryResource
         ulong start,
         bool resetPosition)
     {
+        using InteropHookCollection.CallbackScope callback = _hooks.EnterCallback();
+        using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferNativeWrites();
+
         if (!IsMemoryFileDescriptor(fileDescriptor))
         {
-            return _fileDescriptorReadHook!.Original(fileDescriptor, outputBuffer, length, start, resetPosition);
+            return _fileDescriptorReadHook!.OriginalDisposeSafe(fileDescriptor, outputBuffer, length, start, resetPosition);
         }
 
-        var memoryFile = (MemoryFileInterface*)fileDescriptor->FileInterface;
-        ulong totalSize = memoryFile->FileInterface.CachedFileSize;
-        if (length == 0)
-        {
-            length = start < totalSize ? totalSize - start : 0;
-        }
-
-        if (length == 0)
-        {
-            return FileOpenSucceeded;
-        }
-
-        if (outputBuffer == null
-            || totalSize > int.MaxValue
-            || length > int.MaxValue
-            || memoryFile->FileInterface.PlatformHandle == nint.Zero)
+        if ((nint)fileDescriptor->ResourceHandle != _activeResourceHandle)
         {
             return FileReadInvalid;
         }
 
-        if (start != 0 || resetPosition)
+        var memoryFile = (MemoryFileInterface*)fileDescriptor->FileInterface;
+        ulong totalSize = memoryFile->FileInterface.CachedFileSize;
+        ulong readStart = start != 0 || resetPosition ? start : memoryFile->Position;
+
+        if (readStart > totalSize || totalSize > int.MaxValue)
         {
-            memoryFile->Position = start;
+            return FileReadInvalid;
         }
 
-        ulong readStart = memoryFile->Position;
-        if (readStart > totalSize || length > totalSize - readStart)
+        if (length == 0)
+        {
+            length = totalSize - readStart;
+        }
+
+        if (length == 0)
+        {
+            memoryFile->Position = readStart;
+            return FileOpenSucceeded;
+        }
+
+        if (outputBuffer == null
+            || length > totalSize - readStart
+            || memoryFile->FileInterface.PlatformHandle == nint.Zero)
         {
             return FileReadInvalid;
         }
 
         ReadOnlySpan<byte> source = new((void*)memoryFile->FileInterface.PlatformHandle, (int)totalSize);
         source.Slice((int)readStart, (int)length).CopyTo(new Span<byte>(outputBuffer, (int)length));
-        memoryFile->Position += length;
+        memoryFile->Position = readStart + length;
         return FileOpenSucceeded;
     }
 
     internal static bool IsMemoryFileDescriptor(ClientFileDescriptor* descriptor)
-        => descriptor != null
+        => (nint)descriptor == _activeDescriptor
+            && descriptor != null
             && descriptor->FileMode == (ClientFileMode)MemoryFileModeValue
+            && (nint)descriptor->FileInterface == _activeFileInterface
             && descriptor->FileInterface != null;
 
-    private bool CanReadResourceKind(MemoryResourceReadKind kind)
+    private static bool HasMatchingResourceHandle(ResourceHandle* handle, ClientFileDescriptor* descriptor)
+        => handle != null && descriptor->ResourceHandle == handle && (nint)handle == _activeResourceHandle;
+
+    private bool CanReadResourceKind(ObjectResourcePathKind kind)
     {
         if (_fileDescriptorReadHook == null)
         {
@@ -453,28 +442,19 @@ internal sealed unsafe class ObjectMemoryResourceService : IObjectMemoryResource
 
         return kind switch
         {
-            MemoryResourceReadKind.Model => _modelResourceReadHook != null && _modelResourceReadUnpacked != null,
-            MemoryResourceReadKind.Texture => _textureResourceReadUnpacked != null,
-            MemoryResourceReadKind.Sound => _soundResourceReadUnpacked != null,
+            ObjectResourcePathKind.Model => _modelResourceReadHook != null && _readBindings.LoadModel != null,
+            ObjectResourcePathKind.Texture => _readBindings.LoadTexture != null && _readBindings.UpdateTextureCategory != null,
+            ObjectResourcePathKind.Sound => _readBindings.LoadSound != null,
             _ => true,
         };
     }
-
-    private static MemoryResourceReadKind ClassifyReadKind(string gamePath)
-        => ObjectAssetPathRules.ClassifyResourcePath(gamePath) switch
-        {
-            ObjectResourcePathKind.Model => MemoryResourceReadKind.Model,
-            ObjectResourcePathKind.Texture or ObjectResourcePathKind.Atex => MemoryResourceReadKind.Texture,
-            ObjectResourcePathKind.Sound => MemoryResourceReadKind.Sound,
-            _ => MemoryResourceReadKind.Direct,
-        };
 
     private static bool HasLoadableResourceShape(ObjectMemoryResource resource)
     {
         if (string.IsNullOrEmpty(resource.GamePath)
          || string.IsNullOrEmpty(resource.MemoryPath)
          || resource.Data is not { Length: > 0 }
-         || !ObjectAssetPathRules.TryNormalizeSupportedResourcePath(resource.GamePath, out string normalizedGamePath)
+         || !ObjectResourcePathUtility.TryNormalizeSupportedGamePath(resource.GamePath, out string normalizedGamePath)
          || !ObjectMemoryResourcePathUtility.TryParse(resource.MemoryPath, out ObjectMemoryResourcePath memoryPath))
         {
             return false;
@@ -518,20 +498,62 @@ internal sealed unsafe class ObjectMemoryResourceService : IObjectMemoryResource
         ClientFileDescriptor* fileDescriptor,
         byte fileResult)
     {
-        using (var managerLock = fileHandleManager->Lock.Acquire())
-        {
-            fileHandle.AllocatedBuffer = null;
-            fileHandle.ResultLength = fileDescriptor->Length;
-        }
-
-        using (var managerLock = fileHandleManager->Lock.Acquire())
-        {
-            fileHandle.Reset(fileResult);
-        }
+        using var managerLock = fileHandleManager->Lock.Acquire();
+        fileHandle.AllocatedBuffer = null;
+        fileHandle.ResultLength = fileDescriptor->Length;
+        fileHandle.Reset(fileResult);
     }
 
     private static byte InterlockedRead(ref byte value)
         => Interlocked.CompareExchange(ref value, (byte)0, (byte)0);
+
+    [StructLayout(LayoutKind.Auto)]
+    private readonly struct MemoryDescriptorScope : IDisposable
+    {
+        private readonly nint _previousDescriptor;
+        private readonly nint _previousFileInterface;
+        private readonly nint _previousResourceHandle;
+        private readonly ClientFileDescriptor* _descriptor;
+        private readonly ClientFileMode _originalFileMode;
+        private readonly ClientFileInterface* _originalFileInterface;
+        private readonly ClientFileInterface* _borrowedFileInterface;
+
+        public MemoryDescriptorScope(nint descriptor, nint fileInterface)
+        {
+            _previousDescriptor = _activeDescriptor;
+            _previousFileInterface = _activeFileInterface;
+            _previousResourceHandle = _activeResourceHandle;
+            _descriptor = (ClientFileDescriptor*)descriptor;
+            _originalFileMode = _descriptor->FileMode;
+            _originalFileInterface = _descriptor->FileInterface;
+            _borrowedFileInterface = (ClientFileInterface*)fileInterface;
+            _descriptor->FileMode = (ClientFileMode)MemoryFileModeValue;
+            _descriptor->FileInterface = _borrowedFileInterface;
+            SetActiveDescriptor(descriptor, fileInterface, (nint)_descriptor->ResourceHandle);
+        }
+
+        public void Dispose()
+        {
+            if (_descriptor->FileMode == (ClientFileMode)MemoryFileModeValue)
+            {
+                _descriptor->FileMode = _originalFileMode;
+            }
+
+            if (_descriptor->FileInterface == _borrowedFileInterface)
+            {
+                _descriptor->FileInterface = _originalFileInterface;
+            }
+
+            SetActiveDescriptor(_previousDescriptor, _previousFileInterface, _previousResourceHandle);
+        }
+
+        private static void SetActiveDescriptor(nint descriptor, nint fileInterface, nint resourceHandle)
+        {
+            _activeDescriptor = descriptor;
+            _activeFileInterface = fileInterface;
+            _activeResourceHandle = resourceHandle;
+        }
+    }
 
     [StructLayout(LayoutKind.Explicit, Size = 0x30)]
     private struct MemoryFileInterface
@@ -540,4 +562,3 @@ internal sealed unsafe class ObjectMemoryResourceService : IObjectMemoryResource
         [FieldOffset(0x28)] public ulong Position;
     }
 }
-

@@ -1,7 +1,10 @@
 using Dalamud.Plugin.Services;
+using Intoner.Logging;
+using Intoner.Objects.Assets;
 using Intoner.Objects.Preview.Assets;
 using Intoner.Objects.Preview.Rendering;
 using Microsoft.Extensions.Logging;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.InteropServices;
 
 namespace Intoner.Objects.Preview;
@@ -60,14 +63,9 @@ internal sealed class PreviewService : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        if (asset is null || !asset.IsValid)
+        if (!TryValidateAsset(asset, out string? error))
         {
-            return new PreviewRender.Result(null, false, "Select an asset to preview.");
-        }
-
-        if (!asset.HasModels)
-        {
-            return new PreviewRender.Result(null, false, "Preview unavailable for this asset.");
+            return new PreviewRender.Result(null, false, error);
         }
 
         var normalizedRequest = NormalizeRequest(request);
@@ -76,9 +74,9 @@ internal sealed class PreviewService : IDisposable
             return GetPreviewGeometry(asset, out _);
         }
 
-        var now = GetNowMilliseconds();
+        var now = Environment.TickCount64;
         string assetKey = asset.CacheKey;
-        var state = GetOrCreateState(asset);
+        var state = _stateStore.GetOrCreate(asset);
         PreviewRender.Result result;
         PreviewAssetState.GeometryEntry? geometryEntry = null;
 
@@ -112,7 +110,7 @@ internal sealed class PreviewService : IDisposable
             PreviewAssetService.MarkGeometryAccess(geometryEntry, PreviewRender.Mode.Thumbnail, now);
         }
 
-        MaybeTrimCaches(now);
+        _cacheManager.Trim(now);
         return result;
     }
 
@@ -123,29 +121,21 @@ internal sealed class PreviewService : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
 
         geometryEntry = null;
-        if (asset is null || !asset.IsValid)
+        if (!TryValidateAsset(asset, out string? error))
         {
-            return new PreviewRender.Result(null, false, "Select an asset to preview.");
+            return new PreviewRender.Result(null, false, error);
         }
 
-        if (!asset.HasModels)
-        {
-            return new PreviewRender.Result(null, false, "Preview unavailable for this asset.");
-        }
-
-        var now = GetNowMilliseconds();
+        var now = Environment.TickCount64;
         string assetKey = asset.CacheKey;
-        var state = GetOrCreateState(asset);
+        var state = _stateStore.GetOrCreate(asset);
 
         PreviewRender.Result result;
         lock (state.SyncRoot)
         {
             state.LastDetailAccessAtMs = now;
             geometryEntry = state.GeometryEntry;
-            if (!state.HasLoadedGeometry)
-            {
-                QueueLoad(assetKey, state, now);
-            }
+            QueueLoad(assetKey, state, now);
 
             result = new PreviewRender.Result(
                 null,
@@ -158,8 +148,20 @@ internal sealed class PreviewService : IDisposable
             PreviewAssetService.MarkGeometryAccess(geometryEntry, PreviewRender.Mode.Detail, now);
         }
 
-        MaybeTrimCaches(now);
+        _cacheManager.Trim(now);
         return result;
+    }
+
+    private static bool TryValidateAsset([NotNullWhen(true)] PreviewAsset? asset, out string? error)
+    {
+        if (asset is null || !asset.IsValid)
+        {
+            error = "Select an asset to preview.";
+            return false;
+        }
+
+        error = asset.HasModels ? null : "Preview unavailable for this asset.";
+        return error is null;
     }
 
     public PreviewRender.Result AcquirePreviewGeometry(
@@ -174,7 +176,7 @@ internal sealed class PreviewService : IDisposable
             return result;
         }
 
-        _assetService.BeginGeometryUse(geometryEntry, mode, GetNowMilliseconds());
+        _assetService.BeginGeometryUse(geometryEntry, mode, Environment.TickCount64);
         lease = new PreviewAssetState.GeometryLease(geometryEntry);
         return new PreviewRender.Result(null, false, null);
     }
@@ -213,12 +215,6 @@ internal sealed class PreviewService : IDisposable
         _stateStore.Clear();
     }
 
-    private PreviewCacheState.Asset GetOrCreateState(PreviewAsset asset)
-        => _stateStore.GetOrCreate(asset);
-
-    private bool TryGetState(string assetKey, out PreviewCacheState.Asset? state)
-        => _stateStore.TryGet(assetKey, out state);
-
     private static PreviewRender.Request NormalizeRequest(PreviewRender.Request request)
     {
         return new PreviewRender.Request(
@@ -230,9 +226,6 @@ internal sealed class PreviewService : IDisposable
             request.BackgroundStyle,
             request.Mode);
     }
-
-    private static long GetNowMilliseconds()
-        => Environment.TickCount64;
 
     private static void MarkThumbnailAccess(PreviewCacheState.Asset assetState, PreviewCacheState.Render renderState, long now)
     {
@@ -250,14 +243,17 @@ internal sealed class PreviewService : IDisposable
         if (!renderState.HasRequestedRequest || renderState.RequestedRequest != request)
         {
             renderState.Error = null;
+            renderState.RenderFailureCount = 0;
+            renderState.NextRenderRetryAtMs = 0;
         }
 
         renderState.RequestedRequest = request;
         renderState.HasRequestedRequest = true;
 
+        QueueLoad(assetKey, assetState, now);
+
         if (!assetState.HasLoadedGeometry)
         {
-            QueueLoad(assetKey, assetState, now);
             return;
         }
 
@@ -281,7 +277,8 @@ internal sealed class PreviewService : IDisposable
 
     private void QueueLoad(string assetKey, PreviewCacheState.Asset assetState, long now)
     {
-        if (assetState.LoadQueued || assetState.LoadRunning || assetState.HasLoadedGeometry || assetState.NextLoadRetryAtMs > now)
+        if (assetState.LoadQueued || assetState.LoadRunning || assetState.NextLoadRetryAtMs > now
+         || (assetState.GeometryEntry is { } entry && !_assetService.NeedsAssetRetry(entry, now)))
         {
             return;
         }
@@ -308,35 +305,31 @@ internal sealed class PreviewService : IDisposable
             return;
         }
 
-        QueueRenderWork(assetKey);
-    }
-
-    private void QueueRenderWork(string assetKey)
-    {
         _scheduler.EnqueueRender(assetKey);
     }
 
     private void ProcessLoadWork(string assetKey)
     {
-        if (!TryGetState(assetKey, out PreviewCacheState.Asset? state) || state is null)
+        if (!_stateStore.TryGet(assetKey, out PreviewCacheState.Asset? state) || state is null)
         {
             return;
         }
 
         lock (state.SyncRoot)
         {
-            if (state.HasLoadedGeometry || state.LoadRunning || !state.LoadQueued)
+            if (state.LoadRunning || !state.LoadQueued)
             {
                 return;
             }
 
             state.LoadQueued = false;
-            if (!PreviewCachePolicy.HasRecentLoadInterest(state, GetNowMilliseconds()))
+            if (!PreviewCachePolicy.HasRecentLoadInterest(state, Environment.TickCount64))
             {
                 return;
             }
 
             state.LoadRunning = true;
+            state.ThumbnailRenderState.RenderCancellation?.Cancel();
         }
 
         LoadGeometry(assetKey, state);
@@ -344,7 +337,7 @@ internal sealed class PreviewService : IDisposable
 
     private void ProcessRenderWork(string assetKey)
     {
-        if (!TryGetState(assetKey, out PreviewCacheState.Asset? state) || state is null)
+        if (!_stateStore.TryGet(assetKey, out PreviewCacheState.Asset? state) || state is null)
         {
             return;
         }
@@ -356,7 +349,7 @@ internal sealed class PreviewService : IDisposable
         {
             PreviewCacheState.Render renderState = state.ThumbnailRenderState;
             renderState.RenderQueued = false;
-            if (!PreviewCachePolicy.CanProcessRequestedRender(state, renderState, GetNowMilliseconds()))
+            if (!PreviewCachePolicy.CanProcessRequestedRender(state, renderState, Environment.TickCount64))
             {
                 return;
             }
@@ -364,7 +357,6 @@ internal sealed class PreviewService : IDisposable
             geometryEntry = state.GeometryEntry;
             if (geometryEntry is null)
             {
-                state.HasLoadedGeometry = false;
                 return;
             }
 
@@ -394,15 +386,15 @@ internal sealed class PreviewService : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(
-                ex,
+            DiagnosticLog.Write(_logger, LogLevel.Warning, ex,
                 "Failed to load preview geometry for {Source} {Path}",
                 state.PreviewAsset.AssetKey.Source,
                 state.PreviewAsset.DisplayPath);
             error = "Failed to load preview geometry.";
+            geometryEntry = null;
         }
 
-        long now = GetNowMilliseconds();
+        long now = Environment.TickCount64;
         var shouldQueueThumbnailRender = false;
         PreviewAssetState.GeometryEntry? attachedGeometryEntry = geometryEntry;
         long lastThumbnailAccessAtMs = 0;
@@ -410,10 +402,26 @@ internal sealed class PreviewService : IDisposable
         bool loadSucceeded = geometryEntry is not null;
         lock (state.SyncRoot)
         {
+            state.LoadRunning = false;
+
+            if (_disposed)
+            {
+                return;
+            }
+
+            if (!loadSucceeded && state.GeometryEntry is { } retainedGeometry)
+            {
+                geometryEntry = retainedGeometry;
+                attachedGeometryEntry = retainedGeometry;
+            }
+
+            PreviewCacheState.Render renderState = state.ThumbnailRenderState;
+            renderState.PendingTexture = null;
+            renderState.NextAssetRetryAtMs = now;
+            renderState.RenderCancellation?.Cancel();
+
             state.GeometryEntry = geometryEntry;
             state.Error = error;
-            state.HasLoadedGeometry = loadSucceeded;
-            state.LoadRunning = false;
             if (loadSucceeded)
             {
                 state.LoadFailureCount = 0;
@@ -428,10 +436,8 @@ internal sealed class PreviewService : IDisposable
             lastThumbnailAccessAtMs = state.LastThumbnailAccessAtMs;
             lastDetailAccessAtMs = state.LastDetailAccessAtMs;
 
-            if (state.GeometryEntry is not null)
-            {
-                shouldQueueThumbnailRender = TryMarkPostLoadThumbnailRenderQueued(state, now);
-            }
+            shouldQueueThumbnailRender = PreviewCachePolicy.CanProcessRequestedRender(state, renderState, now)
+                && TryMarkRenderQueued(renderState);
         }
 
         if (attachedGeometryEntry is not null)
@@ -441,7 +447,7 @@ internal sealed class PreviewService : IDisposable
 
         if (shouldQueueThumbnailRender)
         {
-            QueueRenderWork(assetKey);
+            _scheduler.EnqueueRender(assetKey);
         }
     }
 
@@ -455,12 +461,16 @@ internal sealed class PreviewService : IDisposable
         PreviewCacheState.PendingThumbnailTexture? pendingTexture = null;
         string? error = null;
         var wasCanceled = false;
+        PreviewAssetState.GeometryLease lease = default;
 
         try
         {
-            _assetService.BeginGeometryUse(geometryEntry, PreviewRender.Mode.Thumbnail, GetNowMilliseconds());
+            long startedAt = Environment.TickCount64;
+            _assetService.BeginGeometryUse(geometryEntry, PreviewRender.Mode.Thumbnail, startedAt);
+            lease = new PreviewAssetState.GeometryLease(geometryEntry);
+            ModelPreviewGeometryReader.PreviewGeometry geometry = _assetService.CaptureRenderGeometry(geometryEntry, out long nextAssetRetryAtMs);
             byte[] pixels = ThumbnailRenderer.Render(
-                geometryEntry.Geometry,
+                geometry,
                 state.PreviewAsset.UntexturedDiffuseColor,
                 request.ToCameraState(),
                 request.Width,
@@ -470,9 +480,8 @@ internal sealed class PreviewService : IDisposable
             pendingTexture = new PreviewCacheState.PendingThumbnailTexture(
                 request,
                 pixels,
-                request.Width,
-                request.Height,
-                state.PreviewAsset.CreateTextureName("Objects.Preview.Thumbnail"));
+                state.PreviewAsset.CreateTextureName("Objects.Preview.Thumbnail"),
+                nextAssetRetryAtMs);
         }
         catch (OperationCanceledException)
         {
@@ -480,8 +489,7 @@ internal sealed class PreviewService : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(
-                ex,
+            DiagnosticLog.Write(_logger, LogLevel.Warning, ex,
                 "Failed to render thumbnail preview for {Source} {Path}",
                 state.PreviewAsset.AssetKey.Source,
                 state.PreviewAsset.DisplayPath);
@@ -489,10 +497,10 @@ internal sealed class PreviewService : IDisposable
         }
         finally
         {
-            PreviewAssetService.EndGeometryUse(geometryEntry);
+            lease.Dispose();
         }
 
-        var now = GetNowMilliseconds();
+        var now = Environment.TickCount64;
         bool shouldRequeue = false;
         lock (state.SyncRoot)
         {
@@ -502,25 +510,23 @@ internal sealed class PreviewService : IDisposable
             renderState.RenderCancellation?.Dispose();
             renderState.RenderCancellation = null;
 
-            if (!wasCanceled && renderState.HasRequestedRequest && renderState.RequestedRequest == request)
+            if (_disposed)
             {
-                renderState.LastRenderedRequest = request;
-                renderState.HasRenderedRequest = true;
+                return;
+            }
+
+            if (!wasCanceled && !cancellationToken.IsCancellationRequested && ReferenceEquals(state.GeometryEntry, geometryEntry)
+             && renderState.HasRequestedRequest && renderState.RequestedRequest == request)
+            {
                 if (pendingTexture is not null
                  && !PreviewCachePolicy.IsThumbnailWorkExpired(renderState.LastAccessAtMs, now))
                 {
                     renderState.PendingTexture = pendingTexture;
-                    renderState.LastRenderSucceeded = true;
-                    renderState.RenderFailureCount = 0;
-                    renderState.NextRenderRetryAtMs = 0;
                     renderState.Error = null;
                 }
-                else if (renderState.Texture is null)
+                else
                 {
-                    renderState.LastRenderSucceeded = false;
-                    renderState.RenderFailureCount++;
-                    renderState.NextRenderRetryAtMs = now + PreviewCachePolicy.GetRenderRetryDelayMilliseconds(renderState.RenderFailureCount);
-                    renderState.Error = error ?? "Failed to render preview.";
+                    PreviewCachePolicy.RecordRenderFailure(renderState, request, now, error ?? "Failed to render preview.");
                 }
             }
 
@@ -533,17 +539,7 @@ internal sealed class PreviewService : IDisposable
 
         if (shouldRequeue)
         {
-            QueueRenderWork(assetKey);
+            _scheduler.EnqueueRender(assetKey);
         }
     }
-
-    private static bool TryMarkPostLoadThumbnailRenderQueued(PreviewCacheState.Asset state, long now)
-    {
-        PreviewCacheState.Render renderState = state.ThumbnailRenderState;
-        return PreviewCachePolicy.CanProcessRequestedRender(state, renderState, now)
-            && TryMarkRenderQueued(renderState);
-    }
-
-    private void MaybeTrimCaches(long now)
-        => _cacheManager.Trim(now);
 }

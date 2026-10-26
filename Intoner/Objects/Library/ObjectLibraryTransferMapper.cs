@@ -211,7 +211,7 @@ internal static class ObjectLibraryTransferMapper
         }
 
         if (group.CapturedIn is null
-         || !ObjectApiMapper.ToCreationContext(group.CapturedIn).Scope.IsValid
+         || !ObjectApiMapper.ToCreationContext(group.CapturedIn).IsAssigned
          || group.EntryIds.Count == 0
          || group.EntryIds.Distinct().Count() != group.EntryIds.Count)
         {

@@ -2,6 +2,7 @@ using Dalamud.Game.ClientState.Objects.SubKinds;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine;
+using Intoner.Objects.Interop;
 using Intoner.Objects.Utils;
 using Intoner.Scene;
 using Intoner.Services.Configuration;

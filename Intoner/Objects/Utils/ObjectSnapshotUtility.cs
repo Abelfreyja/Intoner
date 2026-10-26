@@ -1,5 +1,5 @@
-using Intoner.Objects.Assets;
 using Intoner.Objects.Models;
+using Intoner.Objects.Resources;
 using Intoner.Scene;
 
 namespace Intoner.Objects.Utils;
@@ -8,12 +8,27 @@ internal static class ObjectSnapshotUtility
 {
     /// <summary> copies snapshots with fresh ids, remapping internal attachments and clearing external attachments </summary>
     public static bool TryCopyWithNewIds(IReadOnlyList<ObjectSnapshot> snapshots, out List<ObjectSnapshot> copies)
+        => TryCopyWithNewIds(snapshots, [], out copies, out _);
+
+    /// <summary> copies objects and groups together, detaching membership and attachments outside the copied set </summary>
+    public static bool TryCopyWithNewIds(
+        IReadOnlyList<ObjectSnapshot> snapshots,
+        IReadOnlyList<SceneGroupSnapshot> groups,
+        out List<ObjectSnapshot> copies,
+        out List<SceneGroupSnapshot> groupCopies)
     {
         copies = [];
+        groupCopies = [];
+        Dictionary<Guid, Guid> groupIds = new(groups.Count);
+        foreach (Guid id in groups.Select(static group => group.Id))
+        {
+            if (id == Guid.Empty || !groupIds.TryAdd(id, Guid.NewGuid()))
+                return false;
+        }
         Dictionary<Guid, Guid> copiedIds = new(snapshots.Count);
         foreach (Guid id in snapshots.Select(static snapshot => snapshot.Id))
         {
-            if (id == Guid.Empty || !copiedIds.TryAdd(id, Guid.NewGuid()))
+            if (id == Guid.Empty || groupIds.ContainsKey(id) || !copiedIds.TryAdd(id, Guid.NewGuid()))
             {
                 return false;
             }
@@ -23,31 +38,27 @@ internal static class ObjectSnapshotUtility
         foreach (ObjectSnapshot snapshot in snapshots)
         {
             ObjectData model = snapshot.Model;
-            if (model is FurnitureModel furniture)
+
+            if (model is FurnitureModel { AttachmentParentId: { } parentId } furniture)
             {
                 model = furniture with
                 {
-                    AttachmentParentId = furniture.AttachmentParentId is { } parentId
-                        && copiedIds.TryGetValue(parentId, out Guid copiedParentId)
-                            ? copiedParentId
-                            : null,
+                    AttachmentParentId = copiedIds.TryGetValue(parentId, out Guid copiedParentId)
+                        ? copiedParentId
+                        : null,
                 };
             }
 
-            copies.Add(snapshot with { Id = copiedIds[snapshot.Id], Model = model });
+            copies.Add(snapshot with
+            {
+                Id = copiedIds[snapshot.Id], Model = model,
+                GroupId = snapshot.GroupId is Guid groupId && groupIds.TryGetValue(groupId, out Guid copiedGroupId) ? copiedGroupId : null,
+            });
         }
+
+        groupCopies = groups.Select(group => group with { Id = groupIds[group.Id] }).ToList();
 
         return true;
-    }
-
-    public static bool MatchesLocation(ObjectSnapshot snapshot, SceneLocationScope currentLocation)
-    {
-        if (!snapshot.CreatedIn.IsValid)
-        {
-            return true;
-        }
-
-        return snapshot.CreatedIn.Scope == currentLocation;
     }
 
     public static bool IsCollectionOnlyChange(ObjectSnapshot previousSnapshot, ObjectSnapshot nextSnapshot)
@@ -61,38 +72,15 @@ internal static class ObjectSnapshotUtility
             return snapshot;
         }
 
-        var nextSnapshot = snapshot;
-        if (patch.Name is not null)
+        return snapshot with
         {
-            nextSnapshot = nextSnapshot with { Name = patch.Name };
-        }
-
-        if (patch.FolderPath is not null)
-        {
-            nextSnapshot = nextSnapshot with { FolderPath = patch.FolderPath };
-        }
-
-        if (patch.Locked.HasValue)
-        {
-            nextSnapshot = nextSnapshot with { Locked = patch.Locked.Value };
-        }
-
-        if (patch.Visible.HasValue)
-        {
-            nextSnapshot = nextSnapshot with { Visible = patch.Visible.Value };
-        }
-
-        if (patch.Transform is not null)
-        {
-            nextSnapshot = nextSnapshot with { Transform = patch.Transform };
-        }
-
-        if (patch.Model is not null)
-        {
-            nextSnapshot = nextSnapshot with { Model = ApplyModelPatch(nextSnapshot.Model, patch.Model) };
-        }
-
-        return nextSnapshot;
+            Name = patch.Name ?? snapshot.Name,
+            FolderPath = patch.FolderPath ?? snapshot.FolderPath,
+            Locked = patch.Locked ?? snapshot.Locked,
+            Visible = patch.Visible ?? snapshot.Visible,
+            Transform = patch.Transform ?? snapshot.Transform,
+            Model = patch.Model is null ? snapshot.Model : ApplyModelPatch(snapshot.Model, patch.Model),
+        };
     }
 
     public static string GetAssetName(ObjectSnapshot snapshot)
@@ -109,11 +97,43 @@ internal static class ObjectSnapshotUtility
         => GetRootResourcePath(snapshot.Model);
 
     public static string GetRootResourcePath(ObjectData model)
+        => ObjectResolvedPath.FromGamePath(GetDeclaredRootResourcePath(model)).Path;
+
+    public static bool TryNormalizeRootResourcePath(ObjectData model, out ObjectData normalizedModel)
+    {
+        string path = GetDeclaredRootResourcePath(model);
+        string normalizedPath = ObjectResolvedPath.FromGamePath(path).Path;
+
+        if (!string.IsNullOrWhiteSpace(path) && normalizedPath.Length == 0)
+        {
+            normalizedModel = null!;
+            return false;
+        }
+
+        if (string.Equals(path, normalizedPath, StringComparison.Ordinal))
+        {
+            normalizedModel = model;
+            return true;
+        }
+
+        normalizedModel = model switch
+        {
+            BgObjectModel bgObject => bgObject with { ModelPath = normalizedPath },
+            FurnitureModel furniture => furniture with { SharedGroupPath = normalizedPath },
+            VfxModel vfx => vfx with { VfxPath = normalizedPath },
+            LightModel light => light with { ProjectionTexturePath = normalizedPath },
+            _ => model,
+        };
+        return true;
+    }
+
+    private static string GetDeclaredRootResourcePath(ObjectData model)
         => model switch
         {
-            BgObjectModel bgObjectModel => GameAssetPathRules.NormalizeGamePath(bgObjectModel.ModelPath),
-            FurnitureModel furnitureModel => GameAssetPathRules.NormalizeGamePath(furnitureModel.SharedGroupPath),
-            VfxModel vfxModel => GameAssetPathRules.NormalizeGamePath(vfxModel.VfxPath),
+            BgObjectModel bgObjectModel => bgObjectModel.ModelPath,
+            FurnitureModel furnitureModel => furnitureModel.SharedGroupPath,
+            VfxModel vfxModel => vfxModel.VfxPath,
+            LightModel lightModel => lightModel.ProjectionTexturePath,
             _ => string.Empty,
         };
 
@@ -131,6 +151,10 @@ internal static class ObjectSnapshotUtility
         => model with
         {
             ModelPath = patch.ModelPath ?? model.ModelPath,
+            CameraCollision = patch.CameraCollision ?? model.CameraCollision,
+            ColliderDefinition = patch.ClearColliderDefinition ? null : patch.ColliderDefinition
+                ?? (patch.ModelPath is not null && !string.Equals(
+                    patch.ModelPath, model.ModelPath, StringComparison.OrdinalIgnoreCase) ? null : model.ColliderDefinition),
             Transparency = patch.Transparency ?? model.Transparency,
             DyeColor = patch.DyeColor ?? model.DyeColor,
             IsCoveredFromRain = patch.IsCoveredFromRain ?? model.IsCoveredFromRain,
@@ -140,6 +164,7 @@ internal static class ObjectSnapshotUtility
         => model with
         {
             SharedGroupPath = patch.SharedGroupPath ?? model.SharedGroupPath,
+            CameraCollision = patch.CameraCollision ?? model.CameraCollision,
             Color = patch.Color is not null
                 ? ApplyFurnitureColorPatch(model.Color, patch.Color)
                 : model.Color,
@@ -188,6 +213,7 @@ internal static class ObjectSnapshotUtility
             Shadow = patch.Shadow is not null
                 ? ApplyLightShadowPatch(model.Shadow, patch.Shadow)
                 : model.Shadow,
+            ProjectionTexturePath = patch.ProjectionTexturePath ?? model.ProjectionTexturePath,
         };
 
     private static LightFlags ApplyLightFlagsPatch(LightFlags model, LightFlagsPatch patch)

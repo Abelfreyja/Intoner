@@ -1,5 +1,5 @@
-using Intoner.Objects.Assets;
 using Intoner.Objects.Preview;
+using Intoner.Objects.Resources;
 using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 
@@ -9,7 +9,7 @@ internal static class CatalogPreviewAssetFactory
 {
     public static PreviewAsset Create(ObjectCatalogEntry entry)
     {
-        string normalizedPath = GameAssetPathRules.NormalizeGamePath(entry.PlacementPath);
+        string normalizedPath = ObjectResolvedPath.FromGamePath(entry.PlacementPath).Path;
         return new PreviewAsset(
             new PreviewAsset.Key(GetSource(entry.Kind), normalizedPath),
             entry.DisplayPath,
@@ -24,7 +24,8 @@ internal static class CatalogPreviewAssetFactory
         [NotNullWhen(true)] out PreviewAsset? asset)
     {
         asset = null;
-        if (!GameAssetPathRules.TryNormalizeGamePath(path, out string normalizedPath))
+        string normalizedPath = ObjectResolvedPath.FromGamePath(path).Path;
+        if (normalizedPath.Length == 0)
         {
             return false;
         }

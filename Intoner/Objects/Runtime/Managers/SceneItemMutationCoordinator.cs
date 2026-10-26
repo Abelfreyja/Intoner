@@ -1,3 +1,4 @@
+using Intoner.Logging;
 using Microsoft.Extensions.Logging;
 
 namespace Intoner.Scene;
@@ -61,8 +62,14 @@ internal sealed class SceneItemMutationCoordinator
     public SceneMutationStatus ApplyChanges(
         IReadOnlyList<SceneItemSnapshotChange> changes,
         Func<bool> commit)
+        => ApplyChangesCore(changes, commit, stored: false);
+
+    public SceneMutationStatus ApplyStoredChanges(IReadOnlyList<SceneItemSnapshotChange> changes, Func<bool> commit)
+        => ApplyChangesCore(changes, commit, stored: true);
+
+    private SceneMutationStatus ApplyChangesCore(IReadOnlyList<SceneItemSnapshotChange> changes, Func<bool> commit, bool stored)
     {
-        if (!TryBuildChangeBatches(changes, out IReadOnlyList<DomainChangeBatch> batches))
+        if (!TryBuildChangeBatches(changes, stored, out IReadOnlyList<DomainChangeBatch> batches))
         {
             return SceneMutationStatus.Rejected;
         }
@@ -71,7 +78,7 @@ internal sealed class SceneItemMutationCoordinator
         SceneMutationStatus result = SceneMutationStatus.Applied;
         foreach (DomainChangeBatch batch in batches)
         {
-            SceneMutationStatus status = ApplyBatch(batch);
+            SceneMutationStatus status = ApplyBatch(batch, stored);
             if (status.IsApplied())
             {
                 applied.Add(batch);
@@ -84,7 +91,7 @@ internal sealed class SceneItemMutationCoordinator
                 applied.Add(batch);
             }
 
-            bool batchRecovered = Rollback(applied);
+            bool batchRecovered = Rollback(applied, stored);
             return status == SceneMutationStatus.RecoveryRequired || !batchRecovered
                 ? SceneMutationStatus.RecoveryRequired
                 : SceneMutationStatus.Rejected;
@@ -96,7 +103,7 @@ internal sealed class SceneItemMutationCoordinator
             return result;
         }
 
-        bool commitRecovered = Rollback(applied);
+        bool commitRecovered = Rollback(applied, stored);
         return commitStatus == SceneMutationStatus.RecoveryRequired || !commitRecovered
             ? SceneMutationStatus.RecoveryRequired
             : SceneMutationStatus.Rejected;
@@ -115,17 +122,16 @@ internal sealed class SceneItemMutationCoordinator
         if (!TryBuildInputBatches(
                 snapshots,
                 out IReadOnlyList<DomainInputBatch> batches,
-                out IReadOnlyDictionary<Guid, SceneItemOwnership> placedItems))
+                out Dictionary<Guid, SceneItemOwnership> assignedItems))
         {
             return SceneMutationStatus.Rejected;
         }
 
         var ordered = new SceneItemSnapshot[snapshots.Count];
-        var assignedIds = placedItems.Keys.ToHashSet();
         foreach (DomainInputBatch batch in batches)
         {
             if (!TryCreateDuplicates(batch, out IReadOnlyList<SceneItemSnapshot> batchDuplicates)
-                || !TryAssignDuplicates(batch, batchDuplicates, assignedIds, ordered))
+                || !TryAssignDuplicates(batch, batchDuplicates, assignedItems, ordered))
             {
                 return SceneMutationStatus.Rejected;
             }
@@ -146,15 +152,15 @@ internal sealed class SceneItemMutationCoordinator
         return status;
     }
 
-    private SceneMutationStatus ApplyBatch(DomainChangeBatch batch)
+    private SceneMutationStatus ApplyBatch(DomainChangeBatch batch, bool stored)
     {
         try
         {
-            return batch.Domain.ApplyChanges(batch.Changes);
+            return stored ? batch.Domain.ApplyStoredChanges(batch.Changes) : batch.Domain.ApplyChanges(batch.Changes);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "scene item change failed in domain {DomainType}", batch.Domain.GetType().Name);
+            DiagnosticLog.Write(_logger, LogLevel.Error, ex, "scene item change failed in domain {DomainType}", batch.Domain.GetType().Name);
             return SceneMutationStatus.RecoveryRequired;
         }
     }
@@ -169,12 +175,12 @@ internal sealed class SceneItemMutationCoordinator
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "scene item transaction commit failed");
+            DiagnosticLog.Write(() => _logger.LogError(ex, "scene item transaction commit failed"));
             return SceneMutationStatus.RecoveryRequired;
         }
     }
 
-    private bool Rollback(IReadOnlyList<DomainChangeBatch> applied)
+    private bool Rollback(IReadOnlyList<DomainChangeBatch> applied, bool stored)
     {
         bool recovered = true;
         for (int index = applied.Count - 1; index >= 0; --index)
@@ -183,20 +189,19 @@ internal sealed class SceneItemMutationCoordinator
             SceneItemSnapshotChange[] reverseChanges = Reverse(batch.Changes);
             try
             {
-                if (batch.Domain.ApplyChanges(reverseChanges).IsFullyApplied())
+                SceneMutationStatus status = stored ? batch.Domain.ApplyStoredChanges(reverseChanges) : batch.Domain.ApplyChanges(reverseChanges);
+
+                if (!status.IsFullyApplied())
                 {
-                    continue;
+                    DiagnosticLog.Write(_logger, LogLevel.Error, null, "could not roll back scene items in domain {DomainType}", batch.Domain.GetType().Name);
+                    recovered = false;
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "scene item rollback failed in domain {DomainType}", batch.Domain.GetType().Name);
+                DiagnosticLog.Write(_logger, LogLevel.Error, ex, "scene item rollback failed in domain {DomainType}", batch.Domain.GetType().Name);
                 recovered = false;
-                continue;
             }
-
-            _logger.LogError("could not roll back scene items in domain {DomainType}", batch.Domain.GetType().Name);
-            recovered = false;
         }
 
         return recovered;
@@ -225,15 +230,11 @@ internal sealed class SceneItemMutationCoordinator
     private bool TryBuildInputBatches(
         IReadOnlyList<SceneItemSnapshot> snapshots,
         out IReadOnlyList<DomainInputBatch> batches,
-        out IReadOnlyDictionary<Guid, SceneItemOwnership> placedItems)
+        out Dictionary<Guid, SceneItemOwnership> assignedItems)
     {
         batches = [];
-        if (!TryResolveInputs(
-                snapshots,
-                out SceneItemOwnership[] currentItems,
-                out Dictionary<Guid, SceneItemOwnership> currentById))
+        if (!TryResolveInputs(snapshots, out SceneItemOwnership[] currentItems, out assignedItems))
         {
-            placedItems = currentById;
             return false;
         }
 
@@ -256,16 +257,20 @@ internal sealed class SceneItemMutationCoordinator
         }
 
         batches = result;
-        placedItems = currentById;
         return true;
     }
 
     private bool TryBuildChangeBatches(
         IReadOnlyList<SceneItemSnapshotChange> changes,
+        bool stored,
         out IReadOnlyList<DomainChangeBatch> batches)
     {
         batches = [];
-        if (!_domains.TryCapturePlacedItems(out Dictionary<Guid, SceneItemOwnership> placedItems))
+        bool captured = stored
+            ? _domains.TryCaptureStoredItems(out Dictionary<Guid, SceneItemOwnership> placedItems)
+            : _domains.TryCapturePlacedItems(out placedItems);
+
+        if (!captured)
         {
             return false;
         }
@@ -389,7 +394,7 @@ internal sealed class SceneItemMutationCoordinator
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "scene item duplicate preparation failed in domain {DomainType}", batch.Domain.GetType().Name);
+            DiagnosticLog.Write(_logger, LogLevel.Error, ex, "scene item duplicate preparation failed in domain {DomainType}", batch.Domain.GetType().Name);
             duplicates = [];
             return false;
         }
@@ -398,7 +403,7 @@ internal sealed class SceneItemMutationCoordinator
     private static bool TryAssignDuplicates(
         DomainInputBatch batch,
         IReadOnlyList<SceneItemSnapshot> duplicates,
-        HashSet<Guid> assignedIds,
+        Dictionary<Guid, SceneItemOwnership> assignedItems,
         SceneItemSnapshot[] ordered)
     {
         if (duplicates.Count != batch.Snapshots.Count)
@@ -411,7 +416,7 @@ internal sealed class SceneItemMutationCoordinator
             SceneItemSnapshot duplicate = duplicates[index];
             if (duplicate.Id == Guid.Empty
                 || !batch.Domain.CanHandle(duplicate)
-                || !assignedIds.Add(duplicate.Id))
+                || !assignedItems.TryAdd(duplicate.Id, new SceneItemOwnership(batch.Domain, duplicate)))
             {
                 return false;
             }

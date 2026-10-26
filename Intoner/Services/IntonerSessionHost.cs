@@ -1,8 +1,8 @@
-using Dalamud.Plugin.Services;
 using Intoner.Objects.Filesystem.Layouts;
+using Intoner.Objects.Interop;
 using Intoner.Objects.Interop.Ipc;
+using Intoner.Objects.Runtime;
 using Intoner.Objects.UI;
-using Intoner.Services.Interop;
 using Intoner.UI.Windows;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -12,55 +12,97 @@ namespace Intoner.Services;
 internal sealed class IntonerSessionHost : IAsyncDisposable
 {
     private readonly AsyncServiceScope _scope;
-    private readonly ILogger<IntonerSessionHost> _logger;
-    private readonly IIntonerMediator _mediator;
-    private readonly IntonerWindowService _windowService;
+    private readonly IntonerSession _session;
     private int _disposed;
 
-    private IntonerSessionHost(
-        AsyncServiceScope scope,
-        ILogger<IntonerSessionHost> logger,
-        IIntonerMediator mediator,
-        IntonerWindowService windowService)
+    private IntonerSessionHost(AsyncServiceScope scope, IntonerSession session)
     {
         _scope = scope;
-        _logger = logger;
-        _mediator = mediator;
-        _windowService = windowService;
+        _session = session;
     }
 
     public static async Task<IntonerSessionHost> CreateAsync(IServiceProvider provider)
     {
         AsyncServiceScope scope = provider.CreateAsyncScope();
-        IntonerSessionHost? host = null;
 
         try
         {
             IServiceProvider scopedProvider = scope.ServiceProvider;
-            _ = scopedProvider.GetRequiredService<IObjectLayoutRecoveryService>().TryPrepareSession();
-            IntonerWindowService windowService = scopedProvider.GetRequiredService<IntonerWindowService>();
-            EditorWindow editorWindow = scopedProvider.GetRequiredService<EditorWindow>();
-            EditorBackgroundWindow editorBackgroundWindow = scopedProvider.GetRequiredService<EditorBackgroundWindow>();
-            ILogger<IntonerSessionHost> logger = scopedProvider.GetRequiredService<ILogger<IntonerSessionHost>>();
-            IntonerSignatures.Verify(scopedProvider.GetRequiredService<ISigScanner>(), logger);
-            host = new IntonerSessionHost(
-                scope,
-                logger,
-                scopedProvider.GetRequiredService<IIntonerMediator>(),
-                windowService);
-
-            windowService.AddWindow(editorWindow);
-            windowService.AddWindow(editorBackgroundWindow);
-            _ = scopedProvider.GetRequiredService<IntonerIpcHost>();
-            windowService.Start();
-            host._logger.LogInformation("Intoner session services initialized");
-            return host;
+            await Task.Run(() =>
+            {
+                _ = scopedProvider.GetRequiredService<IObjectLayoutRecoveryService>().TryPrepareSession();
+                _ = scopedProvider.GetRequiredService<FurnitureEmoteGuard>();
+                _ = scopedProvider.GetRequiredService<CameraCollisionService>();
+            }).ConfigureAwait(false);
+            await scopedProvider.GetRequiredService<FurnitureEmoteGuard>().StartAsync().ConfigureAwait(false);
+            await scopedProvider.GetRequiredService<CameraCollisionService>().StartAsync().ConfigureAwait(false);
+            IntonerSession session = await Task.Run(() => scopedProvider.GetRequiredService<IntonerSession>()).ConfigureAwait(false);
+            session.Start();
+            return new IntonerSessionHost(scope, session);
         }
         catch
         {
-            await (host?.DisposeAsync() ?? scope.DisposeAsync()).ConfigureAwait(false);
+            await scope.DisposeAsync().ConfigureAwait(false);
             throw;
         }
+    }
+
+    public void RequestMainWindowToggle()
+        => _session.RequestMainWindowToggle();
+
+    public void RequestConfigWindow()
+        => _session.RequestConfigWindow();
+
+    public ValueTask DisposeAsync()
+        => Interlocked.Exchange(ref _disposed, 1) == 0 ? _scope.DisposeAsync() : ValueTask.CompletedTask;
+}
+
+internal sealed class IntonerSession : IDisposable
+{
+    private readonly ILogger<IntonerSession> _logger;
+    private readonly IIntonerMediator        _mediator;
+    private readonly IntonerWindowService    _windows;
+    private readonly EditorWindow            _editor;
+    private readonly EditorBackgroundWindow  _background;
+    private readonly IntonerIpcHost          _ipc;
+    private readonly ObjectSceneHost         _sceneHost;
+    private bool _started;
+    private bool _disposed;
+
+    public IntonerSession(
+        ILogger<IntonerSession> logger,
+        IIntonerMediator mediator,
+        IntonerWindowService windows,
+        EditorWindow editor,
+        EditorBackgroundWindow background,
+        IntonerIpcHost ipc,
+        ObjectSceneHost sceneHost)
+    {
+        _logger     = logger;
+        _mediator   = mediator;
+        _windows    = windows;
+        _editor     = editor;
+        _background = background;
+        _ipc        = ipc;
+        _sceneHost  = sceneHost;
+    }
+
+    public void Start()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        if (_started)
+        {
+            return;
+        }
+
+        _sceneHost.Start();
+        _windows.AddWindow(_editor);
+        _windows.AddWindow(_background);
+        _ipc.Start();
+        _windows.Start();
+        _started    = true;
+        _logger.LogInformation("Intoner session services initialized");
     }
 
     public void RequestMainWindowToggle()
@@ -69,17 +111,15 @@ internal sealed class IntonerSessionHost : IAsyncDisposable
     public void RequestConfigWindow()
         => _mediator.Publish(IntonerMainWindowRequest.OpenSettings);
 
-    public async ValueTask DisposeAsync()
+    public void Dispose()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        if (_disposed)
         {
             return;
         }
 
-        await using (_scope.ConfigureAwait(false))
-        {
-            _logger.LogInformation("Intoner session services shutting down");
-            _windowService.Stop();
-        }
+        _disposed   = true;
+        _windows.Stop();
+        _logger.LogInformation("Intoner session services shutting down");
     }
 }

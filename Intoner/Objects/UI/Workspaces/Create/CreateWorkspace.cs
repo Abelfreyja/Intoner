@@ -7,6 +7,7 @@ using Intoner.Objects.Library;
 using Intoner.Objects.Models;
 using Intoner.Objects.Runtime;
 using Intoner.Objects.UI.Components;
+using Intoner.Objects.Utils;
 using System.Numerics;
 
 namespace Intoner.Objects.UI;
@@ -14,6 +15,8 @@ namespace Intoner.Objects.UI;
 internal sealed class CreateWorkspace
 {
     private readonly IObjectSceneView _sceneView;
+    private readonly IObjectLayoutManager _layoutManager;
+    private readonly LayoutActions _layoutActions;
     private readonly IObjectHousingModePolicy _housingModePolicy;
     private readonly IObjectLibrary _objectLibrary;
     private readonly EditorOverlayLayer _editorOverlayLayer;
@@ -26,6 +29,7 @@ internal sealed class CreateWorkspace
     private readonly ObjectCreateActions _createActions;
     private readonly ObjectCatalogBrowser _catalogBrowser;
     private readonly ObjectLibraryBrowser _libraryBrowser;
+    private (long Revision, Guid? LayoutId, IReadOnlyList<string> Folders)? _placementFolders;
     private const string PreviewControlsText = "drag to rotate | scroll to zoom | double click to reset";
 
     public CreateWorkspace(
@@ -41,9 +45,13 @@ internal sealed class CreateWorkspace
         ObjectPreviewRenderer preview,
         ObjectCreateActions createActions,
         ObjectCatalogBrowser catalogBrowser,
-        ObjectLibraryBrowser libraryBrowser)
+        ObjectLibraryBrowser libraryBrowser,
+        IObjectLayoutManager layoutManager,
+        LayoutActions layoutActions)
     {
         _sceneView             = sceneView;
+        _layoutManager         = layoutManager;
+        _layoutActions         = layoutActions;
         _housingModePolicy     = housingModePolicy;
         _objectLibrary         = objectLibrary;
         _editorOverlayLayer    = editorOverlayLayer;
@@ -180,15 +188,14 @@ internal sealed class CreateWorkspace
         return ImGui.GetStyle().ItemSpacing.Y;
     }
 
-    private static void DrawCreateActionCard(
+    private void DrawCreateActionCard(
         string id,
         string label,
         string description,
-        IReadOnlyList<string> placedFolders,
+        Guid? selectedLayoutId,
         string selectedFolderPath,
         bool enabled,
-        Action onClick,
-        Action<string> onFolderChanged)
+        Action onClick)
     {
         EditorCard.DrawPanelCard(
             $"create-action-{id}",
@@ -204,9 +211,11 @@ internal sealed class CreateWorkspace
                 var folderButtonWidth = buttonHeight;
                 var buttonWidth = EditorLayout.Positive(availableWidth - folderButtonWidth - buttonGap);
                 var folderPopupId = $"##create-action-folder-popup:{id}";
-                var placementLabel = BuildCreatePlacementLabel(label, selectedFolderPath);
-                var folderButtonTooltip = BuildCreatePlacementFolderTooltip(selectedFolderPath, placedFolders.Count > 0);
-                var folderSelected = !string.IsNullOrEmpty(selectedFolderPath);
+                string layoutName = selectedLayoutId.HasValue && _layoutManager.TryGetLayout(selectedLayoutId.Value, out ObjectLayoutSnapshot layout)
+                    ? layout.Name : ObjectDestinationMenu.UnassignedLabel;
+                string destination = selectedFolderPath.Length > 0 ? $"{layoutName} / {selectedFolderPath}" : layoutName;
+                string placementLabel = $"{label} ({destination})";
+                bool folderSelected = selectedLayoutId.HasValue || selectedFolderPath.Length > 0;
 
                 if (EditorButton.DrawPrimary(
                         $"createAction:{id}:place",
@@ -229,22 +238,22 @@ internal sealed class CreateWorkspace
                 }
 
                 ImGui.SameLine(0f, buttonGap);
-                FontAwesomeIcon folderIcon = folderSelected ? FontAwesomeIcon.FolderOpen : FontAwesomeIcon.Folder;
+                FontAwesomeIcon folderIcon = selectedFolderPath.Length > 0 ? FontAwesomeIcon.FolderOpen : FontAwesomeIcon.LayerGroup;
                 bool folderButtonClicked = EditorIconButton.DrawToggle(
                         $"createAction:{id}:folder",
                         folderIcon,
                         new Vector2(folderButtonWidth, buttonHeight),
                         folderSelected,
                         ThemeColors.AccentPrimary,
-                        ThemeColors.AccentOrange,
-                        enabled: enabled);
+                        ThemeColors.AccentOrange);
                 bool folderButtonHovered = ImGui.IsItemHovered();
 
                 using (EditorContextMenu.PopupScope popup = EditorContextMenu.BeginDropdownForLastItem(folderPopupId, folderButtonClicked))
                 {
                     if (popup)
                     {
-                        FolderSelectionMenu.DrawPaths(placedFolders, selectedFolderPath, onFolderChanged);
+                        ObjectDestinationMenu.Draw(_layoutManager.GetEnabledLayouts(), _sceneView.GetPlacedFolders,
+                            selectedLayoutId, selectedFolderPath, SelectPlacementDestination);
                     }
                 }
 
@@ -252,8 +261,8 @@ internal sealed class CreateWorkspace
                 {
                     IntonerTooltip.Attach(
                         folderIcon,
-                        "Placement folder",
-                        folderButtonTooltip,
+                        "Placement Destination",
+                        destination,
                         new IntonerTooltipOptions
                         {
                             Accent = folderSelected ? ThemeColors.AccentPrimary : ThemeColors.AccentOrange,
@@ -262,21 +271,12 @@ internal sealed class CreateWorkspace
             });
     }
 
-    private static string BuildCreatePlacementLabel(string label, string folderPath)
+    private void SelectPlacementDestination(Guid? layoutId, string folderPath)
     {
-        return $"{label} ({FolderSelectionMenu.ResolvePathLabel(folderPath)})";
-    }
-
-    private static string BuildCreatePlacementFolderTooltip(string folderPath, bool hasFolders)
-    {
-        if (!string.IsNullOrEmpty(folderPath))
+        if (_layoutActions.SetCreation(layoutId))
         {
-            return $"Current folder: {FolderSelectionMenu.ResolvePathLabel(folderPath)}\nClick to change or clear it.";
+            _draft.SetCreatePlacementFolderPath(layoutId, folderPath);
         }
-
-        return hasFolders
-            ? "Current folder: Ungrouped\nClick to choose a folder."
-            : "Current folder: Ungrouped\nCreate a folder first to assign one.";
     }
 
     private float ResolveCreateBrowserActionButtonEdge()
@@ -392,8 +392,9 @@ internal sealed class CreateWorkspace
             _                   => throw new InvalidOperationException($"unsupported draft kind {_browserSelection.Kind}"),
         };
         string actionLabel = ObjectEditorCatalog.ResolvePlacementActionLabel(ObjectEditorCatalog.ToObjectKind(_browserSelection.Kind));
-        var placedFolders = _sceneView.GetPlacedFolders();
-        var selectedPlacementFolderPath = _draft.ResolveCreatePlacementFolderPath(placedFolders);
+        Guid? placementLayoutId = _sceneView.GetCreationLayoutId();
+        IReadOnlyList<string> placedFolders = GetPlacementFolders(placementLayoutId);
+        string selectedPlacementFolderPath = _draft.ResolveCreatePlacementFolderPath(placementLayoutId, placedFolders);
 
         var spacingY = ImGui.GetStyle().ItemSpacing.Y;
         var actionHostHeight = MeasureCreateActionHostHeight();
@@ -440,7 +441,7 @@ internal sealed class CreateWorkspace
                 id,
                 actionLabel,
                 actionDescription,
-                placedFolders,
+                placementLayoutId,
                 selectedPlacementFolderPath,
                 canPlace,
                 () =>
@@ -448,14 +449,27 @@ internal sealed class CreateWorkspace
                     ObjectLibraryPreset preset = _draft.CaptureCreatePreset();
                     _createActions.CreateObject(kind, new ObjectPlacementOverrides
                     {
+                        Name = _catalogInfo.ResolveObjectName(preset.Model),
                         Visible = preset.Visible,
                         FolderPath = selectedPlacementFolderPath,
                         Scale = kind == ObjectKind.Light ? null : preset.Scale,
                         Model = preset.Model,
                     });
-                },
-                _draft.SetCreatePlacementFolderPath);
+                });
         });
+    }
+
+    private IReadOnlyList<string> GetPlacementFolders(Guid? layoutId)
+    {
+        long revision = _sceneView.GetPersistentSceneRevision();
+        if (_placementFolders is { } cached && cached.Revision == revision && cached.LayoutId == layoutId)
+        {
+            return cached.Folders;
+        }
+
+        IReadOnlyList<string> folders = _sceneView.GetPlacedFolders(layoutId);
+        _placementFolders = (revision, layoutId, folders);
+        return folders;
     }
 
     private void DrawBgObjectCreateSettings()
@@ -474,7 +488,7 @@ internal sealed class CreateWorkspace
         {
             EditorPropertyTable.Checkbox("bgobjectCreateVisible", "Visible", ref _draft.BgObject.Visible);
             _transformEditor.DrawScaleClipboardRow("bgobjectCreateScale", ref _draft.BgObject.Scale);
-            ObjectModelEditor.DrawBgObjectRows("create", ref _draft.BgObject.Model);
+            ObjectModelEditor.DrawBgObjectRows("create", ref _draft.BgObject.Model, _catalogInfo.ResolveBgObjectCatalogInfo(_draft.BgObject.Model.ModelPath));
         }
     }
 

@@ -95,23 +95,26 @@ internal static class EditorScrollListOverlay
             return;
         }
 
-        float maxCornerRadius = MathF.Min(
-            options.Rounding,
-            MathF.Min((max.X - min.X) * 0.5f, (max.Y - min.Y) * 0.5f));
-        ImDrawFlags leftCorner = top ? ImDrawFlags.RoundCornersTopLeft : ImDrawFlags.RoundCornersBottomLeft;
-        ImDrawFlags rightCorner = top ? ImDrawFlags.RoundCornersTopRight : ImDrawFlags.RoundCornersBottomRight;
-        float leftCornerRadius = (options.CornerFlags & leftCorner) != ImDrawFlags.None ? maxCornerRadius : 0f;
-        float rightCornerRadius = (options.CornerFlags & rightCorner) != ImDrawFlags.None ? maxCornerRadius : 0f;
-        DrawRoundedEdgeCueGradient(
-            drawList,
-            min,
-            max,
-            edgeHeight,
-            alpha,
-            top,
-            options.EdgeColor,
-            leftCornerRadius,
-            rightCornerRadius);
+        if (!options.HideEdgeFade)
+        {
+            float maxCornerRadius = MathF.Min(
+                options.Rounding,
+                MathF.Min((max.X - min.X) * 0.5f, (max.Y - min.Y) * 0.5f));
+            ImDrawFlags leftCorner = top ? ImDrawFlags.RoundCornersTopLeft : ImDrawFlags.RoundCornersBottomLeft;
+            ImDrawFlags rightCorner = top ? ImDrawFlags.RoundCornersTopRight : ImDrawFlags.RoundCornersBottomRight;
+            float leftCornerRadius = (options.CornerFlags & leftCorner) != ImDrawFlags.None ? maxCornerRadius : 0f;
+            float rightCornerRadius = (options.CornerFlags & rightCorner) != ImDrawFlags.None ? maxCornerRadius : 0f;
+            DrawRoundedEdgeCueGradient(
+                drawList,
+                min,
+                max,
+                edgeHeight,
+                alpha,
+                top,
+                options.EdgeColor,
+                leftCornerRadius,
+                rightCornerRadius);
+        }
 
         if (options.ShowEdgeCueArrow)
         {

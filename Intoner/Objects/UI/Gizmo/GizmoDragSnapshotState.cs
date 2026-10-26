@@ -15,6 +15,24 @@ internal sealed class GizmoDragSnapshotState
 
     public SceneItemSnapshot PrimarySnapshot { get; private set; } = null!;
 
+    public bool MatchesSelection(IReadOnlyList<SceneItemSnapshot> snapshots)
+    {
+        if (snapshots.Count != _selectionEntries.Length)
+        {
+            return false;
+        }
+
+        for (int index = 0; index < snapshots.Count; ++index)
+        {
+            if (snapshots[index].Id != _selectionEntries[index].Snapshot.Id)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     public void Begin(GizmoSelectionEntry[] selectionEntries, SceneItemSnapshot primarySnapshot)
     {
         Reset();

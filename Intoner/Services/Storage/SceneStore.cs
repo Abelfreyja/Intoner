@@ -1,7 +1,7 @@
 using Intoner.Services.Serialization;
 using Microsoft.Extensions.Logging;
-using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Intoner.Services.Storage;
 
@@ -9,15 +9,20 @@ internal sealed record SceneStoreDocument
 {
     public const int CurrentFormatVersion = 1;
 
+    [JsonRequired]
     public int FormatVersion { get; init; } = CurrentFormatVersion;
+    [JsonRequired]
     public Dictionary<string, JsonElement> Sections { get; init; } = new(StringComparer.Ordinal);
 }
 
 /// <summary> persists independently versioned scene domain sections in one document </summary>
 internal interface ISceneStore
 {
-    /// <summary> reads and deserializes one scene domain section </summary>
-    bool TryRead<T>(string section, [NotNullWhen(true)] out T? value);
+    /// <summary> true when the scene document could not be loaded safely </summary>
+    bool IsReadOnly { get; }
+
+    /// <summary> reads one scene domain section for its owner to deserialize </summary>
+    bool TryRead(string section, out JsonElement value);
 
     /// <summary> atomically replaces one scene domain section while preserving all others </summary>
     bool TryWrite<T>(string section, T value);
@@ -33,6 +38,7 @@ internal sealed class SceneStore : ISceneStore
     private readonly Lock _stateLock = new();
 
     private IReadOnlyDictionary<string, JsonElement> _sections;
+    private bool _canWrite = true;
 
     public SceneStore(
         ILogger<SceneStore> logger,
@@ -45,30 +51,14 @@ internal sealed class SceneStore : ISceneStore
         _sections = LoadSections();
     }
 
-    public bool TryRead<T>(string section, [NotNullWhen(true)] out T? value)
+    public bool IsReadOnly => !_canWrite;
+
+    public bool TryRead(string section, out JsonElement value)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(section);
-
-        JsonElement element;
         lock (_stateLock)
         {
-            if (!_sections.TryGetValue(section, out element))
-            {
-                value = default;
-                return false;
-            }
-        }
-
-        try
-        {
-            value = element.Deserialize<T>(JsonOptions);
-            return value is not null;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "failed to read scene store section {Section}", section);
-            value = default;
-            return false;
+            return _sections.TryGetValue(section, out value);
         }
     }
 
@@ -82,6 +72,11 @@ internal sealed class SceneStore : ISceneStore
             JsonElement element = JsonSerializer.SerializeToElement(value, JsonOptions);
             lock (_stateLock)
             {
+                if (!_canWrite)
+                {
+                    return false;
+                }
+
                 var sections = new Dictionary<string, JsonElement>(_sections, StringComparer.Ordinal)
                 {
                     [section] = element,
@@ -92,7 +87,7 @@ internal sealed class SceneStore : ISceneStore
                         Sections = sections,
                     },
                     JsonOptions);
-                _fileSystem.WriteAllTextAtomic(_path, json);
+                JsonDocumentUtility.WriteFile(_fileSystem, _path, json);
                 _sections = sections;
             }
 
@@ -112,10 +107,11 @@ internal sealed class SceneStore : ISceneStore
             return new Dictionary<string, JsonElement>(StringComparer.Ordinal);
         }
 
+        _canWrite = false;
         try
         {
             SceneStoreDocument? document = JsonSerializer.Deserialize<SceneStoreDocument>(
-                _fileSystem.ReadAllText(_path),
+                JsonDocumentUtility.ReadFile(_fileSystem, _path),
                 JsonOptions);
             if (document is null)
             {
@@ -131,7 +127,9 @@ internal sealed class SceneStore : ISceneStore
                 return new Dictionary<string, JsonElement>(StringComparer.Ordinal);
             }
 
-            return new Dictionary<string, JsonElement>(document.Sections, StringComparer.Ordinal);
+            Dictionary<string, JsonElement> sections = new(document.Sections, StringComparer.Ordinal);
+            _canWrite = true;
+            return sections;
         }
         catch (Exception ex)
         {

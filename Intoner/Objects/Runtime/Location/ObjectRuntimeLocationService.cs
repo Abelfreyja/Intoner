@@ -53,12 +53,11 @@ internal sealed class ObjectRuntimeLocationService : IObjectRuntimeLocationServi
 
     private ObjectRuntimeLocationContext BuildCurrentContext()
     {
-        SceneCreationContext creationContext = _sceneLocationService.GetCurrentCreationContext();
-        SceneLocationScope scope = creationContext.Scope;
+        SceneLocationScope scope = _sceneLocationService.GetCurrentLocationScope();
         ObjectTerritoryMetadata territory = BuildTerritoryMetadata(scope.TerritoryId);
         return new ObjectRuntimeLocationContext(
             scope,
-            creationContext,
+            SceneCreationContext.FromScope(scope, territory.TerritoryName),
             territory,
             _housingContextResolver.Resolve(scope.TerritoryId));
     }

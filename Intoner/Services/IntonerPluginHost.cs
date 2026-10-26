@@ -1,6 +1,8 @@
 using Dalamud.Game.Command;
 using Dalamud.Interface;
+using Intoner.Services.Interop;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace Intoner.Services;
 
@@ -14,6 +16,7 @@ internal sealed class IntonerPluginHost : IAsyncDisposable
     private ServiceProvider? _provider;
     private IntonerSessionHost? _sessionHost;
     private CancellationTokenSource? _lifecycleCts;
+    private CancellationToken _lifecycleToken;
     private bool _loaded;
     private bool _commandRegistered;
     private bool _uiEventsRegistered;
@@ -43,6 +46,10 @@ internal sealed class IntonerPluginHost : IAsyncDisposable
                 ValidateScopes = true,
             });
 
+            await Task.Run(() => IntonerSignatures.Verify(_dalamudServices.SigScanner,
+                _provider.GetRequiredService<ILogger<IntonerPluginHost>>()), cancellationToken).ConfigureAwait(false);
+            await _provider.GetRequiredService<IntonerPluginRuntime>().StartAsync(cancellationToken).ConfigureAwait(false);
+
             _dalamudServices.CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
             {
                 HelpMessage = "Open Intoner.",
@@ -55,12 +62,13 @@ internal sealed class IntonerPluginHost : IAsyncDisposable
             _uiEventsRegistered = true;
 
             _lifecycleCts = new CancellationTokenSource();
+            _lifecycleToken = _lifecycleCts.Token;
             _dalamudServices.ClientState.Login += HandleClientLogin;
             _dalamudServices.ClientState.Logout += HandleClientLogout;
             _clientEventsRegistered = true;
             _loaded = true;
 
-            using CancellationTokenSource loadCts = CancellationTokenSource.CreateLinkedTokenSource(_lifecycleCts.Token, cancellationToken);
+            using CancellationTokenSource loadCts = CancellationTokenSource.CreateLinkedTokenSource(_lifecycleToken, cancellationToken);
             await UpdateSessionHostAsync(loadCts.Token).ConfigureAwait(false);
         }
         catch
@@ -135,18 +143,17 @@ internal sealed class IntonerPluginHost : IAsyncDisposable
     private bool IsGameSessionActive
         => !_disposed && _dalamudServices.ClientState.IsLoggedIn;
 
-    private async Task UpdateSessionHostAsync(CancellationToken cancellationToken)
+    private async Task UpdateSessionHostAsync(CancellationToken cancellationToken, bool resetSession = false)
     {
         await _lifecycleLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (!IsGameSessionActive)
+            if (resetSession || !IsGameSessionActive)
             {
                 await DisposeServicesAsync(TakeSessionHost(), null).ConfigureAwait(false);
-                return;
             }
 
-            if (_sessionHost is not null)
+            if (!IsGameSessionActive || _sessionHost is not null)
             {
                 return;
             }
@@ -174,23 +181,23 @@ internal sealed class IntonerPluginHost : IAsyncDisposable
     }
 
     private void HandleClientLogin()
-        => RunLifecycleTask(() => UpdateSessionHostAsync(_lifecycleCts?.Token ?? CancellationToken.None));
+        => RunLifecycleTask(() => UpdateSessionHostAsync(_lifecycleToken));
 
     private void HandleClientLogout(int type, int code)
     {
         _ = type;
         _ = code;
-        RunLifecycleTask(() => UpdateSessionHostAsync(CancellationToken.None));
+        RunLifecycleTask(() => UpdateSessionHostAsync(CancellationToken.None, resetSession: true));
     }
 
-    private void RunLifecycleTask(Func<Task> taskFactory)
+    internal void RunLifecycleTask(Func<Task> taskFactory)
     {
         if (_disposed)
         {
             return;
         }
 
-        _ = RunLifecycleTaskAsync(taskFactory);
+        _ = Task.Run(() => RunLifecycleTaskAsync(taskFactory));
     }
 
     private async Task RunLifecycleTaskAsync(Func<Task> taskFactory)

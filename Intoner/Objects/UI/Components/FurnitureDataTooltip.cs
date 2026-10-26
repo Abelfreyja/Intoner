@@ -18,11 +18,11 @@ internal static class FurnitureDataTooltip
             EditorBadgeStyle.Muted,
             DrawTooltip: () => Draw(variant));
 
-    private static void Draw(ObjectCatalogFurnitureVariant variant)
+    public static void Draw(ObjectCatalogFurnitureVariant variant, string? assetPath = null)
     {
         string title = variant.Name;
         string subtitle = BuildPlacementSummary(variant);
-        IReadOnlyList<PropertyRow> properties = BuildProperties(variant);
+        IReadOnlyList<PropertyRow> properties = BuildProperties(variant, assetPath);
         float contentWidth = IntonerTooltipContent.MeasureHeaderWidth(
             FontAwesomeIcon.Home,
             title,
@@ -37,7 +37,7 @@ internal static class FurnitureDataTooltip
         IntonerTooltip.DrawContentSized(
             () =>
             {
-                IntonerTooltipContent.Heading(
+                IntonerTooltipContent.Header(
                     FontAwesomeIcon.Home,
                     title,
                     subtitle,
@@ -55,7 +55,7 @@ internal static class FurnitureDataTooltip
             });
     }
 
-    private static IReadOnlyList<PropertyRow> BuildProperties(ObjectCatalogFurnitureVariant variant)
+    private static IReadOnlyList<PropertyRow> BuildProperties(ObjectCatalogFurnitureVariant variant, string? assetPath)
     {
         List<PropertyRow> properties = new(4);
         if (!string.IsNullOrWhiteSpace(variant.Category))
@@ -82,6 +82,11 @@ internal static class FurnitureDataTooltip
             properties.Add(new PropertyRow(
                 "Aquarium",
                 $"Tier {variant.HousingMetadata.AquariumTier.ToString(CultureInfo.InvariantCulture)}"));
+        }
+
+        if (!string.IsNullOrWhiteSpace(assetPath))
+        {
+            properties.Add(new PropertyRow("Asset", assetPath));
         }
 
         return properties;

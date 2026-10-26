@@ -1,4 +1,5 @@
 using Dalamud.Plugin.Services;
+using Intoner.Objects.Interop;
 using Intoner.Services.Interop;
 using Microsoft.Extensions.Logging;
 using System.Numerics;
@@ -9,18 +10,18 @@ internal sealed unsafe class NativePlacementAreaQuery
 {
     private const byte InvalidHousingBlockId = byte.MaxValue;
 
-    private readonly NativeAreaContainmentDelegate? _areaContainment;
-    private readonly NativeBlockForPositionDelegate? _blockForPosition;
+    private readonly PositionQueryDelegate? _areaContainment;
+    private readonly PositionQueryDelegate? _blockForPosition;
 
     public NativePlacementAreaQuery(
         ILogger<NativePlacementAreaQuery> logger,
         ISigScanner sigScanner)
     {
-        _areaContainment = InteropHookUtility.CreateDelegate<NativeAreaContainmentDelegate>(
+        _areaContainment = InteropHookUtility.CreateDelegate<PositionQueryDelegate>(
             logger,
             sigScanner,
             IntonerSignatures.NativeHousingPlacementAreaContainment);
-        _blockForPosition = InteropHookUtility.CreateDelegate<NativeBlockForPositionDelegate>(
+        _blockForPosition = InteropHookUtility.CreateDelegate<PositionQueryDelegate>(
             logger,
             sigScanner,
             IntonerSignatures.NativeHousingPlacementBlockForPosition);
@@ -77,7 +78,5 @@ internal sealed unsafe class NativePlacementAreaQuery
         return true;
     }
 
-    private delegate byte NativeAreaContainmentDelegate(Vector3* position);
-
-    private delegate byte NativeBlockForPositionDelegate(Vector3* position);
+    private delegate byte PositionQueryDelegate(Vector3* position);
 }

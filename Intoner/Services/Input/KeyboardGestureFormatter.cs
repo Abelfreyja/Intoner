@@ -8,8 +8,9 @@ namespace Intoner.Services.Input
     {
         public static string Format(KeyboardGesture gesture)
         {
-            string modifiers = Format(gesture.Modifiers);
+            string modifiers = Format(gesture.Modifiers & ~gesture.ImplicitModifier);
             string key = Format(gesture.Key);
+
             if (modifiers.Length == 0)
             {
                 return key;
@@ -40,6 +41,8 @@ namespace Intoner.Services.Input
             {
                 VirtualKey.NO_KEY => string.Empty,
                 VirtualKey.CONTROL => "Ctrl",
+                VirtualKey.SHIFT => "Shift",
+                VirtualKey.MENU => "Alt",
                 VirtualKey.LCONTROL => "Left Ctrl",
                 VirtualKey.RCONTROL => "Right Ctrl",
                 VirtualKey.LMENU => "Left Alt",

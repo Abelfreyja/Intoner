@@ -1,4 +1,5 @@
 using Intoner.Objects.Assets.Cache;
+using Intoner.Objects.Resources;
 using Intoner.Objects.Utils;
 using System.Diagnostics.CodeAnalysis;
 using static Intoner.Objects.Assets.ObjectAssetStateChange;
@@ -16,16 +17,16 @@ internal sealed class ObjectAssetStandaloneVfxCatalog(IObjectAssetGameData gameD
         List<RuntimeVfxAsset> snapshot = new(state.VfxAssets.Count);
         foreach (RuntimeVfxAssetState asset in state.VfxAssets.Values)
         {
-            if (asset.SupportClass != VfxStandaloneSupportClass.SupportedStandalone)
+            if (asset.Report is not { IsSupportedStandalone: true } report)
             {
                 continue;
             }
 
             snapshot.Add(new RuntimeVfxAsset(
                 asset.Path,
-                asset.CatalogSource,
-                asset.SearchTerms,
-                asset.Analysis?.LoopFacts ?? VfxLoopFacts.Unknown));
+                report.CatalogSource,
+                report.SearchTerms,
+                report.Analysis.LoopFacts));
         }
 
         snapshot.Sort(comparer);
@@ -40,7 +41,7 @@ internal sealed class ObjectAssetStandaloneVfxCatalog(IObjectAssetGameData gameD
         bool runtimeObserved,
         [NotNullWhen(true)] out VfxStandaloneReport? report)
     {
-        string normalizedPath = GameAssetPathRules.NormalizeGamePath(path);
+        string normalizedPath = ObjectResolvedPath.FromGamePath(path).Path;
         report = null;
         if (!GameAssetPathRules.IsFileKind(normalizedPath, GameAssetFileKind.Avfx))
         {
@@ -48,29 +49,33 @@ internal sealed class ObjectAssetStandaloneVfxCatalog(IObjectAssetGameData gameD
         }
 
         RuntimeVfxEvidence resolvedEvidence = RuntimeVfxEvidence.None;
-        AssetPathContract pathContracts = GetPathContracts(state, normalizedPath);
-        KnownVfxFamily familyHint = GetPathFamilyHint(state, normalizedPath);
-        IReadOnlyList<string> knownSearchTerms = state.KnowledgeBase.GetSearchTerms(normalizedPath);
-        if (state.StaticResolvedVfxPaths.TryGetValue(normalizedPath, out ResolvedVfxPath? resolvedPath))
+        _ = state.KnowledgeBase.TryGetPath(normalizedPath, out KnownAssetPath? knownPath);
+        _ = state.StaticResolvedVfxPaths.TryGetValue(normalizedPath, out ResolvedVfxPath? resolvedPath);
+        AssetPathContract pathContracts = knownPath?.Contracts ?? AssetPathContract.None;
+        KnownVfxFamily familyHint = resolvedPath?.Family ?? knownPath?.VfxFamily ?? KnownVfxFamily.None;
+        IReadOnlyList<string> knownSearchTerms = knownPath?.SearchTerms ?? [];
+
+        if (resolvedPath is null && familyHint == KnownVfxFamily.None)
+        {
+            familyHint = KnownVfxFamilyExtensions.InferFamilyHintFromPath(normalizedPath);
+        }
+
+        if (resolvedPath is not null)
         {
             analysis ??= resolvedPath.Analysis;
             resolvedEvidence |= resolvedPath.Evidence;
             pathContracts |= resolvedPath.Contracts;
             knownSearchTerms = SearchTermUtility.MergeTerms(knownSearchTerms, resolvedPath.SearchTerms);
-            if (familyHint == KnownVfxFamily.None)
-            {
-                familyHint = resolvedPath.Family;
-            }
         }
 
         if (state.VfxAssets.TryGetValue(normalizedPath, out RuntimeVfxAssetState? existingAsset))
         {
             analysis ??= existingAsset.Analysis;
-            resolvedEvidence |= existingAsset.Evidence.WithoutAnalysisFlags();
-            pathContracts |= existingAsset.PathContracts;
+            resolvedEvidence |= existingAsset.SourceEvidence.WithoutAnalysisFlags();
+            pathContracts |= existingAsset.Report?.PathContracts ?? AssetPathContract.None;
             if (familyHint == KnownVfxFamily.None)
             {
-                familyHint = existingAsset.FamilyHint;
+                familyHint = existingAsset.Report?.FamilyHint ?? KnownVfxFamily.None;
             }
 
             runtimeObserved |= existingAsset.SeenFromRuntime;
@@ -117,16 +122,6 @@ internal sealed class ObjectAssetStandaloneVfxCatalog(IObjectAssetGameData gameD
             RuntimeVfxEvidence.ActorCreate,
             runtimeObserved: true);
 
-    public ObservationApplyResult ObserveTriggerUse(CatalogAssetState state, string path)
-        => ObserveStandalonePath(
-            state,
-            path,
-            AssetPathSource.RuntimeObserved,
-            AssetPathContract.RuntimeObservation,
-            ["trigger used"],
-            RuntimeVfxEvidence.TriggerUsed,
-            runtimeObserved: true);
-
     public ObservationApplyResult ObserveStandalonePath(
         CatalogAssetState state,
         string path,
@@ -138,10 +133,17 @@ internal sealed class ObjectAssetStandaloneVfxCatalog(IObjectAssetGameData gameD
         VfxAnalysis? analysis = null,
         KnownVfxFamily familyHint = KnownVfxFamily.None)
     {
-        _ = AddKnowledgePath(state, path, source, contract, searchTerms, familyHint);
+        string normalizedPath = ObjectResolvedPath.FromGamePath(path).Path;
+
+        if (!GameAssetPathRules.IsFileKind(normalizedPath, GameAssetFileKind.Avfx))
+        {
+            return ObservationApplyResult.None;
+        }
+
+        _ = AddKnowledgePath(state, normalizedPath, source, contract, searchTerms, familyHint);
         return TryPromote(
             state,
-            path,
+            normalizedPath,
             evidence,
             analysis,
             runtimeObserved);
@@ -156,7 +158,13 @@ internal sealed class ObjectAssetStandaloneVfxCatalog(IObjectAssetGameData gameD
         IReadOnlyList<string> searchTerms,
         bool runtimeObserved)
     {
-        string normalizedPath = GameAssetPathRules.NormalizeGamePath(path);
+        string normalizedPath = ObjectResolvedPath.FromGamePath(path).Path;
+
+        if (!GameAssetPathRules.IsFileKind(normalizedPath, GameAssetFileKind.Avfx))
+        {
+            return ObservationApplyResult.None;
+        }
+
         IReadOnlyList<string> referenceSearchTerms = SearchTermUtility.MergeTerms(searchTerms, referenceInfo.BuildSearchTerms());
         _ = AddKnowledgePath(state, normalizedPath, source, contract, referenceSearchTerms);
 
@@ -176,7 +184,7 @@ internal sealed class ObjectAssetStandaloneVfxCatalog(IObjectAssetGameData gameD
 
         return Combine(
             result,
-            TryMergeAcceptedEvidence(
+            TryMergeTrackedEvidence(
                 state,
                 normalizedPath,
                 referenceInfo.NormalizedEvidence,
@@ -190,119 +198,73 @@ internal sealed class ObjectAssetStandaloneVfxCatalog(IObjectAssetGameData gameD
         VfxAnalysis? analysis = null,
         bool runtimeObserved = false)
     {
-        if (!TryBuildReport(state, path, evidence, analysis, runtimeObserved, out VfxStandaloneReport? report))
+        string normalizedPath = ObjectResolvedPath.FromGamePath(path).Path;
+
+        if (!GameAssetPathRules.IsFileKind(normalizedPath, GameAssetFileKind.Avfx))
         {
             return ObservationApplyResult.None;
         }
 
-        if (!report.IsSupportedStandalone)
-        {
-            string normalizedPath = GameAssetPathRules.NormalizeGamePath(path);
-            return RemoveStandaloneVfx(state, normalizedPath)
-                ? ObservationApplyResult.ProjectionChanged
-                : ObservationApplyResult.None;
-        }
-
-        if (!state.VfxAssets.TryGetValue(report.Path, out RuntimeVfxAssetState? asset))
-        {
-            state.VfxAssets[report.Path] = new RuntimeVfxAssetState(report.Path)
-            {
-                CatalogSource       = report.CatalogSource,
-                Evidence            = report.CombinedEvidence,
-                Analysis            = report.Analysis,
-                SearchTerms         = report.SearchTerms,
-                PathContracts       = report.PathContracts,
-                FamilyHint          = report.FamilyHint,
-                SupportClass        = report.SupportClass,
-                SeenFromRuntime     = report.SeenFromRuntime,
-            };
-            MarkStandaloneVfxChanged(state);
-            return ObservationApplyResult.ProjectionChanged;
-        }
-
+        bool existed = state.VfxAssets.TryGetValue(normalizedPath, out RuntimeVfxAssetState? asset);
+        asset ??= new RuntimeVfxAssetState(normalizedPath);
         RuntimeVfxEvidence previousEvidence = asset.Evidence;
-        string previousCatalogSource = asset.CatalogSource;
         bool previousSeenFromRuntime = asset.SeenFromRuntime;
         VfxAnalysis? previousAnalysis = asset.Analysis;
-        IReadOnlyList<string> previousSearchTerms = asset.SearchTerms;
-        KnownVfxFamily previousFamilyHint = asset.FamilyHint;
-        VfxStandaloneSupportClass previousSupportClass = asset.SupportClass;
+        VfxStandaloneReport? previousReport = asset.Report;
+        bool hasReport = TryBuildReport(state, normalizedPath, evidence, analysis, runtimeObserved, out VfxStandaloneReport? report);
+        asset.SourceEvidence |= evidence.WithoutAnalysisFlags();
+        asset.SeenFromRuntime |= runtimeObserved;
+        asset.Analysis ??= analysis;
 
-        asset.Evidence = report.CombinedEvidence;
-        asset.Analysis = report.Analysis;
-        asset.SearchTerms = report.SearchTerms;
-        asset.PathContracts = report.PathContracts;
-        asset.FamilyHint = report.FamilyHint;
-        asset.CatalogSource = report.CatalogSource;
-        asset.SupportClass = report.SupportClass;
-        asset.SeenFromRuntime = report.SeenFromRuntime;
-        if (asset.Evidence == previousEvidence
+        if (hasReport && report is not null)
+        {
+            asset.SourceEvidence = report.SourceEvidence;
+            asset.Analysis = report.Analysis;
+            asset.SeenFromRuntime = report.SeenFromRuntime;
+            asset.Report = report;
+        }
+
+        state.VfxAssets[normalizedPath] = asset;
+
+        if (existed
+         && asset.Evidence == previousEvidence
          && Equals(asset.Analysis, previousAnalysis)
-         && SearchTermsEqual(asset.SearchTerms, previousSearchTerms)
-         && string.Equals(asset.CatalogSource, previousCatalogSource, StringComparison.OrdinalIgnoreCase)
-         && asset.FamilyHint == previousFamilyHint
-         && asset.SupportClass == previousSupportClass
-         && asset.SeenFromRuntime == previousSeenFromRuntime)
+         && asset.SeenFromRuntime == previousSeenFromRuntime
+         && VfxStandaloneReport.HasSameClassification(previousReport, asset.Report))
         {
             return ObservationApplyResult.None;
         }
 
-        MarkStandaloneVfxChanged(state);
+        bool projectionChanged = !VfxStandaloneReport.HasSameProjection(previousReport, asset.Report);
 
-        bool projectionChanged = asset.Evidence != previousEvidence
-            || !string.Equals(asset.CatalogSource, previousCatalogSource, StringComparison.OrdinalIgnoreCase)
-            || !SearchTermsEqual(asset.SearchTerms, previousSearchTerms)
-            || asset.FamilyHint != previousFamilyHint
-            || asset.SupportClass != previousSupportClass;
+        if (projectionChanged)
+        {
+            MarkStandaloneVfxChanged(state);
+        }
+        else if (asset.SeenFromRuntime)
+        {
+            MarkCacheSectionsDirty(state, ObjectAssetCacheSectionSet.RuntimeVfx);
+        }
 
         return projectionChanged
             ? ObservationApplyResult.ProjectionChanged
             : ObservationApplyResult.MetadataChanged;
     }
 
-    private ObservationApplyResult TryMergeAcceptedEvidence(
+    private ObservationApplyResult TryMergeTrackedEvidence(
         CatalogAssetState state,
         string path,
         RuntimeVfxEvidence evidence,
         bool runtimeObserved = false)
     {
-        string normalizedPath = GameAssetPathRules.NormalizeGamePath(path);
+        string normalizedPath = ObjectResolvedPath.FromGamePath(path).Path;
+
         if (!state.VfxAssets.TryGetValue(normalizedPath, out RuntimeVfxAssetState? asset))
         {
             return ObservationApplyResult.None;
         }
 
         return TryPromote(state, normalizedPath, asset.Evidence | evidence, asset.Analysis, runtimeObserved || asset.SeenFromRuntime);
-    }
-
-    private static bool RemoveStandaloneVfx(CatalogAssetState state, string normalizedPath)
-    {
-        if (!state.VfxAssets.Remove(normalizedPath))
-        {
-            return false;
-        }
-
-        MarkStandaloneVfxChanged(state);
-        return true;
-    }
-
-    private static AssetPathContract GetPathContracts(CatalogAssetState state, string path)
-        => state.KnowledgeBase.GetContracts(path);
-
-    private static KnownVfxFamily GetPathFamilyHint(CatalogAssetState state, string path)
-    {
-        if (state.StaticResolvedVfxPaths.TryGetValue(path, out ResolvedVfxPath? resolvedPath))
-        {
-            return resolvedPath.Family;
-        }
-
-        KnownVfxFamily knownFamily = state.KnowledgeBase.GetVfxFamily(path);
-        if (knownFamily != KnownVfxFamily.None)
-        {
-            return knownFamily;
-        }
-
-        return KnownVfxFamilyExtensions.InferFamilyHintFromPath(path);
     }
 
     private static VfxTimelineReferenceInfo GetTimelineReferenceInfo(CatalogAssetState state, string path)
@@ -386,23 +348,5 @@ internal sealed class ObjectAssetStandaloneVfxCatalog(IObjectAssetGameData gameD
             searchTerms,
             policyResult.SupportClass,
             runtimeObserved);
-    }
-
-    private static bool SearchTermsEqual(IReadOnlyList<string> left, IReadOnlyList<string> right)
-    {
-        if (left.Count != right.Count)
-        {
-            return false;
-        }
-
-        for (var index = 0; index < left.Count; index++)
-        {
-            if (!string.Equals(left[index], right[index], StringComparison.OrdinalIgnoreCase))
-            {
-                return false;
-            }
-        }
-
-        return true;
     }
 }

@@ -13,10 +13,51 @@ internal enum EditorAccentIconButtonStyle
     Subtle,
 }
 
+internal enum EditorToggleIconButtonStyle
+{
+    Subtle,
+    Outlined,
+    MutedOutline,
+}
+
 internal static class EditorIconButton
 {
+    public readonly record struct Item(string Id, FontAwesomeIcon Icon, string Tooltip, bool Enabled = true,
+        bool Selected = false, Vector4? IconColor = null, Vector4? TooltipTitleColor = null);
+
     private const float MinimumEdge = 28f;
     private const float IconPadding = 12f;
+
+    public static Vector2 MeasureStrip(IReadOnlyList<Item> items)
+    {
+        float edge = items.Count == 0 ? 0f : MathF.Ceiling(MathF.Max(Scaled(MinimumEdge),
+            MathF.Max(ImGui.GetFrameHeight(), UiBuilder.IconFont.FontSize + Scaled(IconPadding))));
+        return new Vector2(EditorLayout.ResolveActionStripWidth(edge, items.Count), edge);
+    }
+
+    public static string? DrawStrip(IReadOnlyList<Item> items)
+    {
+        if (items.Count == 0)
+            return null;
+
+        float edge = MeasureStrip(items).Y;
+        float gap = ImGui.GetStyle().ItemSpacing.X;
+        int columns = Math.Max(1, (int)MathF.Floor((ImGui.GetContentRegionAvail().X + gap) / (edge + gap)));
+        string? activatedId = null;
+        for (int index = 0; index < items.Count; ++index)
+        {
+            if (index % columns != 0)
+                ImGui.SameLine();
+            Item item = items[index];
+            EditorIcon.Metrics metrics = EditorIcon.Measure(item.Icon);
+            float iconScale = MathF.Min(1f, MathF.Max(1f, edge - Scaled(IconPadding))
+                / MathF.Max(1f, MathF.Max(metrics.Size.X, metrics.Size.Y)));
+            if (DrawDefault(item.Id, item.Icon, item.Tooltip, item.Selected, edge, item.IconColor,
+                    item.TooltipTitleColor, enabled: item.Enabled, iconScale: iconScale))
+                activatedId = item.Id;
+        }
+        return activatedId;
+    }
 
     public static float MeasureEdge(FontAwesomeIcon icon)
     {
@@ -26,7 +67,7 @@ internal static class EditorIconButton
             MathF.Ceiling(MathF.Max(iconMetrics.Size.X, iconMetrics.Size.Y) + Scaled(IconPadding)));
     }
 
-    public static float MeasureMaxEdge(params FontAwesomeIcon[] icons)
+    public static float MeasureMaxEdge(params ReadOnlySpan<FontAwesomeIcon> icons)
     {
         float edge = 0f;
         foreach (FontAwesomeIcon icon in icons)
@@ -63,7 +104,8 @@ internal static class EditorIconButton
         Vector4? iconColor = null,
         Vector4? tooltipTitleColor = null,
         Vector4? tooltipAccent = null,
-        bool enabled = true)
+        bool enabled = true,
+        float iconScale = 1f)
     {
         float edge = edgeOverride ?? MeasureEdge(icon);
         using var selectedButton = selected
@@ -81,7 +123,8 @@ internal static class EditorIconButton
             icon,
             ImGui.GetItemRectMin(),
             ImGui.GetItemRectMax(),
-            iconColor ?? (enabled ? ThemeColors.Text : ThemeColors.TextDisabled));
+            enabled ? iconColor ?? ThemeColors.Text : ThemeColors.TextDisabled,
+            iconScale);
 
         DrawTooltip(icon, tooltip, tooltipAccent ?? iconColor, tooltipTitleColor);
         return enabled && clicked;
@@ -149,13 +192,16 @@ internal static class EditorIconButton
         Vector4 selectedAccent,
         Vector4 inactiveAccent,
         string? tooltip = null,
-        bool enabled = true)
+        bool enabled = true,
+        Action? drawTooltip = null,
+        EditorToggleIconButtonStyle style = EditorToggleIconButtonStyle.Subtle)
     {
         Vector4 accent = selected ? selectedAccent : inactiveAccent;
-        ResolveToggleColors(selected, enabled, accent, out Vector4 fill, out Vector4 hoverFill, out Vector4 activeFill, out Vector4 border);
-        float rounding = Scaled(4f);
-        float borderThickness = MathF.Max(1f, Scaled(0.75f));
-        float borderInset = borderThickness * 0.5f;
+        ResolveToggleColors(selected, enabled, accent, style, out Vector4 fill, out Vector4 hoverFill, out Vector4 activeFill, out Vector4 border);
+        bool subtle = style == EditorToggleIconButtonStyle.Subtle;
+        float rounding = Scaled(subtle ? 4f : 7f);
+        float borderThickness = MathF.Max(1f, Scaled(subtle ? 0.75f : 1f));
+        float borderInset = subtle ? borderThickness * 0.5f : 0f;
 
         bool clicked;
         using (ImRaii.Disabled(!enabled))
@@ -163,7 +209,7 @@ internal static class EditorIconButton
         using (ImRaii.PushColor(ImGuiCol.ButtonHovered, hoverFill))
         using (ImRaii.PushColor(ImGuiCol.ButtonActive, activeFill))
         using (ImRaii.PushColor(ImGuiCol.Border, Vector4.Zero))
-        using (ImRaii.PushStyle(ImGuiStyleVar.FrameBorderSize, 0f))
+        using (ImRaii.PushStyle(ImGuiStyleVar.FrameBorderSize, subtle ? 0f : borderThickness))
         using (ImRaii.PushStyle(ImGuiStyleVar.FrameRounding, rounding))
         {
             clicked = ImGui.Button($"##{id}", size);
@@ -179,16 +225,23 @@ internal static class EditorIconButton
             MathF.Max(0f, rounding - borderInset),
             ImDrawFlags.None,
             borderThickness);
+        float iconAlpha = (selected, style) switch
+        {
+            (_, EditorToggleIconButtonStyle.Subtle) => accent.W,
+            (true, _) => 1f,
+            (_, EditorToggleIconButtonStyle.Outlined) => 0.88f,
+            _ => 0.72f,
+        };
         EditorIcon.DrawCentered(
             drawList,
             icon,
             min,
             max,
-            enabled ? accent : ThemeColors.TextDisabled with { W = 0.72f });
+            enabled ? accent with { W = iconAlpha } : ThemeColors.TextDisabled with { W = 0.72f });
 
-        if (!string.IsNullOrWhiteSpace(tooltip))
+        if (drawTooltip is not null || !string.IsNullOrWhiteSpace(tooltip))
         {
-            DrawTooltip(icon, tooltip, accent, null);
+            DrawTooltip(icon, tooltip ?? string.Empty, accent, null, drawTooltip);
         }
 
         return enabled && clicked;
@@ -225,6 +278,7 @@ internal static class EditorIconButton
         bool selected,
         bool enabled,
         Vector4 accent,
+        EditorToggleIconButtonStyle style,
         out Vector4 fill,
         out Vector4 hoverFill,
         out Vector4 activeFill,
@@ -236,6 +290,21 @@ internal static class EditorIconButton
             hoverFill = fill;
             activeFill = fill;
             border = ThemeColors.Border with { W = 0.26f };
+            return;
+        }
+
+        if (style != EditorToggleIconButtonStyle.Subtle)
+        {
+            (float hoverAlpha, float activeAlpha, float borderAlpha) = (selected, style) switch
+            {
+                (true, _) => (0.30f, 0.36f, 0.88f),
+                (_, EditorToggleIconButtonStyle.MutedOutline) => (0.08f, 0.12f, 0.28f),
+                _ => (0.12f, 0.18f, 0.42f),
+            };
+            fill = selected ? accent with { W = 0.20f } : ThemeColors.ButtonDefault with { W = 0.80f };
+            hoverFill = accent with { W = hoverAlpha };
+            activeFill = accent with { W = activeAlpha };
+            border = accent with { W = borderAlpha };
             return;
         }
 

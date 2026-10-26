@@ -2,10 +2,11 @@ namespace Intoner.Objects.Assets.Cache;
 
 internal static class ObjectAssetCacheSaveBuilder
 {
-    public static CaptureData Capture(CatalogAssetState state, ObjectAssetCacheSectionSet sections)
+    public static ObjectAssetCacheSaveRequest Capture(CatalogAssetState state, ObjectAssetCacheSectionSet sections)
         => new(
             string.IsNullOrWhiteSpace(state.GameVersion) ? null : state.GameVersion,
             string.IsNullOrWhiteSpace(state.SqpackIndexFingerprint) ? null : state.SqpackIndexFingerprint,
+            state.Language,
             sections,
             sections.Contains(ObjectAssetCacheSectionKind.StaticCollisionPaths)
                 ? state.StaticCollisionPaths.ToArray()
@@ -17,70 +18,23 @@ internal static class ObjectAssetCacheSaveBuilder
                 ? state.StaticResolvedVfxPaths.Values.ToArray()
                 : [],
             sections.Contains(ObjectAssetCacheSectionKind.BgModels)
-                ? state.BgModels.Values.Select(static asset => asset.CaptureForSave()).ToArray()
+                ? state.BgModels.Values
+                    .Where(static asset => asset.IsRuntimeObserved)
+                    .Select(static asset => asset.ToCacheModel())
+                    .ToArray()
                 : [],
-            sections.Contains(ObjectAssetCacheSectionKind.BgModels)
-                ? state.GameDataBgObjects.Keys.ToArray()
-                : [],
-            sections.Contains(ObjectAssetCacheSectionKind.StandaloneVfx)
-                ? state.VfxAssets.Values.Select(static asset => asset.CaptureForSave()).ToArray()
-                : [],
-            sections.Contains(ObjectAssetCacheSectionKind.StandaloneVfx)
-                ? state.StaticResolvedVfxPaths.Keys.ToArray()
-                : [],
-            sections.Contains(ObjectAssetCacheSectionKind.TimelineReferencedVfx)
-                ? state.RuntimeTimelineReferencedVfx.ToArray()
+            sections.Contains(ObjectAssetCacheSectionKind.RuntimeVfx)
+                ? state.VfxAssets.Values
+                    .Where(static asset => asset.SeenFromRuntime)
+                    .Select(static asset => new ObjectAssetCacheRuntimeVfx(asset.Path, asset.Evidence, asset.Analysis))
+                    .ToArray()
                 : [],
             sections.Contains(ObjectAssetCacheSectionKind.TimelineReferencedVfx)
-                ? state.StaticTimelineReferencedVfx.Keys.ToArray()
+                ? state.RuntimeTimelineReferencedVfx
+                    .Where(static pair => pair.Value.HasEvidence)
+                    .Where(pair => !state.StaticTimelineReferencedVfx.TryGetValue(pair.Key, out VfxTimelineReferenceInfo reference)
+                        || !pair.Value.IsCoveredBy(reference))
+                    .Select(static pair => new ObjectAssetCacheTimelineReferencedVfxEntry(pair.Key, pair.Value.NormalizedEvidence, pair.Value.Context))
+                    .ToArray()
                 : []);
-
-    public static ObjectAssetCacheSaveRequest BuildRequest(CaptureData capture)
-    {
-        HashSet<string> staticBgModelPaths = new(capture.StaticBgModelPaths, StringComparer.OrdinalIgnoreCase);
-        HashSet<string> staticResolvedVfxPaths = new(capture.StaticResolvedVfxPaths, StringComparer.OrdinalIgnoreCase);
-        HashSet<string> staticTimelinePaths = new(capture.StaticTimelineReferencedPaths, StringComparer.OrdinalIgnoreCase);
-
-        return new ObjectAssetCacheSaveRequest(
-            capture.GameVersion,
-            capture.SqpackIndexFingerprint,
-            capture.Sections,
-            capture.StaticCollisionPaths,
-            capture.StaticGameDataBgObjects
-                .Select(ObjectAssetCacheProjection.ToCacheStaticBgObject)
-                .ToArray(),
-            capture.StaticResolvedVfxEntries
-                .Select(ObjectAssetCacheProjection.ToCacheResolvedVfxEntry)
-                .ToArray(),
-            capture.BgModels
-                .Where(static asset => asset.IsRuntimeObserved)
-                .Where(asset => !staticBgModelPaths.Contains(asset.CacheModel.Path))
-                .Select(static asset => asset.CacheModel)
-                .ToArray(),
-            capture.VfxAssets
-                .Where(static asset => asset.SeenFromRuntime)
-                .Where(asset => !staticResolvedVfxPaths.Contains(asset.Path))
-                .Where(static asset => asset.SupportClass == VfxStandaloneSupportClass.SupportedStandalone)
-                .Select(static asset => new ObjectAssetCacheStandaloneVfx(asset.Path, asset.Evidence, asset.Analysis))
-                .ToArray(),
-            capture.RuntimeTimelineReferencedVfx
-                .Where(static pair => pair.Value.HasEvidence)
-                .Where(pair => !staticTimelinePaths.Contains(pair.Key))
-                .Select(static pair => new ObjectAssetCacheTimelineReferencedVfxEntry(pair.Key, pair.Value.NormalizedEvidence, pair.Value.Context))
-                .ToArray());
-    }
-
-    internal sealed record CaptureData(
-        string? GameVersion,
-        string? SqpackIndexFingerprint,
-        ObjectAssetCacheSectionSet Sections,
-        IReadOnlyList<string> StaticCollisionPaths,
-        IReadOnlyList<GameDataBgObjectAsset> StaticGameDataBgObjects,
-        IReadOnlyList<ResolvedVfxPath> StaticResolvedVfxEntries,
-        IReadOnlyList<ObservedBgModelState.CacheSaveCapture> BgModels,
-        IReadOnlyList<string> StaticBgModelPaths,
-        IReadOnlyList<RuntimeVfxAssetState.CacheSaveCapture> VfxAssets,
-        IReadOnlyList<string> StaticResolvedVfxPaths,
-        IReadOnlyList<KeyValuePair<string, VfxTimelineReferenceInfo>> RuntimeTimelineReferencedVfx,
-        IReadOnlyList<string> StaticTimelineReferencedPaths);
 }

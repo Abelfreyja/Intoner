@@ -1,4 +1,9 @@
+using System.Runtime.InteropServices;
+
 namespace Intoner.Scene.Rendering;
+
+[StructLayout(LayoutKind.Auto)]
+internal readonly record struct SceneRenderCommand(SceneRenderPhase Phase, SceneProjection? Projection);
 
 /// <summary> tracks the exact native target commands assigned to scene phases </summary>
 internal sealed class SceneRenderCommandTracker
@@ -7,12 +12,12 @@ internal sealed class SceneRenderCommandTracker
     private const int BucketCount = sizeof(long) * 8;
 
     private readonly Lock _stateLock = new();
-    private readonly Dictionary<nint, SceneRenderPhase> _commands = new(8);
+    private readonly Dictionary<nint, SceneRenderCommand> _commands = new(8);
 
     private long _bucketMask;
 
     /// <summary> records or updates a command and reports whether stale entries had to be discarded </summary>
-    public bool Track(nint command, SceneRenderPhase phase)
+    public bool Track(nint command, SceneRenderCommand frame)
     {
         lock (_stateLock)
         {
@@ -22,7 +27,7 @@ internal sealed class SceneRenderCommandTracker
                 ClearLocked();
             }
 
-            if (_commands.TryAdd(command, phase))
+            if (_commands.TryAdd(command, frame))
             {
                 int bucket = GetBucket(command);
                 Volatile.Write(
@@ -31,7 +36,7 @@ internal sealed class SceneRenderCommandTracker
             }
             else
             {
-                _commands[command] = phase;
+                _commands[command] = frame;
             }
 
             return reset;
@@ -52,18 +57,18 @@ internal sealed class SceneRenderCommandTracker
         }
     }
 
-    /// <summary> removes a command and returns its assigned phase </summary>
-    public bool TryTake(nint command, out SceneRenderPhase phase)
+    /// <summary> removes a command and returns its retained scene state </summary>
+    public bool TryTake(nint command, out SceneRenderCommand frame)
     {
         if (!MayContain(command))
         {
-            phase = default;
+            frame = default;
             return false;
         }
 
         lock (_stateLock)
         {
-            return RemoveLocked(command, out phase);
+            return RemoveLocked(command, out frame);
         }
     }
 
@@ -75,9 +80,9 @@ internal sealed class SceneRenderCommandTracker
         }
     }
 
-    private bool RemoveLocked(nint command, out SceneRenderPhase phase)
+    private bool RemoveLocked(nint command, out SceneRenderCommand frame)
     {
-        if (!_commands.Remove(command, out phase))
+        if (!_commands.Remove(command, out frame))
         {
             return false;
         }

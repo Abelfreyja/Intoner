@@ -47,7 +47,8 @@ internal sealed record ResolvedVfxPath(
     AssetPathSource Sources,
     AssetPathContract Contracts,
     IReadOnlyList<string> SearchTerms,
-    VfxAnalysis? Analysis = null);
+    VfxAnalysis? Analysis = null,
+    VfxTimelineContext TimelineContext = VfxTimelineContext.None);
 
 internal sealed class ResolvedVfxPathAccumulator
 {
@@ -71,6 +72,7 @@ internal sealed class ResolvedVfxPathAccumulator
     public AssetPathContract Contracts { get; private set; }
     public HashSet<string> SearchTerms { get; }
     public VfxAnalysis? Analysis { get; private set; }
+    public VfxTimelineContext TimelineContext { get; private set; }
 
     public void Merge(
         KnownVfxFamily family,
@@ -78,7 +80,8 @@ internal sealed class ResolvedVfxPathAccumulator
         AssetPathSource sources,
         AssetPathContract contracts,
         IEnumerable<string> searchTerms,
-        VfxAnalysis? analysis)
+        VfxAnalysis? analysis,
+        VfxTimelineContext timelineContext = VfxTimelineContext.None)
     {
         Family |= family;
         Evidence |= evidence;
@@ -86,6 +89,7 @@ internal sealed class ResolvedVfxPathAccumulator
         Contracts |= contracts;
         _ = SearchTermUtility.AddTerms(SearchTerms, searchTerms);
         Analysis ??= analysis;
+        TimelineContext |= timelineContext;
     }
 
     public ResolvedVfxPath ToResolvedVfxPath()
@@ -96,7 +100,8 @@ internal sealed class ResolvedVfxPathAccumulator
             Sources,
             Contracts,
             SearchTermUtility.BuildStableTerms(SearchTerms),
-            Analysis);
+            Analysis,
+            TimelineContext);
 
     public static void MergeInto(
         IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
@@ -106,7 +111,8 @@ internal sealed class ResolvedVfxPathAccumulator
         AssetPathSource sources,
         AssetPathContract contracts,
         IEnumerable<string> searchTerms,
-        VfxAnalysis? analysis = null)
+        VfxAnalysis? analysis = null,
+        VfxTimelineContext timelineContext = VfxTimelineContext.None)
     {
         if (!resolvedPaths.TryGetValue(normalizedPath, out ResolvedVfxPathAccumulator? state))
         {
@@ -114,7 +120,7 @@ internal sealed class ResolvedVfxPathAccumulator
             resolvedPaths.Add(normalizedPath, state);
         }
 
-        state.Merge(family, evidence, sources, contracts, searchTerms, analysis);
+        state.Merge(family, evidence, sources, contracts, searchTerms, analysis, timelineContext);
     }
 
     public static IReadOnlyList<ResolvedVfxPath> BuildSnapshot(IEnumerable<ResolvedVfxPathAccumulator> resolvedPaths)
@@ -181,4 +187,3 @@ internal static class RuntimeVfxEvidenceExtensions
         return "vfx";
     }
 }
-

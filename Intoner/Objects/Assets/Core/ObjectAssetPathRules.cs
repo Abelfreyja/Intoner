@@ -51,18 +51,6 @@ internal static class ObjectAssetPathRules
     public static bool IsSupportedResourcePath(string path)
         => ClassifyResourcePath(path) != ObjectResourcePathKind.Unknown;
 
-    public static bool TryNormalizeSupportedResourcePath(string path, out string normalizedPath)
-    {
-        if (GameAssetPathRules.TryNormalizeGamePath(path, out normalizedPath)
-         && ClassifyResourcePathNormalized(normalizedPath) != ObjectResourcePathKind.Unknown)
-        {
-            return true;
-        }
-
-        normalizedPath = string.Empty;
-        return false;
-    }
-
     public static IEnumerable<string> CollectBgModelAnimationResourcePaths(string modelPath)
     {
         string normalizedModelPath = GameAssetPathRules.NormalizeGamePath(modelPath);
@@ -81,6 +69,9 @@ internal static class ObjectAssetPathRules
         yield return $"{basePath}.sklb";
         yield return $"{basePath}.pap";
     }
+
+    public static bool IsRelevantRuntimeCapturePath(string path)
+        => ClassifyKnownAssetPath(path) is AssetPathKind.Model or AssetPathKind.SharedGroup or AssetPathKind.Vfx or AssetPathKind.Timeline;
 
     public static bool IsRelevantSqpackCatalogSeedPath(string path)
     {
@@ -106,7 +97,7 @@ internal static class ObjectAssetPathRules
             GameAssetFileKind.Avfx => ObjectResourcePathKind.Vfx,
             GameAssetFileKind.Atex => ObjectResourcePathKind.Atex,
             GameAssetFileKind.Scd => ObjectResourcePathKind.Sound,
-            GameAssetFileKind.Eid => ObjectResourcePathKind.Eid,
+            GameAssetFileKind.Pcb => ObjectResourcePathKind.Collision,
             _ => ObjectResourcePathKind.Unknown,
         };
 

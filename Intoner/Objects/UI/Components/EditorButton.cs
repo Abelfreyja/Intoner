@@ -13,6 +13,7 @@ internal static class EditorButton
         Standard,
         Primary,
         FormAction,
+        Subtle,
     }
 
     private const float ButtonHeight = 30f;
@@ -64,6 +65,15 @@ internal static class EditorButton
         string? tooltip = null)
         => DrawCore(id, icon, label, accent, size, enabled, tooltip, accent, ButtonStyle.FormAction);
 
+    public static bool DrawSubtle(
+        string id,
+        FontAwesomeIcon icon,
+        string label,
+        Vector4 accent,
+        Vector2 size,
+        string? tooltip = null)
+        => DrawCore(id, icon, label, accent, size, true, tooltip, null, ButtonStyle.Subtle);
+
     private static bool DrawCore(
         string id,
         FontAwesomeIcon icon,
@@ -75,6 +85,7 @@ internal static class EditorButton
         Vector4? iconColor,
         ButtonStyle style)
     {
+        label ??= string.Empty;
         Vector4 fill = ThemeColors.ButtonDefault with { W = 0.88f };
         Vector4 hoverFill = accent with { W = 0.22f };
         Vector4 activeFill = accent with { W = 0.32f };
@@ -89,8 +100,8 @@ internal static class EditorButton
         else if (style == ButtonStyle.Primary)
         {
             fill = Vector4.Lerp(ThemeColors.ButtonDefault, accent, 0.14f) with { W = 0.86f };
-            hoverFill = Vector4.Lerp(ThemeColors.ButtonDefault, accent, 0.23f) with { W = 0.92f };
-            activeFill = Vector4.Lerp(ThemeColors.ButtonDefault, accent, 0.30f) with { W = 0.96f };
+            hoverFill = ThemeColors.PrimaryButtonInteraction(accent, active: false);
+            activeFill = ThemeColors.PrimaryButtonInteraction(accent, active: true);
             borderColor = accent with { W = 0.42f };
         }
         else if (style == ButtonStyle.FormAction)
@@ -99,6 +110,13 @@ internal static class EditorButton
             hoverFill = Vector4.Lerp(ThemeColors.ButtonDefault, accent, 0.16f) with { W = 0.82f };
             activeFill = Vector4.Lerp(ThemeColors.ButtonDefault, accent, 0.23f) with { W = 0.88f };
             borderColor = accent with { W = 0.34f };
+        }
+        else if (style == ButtonStyle.Subtle)
+        {
+            fill = ThemeColors.WithAlpha(ThemeColors.ButtonDefault, 0.38f);
+            hoverFill = ThemeColors.WithAlpha(accent, 0.10f);
+            activeFill = ThemeColors.WithAlpha(accent, 0.16f);
+            borderColor = ThemeColors.WithAlpha(ThemeColors.Border, 0.34f);
         }
 
         float rounding = Scaled(style == ButtonStyle.Standard ? 5f : 4f);
@@ -119,15 +137,30 @@ internal static class EditorButton
 
         Vector2 min = ImGui.GetItemRectMin();
         Vector2 max = ImGui.GetItemRectMax();
-        if (customBorder)
+        bool hovered = ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled);
+        bool active = ImGui.IsItemActive();
+        if (style == ButtonStyle.Subtle)
+        {
+            if (hovered || active)
+            {
+                borderColor = ThemeColors.WithAlpha(accent, active ? 0.46f : 0.34f);
+            }
+
+            ImGui.GetWindowDrawList().AddRect(min, max, ImGui.GetColorU32(borderColor), rounding);
+        }
+        else if (customBorder)
         {
             DrawSharpBorder(min, max, borderColor, rounding);
         }
 
-        DrawContent(icon, label, iconColor, enabled, style != ButtonStyle.Standard, min, max);
+        bool labelClipped = DrawContent(icon, label, iconColor, enabled, style, hovered || active, min, max);
 
-        if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled)
-            && !string.IsNullOrWhiteSpace(tooltip))
+        if (hovered && style == ButtonStyle.Subtle && (labelClipped || !string.IsNullOrWhiteSpace(tooltip)))
+        {
+            string detail = string.Equals(label, tooltip, StringComparison.Ordinal) ? string.Empty : tooltip ?? string.Empty;
+            IntonerTooltip.DrawDescription(icon, label, detail, new IntonerTooltipOptions { Accent = accent });
+        }
+        else if (hovered && !string.IsNullOrWhiteSpace(tooltip))
         {
             IntonerTooltip.DrawDescription(
                 icon,
@@ -151,30 +184,34 @@ internal static class EditorButton
             thickness);
     }
 
-    private static void DrawContent(
+    private static bool DrawContent(
         FontAwesomeIcon icon,
         string label,
         Vector4? iconColor,
         bool enabled,
-        bool primary,
+        ButtonStyle style,
+        bool emphasized,
         Vector2 min,
         Vector2 max)
     {
         EditorIcon.Metrics iconMetrics = EditorIcon.Measure(icon);
         float spacing = Scaled(6f);
-        float paddingX = Scaled(12f);
+        bool subtle = style == ButtonStyle.Subtle;
+        bool primary = style != ButtonStyle.Standard;
+        float paddingX = Scaled(subtle ? 8f : 12f);
         float availableLabelWidth = MathF.Max(
-            Scaled(12f),
+            subtle ? 1f : Scaled(12f),
             max.X - min.X - (paddingX * 2f) - iconMetrics.Size.X - spacing);
-        string renderedLabel = EditorTextUtility.ClipTextToWidth(label, availableLabelWidth);
+        EditorTextUtility.ClippedText clippedLabel = EditorTextUtility.ClipTextToWidthResult(label, availableLabelWidth);
+        string renderedLabel = clippedLabel.Text;
         Vector2 labelSize = ImGui.CalcTextSize(renderedLabel);
         float contentWidth = iconMetrics.Size.X + spacing + labelSize.X;
-        float startX = min.X + MathF.Max(0f, ((max.X - min.X) - contentWidth) * 0.5f);
+        float startX = min.X + MathF.Max(subtle ? paddingX : 0f, ((max.X - min.X) - contentWidth) * 0.5f);
         Vector4 textColor;
         Vector4 resolvedIconColor;
         if (enabled)
         {
-            textColor = ThemeColors.Text;
+            textColor = subtle && !emphasized ? ThemeColors.WithAlpha(ThemeColors.TextDisabled, 0.88f) : ThemeColors.Text;
             resolvedIconColor = iconColor ?? textColor;
         }
         else
@@ -207,6 +244,7 @@ internal static class EditorButton
                 min.Y + MathF.Max(0f, ((max.Y - min.Y) - labelSize.Y) * 0.5f)),
             ImGui.GetColorU32(textColor),
             renderedLabel);
+        return clippedLabel.IsClipped;
     }
 
     private static float Scaled(float value)

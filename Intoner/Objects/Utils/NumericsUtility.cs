@@ -88,9 +88,16 @@ internal static class NumericsUtility
     public static bool TryNormalize(Vector2 value, out Vector2 normalizedValue)
     {
         normalizedValue = default;
-        if (!HasLength(value))
+        float lengthSquared = value.LengthSquared();
+
+        if (!(lengthSquared > DirectionEpsilonSquared) || !IsFinite(value))
         {
             return false;
+        }
+
+        if (float.IsPositiveInfinity(lengthSquared))
+        {
+            value /= MathF.Max(MathF.Abs(value.X), MathF.Abs(value.Y));
         }
 
         normalizedValue = Vector2.Normalize(value);
@@ -100,12 +107,39 @@ internal static class NumericsUtility
     public static bool TryNormalize(Vector3 value, out Vector3 normalizedValue)
     {
         normalizedValue = default;
-        if (!HasLength(value))
+        float lengthSquared = value.LengthSquared();
+
+        if (!(lengthSquared > DirectionEpsilonSquared) || !IsFinite(value))
         {
             return false;
         }
 
+        if (float.IsPositiveInfinity(lengthSquared))
+        {
+            value /= MathF.Max(MathF.Abs(value.X), MathF.Max(MathF.Abs(value.Y), MathF.Abs(value.Z)));
+        }
+
         normalizedValue = Vector3.Normalize(value);
+        return true;
+    }
+
+    public static bool TryNormalize(Quaternion value, out Quaternion normalizedValue)
+    {
+        normalizedValue = Quaternion.Identity;
+        float lengthSquared = value.LengthSquared();
+
+        if (!(lengthSquared > DirectionEpsilonSquared) || !IsFinite(value))
+        {
+            return false;
+        }
+
+        if (float.IsPositiveInfinity(lengthSquared))
+        {
+            float maximum = MathF.Max(MathF.Max(MathF.Abs(value.X), MathF.Abs(value.Y)), MathF.Max(MathF.Abs(value.Z), MathF.Abs(value.W)));
+            value = new Quaternion(value.X / maximum, value.Y / maximum, value.Z / maximum, value.W / maximum);
+        }
+
+        normalizedValue = Quaternion.Normalize(value);
         return true;
     }
 }

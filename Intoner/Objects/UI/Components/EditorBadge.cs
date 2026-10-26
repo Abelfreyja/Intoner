@@ -54,7 +54,7 @@ internal readonly record struct EditorBadge(
             Color: color);
 
     public static EditorBadge Count(
-        FontAwesomeIcon icon,
+        FontAwesomeIcon? icon,
         int count,
         string singular,
         string plural,

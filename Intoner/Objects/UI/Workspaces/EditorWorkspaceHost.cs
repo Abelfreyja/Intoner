@@ -1,6 +1,5 @@
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
-using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using Intoner.Objects.Catalog;
 using Intoner.Objects.Models;
@@ -121,7 +120,7 @@ internal sealed class EditorWorkspaceHost
         {
             IReadOnlyList<ObjectLayoutSnapshot> layouts = _layoutManager.GetLayouts();
             _layouts.RefreshContext(layouts);
-            EditorFrame frame = new(scene, catalog, _objectKindService.GetKindInfos(), layouts, _layoutManager.GetDefaultLayoutId());
+            EditorFrame frame = new(scene, catalog, _objectKindService.GetKindInfos(), layouts, _layoutManager.GetCreationLayoutId());
             DrawToolbarLayout(frame);
         }
     }
@@ -180,7 +179,7 @@ internal sealed class EditorWorkspaceHost
 
         if (_workspaceMode == WorkspaceMode.Collections)
         {
-            _collections.DrawCollectionsWorkspace(frame.Scene.ActiveObjectIds);
+            _collections.DrawCollectionsWorkspace(frame.Scene.Objects, frame.Scene.ActiveObjectIds);
             return;
         }
 
@@ -219,10 +218,10 @@ internal sealed class EditorWorkspaceHost
                 _editorOverlayLayer.DrawChildPanel("##objectCatalogPanel", Vector2.Zero, true, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse, () => _catalogBrowser.DrawCatalogPanel(frame.Catalog), transparentBackground: false);
                 break;
             case WorkspaceMode.PlacedInspector:
-                _editorOverlayLayer.DrawChildPanel("##objectListPanel", Vector2.Zero, false, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse, () => _sceneWorkspace.DrawObjectListPanel(frame.Scene.Objects, frame.Scene.Displays, frame.Scene.ActiveObjectIds));
+                _editorOverlayLayer.DrawChildPanel("##objectListPanel", Vector2.Zero, false, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse, () => _sceneWorkspace.DrawObjectListPanel(frame.Scene.Objects, frame.Scene.Displays, frame.Scene.ActiveObjectIds, frame.Scene.ActiveItemLookup));
                 break;
             case WorkspaceMode.LayoutManager:
-                _editorOverlayLayer.DrawChildPanel("##objectLayoutListPanel", Vector2.Zero, false, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse, () => _layouts.DrawLayoutListPanel(frame.Layouts, frame.DefaultLayoutId));
+                _editorOverlayLayer.DrawChildPanel("##objectLayoutListPanel", Vector2.Zero, false, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse, () => _layouts.DrawLayoutListPanel(frame.Layouts, frame.CreationLayoutId));
                 break;
         }
     }
@@ -243,7 +242,7 @@ internal sealed class EditorWorkspaceHost
                     Vector2.Zero,
                     false,
                     ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse,
-                    () => _layouts.DrawLayoutInspectorPanel(frame.Scene.Objects, frame.Scene.ActiveObjects, frame.Layouts, frame.DefaultLayoutId));
+                    () => _layouts.DrawLayoutInspectorPanel(frame.Scene.Objects, frame.Scene.ActiveObjects, frame.Layouts, frame.CreationLayoutId));
                 break;
         }
     }
@@ -298,7 +297,9 @@ internal sealed class EditorWorkspaceHost
                 ImGui.SameLine();
             }
 
-            if (!DrawIconTextButton(action.Id, action.Icon, action.Label, widths[actionIndex], _workspaceMode == action.Mode))
+            if (!EditorSegmentedControl.DrawSegment(action.Id, action.Icon, action.Label, null,
+                    _workspaceMode == action.Mode, true, action.Label, ThemeColors.AccentPrimary,
+                    new Vector2(widths[actionIndex], ImGui.GetFrameHeight()), 0, 1, rounding: 5f, showSelectionIndicator: false, background: EditorSegmentBackground.Emphasized))
             {
                 continue;
             }
@@ -331,13 +332,6 @@ internal sealed class EditorWorkspaceHost
     private static float ResolveWorkspaceToolbarDividerHeight()
         => EditorLayout.ResolveDividerThickness() + ImGui.GetStyle().ItemSpacing.Y;
 
-    [StructLayout(LayoutKind.Auto)]
-    internal readonly record struct IconTextButtonMetrics(
-        float Width,
-        float MinimumWidth,
-        EditorIcon.Metrics Icon,
-        float Spacing);
-
     private static void ResolveWorkspaceModeActionWidths(ReadOnlySpan<WorkspaceModeAction> actions, Span<float> widths, float availableWidth)
     {
         if (actions.IsEmpty)
@@ -355,11 +349,10 @@ internal sealed class EditorWorkspaceHost
         for (int index = 0; index < actions.Length; index++)
         {
             WorkspaceModeAction action = actions[index];
-            IconTextButtonMetrics metrics = ResolveIconTextButtonMetrics(action.Icon, action.Label);
-            desiredWidths[index] = metrics.Width;
-            minimumWidths[index] = metrics.MinimumWidth;
-            desiredTotal += metrics.Width;
-            minimumTotal += metrics.MinimumWidth;
+            desiredWidths[index] = EditorSegmentedControl.MeasureWidth(action.Icon, action.Label);
+            minimumWidths[index] = EditorSegmentedControl.MeasureWidth(action.Icon, string.Empty);
+            desiredTotal += desiredWidths[index];
+            minimumTotal += minimumWidths[index];
         }
 
         float extraWidth = desiredTotal <= rowWidth ? (rowWidth - desiredTotal) / actions.Length : 0f;
@@ -394,66 +387,5 @@ internal sealed class EditorWorkspaceHost
             widths[index] = MathF.Max(1f, width);
             remainingWidth -= widths[index];
         }
-    }
-
-    private static IconTextButtonMetrics ResolveIconTextButtonMetrics(FontAwesomeIcon icon, string text)
-    {
-        EditorIcon.Metrics iconMetrics = EditorIcon.Measure(icon);
-        Vector2 labelSize = ImGui.CalcTextSize(text);
-        float spacing = 6f * ImGuiHelpers.GlobalScale;
-        float horizontalPadding = (ImGui.GetStyle().FramePadding.X * 2f) + (18f * ImGuiHelpers.GlobalScale);
-        return new IconTextButtonMetrics(
-            iconMetrics.Size.X + labelSize.X + spacing + horizontalPadding,
-            iconMetrics.Size.X + horizontalPadding,
-            iconMetrics,
-            spacing);
-    }
-
-    private static bool DrawIconTextButton(string id, FontAwesomeIcon icon, string text, float width, bool selected = false)
-    {
-        Vector2 buttonSize = new(MathF.Max(1f, width), 0f);
-        using var selectedButton = selected
-            ? ImRaii.PushColor(ImGuiCol.Button, ImGui.GetColorU32(ImGuiCol.ButtonActive))
-            : default;
-
-        bool clicked = ImGui.Button(id, buttonSize);
-
-        Vector2 min = ImGui.GetItemRectMin();
-        Vector2 max = ImGui.GetItemRectMax();
-        ImDrawListPtr drawList = ImGui.GetWindowDrawList();
-        IconTextButtonMetrics metrics = ResolveIconTextButtonMetrics(icon, text);
-        string label = ResolveIconTextButtonLabel(text, metrics, max.X - min.X);
-        Vector2 labelSize = string.IsNullOrEmpty(label) ? Vector2.Zero : ImGui.CalcTextSize(label);
-        float totalWidth = metrics.Icon.Size.X + (string.IsNullOrEmpty(label) ? 0f : metrics.Spacing + labelSize.X);
-        float startX = min.X + MathF.Max(0f, ((max.X - min.X) - totalWidth) * 0.5f);
-        float iconY = min.Y + ((max.Y - min.Y - metrics.Icon.Size.Y) * 0.5f);
-        float labelY = min.Y + ((max.Y - min.Y - labelSize.Y) * 0.5f);
-
-        drawList.PushClipRect(min, max, true);
-        EditorIcon.Draw(
-            drawList,
-            icon,
-            metrics.Icon,
-            new Vector2(startX, iconY),
-            ThemeColors.Style(ImGuiCol.Text));
-
-        if (!string.IsNullOrEmpty(label))
-        {
-            drawList.AddText(
-                new Vector2(startX + metrics.Icon.Size.X + metrics.Spacing, labelY),
-                ImGui.GetColorU32(ImGuiCol.Text),
-                label);
-        }
-
-        drawList.PopClipRect();
-
-        return clicked;
-    }
-
-    private static string ResolveIconTextButtonLabel(string text, IconTextButtonMetrics metrics, float buttonWidth)
-    {
-        float reservedWidth = metrics.MinimumWidth + metrics.Spacing;
-        float availableTextWidth = buttonWidth - reservedWidth;
-        return EditorTextUtility.ClipTextToWidth(text, availableTextWidth);
     }
 }

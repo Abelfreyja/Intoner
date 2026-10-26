@@ -170,7 +170,7 @@ internal sealed class ViewportResources : GpuUiDeviceResourceHost
             DepthComparison = Comparison.LessEqual,
             IsStencilEnabled = false,
         });
-        _blendState = CreateBlendState(device);
+        _blendState = GpuRenderStateUtility.CreateAlphaBlendState(device);
         _samplerState = new SamplerState(device, new SamplerStateDescription
         {
             Filter = Filter.MinMagMipLinear,
@@ -214,20 +214,6 @@ internal sealed class ViewportResources : GpuUiDeviceResourceHost
         _backgroundVertexShader = null;
         _meshVertexShader?.Dispose();
         _meshVertexShader = null;
-    }
-
-    private static BlendState CreateBlendState(Device device)
-    {
-        var description = BlendStateDescription.Default();
-        description.RenderTarget[0].IsBlendEnabled = true;
-        description.RenderTarget[0].SourceBlend = BlendOption.SourceAlpha;
-        description.RenderTarget[0].DestinationBlend = BlendOption.InverseSourceAlpha;
-        description.RenderTarget[0].BlendOperation = BlendOperation.Add;
-        description.RenderTarget[0].SourceAlphaBlend = BlendOption.One;
-        description.RenderTarget[0].DestinationAlphaBlend = BlendOption.InverseSourceAlpha;
-        description.RenderTarget[0].AlphaBlendOperation = BlendOperation.Add;
-        description.RenderTarget[0].RenderTargetWriteMask = ColorWriteMaskFlags.All;
-        return new BlendState(device, description);
     }
 
     [StructLayout(LayoutKind.Auto)]

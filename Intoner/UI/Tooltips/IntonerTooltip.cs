@@ -25,12 +25,12 @@ internal readonly record struct IntonerTooltipOptions
 
 internal static class IntonerTooltip
 {
-    private const float DefaultRichWidth = 320f;
+    private const float DefaultRichWidth = 346f;
     private const float DefaultMaxWidth = 420f;
-    private const float DefaultRounding = 6f;
+    private const float DefaultRounding = 4f;
     private const float DefaultBorderWidth = 1f;
     private const float DefaultWrapWidthEms = 34f;
-    private const float DefaultPadding = 10f;
+    private const float DefaultPadding = 8f;
 
     private static int _suppressionDepth;
 
@@ -85,20 +85,10 @@ internal static class IntonerTooltip
             return;
         }
 
-        ResolvedStyle style = ResolveStyle(options, false);
+        string normalizedText = text.Trim();
         DrawResolved(
-            () =>
-            {
-                float wrapWidth = style.Width.HasValue
-                    ? ImGui.GetContentRegionAvail().X
-                    : MathF.Min(
-                        ImGui.GetFontSize() * style.WrapWidthEms,
-                        style.MaxWidth - (style.Padding.X * 2f));
-                float wrapPosition = ImGui.GetCursorPosX() + MathF.Max(1f, wrapWidth);
-                using var wrap = ImRaii.TextWrapPos(wrapPosition);
-                ImGui.TextUnformatted(text.Trim());
-            },
-            style);
+            () => IntonerTooltipContent.Label(null, normalizedText, options.Accent, options.TitleColor),
+            ResolveTextStyle(ImGui.CalcTextSize(normalizedText).X, options));
     }
 
     public static void DrawText(
@@ -128,13 +118,22 @@ internal static class IntonerTooltip
 
         string normalizedTitle = title.Trim();
         string normalizedDetail = string.IsNullOrWhiteSpace(detail) ? string.Empty : detail.Trim();
+        if (normalizedDetail.Length == 0)
+        {
+            DrawContentSized(
+                () => IntonerTooltipContent.Label(icon, normalizedTitle, options.Accent, options.TitleColor),
+                IntonerTooltipContent.MeasureItemWidth(icon, normalizedTitle),
+                options);
+            return;
+        }
+
+        if (!options.Width.HasValue && !options.MaxWidth.HasValue)
+        {
+            options = options with { MaxWidth = DefaultRichWidth };
+        }
+
         DrawContentSized(
-            () => IntonerTooltipContent.Header(
-                icon,
-                normalizedTitle,
-                normalizedDetail,
-                options.Accent,
-                options.TitleColor),
+            () => IntonerTooltipContent.Header(icon, normalizedTitle, normalizedDetail, options.Accent, options.TitleColor),
             IntonerTooltipContent.MeasureHeaderWidth(icon, normalizedTitle, normalizedDetail),
             options);
     }
@@ -150,15 +149,7 @@ internal static class IntonerTooltip
             return;
         }
 
-        ResolvedStyle style = ResolveStyle(options, true);
-        if (!options.Width.HasValue)
-        {
-            // imgui truncates window sizes, so keep fractional scaling from reducing the measured content width
-            float width = MathF.Ceiling(MathF.Max(1f, measuredContentWidth) + (style.Padding.X * 2f));
-            style = style with { Width = MathF.Min(width, style.MaxWidth) };
-        }
-
-        DrawResolved(content, style);
+        DrawResolved(content, ResolveContentStyle(measuredContentWidth, options));
     }
 
     public static void Draw(Action content, IntonerTooltipOptions options = default)
@@ -169,8 +160,14 @@ internal static class IntonerTooltip
             return;
         }
 
-        DrawResolved(content, ResolveStyle(options, true));
+        DrawResolved(content, ResolveStyle(options));
     }
+
+    public static StyleScope PushStyle(IntonerTooltipOptions options = default)
+        => PushStyle(ResolveStyle(options));
+
+    private static StyleScope PushStyle(ResolvedStyle style)
+        => new(style.Background, style.Border, style.Padding, style.ItemSpacing, style.Rounding, style.BorderWidth);
 
     private static void DrawResolved(Action content, ResolvedStyle style)
     {
@@ -182,15 +179,9 @@ internal static class IntonerTooltip
         using var enabled = ImRaii.Enabled();
         ApplySizeConstraints(style);
 
-        using var rounding = ImRaii.PushStyle(ImGuiStyleVar.WindowRounding, style.Rounding);
-        using var padding = ImRaii.PushStyle(ImGuiStyleVar.WindowPadding, style.Padding);
-        using var spacing = ImRaii.PushStyle(ImGuiStyleVar.ItemSpacing, style.ItemSpacing);
-        using var borderWidth = ImRaii.PushStyle(ImGuiStyleVar.WindowBorderSize, style.BorderWidth);
-        using var background = ImRaii.PushColor(ImGuiCol.PopupBg, style.Background);
-        using var border = ImRaii.PushColor(ImGuiCol.Border, style.Border);
-        using var text = ImRaii.PushColor(ImGuiCol.Text, ThemeColors.TextDefault);
-        using var disabledText = ImRaii.PushColor(ImGuiCol.TextDisabled, ThemeColors.TextDisabledDefault);
+        using var appearance = PushStyle(style);
         using var tooltip = ImRaii.Tooltip();
+
         if (!tooltip.Alive)
         {
             return;
@@ -210,14 +201,24 @@ internal static class IntonerTooltip
             return;
         }
 
-        ResolvedStyle style = ResolveStyle(options, false);
-        Vector2 textSize = ImGui.CalcTextSize(text);
-        Vector2 size = textSize + (style.Padding * 2f);
+        string normalizedText = text.Trim();
+        Vector2 textSize = ImGui.CalcTextSize(normalizedText);
+        ResolvedStyle style = ResolveTextStyle(textSize.X, options);
+        float width = MathF.Floor(style.Width);
+        float contentWidth = MathF.Max(1f, width - style.Padding.X * 2f);
+        float wrapWidth = textSize.X > contentWidth ? contentWidth : 0f;
+
+        if (wrapWidth > 0f)
+        {
+            textSize = ImGui.CalcTextSize(normalizedText, false, wrapWidth);
+        }
+
         ImGuiViewportPtr viewport = ImGui.GetMainViewport();
+        Vector2 size = Vector2.Min(new Vector2(width, MathF.Ceiling(textSize.Y + style.Padding.Y * 2f)), viewport.WorkSize);
         Vector2 min = Vector2.Clamp(anchor, viewport.WorkPos, viewport.WorkPos + viewport.WorkSize - size);
         Vector2 max = min + size;
 
-        drawList.AddRectFilled(min, max, ImGui.GetColorU32(style.Background), style.Rounding);
+        drawList.AddRectFilled(min, max, ImGui.GetColorU32(ResolveHeaderBackground(style.Background)), style.Rounding);
         drawList.AddRect(
             min,
             max,
@@ -225,10 +226,40 @@ internal static class IntonerTooltip
             style.Rounding,
             ImDrawFlags.None,
             style.BorderWidth);
-        drawList.AddText(min + style.Padding, ImGui.GetColorU32(ThemeColors.Text), text);
+        Vector2 textMin = min + style.Padding;
+        Vector2 textMax = max - style.Padding;
+        drawList.AddText(
+            ImGui.GetFont(),
+            ImGui.GetFontSize(),
+            textMin,
+            ImGui.GetColorU32(options.TitleColor ?? ThemeColors.TextDefault),
+            normalizedText,
+            wrapWidth,
+            new Vector4(textMin.X, textMin.Y, textMax.X, textMax.Y));
     }
 
-    private static ResolvedStyle ResolveStyle(IntonerTooltipOptions options, bool useDefaultWidth)
+    private static ResolvedStyle ResolveTextStyle(float measuredTextWidth, IntonerTooltipOptions options)
+    {
+        float wrapWidth = ImGui.GetFontSize()
+            * (options.WrapWidthEms is > 0f ? options.WrapWidthEms.Value : DefaultWrapWidthEms);
+        return ResolveContentStyle(MathF.Min(measuredTextWidth, wrapWidth), options);
+    }
+
+    private static ResolvedStyle ResolveContentStyle(float measuredContentWidth, IntonerTooltipOptions options)
+    {
+        ResolvedStyle style = ResolveStyle(options);
+
+        if (options.Width is > 0f)
+        {
+            return style;
+        }
+
+        // imgui truncates window sizes, so keep fractional scaling from reducing the measured content width
+        float width = MathF.Ceiling(MathF.Max(1f, measuredContentWidth) + style.Padding.X * 2f);
+        return style with { Width = MathF.Min(width, style.MaxWidth) };
+    }
+
+    private static ResolvedStyle ResolveStyle(IntonerTooltipOptions options)
     {
         float scale = ImGuiHelpers.GlobalScale;
         float viewportWidth = MathF.Max(1f, ImGui.GetMainViewport().WorkSize.X - (24f * scale));
@@ -237,42 +268,56 @@ internal static class IntonerTooltip
         float maxWidth = MathF.Min(
             (options.MaxWidth is > 0f ? options.MaxWidth.Value : DefaultMaxWidth) * scale,
             viewportWidth);
-        float? requestedWidth = null;
-        if (options.Width is > 0f)
-        {
-            requestedWidth = options.Width.Value * scale;
-        }
-        else if (useDefaultWidth)
-        {
-            requestedWidth = DefaultRichWidth * scale;
-        }
-        float? width = requestedWidth.HasValue
-            ? MathF.Min(requestedWidth.Value, maxWidth)
-            : null;
+        float requestedWidth = (options.Width is > 0f ? options.Width.Value : DefaultRichWidth) * scale;
+        float width = MathF.Min(requestedWidth, maxWidth);
+        Vector2 padding = (options.Padding ?? new Vector2(DefaultPadding)) * scale;
+        padding = new Vector2(MathF.Round(padding.X), MathF.Round(padding.Y));
         return new ResolvedStyle(
             background,
             options.Border ?? Vector4.Lerp(ThemeColors.Border, accent, 0.28f) with { W = 0.58f },
-            (options.Padding ?? new Vector2(DefaultPadding)) * scale,
-            (options.ItemSpacing ?? new Vector2(7f, 5f)) * scale,
+            padding,
+            (options.ItemSpacing ?? new Vector2(6f, 6f)) * scale,
             width,
             maxWidth,
             (options.Rounding ?? DefaultRounding) * scale,
-            (options.BorderWidth ?? DefaultBorderWidth) * scale,
-            options.WrapWidthEms is > 0f ? options.WrapWidthEms.Value : DefaultWrapWidthEms);
+            (options.BorderWidth ?? DefaultBorderWidth) * scale);
     }
 
     internal static Vector4 ResolveBackground()
         => Vector4.Lerp(ThemeColors.WindowBg, ThemeColors.ButtonDefault, 0.48f) with { W = 0.99f };
 
+    internal static Vector4 ResolveHeaderBackground(Vector4 background)
+        => Vector4.Lerp(background, ThemeColors.TextDefault, 0.04f);
+
     private static void ApplySizeConstraints(ResolvedStyle style)
+        => ImGui.SetNextWindowSizeConstraints(new Vector2(style.Width, 0f), new Vector2(style.Width, float.MaxValue));
+
+    [StructLayout(LayoutKind.Auto)]
+    public readonly ref struct StyleScope
     {
-        if (style.Width is { } width)
+        private readonly ImRaii.StyleDisposable? _style;
+        private readonly ImRaii.ColorDisposable? _colors;
+
+        internal StyleScope(Vector4 background, Vector4 border, Vector2 padding, Vector2 spacing, float rounding, float borderWidth)
         {
-            ImGui.SetNextWindowSizeConstraints(new Vector2(width, 0f), new Vector2(width, float.MaxValue));
-            return;
+            _style = ImRaii.PushStyle(ImGuiStyleVar.WindowRounding, rounding)
+                .Push(ImGuiStyleVar.PopupRounding, rounding)
+                .Push(ImGuiStyleVar.WindowBorderSize, borderWidth)
+                .Push(ImGuiStyleVar.PopupBorderSize, borderWidth)
+                .Push(ImGuiStyleVar.WindowPadding, padding)
+                .Push(ImGuiStyleVar.ItemSpacing, spacing)
+                .Push(ImGuiStyleVar.CellPadding, IntonerTooltipContent.TableCellPadding);
+            _colors = ImRaii.PushColor(ImGuiCol.PopupBg, background)
+                .Push(ImGuiCol.Border, border)
+                .Push(ImGuiCol.Text, ThemeColors.TextDefault)
+                .Push(ImGuiCol.TextDisabled, Vector4.Lerp(ThemeColors.TextDisabledDefault, ThemeColors.TextDefault, 0.42f));
         }
 
-        ImGui.SetNextWindowSizeConstraints(Vector2.Zero, new Vector2(style.MaxWidth, float.MaxValue));
+        public void Dispose()
+        {
+            _colors?.Dispose();
+            _style?.Dispose();
+        }
     }
 
     [StructLayout(LayoutKind.Auto)]
@@ -306,9 +351,8 @@ internal static class IntonerTooltip
         Vector4 Border,
         Vector2 Padding,
         Vector2 ItemSpacing,
-        float? Width,
+        float Width,
         float MaxWidth,
         float Rounding,
-        float BorderWidth,
-        float WrapWidthEms);
+        float BorderWidth);
 }

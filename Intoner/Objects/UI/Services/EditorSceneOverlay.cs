@@ -7,6 +7,7 @@ using Intoner.Objects.Runtime;
 using Intoner.Objects.UI.Bounds;
 using Intoner.Objects.UI.Components;
 using Intoner.Objects.UI.Services;
+using Intoner.Objects.Utils;
 using Intoner.Scene;
 using Intoner.Services.Input;
 using Intoner.UI;
@@ -30,7 +31,11 @@ internal sealed class EditorSceneOverlay
     private readonly List<BoundsAnnotation> _boundsAnnotations = [];
     private IReadOnlyList<SceneItemBoundsSnapshot>? _editorBoundsSource;
     private IReadOnlyDictionary<Guid, SceneItemSnapshot>? _editorBoundsItems;
+    private IReadOnlyDictionary<Guid, SceneItemSnapshot>? _editorBoundsActiveItems;
+    private readonly Dictionary<Guid, Guid> _boundsMemberGroups = [];
+    private readonly HashSet<Guid> _boundsGroupIds = [];
     private IReadOnlyList<SceneItemBoundsSnapshot> _editorBoundsSnapshots = [];
+    private IReadOnlyList<SceneItemBoundsSnapshot> _editorOverlayBoundsSnapshots = [];
 
     public EditorSceneOverlay(
         ISceneSelectionService sceneSelectionService,
@@ -56,13 +61,42 @@ internal sealed class EditorSceneOverlay
 
     private IReadOnlyList<SceneItemBoundsSnapshot> GetEditorBoundsSnapshots(
         IReadOnlyList<SceneItemBoundsSnapshot> boundsSnapshots,
-        IReadOnlyDictionary<Guid, SceneItemSnapshot> placedItems)
+        IReadOnlyDictionary<Guid, SceneItemSnapshot> placedItems,
+        IReadOnlyDictionary<Guid, SceneItemSnapshot> activeItems)
     {
-        if (!ReferenceEquals(_editorBoundsSource, boundsSnapshots) || !ReferenceEquals(_editorBoundsItems, placedItems))
+        if (!ReferenceEquals(_editorBoundsSource, boundsSnapshots) || !ReferenceEquals(_editorBoundsItems, placedItems)
+            || !ReferenceEquals(_editorBoundsActiveItems, activeItems))
         {
             _editorBoundsSource = boundsSnapshots;
             _editorBoundsItems = placedItems;
-            _editorBoundsSnapshots = boundsSnapshots.Where(bounds => placedItems.ContainsKey(bounds.Id)).ToArray();
+            _editorBoundsActiveItems = activeItems;
+            _boundsMemberGroups.Clear();
+            _boundsGroupIds.Clear();
+            List<SceneItemBoundsSnapshot> editorBounds = boundsSnapshots.Where(bounds => placedItems.ContainsKey(bounds.Id)).ToList();
+            _editorBoundsSnapshots = editorBounds.ToArray();
+            Dictionary<Guid, List<SceneItemBoundsSnapshot>> groupMembers = [];
+            foreach (SceneItemBoundsSnapshot bounds in editorBounds)
+            {
+                if (placedItems[bounds.Id] is not ObjectSnapshot { GroupId: { } groupId })
+                    continue;
+                if (!groupMembers.TryGetValue(groupId, out List<SceneItemBoundsSnapshot>? members))
+                {
+                    members = [];
+                    groupMembers.Add(groupId, members);
+                }
+                members.Add(bounds);
+            }
+            foreach ((Guid groupId, List<SceneItemBoundsSnapshot> members) in groupMembers)
+            {
+                SceneItemSnapshot? item = activeItems.GetValueOrDefault(groupId) ?? placedItems.GetValueOrDefault(groupId);
+                if (item is not SceneGroupSnapshot group || SceneGroupBoundsGeometry.Create(group, members) is not { } groupBounds)
+                    continue;
+                editorBounds.Add(groupBounds);
+                _boundsGroupIds.Add(groupId);
+                foreach (SceneItemBoundsSnapshot member in members)
+                    _boundsMemberGroups.Add(member.Id, groupId);
+            }
+            _editorOverlayBoundsSnapshots = editorBounds;
         }
 
         return _editorBoundsSnapshots;
@@ -77,8 +111,9 @@ internal sealed class EditorSceneOverlay
 
         float thickness = MathF.Max(1.5f * ImGuiHelpers.GlobalScale, 1f);
         DrawBatch batch = _drawManager.BeginPass(DrawPassKind.Bounds, "Bounds", DrawLayer.CurrentWindow);
-        AddBoundsDrawPass(batch, boundsSnapshots, thickness, selected: false);
-        AddBoundsDrawPass(batch, boundsSnapshots, thickness, selected: true);
+        AddBoundsDrawPass(batch, boundsSnapshots, thickness, EditorSelectionRole.None);
+        AddBoundsDrawPass(batch, boundsSnapshots, thickness, EditorSelectionRole.Secondary);
+        AddBoundsDrawPass(batch, boundsSnapshots, thickness, EditorSelectionRole.Primary);
     }
 
     private void SubmitHousingPlacementOverlay(
@@ -157,14 +192,22 @@ internal sealed class EditorSceneOverlay
         DrawBatch batch,
         IReadOnlyList<SceneItemBoundsSnapshot> boundsSnapshots,
         float thickness,
-        bool selected)
+        EditorSelectionRole selectionRole)
     {
         SceneBoundsInteractionSettings settings = _gizmo.Settings.BoundsInteractionSettings;
+        bool selected = selectionRole != EditorSelectionRole.None;
         float opacity = selected ? settings.SelectedBoundsOpacity : settings.InactiveBoundsOpacity;
         foreach (SceneItemBoundsSnapshot boundsSnapshot in boundsSnapshots)
         {
-            bool isSelected = _interaction.Selection.Contains(boundsSnapshot.Id);
-            if (isSelected != selected || !settings.ShouldDraw(boundsSnapshot.Category, isSelected))
+            if (_boundsMemberGroups.TryGetValue(boundsSnapshot.Id, out Guid groupId)
+                && (!_interaction.Selection.Contains(boundsSnapshot.Id) || _interaction.Selection.Contains(groupId)))
+                continue;
+            bool isGroup = _boundsGroupIds.Contains(boundsSnapshot.Id);
+            bool shouldDraw = isGroup
+                ? (settings.BoundsFilter & boundsSnapshot.Category) != SceneBoundsCategory.None && (!settings.ShowSelectedOnly || selected)
+                : settings.ShouldDraw(boundsSnapshot.Category, selected);
+            if (_interaction.Selection.GetRole(boundsSnapshot.Id) != selectionRole
+                || !shouldDraw)
             {
                 continue;
             }
@@ -172,7 +215,9 @@ internal sealed class EditorSceneOverlay
             AddBoundsOverlayBox(
                 batch,
                 boundsSnapshot,
-                EditorColors.BoundsOverlay(boundsSnapshot.Category, opacity),
+                isGroup && selectionRole != EditorSelectionRole.Primary
+                    ? EditorColors.GroupAccent with { W = opacity }
+                    : EditorColors.BoundsOverlay(boundsSnapshot.Category, opacity, selectionRole),
                 thickness);
         }
     }
@@ -222,33 +267,55 @@ internal sealed class EditorSceneOverlay
 
     public EditorSceneFrame PrepareFrame(bool allowSceneInteraction, bool processPointer = true)
     {
-        EditorSceneState.EditorSceneData scene = _sceneState.GetEditorSceneData();
-        IReadOnlyList<ObjectBoundsSnapshot> objectBounds = _sceneView.GetObjectBoundsSnapshots();
-        IReadOnlyList<SceneItemBoundsSnapshot> sceneBounds = GetEditorBoundsSnapshots(_sceneItemService.GetBoundsSnapshots(), scene.ItemLookup);
-        _sceneState.EvaluatePlacement(objectBounds);
-        _interaction.SelectionChanged(_interaction.Selection.TryPrune(scene.SelectableItemIds));
+        EditorSceneFrame frame = CaptureFrame();
 
-        IReadOnlyList<SceneItemSnapshot> activeSelection = _interaction.Selection.ResolveSelectedItems(scene.ActiveItemLookup);
         if (processPointer)
         {
             ScenePointerButtons pointerButtons = EditorInputUtility.CaptureScenePointerButtons(includeAuxiliaryButtons: true);
             bool inputActive = ProcessScenePointerInput(pointerButtons, allowSceneInteraction && !IsSelecting);
-            HandleSceneSelectionInput(activeSelection, sceneBounds, allowSceneInteraction, inputActive);
-
-            activeSelection = _interaction.Selection.ResolveSelectedItems(scene.ActiveItemLookup);
+            HandleSceneSelectionInput(frame.ActiveSelection, frame.SceneBounds, allowSceneInteraction, inputActive);
         }
         else
         {
             CancelSceneSelection();
         }
 
+        return RefreshFrame(frame);
+    }
+
+    internal EditorSceneFrame RefreshFrame(EditorSceneFrame frame)
+        => ReferenceEquals(frame.Scene, _sceneState.GetEditorSceneData())
+            && frame.SelectionRevision == _interaction.Selection.Revision
+            && ReferenceEquals(frame.ObjectBounds, _sceneView.GetObjectBoundsSnapshots())
+            && ReferenceEquals(frame.SceneBounds, GetEditorBoundsSnapshots(
+                _sceneItemService.GetBoundsSnapshots(), frame.Scene.ItemLookup, frame.Scene.ActiveItemLookup))
+                ? frame : CaptureFrame();
+
+    private EditorSceneFrame CaptureFrame()
+    {
+        EditorSceneState.EditorSceneData scene = _sceneState.GetEditorSceneData();
+        IReadOnlyList<ObjectBoundsSnapshot> objectBounds = _sceneView.GetObjectBoundsSnapshots();
+        IReadOnlyList<SceneItemBoundsSnapshot> sceneBounds = GetEditorBoundsSnapshots(_sceneItemService.GetBoundsSnapshots(), scene.ItemLookup, scene.ActiveItemLookup);
+        _sceneState.EvaluatePlacement(objectBounds);
+        _interaction.SelectionChanged(_interaction.Selection.TryPrune(scene.SelectableItemIds));
+        IReadOnlyList<SceneItemSnapshot> activeSelection = _interaction.Selection.ResolveSelectedItems(scene.ActiveItemLookup);
+
+        if (activeSelection.Any(static snapshot => snapshot.Locked)
+            && SceneGroupUtility.ResolveSelectedGroup(activeSelection) is not { Locked: false })
+        {
+            activeSelection = [];
+        }
+
         _gizmo.NormalizeMode(activeSelection);
-        return new EditorSceneFrame(scene, objectBounds, sceneBounds, activeSelection);
+        return new EditorSceneFrame(scene, objectBounds, sceneBounds, activeSelection, _interaction.Selection.Revision);
     }
 
     public void DrawFrame(EditorSceneFrame frame, EditorScreenArea? obscuredArea, bool drawGizmo)
-        => DrawSceneTools(frame.ActiveSelection, frame.SceneBounds, frame.ObjectBounds, _sceneState.PlacementEvaluations,
+    {
+        frame = RefreshFrame(frame);
+        DrawSceneTools(frame.ActiveSelection, frame.SceneBounds, frame.ObjectBounds, _sceneState.PlacementEvaluations,
             drawGizmo ? CreateGizmoDrawOptions(obscuredArea) : null);
+    }
 
     public void Deactivate()
     {
@@ -271,7 +338,7 @@ internal sealed class EditorSceneOverlay
         GizmoDrawOptions? gizmoOptions)
     {
         _drawManager.BeginFrame();
-        SubmitBoundsOverlay(sceneBoundsSnapshots);
+        SubmitBoundsOverlay(_editorOverlayBoundsSnapshots);
         SubmitHousingPlacementOverlay(objectBoundsSnapshots, placementEvaluations);
         DrawCurrentWindowLayer(objectBoundsSnapshots, placementEvaluations);
         if (gizmoOptions.HasValue)
@@ -368,4 +435,5 @@ internal readonly record struct EditorSceneFrame(
     EditorSceneState.EditorSceneData Scene,
     IReadOnlyList<ObjectBoundsSnapshot> ObjectBounds,
     IReadOnlyList<SceneItemBoundsSnapshot> SceneBounds,
-    IReadOnlyList<SceneItemSnapshot> ActiveSelection);
+    IReadOnlyList<SceneItemSnapshot> ActiveSelection,
+    int SelectionRevision);

@@ -6,6 +6,9 @@ using Intoner.Objects.Utils;
 using Intoner.Services.Interop;
 using Intoner.Utils;
 using Microsoft.Extensions.Logging;
+using Penumbra.Api.Enums;
+using System.Diagnostics.CodeAnalysis;
+using System.Runtime.InteropServices;
 
 namespace Intoner.Objects.Resources;
 
@@ -16,8 +19,9 @@ internal interface IVfxResourceRewriteService : IDisposable
     /// Enters a short lived vfx resource rewrite scope for one created vfx root path.
     /// </summary>
     /// <param name="rootPath">the resolved vfx root path being passed to native creation</param>
-    /// <returns>a disposable scope that removes the active rewrite paths</returns>
-    IDisposable EnterRewriteScope(ObjectResolvedRootPath rootPath);
+    /// <param name="isolatedResourceHash">the isolated cache identity for an unmodded root, if available</param>
+    /// <returns>a disposable scope that releases the registration, or an empty scope when rewriting is unavailable or the service is shutting down</returns>
+    IDisposable EnterRewriteScope(ObjectResolvedRootPath rootPath, uint? isolatedResourceHash);
 }
 
 internal sealed unsafe class VfxResourceRewriteService : IVfxResourceRewriteService
@@ -35,51 +39,90 @@ internal sealed unsafe class VfxResourceRewriteService : IVfxResourceRewriteServ
     private const long ReleasedPathGraceMilliseconds = 30_000;
 
     private readonly ILogger<VfxResourceRewriteService> _logger;
+    private readonly ObjectResourceLoadScope _loadScope;
     private readonly ActiveRewritePathRegistry _activePaths = new();
+    private readonly InteropHookCollection _hooks;
     private readonly Hook<VfxResourceBufferLoadDelegate>? _vfxResourceBufferLoadHook;
-    private readonly ObjectLockedOnce _enableOnce = new();
     private readonly DisposalState _disposeState = new();
 
     public VfxResourceRewriteService(
         ILogger<VfxResourceRewriteService> logger,
+        ObjectResourceLoadScope loadScope,
         IGameInteropProvider gameInteropProvider,
         ISigScanner sigScanner)
     {
         _logger = logger;
-        _vfxResourceBufferLoadHook = InteropHookUtility.CreateHook<VfxResourceBufferLoadDelegate>(
+        _loadScope = loadScope;
+        _hooks = new InteropHookCollection(logger);
+        _vfxResourceBufferLoadHook = _hooks.Add(InteropHookUtility.CreateHook<VfxResourceBufferLoadDelegate>(
             _logger,
             gameInteropProvider,
             sigScanner,
             IntonerSignatures.AvfxResourceBufferLoadHook,
-            VfxResourceBufferLoadDetour);
+            VfxResourceBufferLoadDetour));
     }
 
     public void Dispose()
     {
-        if (!_disposeState.TryBeginDispose())
+        if (!_disposeState.TryBeginDispose() && _hooks.IsDisposed)
         {
             return;
         }
 
-        InteropHookUtility.DisposeHook(_vfxResourceBufferLoadHook);
-        _activePaths.Clear();
+        _hooks.Dispose();
+
+        if (_hooks.IsDisposed)
+        {
+            _activePaths.Clear();
+        }
     }
 
-    public IDisposable EnterRewriteScope(ObjectResolvedRootPath rootPath)
+    public IDisposable EnterRewriteScope(ObjectResolvedRootPath rootPath, uint? isolatedResourceHash)
     {
-        if (_disposeState.IsDisposing || !TryEnableHook())
+        using InteropHookCollection.CallbackScope operation = _hooks.EnterOperation();
+
+        if (!operation.IsActive || _disposeState.IsDisposing)
         {
-            return default(VfxRewriteScopeToken);
+            return VfxRewriteScopeToken.Empty;
+        }
+
+        VfxResourceIdentity? identity = ResolveResourceIdentity(rootPath, isolatedResourceHash);
+
+        if (!identity.HasValue
+            || !GameAssetPathRules.IsFileKind(rootPath.RequestedPath, GameAssetFileKind.Avfx)
+            || !TryEnableHook())
+        {
+            return VfxRewriteScopeToken.Empty;
         }
 
         string[] paths = BuildRewritePaths(rootPath);
+
         if (paths.Length == 0)
         {
-            return default(VfxRewriteScopeToken);
+            return VfxRewriteScopeToken.Empty;
         }
 
-        AddActivePaths(paths);
-        return new VfxRewriteScopeToken(this, paths);
+        ActiveRewritePath activePath = _activePaths.Add(identity.Value, paths, rootPath.RequestedPath);
+        return new VfxRewriteScopeToken(_activePaths, activePath);
+    }
+
+    private VfxResourceIdentity? ResolveResourceIdentity(ObjectResolvedRootPath rootPath, uint? isolatedResourceHash)
+    {
+        if (rootPath.ResourceCollectionId.Length == 0)
+        {
+            return isolatedResourceHash.HasValue ? new VfxResourceIdentity(isolatedResourceHash.Value, 0) : null;
+        }
+
+        if (!_loadScope.TryReadActiveCollection(out ObjectCollectionResolveData collection)
+            || !string.Equals(collection.CollectionId, rootPath.ResourceCollectionId, StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        string handlePath = ObjectScopedResourcePathUtility.Create(collection.ResourceScopeId, rootPath.ResolvedPath);
+        return handlePath.Length > 0
+            ? new VfxResourceIdentity(unchecked((uint)ObjectResourcePathEncoding.ComputeResourceHash(handlePath, null)), collection.ResourceScopeId)
+            : null;
     }
 
     private nint VfxResourceBufferLoadDetour(
@@ -91,29 +134,33 @@ internal sealed unsafe class VfxResourceRewriteService : IVfxResourceRewriteServ
         ResourceHandle* resourceHandle,
         int* outputSize)
     {
+        using InteropHookCollection.CallbackScope callback = _hooks.EnterCallback();
+        using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferNativeWrites();
         try
         {
             TryRewriteAvfx(filePath, avfxData, dataSize, resourceHandle);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "avfx resource rewrite failed for {Path}", FormatResourcePaths(ResolveResourcePaths(filePath, resourceHandle)));
+            string paths = FormatResourcePaths(ResolveResourcePaths(filePath, resourceHandle));
+            ObjectResourceLog.Write(() => _logger.LogError(ex, "avfx resource rewrite failed for {Path}", paths));
         }
 
-        return _vfxResourceBufferLoadHook!.Original(job, unknown0, filePath, avfxData, dataSize, resourceHandle, outputSize);
+        return _vfxResourceBufferLoadHook!.OriginalDisposeSafe(job, unknown0, filePath, avfxData, dataSize, resourceHandle, outputSize);
     }
 
     private void TryRewriteAvfx(byte* filePath, byte* avfxData, uint dataSize, ResourceHandle* resourceHandle)
     {
         if (_disposeState.IsDisposing
          || avfxData == null
+         || resourceHandle == null
          || dataSize == 0
          || dataSize > MaximumRewritableAvfxBytes)
         {
             return;
         }
 
-        if (!TryGetActivePath(filePath, resourceHandle, out string resourcePath))
+        if (!TryGetActivePath(filePath, resourceHandle, out ActiveRewritePath? activePath))
         {
             return;
         }
@@ -121,9 +168,14 @@ internal sealed unsafe class VfxResourceRewriteService : IVfxResourceRewriteServ
         Span<byte> avfxBytes = new(avfxData, checked((int)dataSize));
         try
         {
+            if (!AvfxStandaloneRewriter.HasRewritableTimelineBindPoints(avfxBytes))
+            {
+                return;
+            }
+
             byte[] rewrittenAvfx = avfxBytes.ToArray();
-            if (!AvfxStandaloneRewriter.HasRewritableTimelineBindPoints(rewrittenAvfx)
-             || !VfxAssetAnalyzer.TryAnalyzeAvfx(resourcePath, rewrittenAvfx, out VfxAnalysis analysis)
+
+            if (!VfxAssetAnalyzer.TryAnalyzeAvfx(activePath.GamePath, rewrittenAvfx, out VfxAnalysis analysis)
              || !AvfxRewritePolicy.CanRewriteForStandaloneSpawn(analysis))
             {
                 return;
@@ -133,101 +185,80 @@ internal sealed unsafe class VfxResourceRewriteService : IVfxResourceRewriteServ
             if (rewriteResult.TotalCount > 0)
             {
                 rewrittenAvfx.CopyTo(avfxBytes);
-                _logger.LogDebug(
+                ObjectResourceLog.Write(() => _logger.LogDebug(
                     "rewrote avfx for standalone spawn: capabilities={RewriteCapabilities}, timelineBindPoints={TimelineBindPointCount}, timelineBinders={TimelineBinderCount}, binderProperties={BinderPropertyCount}, path={Path}",
                     rewriteResult.AppliedCapabilities,
                     rewriteResult.TimelineBindPointCount,
                     rewriteResult.TimelineBinderCount,
                     rewriteResult.BinderPropertyCount,
-                    resourcePath);
+                    activePath.GamePath));
             }
         }
         finally
         {
-            _activePaths.CompleteLoad(resourcePath);
+            _activePaths.CompleteLoad(activePath);
         }
     }
 
-    private bool TryGetActivePath(byte* filePath, ResourceHandle* resourceHandle, out string activePath)
+    private bool TryGetActivePath(byte* filePath, ResourceHandle* resourceHandle, [NotNullWhen(true)] out ActiveRewritePath? activePath)
     {
-        if (ObjectResourcePathEncoding.TryReadActualScopedHandlePath(resourceHandle, out string actualScopedPath)
-         && TryGetActivePath(actualScopedPath, out activePath))
+        activePath = null;
+
+        if (_disposeState.IsDisposing || resourceHandle == null || resourceHandle->FileType != (uint)ResourceType.Avfx)
         {
-            return true;
+            return false;
         }
 
-        if (ObjectResourcePathEncoding.TryReadHandlePath(resourceHandle, out string handlePath)
-         && TryGetActivePath(handlePath, out activePath))
+        uint resourceHash = resourceHandle->Id;
+        bool hasHandlePath = ObjectResourcePathEncoding.TryReadHandlePath(resourceHandle, out string handlePath);
+        bool hasFilePath = ObjectResourcePathEncoding.TryReadNativePath(filePath, out string nativePath);
+        long? handleScopeId = null;
+        long? fileScopeId = null;
+
+        if (hasHandlePath && !TryNormalizeRewritePath(handlePath, out handlePath, out handleScopeId)
+         || hasFilePath && !TryNormalizeRewritePath(nativePath, out nativePath, out fileScopeId)
+         || handleScopeId.HasValue && fileScopeId.HasValue && handleScopeId != fileScopeId)
         {
-            return true;
+            return false;
         }
 
-        if (ObjectResourcePathEncoding.TryReadNativePath(filePath, out string nativePath)
-         && TryGetActivePath(nativePath, out activePath))
-        {
-            return true;
-        }
-
-        activePath = string.Empty;
-        return false;
+        return _activePaths.TryGetPath(resourceHash, handleScopeId ?? fileScopeId, handlePath, nativePath, out activePath);
     }
 
-    private bool TryGetActivePath(string path, out string activePath)
+    private static bool TryNormalizeRewritePath(string path, out string normalizedPath, out long? resourceScopeId)
     {
-        string normalizedPath = ObjectResourcePathUtility.NormalizeTrackedPath(path);
-        if (IsActiveAvfxPath(normalizedPath, out activePath))
+        normalizedPath = string.Empty;
+        resourceScopeId = null;
+
+        if (ObjectScopedResourcePathUtility.IsObjectScopedPath(path))
         {
-            return true;
+            if (!ObjectScopedResourcePathUtility.TryParse(path, out ObjectScopedResourcePath scopedPath))
+            {
+                return false;
+            }
+
+            resourceScopeId = scopedPath.ResourceScopeId;
+            path = scopedPath.Path;
         }
 
-        string gamePath = ObjectMemoryResourcePathUtility.GetGamePathOrSelf(normalizedPath);
-        if (!string.Equals(gamePath, normalizedPath, StringComparison.OrdinalIgnoreCase)
-         && IsActiveAvfxPath(gamePath, out activePath))
+        if (!ObjectResolvedPath.TryCreate(path, out ObjectResolvedPath resolvedPath))
         {
-            return true;
+            return false;
         }
 
-        activePath = string.Empty;
-        return false;
-    }
-
-    private bool IsActiveAvfxPath(string path, out string activePath)
-    {
-        activePath = TextUtility.TrimOrEmpty(path);
-        return activePath.Length > 0
-            && GameAssetPathRules.IsFileKind(activePath, GameAssetFileKind.Avfx)
-            && IsActivePath(activePath);
+        normalizedPath = resolvedPath.Path;
+        return true;
     }
 
     private static string FormatResourcePaths(IReadOnlyList<string> paths)
         => paths.Count == 0 ? "<unknown>" : string.Join(", ", paths);
 
-    private void AddActivePaths(IReadOnlyList<string> paths)
-        => _activePaths.Add(paths);
-
-    private void ReleaseActivePaths(IReadOnlyList<string> paths)
-        => _activePaths.Release(paths, ReleasedPathGraceMilliseconds);
-
-    private bool IsActivePath(string path)
-        => !_disposeState.IsDisposing && _activePaths.Contains(path);
-
     private bool TryEnableHook()
-        => _enableOnce.TryExecute(
-            () =>
-            {
-                _vfxResourceBufferLoadHook?.Enable();
-                return _vfxResourceBufferLoadHook != null;
-            },
-            () => !_disposeState.IsDisposing);
+        => !_disposeState.IsDisposing && _vfxResourceBufferLoadHook != null && _hooks.Enable();
 
     private static string[] ResolveResourcePaths(byte* filePath, ResourceHandle* resourceHandle)
     {
         HashSet<string> paths = new(StringComparer.OrdinalIgnoreCase);
-
-        if (ObjectResourcePathEncoding.TryReadActualScopedHandlePath(resourceHandle, out string actualScopedPath))
-        {
-            AddResourcePathAliases(paths, actualScopedPath);
-        }
 
         if (ObjectResourcePathEncoding.TryReadHandlePath(resourceHandle, out string handlePath))
         {
@@ -254,15 +285,15 @@ internal sealed unsafe class VfxResourceRewriteService : IVfxResourceRewriteServ
     private static void AddResourcePathAliases(HashSet<string> paths, string path)
     {
         string normalizedPath = ObjectResourcePathUtility.NormalizeTrackedPath(path);
-        AddAvfxPath(paths, normalizedPath);
-        AddAvfxPath(paths, ObjectMemoryResourcePathUtility.GetGamePathOrSelf(normalizedPath));
+        AddRewritePath(paths, normalizedPath);
+        AddRewritePath(paths, ObjectMemoryResourcePathUtility.GetGamePathOrSelf(normalizedPath));
     }
 
-    private static void AddAvfxPath(HashSet<string> paths, string path)
+    private static void AddRewritePath(HashSet<string> paths, string path)
     {
         string normalizedPath = TextUtility.TrimOrEmpty(path);
-        if (normalizedPath.Length == 0
-         || !GameAssetPathRules.IsFileKind(normalizedPath, GameAssetFileKind.Avfx))
+
+        if (normalizedPath.Length == 0)
         {
             return;
         }
@@ -270,88 +301,145 @@ internal sealed unsafe class VfxResourceRewriteService : IVfxResourceRewriteServ
         paths.Add(normalizedPath);
     }
 
-    private readonly struct VfxRewriteScopeToken(VfxResourceRewriteService? owner, IReadOnlyList<string>? paths) : IDisposable
+    private sealed class VfxRewriteScopeToken(ActiveRewritePathRegistry? owner, ActiveRewritePath? activePath) : IDisposable
     {
+        public static readonly IDisposable Empty = new VfxRewriteScopeToken(null, null);
+        private ActiveRewritePathRegistry? _owner = owner;
+
         public void Dispose()
-        {
-            if (paths is not null)
-            {
-                owner?.ReleaseActivePaths(paths);
-            }
-        }
+            => Interlocked.Exchange(ref _owner, null)?.Release(activePath!, ReleasedPathGraceMilliseconds);
     }
 
     private sealed class ActiveRewritePathRegistry
     {
         private readonly Lock _lock = new();
-        private readonly Dictionary<string, ActiveRewritePath> _paths = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<uint, List<ActiveRewritePath>> _paths = [];
 
-        public void Add(IReadOnlyList<string> paths)
+        public ActiveRewritePath Add(VfxResourceIdentity identity, IReadOnlyList<string> paths, string gamePath)
         {
             lock (_lock)
             {
                 ClearExpiredPaths(Environment.TickCount64);
-                ActiveRewritePath activePath = GetOrAddGroup(paths);
+
+                if (!_paths.TryGetValue(identity.ResourceHash, out List<ActiveRewritePath>? registrations))
+                {
+                    registrations = [];
+                    _paths.Add(identity.ResourceHash, registrations);
+                }
+
+                ActiveRewritePath? activePath = null;
+
+                foreach (ActiveRewritePath candidate in registrations)
+                {
+                    if (candidate.Identity == identity
+                        && string.Equals(candidate.GamePath, gamePath, StringComparison.OrdinalIgnoreCase)
+                        && candidate.Paths.SetEquals(paths))
+                    {
+                        activePath = candidate;
+                        break;
+                    }
+                }
+
+                if (activePath == null)
+                {
+                    activePath = new ActiveRewritePath(identity, gamePath, paths);
+                    registrations.Add(activePath);
+                }
+
                 activePath.ScopeCount++;
                 activePath.PendingLoadCount++;
                 activePath.ExpiresAtMilliseconds = 0;
+                return activePath;
             }
         }
 
-        public void Release(IReadOnlyList<string> paths, long releasedPathLifetimeMilliseconds)
+        public void Release(ActiveRewritePath activePath, long releasedPathLifetimeMilliseconds)
         {
             long expiresAtMilliseconds = Environment.TickCount64 + releasedPathLifetimeMilliseconds;
+
             lock (_lock)
             {
                 ClearExpiredPaths(Environment.TickCount64);
-                foreach (ActiveRewritePath activePath in ResolveGroups(paths))
+
+                if (!IsCurrent(activePath))
                 {
-                    if (activePath.ScopeCount > 0)
-                    {
-                        activePath.ScopeCount--;
-                    }
-
-                    if (activePath.ScopeCount > 0)
-                    {
-                        continue;
-                    }
-
-                    if (activePath.PendingLoadCount <= 0)
-                    {
-                        RemoveGroup(activePath);
-                        continue;
-                    }
-
-                    activePath.ExpiresAtMilliseconds = expiresAtMilliseconds;
+                    return;
                 }
+
+                if (activePath.ScopeCount > 0)
+                {
+                    activePath.ScopeCount--;
+                }
+
+                if (activePath.ScopeCount > 0)
+                {
+                    return;
+                }
+
+                if (activePath.PendingLoadCount <= 0)
+                {
+                    Remove(activePath);
+                    return;
+                }
+
+                activePath.ExpiresAtMilliseconds = expiresAtMilliseconds;
             }
         }
 
-        public bool Contains(string path)
+        public bool TryGetPath(uint resourceHash, long? resourceScopeId, string handlePath, string filePath,
+            [NotNullWhen(true)] out ActiveRewritePath? activePath)
         {
+            activePath = null;
+
+            if (handlePath.Length == 0 && filePath.Length == 0)
+            {
+                return false;
+            }
+
             long nowMilliseconds = Environment.TickCount64;
+
             lock (_lock)
             {
-                if (!_paths.TryGetValue(path, out ActiveRewritePath? activePath))
+                if (!_paths.TryGetValue(resourceHash, out List<ActiveRewritePath>? registrations))
                 {
                     return false;
                 }
 
-                if (activePath.IsActive(nowMilliseconds))
+                RemoveExpiredPaths(registrations, nowMilliseconds);
+
+                if (registrations.Count == 0)
                 {
-                    return true;
+                    _paths.Remove(resourceHash);
+                    return false;
                 }
 
-                RemoveGroup(activePath);
-                return false;
+                foreach (ActiveRewritePath candidate in registrations)
+                {
+                    if (resourceScopeId.HasValue && resourceScopeId.Value != candidate.Identity.ResourceScopeId
+                        || handlePath.Length > 0 && !candidate.Paths.Contains(handlePath)
+                        || filePath.Length > 0 && !candidate.Paths.Contains(filePath))
+                    {
+                        continue;
+                    }
+
+                    if (activePath != null)
+                    {
+                        activePath = null;
+                        return false;
+                    }
+
+                    activePath = candidate;
+                }
+
+                return activePath != null;
             }
         }
 
-        public void CompleteLoad(string path)
+        public void CompleteLoad(ActiveRewritePath activePath)
         {
             lock (_lock)
             {
-                if (!_paths.TryGetValue(path, out ActiveRewritePath? activePath))
+                if (!IsCurrent(activePath))
                 {
                     return;
                 }
@@ -363,7 +451,7 @@ internal sealed unsafe class VfxResourceRewriteService : IVfxResourceRewriteServ
 
                 if (activePath.ScopeCount == 0 && activePath.PendingLoadCount <= 0)
                 {
-                    RemoveGroup(activePath);
+                    Remove(activePath);
                 }
             }
         }
@@ -376,93 +464,52 @@ internal sealed unsafe class VfxResourceRewriteService : IVfxResourceRewriteServ
             }
         }
 
-        private ActiveRewritePath GetOrAddGroup(IReadOnlyList<string> paths)
-        {
-            ActiveRewritePath? activePath = null;
-            foreach (string path in paths)
-            {
-                if (!_paths.TryGetValue(path, out ActiveRewritePath? existingPath))
-                {
-                    continue;
-                }
-
-                if (activePath is null)
-                {
-                    activePath = existingPath;
-                    continue;
-                }
-
-                if (!ReferenceEquals(activePath, existingPath))
-                {
-                    MergeGroups(activePath, existingPath);
-                }
-            }
-
-            activePath ??= new ActiveRewritePath();
-            foreach (string path in paths)
-            {
-                activePath.Paths.Add(path);
-                _paths[path] = activePath;
-            }
-
-            return activePath;
-        }
-
         private void ClearExpiredPaths(long nowMilliseconds)
         {
-            HashSet<ActiveRewritePath> activePaths = [];
-            foreach (ActiveRewritePath activePath in _paths.Values)
+            foreach ((uint resourceHash, List<ActiveRewritePath> registrations) in _paths)
             {
-                activePaths.Add(activePath);
-            }
+                RemoveExpiredPaths(registrations, nowMilliseconds);
 
-            foreach (ActiveRewritePath activePath in activePaths)
-            {
-                if (!activePath.IsActive(nowMilliseconds))
+                if (registrations.Count == 0)
                 {
-                    RemoveGroup(activePath);
+                    _paths.Remove(resourceHash);
                 }
             }
         }
 
-        private HashSet<ActiveRewritePath> ResolveGroups(IReadOnlyList<string> paths)
+        private static void RemoveExpiredPaths(List<ActiveRewritePath> registrations, long nowMilliseconds)
         {
-            HashSet<ActiveRewritePath> activePaths = [];
-            foreach (string path in paths)
+            for (int index = registrations.Count - 1; index >= 0; --index)
             {
-                if (_paths.TryGetValue(path, out ActiveRewritePath? activePath))
+                if (!registrations[index].IsActive(nowMilliseconds))
                 {
-                    activePaths.Add(activePath);
+                    registrations.RemoveAt(index);
                 }
             }
-
-            return activePaths;
         }
 
-        private void MergeGroups(ActiveRewritePath target, ActiveRewritePath source)
+        private void Remove(ActiveRewritePath activePath)
         {
-            target.ScopeCount += source.ScopeCount;
-            target.PendingLoadCount += source.PendingLoadCount;
-            target.ExpiresAtMilliseconds = Math.Max(target.ExpiresAtMilliseconds, source.ExpiresAtMilliseconds);
-            foreach (string path in source.Paths)
+            if (_paths.TryGetValue(activePath.Identity.ResourceHash, out List<ActiveRewritePath>? registrations)
+                && registrations.Remove(activePath) && registrations.Count == 0)
             {
-                target.Paths.Add(path);
-                _paths[path] = target;
+                _paths.Remove(activePath.Identity.ResourceHash);
             }
         }
 
-        private void RemoveGroup(ActiveRewritePath activePath)
-        {
-            foreach (string path in activePath.Paths)
-            {
-                _paths.Remove(path);
-            }
-        }
+        private bool IsCurrent(ActiveRewritePath activePath)
+            => _paths.TryGetValue(activePath.Identity.ResourceHash, out List<ActiveRewritePath>? registrations)
+                && registrations.Contains(activePath);
     }
 
-    private sealed class ActiveRewritePath
+    [StructLayout(LayoutKind.Auto)]
+    internal readonly record struct VfxResourceIdentity(uint ResourceHash, long ResourceScopeId);
+
+    internal sealed class ActiveRewritePath(VfxResourceIdentity identity, string gamePath, IReadOnlyList<string> paths)
     {
-        public HashSet<string> Paths { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public VfxResourceIdentity Identity { get; } = identity;
+        public string GamePath { get; } = gamePath;
+        public HashSet<string> Paths { get; } = new(paths, StringComparer.OrdinalIgnoreCase);
         public int ScopeCount { get; set; }
         public int PendingLoadCount { get; set; }
         public long ExpiresAtMilliseconds { get; set; }

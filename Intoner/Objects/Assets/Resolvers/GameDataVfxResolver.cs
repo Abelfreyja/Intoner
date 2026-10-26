@@ -16,41 +16,43 @@ internal sealed class GameDataVfxResolver
 
     private readonly ILogger<GameDataVfxResolver> _logger;
     private readonly IObjectAssetGameData _gameData;
-    private readonly GameDataLayoutAssetResolver _layoutAssetResolver;
 
     public GameDataVfxResolver(
         ILogger<GameDataVfxResolver> logger,
-        IObjectAssetGameData gameData,
-        GameDataLayoutAssetResolver layoutAssetResolver)
+        IObjectAssetGameData gameData)
     {
-        _logger              = logger;
-        _gameData            = gameData;
-        _layoutAssetResolver = layoutAssetResolver;
+        _logger   = logger;
+        _gameData = gameData;
     }
 
-    public IReadOnlyList<ResolvedVfxPath> Resolve(
+    public ResolvedVfxDiscoverySnapshot Resolve(
         SqpackIndexSnapshot sqpackIndexSnapshot,
+        GameDataLayoutAssetResolver.Snapshot layoutSnapshot,
         CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         Dictionary<string, ResolvedVfxPathAccumulator> resolvedPaths = new(StringComparer.OrdinalIgnoreCase);
-        VfxTimelineReferenceCache timelineReferenceCache = new(_gameData);
-        MergeLayoutVfx(resolvedPaths, sqpackIndexSnapshot, cancellationToken);
-        CollectStatusVfx(resolvedPaths, sqpackIndexSnapshot, cancellationToken);
-        CollectActionVfx(resolvedPaths, sqpackIndexSnapshot, timelineReferenceCache, cancellationToken);
-        CollectEmoteTimelineVfx(resolvedPaths, sqpackIndexSnapshot, timelineReferenceCache, cancellationToken);
-        CollectGimmickTimelineVfx(resolvedPaths, sqpackIndexSnapshot, timelineReferenceCache, cancellationToken);
+        VfxTimelineReferenceCache timelineReferenceCache = new();
+        bool isComplete = layoutSnapshot.VfxComplete;
+        MergeLayoutVfx(resolvedPaths, sqpackIndexSnapshot, layoutSnapshot, cancellationToken);
+        isComplete &= CollectStatusVfx(resolvedPaths, sqpackIndexSnapshot, cancellationToken);
+        isComplete &= CollectActionVfx(resolvedPaths, sqpackIndexSnapshot, timelineReferenceCache, cancellationToken);
+        isComplete &= CollectEmoteTimelineVfx(resolvedPaths, sqpackIndexSnapshot, timelineReferenceCache, cancellationToken);
+        isComplete &= CollectGimmickTimelineVfx(resolvedPaths, sqpackIndexSnapshot, timelineReferenceCache, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
 
         IReadOnlyList<ResolvedVfxPath> snapshot = ResolvedVfxPathAccumulator.BuildSnapshot(resolvedPaths.Values);
         _logger.LogInformation("resolved {VfxCount} static vfx paths from game data sources", snapshot.Count);
-        return snapshot;
+        return new ResolvedVfxDiscoverySnapshot(snapshot, isComplete);
     }
 
     private void MergeLayoutVfx(
         IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
         SqpackIndexSnapshot sqpackIndexSnapshot,
+        GameDataLayoutAssetResolver.Snapshot layoutSnapshot,
         CancellationToken cancellationToken)
     {
-        foreach (ResolvedVfxPath resolvedVfxPath in _layoutAssetResolver.Resolve(cancellationToken).ResolvedVfxPaths)
+        foreach (ResolvedVfxPath resolvedVfxPath in layoutSnapshot.ResolvedVfxPaths)
         {
             cancellationToken.ThrowIfCancellationRequested();
             _ = VfxResolvedPathUtility.TryMergeResolvedPath(
@@ -61,7 +63,7 @@ internal sealed class GameDataVfxResolver
         }
     }
 
-    private void CollectStatusVfx(
+    private bool CollectStatusVfx(
         IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
         SqpackIndexSnapshot sqpackIndexSnapshot,
         CancellationToken cancellationToken)
@@ -69,14 +71,14 @@ internal sealed class GameDataVfxResolver
         ExcelSheet<Status>? sheet = _gameData.GetCurrentLanguageExcelSheet<Status>();
         if (sheet is null)
         {
-            return;
+            return false;
         }
 
         foreach (Status row in sheet)
         {
             cancellationToken.ThrowIfCancellationRequested();
             string rowName = row.Name.ExtractText();
-            IReadOnlyList<string> rowSearchTerms = BuildSearchTerms(StatusEffectSource, row.RowId.ToString(), rowName);
+            IReadOnlyList<string> rowSearchTerms = SearchTermUtility.BuildStableTerms(StatusEffectSource, row.RowId.ToString(), rowName);
 
             if (GameDataAssetPathUtility.TryBuildCommonEffectVfxPath(
                 row.HitEffect.ValueNullable?.Location.ValueNullable?.Location.ExtractText() ?? string.Empty,
@@ -121,9 +123,11 @@ internal sealed class GameDataVfxResolver
                     rowSearchTerms);
             }
         }
+
+        return true;
     }
 
-    private void CollectActionVfx(
+    private bool CollectActionVfx(
         IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
         SqpackIndexSnapshot sqpackIndexSnapshot,
         VfxTimelineReferenceCache timelineReferenceCache,
@@ -132,14 +136,15 @@ internal sealed class GameDataVfxResolver
         ExcelSheet<LuminaAction>? sheet = _gameData.GetCurrentLanguageExcelSheet<LuminaAction>();
         if (sheet is null)
         {
-            return;
+            return false;
         }
 
+        bool isComplete = true;
         foreach (LuminaAction row in sheet)
         {
             cancellationToken.ThrowIfCancellationRequested();
             string rowName = row.Name.ExtractText();
-            IReadOnlyList<string> rowSearchTerms = BuildSearchTerms(ActionSource, row.RowId.ToString(), rowName);
+            IReadOnlyList<string> rowSearchTerms = SearchTermUtility.BuildStableTerms(ActionSource, row.RowId.ToString(), rowName);
 
             if (GameDataAssetPathUtility.TryBuildCommonEffectVfxPath(
                 row.VFX.ValueNullable?.VFX.ValueNullable?.Location.ExtractText() ?? string.Empty,
@@ -173,46 +178,32 @@ internal sealed class GameDataVfxResolver
                     rowSearchTerms);
             }
 
-            CollectTimelineReferences(
-                resolvedPaths,
-                sqpackIndexSnapshot,
-                RuntimeVfxEvidence.ActionTimeline,
-                AssetPathSource.GameData,
-                [.. rowSearchTerms, ActionTimelineSource],
-                row.AnimationStart.ValueNullable?.Name.ValueNullable?.Key.ToString() ?? string.Empty,
-                timelineReferenceCache,
-                cancellationToken);
-            CollectTimelineReferences(
-                resolvedPaths,
-                sqpackIndexSnapshot,
-                RuntimeVfxEvidence.ActionTimeline,
-                AssetPathSource.GameData,
-                [.. rowSearchTerms, ActionTimelineSource],
-                row.AnimationEnd.ValueNullable?.Key.ToString() ?? string.Empty,
-                timelineReferenceCache,
-                cancellationToken);
-            CollectTimelineReferences(
-                resolvedPaths,
-                sqpackIndexSnapshot,
-                RuntimeVfxEvidence.ActionTimeline,
-                AssetPathSource.GameData,
-                [.. rowSearchTerms, ActionTimelineSource],
-                row.ActionTimelineHit.ValueNullable?.Key.ToString() ?? string.Empty,
-                timelineReferenceCache,
-                cancellationToken);
-            CollectTimelineReferences(
-                resolvedPaths,
-                sqpackIndexSnapshot,
-                RuntimeVfxEvidence.ActionTimeline,
-                AssetPathSource.GameData,
-                [.. rowSearchTerms, ActionTimelineSource],
-                row.AnimationEnd.ValueNullable?.WeaponTimeline.ValueNullable?.File.ToString() ?? string.Empty,
-                timelineReferenceCache,
-                cancellationToken);
+            IReadOnlyList<string> timelineSearchTerms = [.. rowSearchTerms, ActionTimelineSource];
+            foreach (string timelineKey in EnumerateActionTimelineKeys(row))
+            {
+                isComplete &= CollectTimelineReferences(
+                    resolvedPaths,
+                    sqpackIndexSnapshot,
+                    RuntimeVfxEvidence.ActionTimeline,
+                    timelineSearchTerms,
+                    timelineKey,
+                    timelineReferenceCache,
+                    cancellationToken);
+            }
         }
+
+        return isComplete;
     }
 
-    private void CollectEmoteTimelineVfx(
+    private static IEnumerable<string> EnumerateActionTimelineKeys(LuminaAction row)
+    {
+        yield return row.AnimationStart.ValueNullable?.Name.ValueNullable?.Key.ToString() ?? string.Empty;
+        yield return row.AnimationEnd.ValueNullable?.Key.ToString() ?? string.Empty;
+        yield return row.ActionTimelineHit.ValueNullable?.Key.ToString() ?? string.Empty;
+        yield return row.AnimationEnd.ValueNullable?.WeaponTimeline.ValueNullable?.File.ToString() ?? string.Empty;
+    }
+
+    private bool CollectEmoteTimelineVfx(
         IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
         SqpackIndexSnapshot sqpackIndexSnapshot,
         VfxTimelineReferenceCache timelineReferenceCache,
@@ -221,31 +212,33 @@ internal sealed class GameDataVfxResolver
         ExcelSheet<Emote>? sheet = _gameData.GetCurrentLanguageExcelSheet<Emote>();
         if (sheet is null)
         {
-            return;
+            return false;
         }
 
+        bool isComplete = true;
         foreach (Emote row in sheet)
         {
             cancellationToken.ThrowIfCancellationRequested();
             string rowName = row.Name.ExtractText();
-            IReadOnlyList<string> rowSearchTerms = BuildSearchTerms(EmoteTimelineSource, row.RowId.ToString(), rowName);
+            IReadOnlyList<string> rowSearchTerms = SearchTermUtility.BuildStableTerms(EmoteTimelineSource, row.RowId.ToString(), rowName);
 
             foreach (var timeline in row.ActionTimeline)
             {
-                CollectTimelineReferences(
+                isComplete &= CollectTimelineReferences(
                     resolvedPaths,
                     sqpackIndexSnapshot,
                     RuntimeVfxEvidence.EmoteTimeline,
-                    AssetPathSource.GameData,
                     rowSearchTerms,
                     timeline.ValueNullable?.Key.ToString() ?? string.Empty,
                     timelineReferenceCache,
                     cancellationToken);
             }
         }
+
+        return isComplete;
     }
 
-    private void CollectGimmickTimelineVfx(
+    private bool CollectGimmickTimelineVfx(
         IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
         SqpackIndexSnapshot sqpackIndexSnapshot,
         VfxTimelineReferenceCache timelineReferenceCache,
@@ -254,9 +247,10 @@ internal sealed class GameDataVfxResolver
         ExcelSheet<ActionTimeline>? sheet = _gameData.GetCurrentLanguageExcelSheet<ActionTimeline>();
         if (sheet is null)
         {
-            return;
+            return false;
         }
 
+        bool isComplete = true;
         foreach (ActionTimeline row in sheet)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -267,62 +261,43 @@ internal sealed class GameDataVfxResolver
                 continue;
             }
 
-            CollectTimelineReferences(
+            isComplete &= CollectTimelineReferences(
                 resolvedPaths,
                 sqpackIndexSnapshot,
                 RuntimeVfxEvidence.GimmickTimeline,
-                AssetPathSource.GameData,
-                BuildSearchTerms(GimmickTimelineSource, row.RowId.ToString(), key),
+                SearchTermUtility.BuildStableTerms(GimmickTimelineSource, row.RowId.ToString(), key),
                 key,
                 timelineReferenceCache,
                 cancellationToken);
         }
+
+        return isComplete;
     }
 
-    private void CollectTimelineReferences(
+    private bool CollectTimelineReferences(
         IDictionary<string, ResolvedVfxPathAccumulator> resolvedPaths,
         SqpackIndexSnapshot sqpackIndexSnapshot,
         RuntimeVfxEvidence sourceEvidence,
-        AssetPathSource recoverySource,
         IReadOnlyList<string> baseSearchTerms,
         string timelineKey,
         VfxTimelineReferenceCache timelineReferenceCache,
         CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+
         if (!GameDataAssetPathUtility.TryBuildActionTimelinePath(timelineKey, out string timelinePath))
         {
-            return;
+            return true;
         }
 
-        string normalizedTimelinePath = GameAssetPathRules.NormalizeGamePath(timelinePath);
-        if (!GameAssetPathRules.IsFileKind(normalizedTimelinePath, GameAssetFileKind.Tmb)
-         || !_gameData.FileExists(normalizedTimelinePath))
-        {
-            return;
-        }
-
-        IReadOnlyList<string> searchTerms = SearchTermUtility.MergeTerms(baseSearchTerms, [normalizedTimelinePath]);
-        foreach (TmbVfxReference reference in timelineReferenceCache.Get(normalizedTimelinePath))
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            _ = VfxResolvedPathUtility.TryMergeResolvedPath(
-                resolvedPaths,
-                _gameData,
-                reference.Path,
-                sqpackIndexSnapshot,
-                KnownVfxFamily.None,
-                sourceEvidence | reference.Evidence,
-                recoverySource,
-                AssetPathContract.ParsedFileReference,
-                SearchTermUtility.MergeTerms(searchTerms, reference.SearchTerms));
-        }
+        TmbVfxReferenceCollection collection = timelineReferenceCache.Get(_gameData, timelinePath, cancellationToken);
+        return VfxResolvedPathUtility.MergeTimelinePaths(
+            resolvedPaths,
+            _gameData,
+            collection,
+            sourceEvidence,
+            SearchTermUtility.MergeTerms(baseSearchTerms, [timelinePath]),
+            sqpackIndexSnapshot,
+            cancellationToken);
     }
-
-    private static IReadOnlyList<string> BuildSearchTerms(
-        string source,
-        string rowId,
-        string sourcePath,
-        params IReadOnlyList<string>?[] relatedTerms)
-        => SearchTermUtility.BuildStableTerms([source, rowId, sourcePath], relatedTerms);
 }
-

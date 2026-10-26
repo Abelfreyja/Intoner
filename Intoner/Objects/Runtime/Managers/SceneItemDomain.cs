@@ -13,6 +13,21 @@ internal interface ISceneItemDomain
     /// <summary> gets the current active, persisted, and bounds revisions </summary>
     SceneRevisions Revisions { get; }
 
+    /// <summary> gets the revision of all stored items, including disabled owners </summary>
+    long StoredRevision { get; }
+
+    /// <summary> gets stored items independently of runtime or enabled layout membership </summary>
+    IReadOnlyList<SceneItemSnapshot> GetStoredItems();
+
+    /// <summary> checks that a stored snapshot can retain its recorded owner </summary>
+    SceneHistoryResult ValidateStoredOwner(SceneItemSnapshot snapshot);
+
+    /// <summary> commits checked stored transitions without changing runtime objects </summary>
+    SceneMutationStatus ApplyStoredChanges(IReadOnlyList<SceneItemSnapshotChange> changes);
+
+    /// <summary> reconciles runtime state after a completed history operation </summary>
+    void ReconcileStoredChanges();
+
     /// <summary> gets the manipulation behavior owned by this domain </summary>
     SceneItemManipulationPolicy Manipulation { get; }
 
@@ -135,11 +150,17 @@ internal sealed class SceneItemDomains
     }
 
     public bool TryCapturePlacedItems(out Dictionary<Guid, SceneItemOwnership> items)
+        => TryCaptureItems(stored: false, out items);
+
+    public bool TryCaptureStoredItems(out Dictionary<Guid, SceneItemOwnership> items)
+        => TryCaptureItems(stored: true, out items);
+
+    private bool TryCaptureItems(bool stored, out Dictionary<Guid, SceneItemOwnership> items)
     {
         items = [];
         foreach (ISceneItemDomain domain in All)
         {
-            foreach (SceneItemSnapshot snapshot in domain.GetPlacedItems())
+            foreach (SceneItemSnapshot snapshot in stored ? domain.GetStoredItems() : domain.GetPlacedItems())
             {
                 if (snapshot.Id != Guid.Empty
                     && domain.CanHandle(snapshot)

@@ -149,11 +149,11 @@ internal sealed class SceneRenderService : IDisposable
         }
     }
 
-    private void ExecuteDrawCommand(SceneRenderPhase phase)
+    private void ExecuteDrawCommand(SceneRenderCommand command)
     {
         try
         {
-            ExecuteDrawCommandUnsafe(phase);
+            ExecuteDrawCommandUnsafe(command);
         }
         catch (Exception ex)
         {
@@ -164,7 +164,7 @@ internal sealed class SceneRenderService : IDisposable
         }
     }
 
-    private void ExecuteDrawCommandUnsafe(SceneRenderPhase phase)
+    private void ExecuteDrawCommandUnsafe(SceneRenderCommand command)
     {
         if (_disposeState.IsDisposing)
         {
@@ -184,7 +184,7 @@ internal sealed class SceneRenderService : IDisposable
                 SceneRenderFeatures features = SceneRenderFeatures.None;
                 foreach (ISceneRenderPass pass in _passes)
                 {
-                    if (TryResolveRequest(pass, phase, out SceneRenderFeatures requestedFeatures))
+                    if (TryResolveRequest(pass, command.Phase, out SceneRenderFeatures requestedFeatures))
                     {
                         _activePasses.Add(pass);
                         features |= requestedFeatures;
@@ -199,6 +199,7 @@ internal sealed class SceneRenderService : IDisposable
                 if (!SceneRenderFrame.TryCapture(
                         _sceneDepth,
                         features,
+                        command.Projection,
                         out SceneRenderFrame frame))
                 {
                     if (Interlocked.Exchange(ref _loggedFrameFailure, 1) == 0)
@@ -214,7 +215,7 @@ internal sealed class SceneRenderService : IDisposable
                 {
                     try
                     {
-                        pass.Draw(phase, frame);
+                        pass.Draw(command.Phase, frame);
                     }
                     catch (Exception ex)
                     {

@@ -6,7 +6,8 @@ using Intoner.Objects.Utils;
 using Intoner.Services.Interop;
 using Intoner.Utils;
 using Microsoft.Extensions.Logging;
-using Penumbra.String.Classes;
+using Penumbra.Api.Enums;
+using System.Runtime.InteropServices;
 using ClientFileDescriptor = FFXIVClientStructs.FFXIV.Client.System.File.FileDescriptor;
 using ClientFileInterface = FFXIVClientStructs.FFXIV.Client.System.File.FileInterface;
 using ClientFileMode = FFXIVClientStructs.FFXIV.Client.System.File.FileMode;
@@ -17,7 +18,7 @@ namespace Intoner.Objects.Resources;
 /// <summary> routes owned file jobs and checks local and memory resource support </summary>
 internal sealed unsafe class ObjectFileReadService : IDisposable
 {
-    private enum ObjectLocalFileKind
+    internal enum ObjectLocalFileKind
     {
         DirectRead,
         Model,
@@ -25,22 +26,31 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
         Sound,
     }
 
+    internal enum FileJobRoute
+    {
+        Original,
+        Reject,
+        GamePath,
+        Local,
+        Memory,
+    }
+
+    internal readonly record struct FileJobPlan(
+        FileJobRoute Route,
+        string Path = "",
+        ObjectMemoryResource Memory = default);
+
     private const int CreateFilePathScratchOffset = 0x11;
-    private const int CreateFilePathScratchSize = 0x11 + 0x0B + 14;
+    private const int CreateFilePathScratchSize = 0x11 + 0x0B + ObjectResourceCreateFileHook.PointerPayloadSize / sizeof(char);
     private const int FileDescriptorFilePathOffset = 0x70;
     private static readonly nint CustomModelFileFlag = new(0x0B1EC700);
 
-    private delegate byte FileJobDelegate(ClientFileThread* fileThread, ClientFileDescriptor* fileDescriptor, int priority, bool isSync);
-    private delegate byte ReadFileDelegate(ClientFileThread* fileThread, ClientFileDescriptor* fileDescriptor, int priority, bool isSync);
     private delegate nint CheckFileStateDelegate(nint service, ulong crc64);
-    private delegate byte LoadMdlFileExternDelegate(ResourceHandle* handle, nint unknown0, bool unknown1, nint state);
-    private delegate byte LoadMdlFileLocalDelegate(ResourceHandle* handle, nint unknown0, bool unknown1);
+    private delegate byte LoadMdlFileExternDelegate(ResourceHandle* handle, nint unknown0, [MarshalAs(UnmanagedType.I1)] bool unknown1, nint state);
     private delegate byte TextureOnLoadDelegate(TextureResourceHandle* handle, ClientFileDescriptor* descriptor, byte unknown0);
-    private delegate byte LoadTexFileLocalDelegate(TextureResourceHandle* handle, int lodLevel, ClientFileDescriptor* descriptor, bool unknown0);
-    private delegate void UpdateTextureCategoryDelegate(TextureResourceHandle* handle);
-    private delegate byte SoundReadDelegate(ResourceHandle* handle, ClientFileDescriptor* descriptor, byte unknown0);
 
     private readonly record struct ActiveLocalFileJob(
+        nint FileDescriptor,
         nint ResourceHandle,
         string Path,
         ObjectLocalFileKind Kind,
@@ -48,118 +58,115 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
         ulong HandleCrc64);
 
     private readonly ILogger<ObjectFileReadService> _logger;
-    private readonly IObjectResolvedCollectionStore _collectionStore;
     private readonly ObjectResourceLoadScope _loadScope;
     private readonly ObjectResourceTracker _resourceTracker;
     private readonly IObjectMemoryResourceService _memoryResourceService;
     private readonly ObjectTextureLodService _lodService;
+    private readonly ObjectResourceReadBindings _readBindings;
 
     private readonly ObjectResourceCreateFileHook _createFileHook;
     private readonly ThreadLocal<ActiveLocalFileJob?> _activeLocalFileJob = new(static () => default);
-    private readonly ObjectLockedOnce _enableOnce = new();
+    private readonly InteropHookCollection _hooks;
 
-    private readonly Hook<FileJobDelegate>? _fileJobHook;
+    private readonly Hook<ClientFileThread.Delegates.DoFileJob>? _fileJobHook;
     private readonly Hook<CheckFileStateDelegate>? _checkFileStateHook;
     private readonly Hook<LoadMdlFileExternDelegate>? _loadMdlFileExternHook;
     private readonly Hook<TextureOnLoadDelegate>? _textureOnLoadHook;
-    private readonly Hook<SoundReadDelegate>? _soundOnLoadHook;
-    private readonly SoundReadDelegate? _soundOnLoadOriginal;
-    private readonly ReadFileDelegate? _readFile;
-    private readonly LoadMdlFileLocalDelegate? _loadMdlFileLocal;
-    private readonly LoadTexFileLocalDelegate? _loadTexFileLocal;
-    private readonly UpdateTextureCategoryDelegate? _updateTextureCategory;
-    private readonly SoundReadDelegate? _loadScdFileLocal;
+    private readonly Hook<ObjectResourceReadBindings.LoadSoundDelegate>? _soundOnLoadHook;
+    private readonly ClientFileThread.Delegates.DoFileJob? _readFile;
     private readonly DisposalState _disposeState = new();
 
     public ObjectFileReadService(
         ILogger<ObjectFileReadService> logger,
-        IObjectResolvedCollectionStore collectionStore,
         ObjectResourceLoadScope loadScope,
         ObjectResourceTracker resourceTracker,
         IObjectMemoryResourceService memoryResourceService,
         ObjectTextureLodService lodService,
+        ObjectResourceReadBindings readBindings,
         IGameInteropProvider gameInteropProvider,
         ISigScanner sigScanner)
     {
         _logger = logger;
-        _collectionStore = collectionStore;
         _loadScope = loadScope;
         _resourceTracker = resourceTracker;
         _memoryResourceService = memoryResourceService;
         _lodService = lodService;
-        _createFileHook = new ObjectResourceCreateFileHook(gameInteropProvider);
+        _readBindings = readBindings;
+        _hooks = new InteropHookCollection(logger);
+        try
+        {
+            _createFileHook = new ObjectResourceCreateFileHook(gameInteropProvider, logger);
 
-        _fileJobHook = InteropHookUtility.CreateHookFromAddress<FileJobDelegate>(
-            _logger,
-            gameInteropProvider,
-            IntonerSignatures.ResourceFileJob,
-            FileJobDetour);
-        _checkFileStateHook = InteropHookUtility.CreateHook<CheckFileStateDelegate>(
-            _logger,
-            gameInteropProvider,
-            sigScanner,
-            IntonerSignatures.ResourceCheckFileState,
-            CheckFileStateDetour);
-        _loadMdlFileExternHook = InteropHookUtility.CreateHook<LoadMdlFileExternDelegate>(
-            _logger,
-            gameInteropProvider,
-            sigScanner,
-            IntonerSignatures.ResourceLoadMdlFileExtern,
-            LoadMdlFileExternDetour);
-        _textureOnLoadHook = InteropHookUtility.CreateHook<TextureOnLoadDelegate>(
-            _logger,
-            gameInteropProvider,
-            sigScanner,
-            IntonerSignatures.ResourceTextureOnLoad,
-            TextureOnLoadDetour);
-        _soundOnLoadHook = InteropHookUtility.CreateHook<SoundReadDelegate>(
-            _logger,
-            gameInteropProvider,
-            sigScanner,
-            IntonerSignatures.ResourceSoundOnLoad,
-            SoundOnLoadDetour);
-        _soundOnLoadOriginal = _soundOnLoadHook?.Original;
+            _fileJobHook = _hooks.Add(InteropHookUtility.CreateHookFromAddress<ClientFileThread.Delegates.DoFileJob>(
+                _logger,
+                gameInteropProvider,
+                IntonerSignatures.ResourceFileJob,
+                FileJobDetour));
+            _checkFileStateHook = _hooks.Add(InteropHookUtility.CreateHook<CheckFileStateDelegate>(
+                _logger,
+                gameInteropProvider,
+                sigScanner,
+                IntonerSignatures.ResourceCheckFileState,
+                CheckFileStateDetour));
+            _loadMdlFileExternHook = _hooks.Add(InteropHookUtility.CreateHook<LoadMdlFileExternDelegate>(
+                _logger,
+                gameInteropProvider,
+                sigScanner,
+                IntonerSignatures.ResourceLoadMdlFileExtern,
+                LoadMdlFileExternDetour));
+            _textureOnLoadHook = _hooks.Add(InteropHookUtility.CreateHook<TextureOnLoadDelegate>(
+                _logger,
+                gameInteropProvider,
+                sigScanner,
+                IntonerSignatures.ResourceTextureOnLoad,
+                TextureOnLoadDetour));
+            _soundOnLoadHook = _hooks.Add(InteropHookUtility.CreateHook<ObjectResourceReadBindings.LoadSoundDelegate>(
+                _logger,
+                gameInteropProvider,
+                sigScanner,
+                IntonerSignatures.ResourceSoundOnLoad,
+                SoundOnLoadDetour));
 
-        _readFile = InteropHookUtility.CreateDelegate<ReadFileDelegate>(
-            _logger,
-            sigScanner,
-            IntonerSignatures.ResourceReadFile);
-        _loadMdlFileLocal = InteropHookUtility.CreateDelegate<LoadMdlFileLocalDelegate>(
-            _logger,
-            sigScanner,
-            IntonerSignatures.ResourceLoadMdlFileLocal);
-        _loadTexFileLocal = InteropHookUtility.CreateDelegate<LoadTexFileLocalDelegate>(
-            _logger,
-            sigScanner,
-            IntonerSignatures.ResourceLoadTexFileLocal);
-        _loadScdFileLocal = InteropHookUtility.CreateDelegate<SoundReadDelegate>(
-            _logger,
-            sigScanner,
-            IntonerSignatures.ResourceLoadScdFileLocal);
-        _updateTextureCategory = InteropHookUtility.CreateDelegate<UpdateTextureCategoryDelegate>(
-            _logger,
-            sigScanner,
-            IntonerSignatures.ResourceUpdateTextureCategory);
+            _readFile = InteropHookUtility.CreateDelegate<ClientFileThread.Delegates.DoFileJob>(
+                _logger,
+                sigScanner,
+                IntonerSignatures.ResourceReadFile);
+        }
+        catch
+        {
+            Dispose();
+            throw;
+        }
     }
 
     public void Dispose()
     {
-        if (!_disposeState.TryBeginDispose())
+        if (!_disposeState.TryBeginDispose() && _hooks.IsDisposed && _createFileHook?.IsDisposed != false)
         {
             return;
         }
 
-        InteropHookUtility.DisposeHook(_fileJobHook);
-        InteropHookUtility.DisposeHook(_checkFileStateHook);
-        InteropHookUtility.DisposeHook(_loadMdlFileExternHook);
-        InteropHookUtility.DisposeHook(_textureOnLoadHook);
-        InteropHookUtility.DisposeHook(_soundOnLoadHook);
-        _createFileHook.Dispose();
-        _activeLocalFileJob.Dispose();
+        _hooks.Dispose();
+
+        if (!_hooks.IsDisposed)
+        {
+            return;
+        }
+
+        _createFileHook?.Dispose();
+
+        if (_createFileHook?.IsDisposed != false)
+        {
+            _activeLocalFileJob.Dispose();
+        }
     }
 
-    public bool CanLoadLocalFilePath(string localFilePath)
-        => TryGetLoadableLocalFileKind(localFilePath, out _, out _);
+    public bool CanLoadLocalFilePath(string localFilePath, ResourceType resourceType)
+        => !IsDisposing
+            && ObjectLocalFilePathUtility.NormalizeLocalFilePath(localFilePath).Length > 0
+            && TryEnableHooks()
+            && CanLoadRootedLocalFiles()
+            && CanLoadLocalFileKind(ClassifyLocalResource(resourceType));
 
     public bool CanRouteScopedGamePaths()
         => TryEnableHooks() && CanHandleCustomFileJobs();
@@ -169,159 +176,168 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
             && _memoryResourceService.TryGetResource(memoryResourcePath, out ObjectMemoryResource memoryResource)
             && CanLoadMemoryResource(memoryResource);
 
-    private bool TryGetLoadableLocalFileKind(string localFilePath, out string normalizedLocalFilePath, out ObjectLocalFileKind kind)
-    {
-        normalizedLocalFilePath = ObjectLocalFilePathUtility.NormalizeLocalFilePath(localFilePath);
-        kind = ObjectLocalFileKind.DirectRead;
-        if (IsDisposing)
-        {
-            return false;
-        }
-
-        if (normalizedLocalFilePath.Length == 0)
-        {
-            return false;
-        }
-
-        if (!TryEnableHooks())
-        {
-            return false;
-        }
-
-        if (!CanLoadRootedLocalFiles())
-        {
-            return false;
-        }
-
-        kind = ClassifyCustomLocalFile(normalizedLocalFilePath);
-        if (!CanLoadLocalFileKind(kind))
-        {
-            return false;
-        }
-
-        return true;
-    }
-
     internal byte FileJobDetour(ClientFileThread* fileThread, ClientFileDescriptor* fileDescriptor, int priority, bool isSync)
     {
-        nint resourceHandleAddress = nint.Zero;
+        using InteropHookCollection.CallbackScope callback = _hooks.EnterCallback();
+        using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferNativeWrites();
+        using InteropHookCollection.CallbackScope operation = _hooks.EnterOperation();
+        using ActiveLocalFileJobToken parentJob = SuspendActiveLocalFileJob();
+        ObjectResourceLoadScopeToken scope = default;
+
         try
         {
-            if (IsDisposing
-                || fileDescriptor == null
+            FileJobPlan plan = PrepareFileJob(fileDescriptor, ref scope);
+            return ExecuteFileJob(fileThread, fileDescriptor, priority, isSync, plan);
+        }
+        finally
+        {
+            scope.Dispose();
+        }
+    }
+
+    private FileJobPlan PrepareFileJob(ClientFileDescriptor* fileDescriptor, ref ObjectResourceLoadScopeToken scope)
+    {
+        nint resourceHandleAddress = nint.Zero;
+
+        try
+        {
+            if (fileDescriptor == null
                 || fileDescriptor->ResourceHandle == null
                 || fileDescriptor->FileMode != ClientFileMode.LoadSqPackResource)
             {
-                return CallFileJobOriginal(fileThread, fileDescriptor, priority, isSync);
+                return new(FileJobRoute.Original);
             }
 
             resourceHandleAddress = (nint)fileDescriptor->ResourceHandle;
+
             if (!ObjectResourcePathEncoding.TryReadHandlePath(fileDescriptor->ResourceHandle, out string handlePath))
             {
-                return CallFileJobOriginal(fileThread, fileDescriptor, priority, isSync);
+                return new(FileJobRoute.Original);
+            }
+
+            if (IsDisposing)
+            {
+                return new(ObjectResourcePathUtility.IsOwnedResourcePath(handlePath) ? FileJobRoute.Reject : FileJobRoute.Original);
             }
 
             if (ObjectScopedResourcePathUtility.TryParse(handlePath, out ObjectScopedResourcePath scopedPath))
             {
-                using ObjectResourceLoadScopeToken scope = _resourceTracker.EnterHandleScope((nint)fileDescriptor->ResourceHandle, scopedPath);
+                scope = _resourceTracker.EnterHandleScope(resourceHandleAddress, scopedPath);
+
                 if (scope.IsActive)
                 {
-                    return RouteFileJobPath(fileThread, fileDescriptor, priority, isSync, scopedPath.Path, restoreScopedPath: true);
+                    return PrepareFileJobPath(fileDescriptor, scopedPath.Path);
                 }
 
                 LogRejectedFileJob("generation unavailable", resourceHandleAddress, handlePath, scopedPath.ResourceScopeId);
-                return RejectFileJob(fileDescriptor);
+                return new(FileJobRoute.Reject);
             }
 
             if (ObjectScopedResourcePathUtility.IsObjectScopedPath(handlePath))
             {
-                LogRejectedFileJob("malformed private path", resourceHandleAddress, handlePath);
-                return RejectFileJob(fileDescriptor);
+                string reason = ObjectScopedResourcePathUtility.IsRejectedPath(handlePath)
+                    ? "resource request rejected"
+                    : "malformed private path";
+                LogRejectedFileJob(reason, resourceHandleAddress, handlePath);
+                return new(FileJobRoute.Reject);
             }
 
-            if (ObjectScopedResourcePathUtility.IsForeignScopedPath(handlePath)
-                || !ShouldRouteUnscopedFileJobPath(handlePath))
+            if (!ObjectMemoryResourcePathUtility.IsMemoryResourcePath(handlePath))
             {
-                return CallFileJobOriginal(fileThread, fileDescriptor, priority, isSync);
+                return new(FileJobRoute.Original);
             }
 
             string normalizedPath = ObjectResourcePathUtility.NormalizeTrackedPath(handlePath);
+
             if (normalizedPath.Length == 0)
             {
-                return CallFileJobOriginal(fileThread, fileDescriptor, priority, isSync);
+                LogRejectedFileJob("malformed memory path", resourceHandleAddress, handlePath);
+                return new(FileJobRoute.Reject);
             }
 
-            return RouteFileJobPath(fileThread, fileDescriptor, priority, isSync, normalizedPath, restoreScopedPath: false);
+            return PrepareMemoryFileJob(resourceHandleAddress, normalizedPath);
         }
         catch (Exception ex)
         {
             LogFileHookFailure(ex, "file job", (ResourceHandle*)resourceHandleAddress);
-            return ShouldFailClosedFileJob(fileDescriptor)
-                ? RejectFileJob(fileDescriptor)
-                : CallFileJobOriginal(fileThread, fileDescriptor, priority, isSync);
+            return new(ShouldFailClosedFileJob(fileDescriptor) ? FileJobRoute.Reject : FileJobRoute.Original);
         }
     }
 
-    private byte RouteFileJobPath(
-        ClientFileThread* fileThread,
-        ClientFileDescriptor* fileDescriptor,
-        int priority,
-        bool isSync,
-        string normalizedPath,
-        bool restoreScopedPath)
+    private FileJobPlan PrepareFileJobPath(ClientFileDescriptor* fileDescriptor, string normalizedPath)
     {
-        if (fileDescriptor == null)
-        {
-            return CallFileJobOriginal(fileThread, fileDescriptor, priority, isSync);
-        }
-
         nint resourceHandleAddress = (nint)fileDescriptor->ResourceHandle;
+
         if (ObjectMemoryResourcePathUtility.IsMemoryResourcePath(normalizedPath))
         {
-            if (!_memoryResourceService.TryGetResource(normalizedPath, out ObjectMemoryResource memoryResource))
-            {
-                LogRejectedFileJob("memory payload unavailable", resourceHandleAddress, normalizedPath);
-                return RejectFileJob(fileDescriptor);
-            }
-
-            if (!CanLoadMemoryResource(memoryResource))
-            {
-                LogRejectedFileJob("memory resource unsupported", resourceHandleAddress, normalizedPath);
-                return RejectFileJob(fileDescriptor);
-            }
-
-            byte result = _memoryResourceService.ReadResource(fileDescriptor, memoryResource);
-            if (result == 0)
-            {
-                LogRejectedFileJob("memory read failed", resourceHandleAddress, normalizedPath);
-            }
-
-            return result == 0 ? RejectFileJob(fileDescriptor) : result;
+            return PrepareMemoryFileJob(resourceHandleAddress, normalizedPath);
         }
 
         if (!ObjectLocalFilePathUtility.IsLocalFilePath(normalizedPath))
         {
-            return restoreScopedPath
-                ? RunFileJobWithTemporaryResourcePath(fileThread, fileDescriptor, priority, isSync, normalizedPath)
-                : CallFileJobOriginal(fileThread, fileDescriptor, priority, isSync);
+            return new(FileJobRoute.GamePath, normalizedPath);
         }
 
-        if (_readFile != null
-            && (restoreScopedPath || (_collectionStore.ContainsLocalFilePath(normalizedPath)
-                && TryGetLoadableLocalFileKind(normalizedPath, out _, out _))))
+        ResourceType resourceType = (ResourceType)fileDescriptor->ResourceHandle->FileType;
+
+        if (CanLoadLocalFilePath(normalizedPath, resourceType))
         {
-            ObjectLocalFileKind kind = ClassifyCustomLocalFile(normalizedPath);
-            using IDisposable activeJob = EnterActiveLocalFileJob(fileDescriptor->ResourceHandle, normalizedPath, kind);
-            return ReadLocalFile(fileThread, fileDescriptor, priority, isSync, normalizedPath, restoreScopedPath);
+            return new(FileJobRoute.Local, normalizedPath);
         }
 
-        if (restoreScopedPath)
+        LogRejectedFileJob("local reader unavailable", resourceHandleAddress, normalizedPath);
+        return new(FileJobRoute.Reject);
+    }
+
+    private FileJobPlan PrepareMemoryFileJob(nint resourceHandleAddress, string normalizedPath)
+    {
+        if (!_memoryResourceService.TryGetResource(normalizedPath, out ObjectMemoryResource memoryResource))
         {
-            LogRejectedFileJob("local reader unavailable", resourceHandleAddress, normalizedPath);
-            return RejectFileJob(fileDescriptor);
+            LogRejectedFileJob("memory payload unavailable", resourceHandleAddress, normalizedPath);
+            return new(FileJobRoute.Reject);
         }
 
-        return CallFileJobOriginal(fileThread, fileDescriptor, priority, isSync);
+        if (!CanLoadMemoryResource(memoryResource))
+        {
+            LogRejectedFileJob("memory resource unsupported", resourceHandleAddress, normalizedPath);
+            return new(FileJobRoute.Reject);
+        }
+
+        return new(FileJobRoute.Memory, normalizedPath, Memory: memoryResource);
+    }
+
+    internal byte ExecuteFileJob(ClientFileThread* fileThread, ClientFileDescriptor* descriptor, int priority, bool isSync, FileJobPlan plan)
+    {
+        switch (plan.Route)
+        {
+            case FileJobRoute.Reject:
+                return CompleteRejectedFileJob(descriptor);
+            case FileJobRoute.GamePath:
+                return RunFileJobWithTemporaryResourcePath(fileThread, descriptor, priority, isSync, plan.Path);
+            case FileJobRoute.Local:
+                using (EnterActiveLocalFileJob(descriptor, plan.Path, ClassifyLocalResource((ResourceType)descriptor->ResourceHandle->FileType)))
+                {
+                    return ReadLocalFile(fileThread, descriptor, priority, isSync, plan.Path);
+                }
+            case FileJobRoute.Memory:
+                byte result = _memoryResourceService.ReadResource(descriptor, plan.Memory);
+
+                if (result != 0)
+                {
+                    return result;
+                }
+
+                LogRejectedFileJob("memory read failed", (nint)descriptor->ResourceHandle, plan.Path);
+                return CompleteRejectedFileJob(descriptor);
+            default:
+                return CallFileJobOriginal(fileThread, descriptor, priority, isSync);
+        }
+    }
+
+    private byte CompleteRejectedFileJob(ClientFileDescriptor* fileDescriptor)
+    {
+        using ObjectResourceLoadScopeToken scope = _loadScope.Suspend();
+        return RejectFileJob(fileDescriptor);
     }
 
     internal static byte RejectFileJob(ClientFileDescriptor* fileDescriptor)
@@ -330,10 +346,6 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
         fileDescriptor->ResourceHandle->FinishLoad(fileDescriptor, byte.MaxValue, 0);
         return 1;
     }
-
-    private static bool ShouldRouteUnscopedFileJobPath(string path)
-        => ObjectMemoryResourcePathUtility.IsMemoryResourcePath(path)
-            || ObjectLocalFilePathUtility.IsLocalFilePath(path);
 
     private static bool ShouldFailClosedFileJob(ClientFileDescriptor* fileDescriptor)
     {
@@ -344,20 +356,13 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
             return false;
         }
 
-        if (ObjectScopedResourcePathUtility.IsObjectScopedPath(handlePath))
-        {
-            return true;
-        }
-
-        string normalizedPath = ObjectResourcePathUtility.NormalizeTrackedPath(handlePath);
-        return ObjectMemoryResourcePathUtility.IsMemoryResourcePath(normalizedPath);
+        return ObjectResourcePathUtility.IsOwnedResourcePath(handlePath);
     }
 
     private byte CallFileJobOriginal(ClientFileThread* fileThread, ClientFileDescriptor* fileDescriptor, int priority, bool isSync)
     {
         using ObjectResourceLoadScopeToken scope = _loadScope.Suspend();
-        using ActiveLocalFileJobToken job = SuspendActiveLocalFileJob();
-        return _fileJobHook!.Original(fileThread, fileDescriptor, priority, isSync);
+        return _fileJobHook!.OriginalDisposeSafe(fileThread, fileDescriptor, priority, isSync);
     }
 
     private byte RunFileJobWithTemporaryResourcePath(
@@ -370,7 +375,7 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
             fileDescriptor->ResourceHandle,
             path,
             (Hook: _fileJobHook!, FileThread: (nint)fileThread, FileDescriptor: (nint)fileDescriptor, Priority: priority, IsSync: isSync),
-            static state => state.Hook.Original(
+            static state => state.Hook.OriginalDisposeSafe(
                 (ClientFileThread*)state.FileThread,
                 (ClientFileDescriptor*)state.FileDescriptor,
                 state.Priority,
@@ -381,8 +386,7 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
         ClientFileDescriptor* fileDescriptor,
         int priority,
         bool isSync,
-        string normalizedPath,
-        bool restoreScopedPath)
+        string normalizedPath)
         => ObjectResourcePathEncoding.WithNullTerminatedUtf8(
             normalizedPath,
             (
@@ -390,11 +394,22 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
                 FileThread: (nint)fileThread,
                 FileDescriptor: (nint)fileDescriptor,
                 Priority: priority,
-                IsSync: isSync,
-                RestoreScopedPath: restoreScopedPath),
+                IsSync: isSync),
             static (pathPointer, pathByteCount, state) =>
             {
                 var fileDescriptor = (ClientFileDescriptor*)state.FileDescriptor;
+                using ObjectResourceCreateFileHook.ReadScope readScope = state.Owner._createFileHook.EnterRead(pathPointer, pathByteCount);
+
+                if (!readScope.IsActive)
+                {
+                    return (byte)0;
+                }
+
+                ClientFileMode originalFileMode = fileDescriptor->FileMode;
+                ClientFileInterface* originalFileInterface = fileDescriptor->FileInterface;
+                Span<byte> originalFilePath = stackalloc byte[ObjectResourceCreateFileHook.PointerPayloadSize];
+                Span<byte> temporaryFilePath = stackalloc byte[ObjectResourceCreateFileHook.PointerPayloadSize];
+                new ReadOnlySpan<byte>(GetFilePathPointer(fileDescriptor), originalFilePath.Length).CopyTo(originalFilePath);
                 fileDescriptor->FileMode = ClientFileMode.LoadUnpackedResource;
                 Span<char> descriptorScratch = stackalloc char[CreateFilePathScratchSize];
                 descriptorScratch.Clear();
@@ -403,66 +418,77 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
                     fileDescriptor->FileInterface = (ClientFileInterface*)((byte*)scratchPointer + 1);
                     ObjectResourceCreateFileHook.WritePointerPayload(scratchPointer + CreateFilePathScratchOffset, pathPointer, pathByteCount);
                     ObjectResourceCreateFileHook.WritePointerPayload(GetFilePathPointer(fileDescriptor), pathPointer, pathByteCount);
+                    new ReadOnlySpan<byte>(GetFilePathPointer(fileDescriptor), temporaryFilePath.Length).CopyTo(temporaryFilePath);
 
-                    if (!state.RestoreScopedPath)
+                    try
                     {
+                        using ObjectResourceHandlePathScope resourcePath = new(fileDescriptor->ResourceHandle, pathPointer, pathByteCount);
                         return state.Owner._readFile!(
                             (ClientFileThread*)state.FileThread,
                             fileDescriptor,
                             state.Priority,
                             state.IsSync);
                     }
+                    finally
+                    {
+                        if (fileDescriptor->FileInterface == (ClientFileInterface*)((byte*)scratchPointer + 1))
+                        {
+                            fileDescriptor->FileInterface = originalFileInterface;
+                        }
 
-                    using var resourcePath = new ObjectResourceHandlePathScope(
-                        fileDescriptor->ResourceHandle,
-                        pathPointer,
-                        pathByteCount);
-                    return state.Owner._readFile!(
-                        (ClientFileThread*)state.FileThread,
-                        fileDescriptor,
-                        state.Priority,
-                        state.IsSync);
+                        if (fileDescriptor->FileMode == ClientFileMode.LoadUnpackedResource)
+                        {
+                            fileDescriptor->FileMode = originalFileMode;
+                        }
+
+                        Span<byte> currentPath = new(GetFilePathPointer(fileDescriptor), originalFilePath.Length);
+
+                        if (currentPath.SequenceEqual(temporaryFilePath))
+                        {
+                            originalFilePath.CopyTo(currentPath);
+                        }
+                    }
                 }
             });
 
     private nint CheckFileStateDetour(nint service, ulong crc64)
     {
+        using InteropHookCollection.CallbackScope callback = _hooks.EnterCallback();
+        using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferNativeWrites();
         try
         {
-            if (IsDisposing)
-            {
-                return _checkFileStateHook!.Original(service, crc64);
-            }
-
             if (TryGetActiveLocalFileJob(crc64, out ActiveLocalFileJob activeJob))
             {
-                return activeJob.Kind switch
+                switch (activeJob.Kind)
                 {
-                    ObjectLocalFileKind.Model when CanLoadLocalModels() => CustomModelFileFlag,
-                    ObjectLocalFileKind.Texture when CanLoadLocalTextures() => nint.Zero,
-                    _ => _checkFileStateHook!.Original(service, crc64),
-                };
+                    case ObjectLocalFileKind.Model when CanLoadLocalModels():
+                        return CustomModelFileFlag;
+                    case ObjectLocalFileKind.Texture when CanLoadLocalTextures():
+                        return nint.Zero;
+                }
             }
-
-            return _checkFileStateHook!.Original(service, crc64);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "object resource check file state hook failed");
-            return _checkFileStateHook!.Original(service, crc64);
+            ObjectResourceLog.Write(() => _logger.LogError(ex, "object resource check file state hook failed"));
         }
+
+        return _checkFileStateHook!.OriginalDisposeSafe(service, crc64);
     }
 
     private byte LoadMdlFileExternDetour(ResourceHandle* handle, nint unknown0, bool unknown1, nint state)
     {
+        using InteropHookCollection.CallbackScope callback = _hooks.EnterCallback();
+        using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferNativeWrites();
+
+        if (state != CustomModelFileFlag)
+        {
+            return _loadMdlFileExternHook!.OriginalDisposeSafe(handle, unknown0, unknown1, state);
+        }
+
         try
         {
-            if (IsDisposing || state != CustomModelFileFlag)
-            {
-                return _loadMdlFileExternHook!.Original(handle, unknown0, unknown1, state);
-            }
-
-            if (_loadMdlFileLocal == null
+            if (_readBindings.LoadModel == null
                 || !TryGetMatchingActiveLocalFileJob(ObjectLocalFileKind.Model, handle, null, out ActiveLocalFileJob activeJob))
             {
                 return 0;
@@ -471,7 +497,7 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
             using var scope = EnterScopedHandleCollectionScope(handle);
             if (!ObjectResourcePathEncoding.TryReadActualScopedHandlePath(handle, out string actualPath))
             {
-                return _loadMdlFileLocal(handle, unknown0, unknown1);
+                return _readBindings.LoadModel(handle, (ClientFileDescriptor*)unknown0, unknown1);
             }
 
             if (!string.Equals(ObjectResourcePathUtility.NormalizeTrackedPath(actualPath), activeJob.Path, StringComparison.OrdinalIgnoreCase))
@@ -483,24 +509,22 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
                 handle,
                 actualPath,
                 (Owner: this, Handle: (nint)handle, Unknown0: unknown0, Unknown1: unknown1),
-                static state => state.Owner._loadMdlFileLocal!(
+                static state => state.Owner._readBindings.LoadModel!(
                     (ResourceHandle*)state.Handle,
-                    state.Unknown0,
+                    (ClientFileDescriptor*)state.Unknown0,
                     state.Unknown1));
         }
         catch (Exception ex)
         {
             LogFileHookFailure(ex, "model extern load", handle);
-            return state == CustomModelFileFlag
-                ? (byte)0
-                : _loadMdlFileExternHook!.Original(handle, unknown0, unknown1, state);
+            return 0;
         }
     }
 
-    private byte TextureOnLoadDetour(TextureResourceHandle* handle, ClientFileDescriptor* descriptor, byte unknown0)
+    internal byte TextureOnLoadDetour(TextureResourceHandle* handle, ClientFileDescriptor* descriptor, byte unknown0)
     {
-        byte result = 0;
-        bool calledOriginal = false;
+        using InteropHookCollection.CallbackScope callback = _hooks.EnterCallback();
+        using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferNativeWrites();
         try
         {
             if (ObjectMemoryResourceService.IsMemoryFileDescriptor(descriptor)
@@ -509,33 +533,34 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
                 return memoryResult;
             }
 
-            result = _textureOnLoadHook!.Original(handle, descriptor, unknown0);
-            calledOriginal = true;
-            if (!TryGetMatchingActiveLocalFileJob(ObjectLocalFileKind.Texture, (ResourceHandle*)handle, descriptor, out _))
+            byte result = _textureOnLoadHook!.OriginalDisposeSafe(handle, descriptor, unknown0);
+
+            if (descriptor == null || descriptor->FileMode != ClientFileMode.LoadUnpackedResource
+                || !TryGetMatchingActiveLocalFileJob(ObjectLocalFileKind.Texture, (ResourceHandle*)handle, descriptor, out _))
             {
                 return result;
             }
 
-            if (_loadTexFileLocal == null)
+            if (_readBindings.LoadTexture == null)
             {
                 return 0;
             }
 
-            result = _loadTexFileLocal(handle, _lodService.GetLod(handle), descriptor, unknown0 != 0);
-            _updateTextureCategory?.Invoke(handle);
+            result = _readBindings.LoadTexture(handle, _lodService.GetLod(handle), descriptor, unknown0 != 0);
+            _readBindings.UpdateTextureCategory?.Invoke(handle);
             return result;
         }
         catch (Exception ex)
         {
             LogFileHookFailure(ex, "texture on load", (ResourceHandle*)handle);
-            return calledOriginal
-                ? result
-                : _textureOnLoadHook!.Original(handle, descriptor, unknown0);
+            return 0;
         }
     }
 
     internal byte SoundOnLoadDetour(ResourceHandle* handle, ClientFileDescriptor* descriptor, byte unknown0)
     {
+        using InteropHookCollection.CallbackScope callback = _hooks.EnterCallback();
+        using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferNativeWrites();
         try
         {
             if (ObjectMemoryResourceService.IsMemoryFileDescriptor(descriptor))
@@ -549,12 +574,12 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
                 && descriptor->FileMode == ClientFileMode.LoadUnpackedResource
                 && TryGetMatchingActiveLocalFileJob(ObjectLocalFileKind.Sound, handle, descriptor, out _))
             {
-                return _loadScdFileLocal != null
-                    ? _loadScdFileLocal(handle, descriptor, unknown0)
+                return _readBindings.LoadSound != null
+                    ? _readBindings.LoadSound(handle, descriptor, unknown0)
                     : (byte)0;
             }
 
-            return _soundOnLoadOriginal!(handle, descriptor, unknown0);
+            return _soundOnLoadHook!.OriginalDisposeSafe(handle, descriptor, unknown0);
         }
         catch (Exception ex)
         {
@@ -567,27 +592,12 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
         => _disposeState.IsDisposing;
 
     private bool TryEnableHooks()
-        => _enableOnce.TryExecute(
-            () =>
-            {
-                if (!_createFileHook.Enable())
-                {
-                    return false;
-                }
+        => !IsDisposing && _createFileHook.Enable() && _hooks.Enable();
 
-                _fileJobHook?.Enable();
-                _checkFileStateHook?.Enable();
-                _loadMdlFileExternHook?.Enable();
-                _textureOnLoadHook?.Enable();
-                _soundOnLoadHook?.Enable();
-                return true;
-            },
-            () => !IsDisposing);
-
-    private IDisposable EnterActiveLocalFileJob(ResourceHandle* handle, string normalizedPath, ObjectLocalFileKind kind)
+    private ActiveLocalFileJobToken EnterActiveLocalFileJob(ClientFileDescriptor* descriptor, string normalizedPath, ObjectLocalFileKind kind)
     {
-        if (IsDisposing
-            || handle == null
+        if (descriptor == null
+            || descriptor->ResourceHandle == null
             || kind == ObjectLocalFileKind.DirectRead
             || normalizedPath.Length == 0
             || !ObjectThreadLocalUtility.TryRead(_activeLocalFileJob, null, out ActiveLocalFileJob? previousJob))
@@ -595,19 +605,19 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
             return default(ActiveLocalFileJobToken);
         }
 
-        ulong pathCrc = new FullPath(normalizedPath).Crc64;
+        ResourceHandle* handle = descriptor->ResourceHandle;
+        ulong pathCrc = ObjectResourcePathEncoding.ComputeFilePathCrc64(normalizedPath);
         ulong handleCrc = ObjectResourcePathEncoding.TryReadHandlePath(handle, out string handlePath)
-            ? new FullPath(handlePath).Crc64
+            ? ObjectResourcePathEncoding.ComputeFilePathCrc64(handlePath)
             : 0;
-        ActiveLocalFileJob activeJob = new((nint)handle, normalizedPath, kind, pathCrc, handleCrc);
+        ActiveLocalFileJob activeJob = new((nint)descriptor, (nint)handle, normalizedPath, kind, pathCrc, handleCrc);
         return ObjectThreadLocalUtility.TryWrite(_activeLocalFileJob, activeJob)
             ? new ActiveLocalFileJobToken(this, previousJob)
             : default(ActiveLocalFileJobToken);
     }
 
     private ActiveLocalFileJobToken SuspendActiveLocalFileJob()
-        => !IsDisposing
-         && ObjectThreadLocalUtility.TryRead(_activeLocalFileJob, null, out ActiveLocalFileJob? previousJob)
+        => ObjectThreadLocalUtility.TryRead(_activeLocalFileJob, null, out ActiveLocalFileJob? previousJob)
          && ObjectThreadLocalUtility.TryWrite(_activeLocalFileJob, null)
             ? new ActiveLocalFileJobToken(this, previousJob)
             : default;
@@ -636,18 +646,20 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
         out ActiveLocalFileJob activeJob)
     {
         activeJob = default;
+
         if (handle == null
             || !TryReadActiveLocalFileJob(out ActiveLocalFileJob job)
             || job.Kind != kind
             || job.ResourceHandle != (nint)handle
-            || (descriptor != null && descriptor->ResourceHandle != handle))
+            || (descriptor != null && (nint)descriptor != job.FileDescriptor))
         {
             return false;
         }
 
-        if (TryResolveHandleActualPath(handle, out string actualPath)
-            && ObjectLocalFilePathUtility.IsLocalFilePath(actualPath)
-            && !string.Equals(ObjectLocalFilePathUtility.NormalizeLocalFilePath(actualPath), job.Path, StringComparison.OrdinalIgnoreCase))
+        if (ObjectResourcePathEncoding.TryReadHandlePath(handle, out string handlePath)
+            && (!ObjectResolvedPath.TryCreate(ObjectScopedResourcePathUtility.Strip(handlePath), out ObjectResolvedPath actualPath)
+                || actualPath.IsMemory
+                || actualPath.IsLocalFile && !string.Equals(actualPath.Path, job.Path, StringComparison.OrdinalIgnoreCase)))
         {
             return false;
         }
@@ -659,9 +671,9 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
     private bool TryReadActiveLocalFileJob(out ActiveLocalFileJob activeJob)
     {
         activeJob = default;
-        if (IsDisposing
-            || !ObjectThreadLocalUtility.TryRead(_activeLocalFileJob, null, out ActiveLocalFileJob? currentJob)
-            || currentJob is not { } job)
+        if (!ObjectThreadLocalUtility.TryRead(_activeLocalFileJob, null, out ActiveLocalFileJob? currentJob)
+            || currentJob is not { } job
+            || ((ClientFileDescriptor*)job.FileDescriptor)->ResourceHandle != (ResourceHandle*)job.ResourceHandle)
         {
             return false;
         }
@@ -670,31 +682,14 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
         return true;
     }
 
-    private static bool TryResolveHandleActualPath(ResourceHandle* handle, out string actualPath)
-    {
-        if (ObjectResourcePathEncoding.TryReadActualScopedHandlePath(handle, out actualPath))
-        {
-            return true;
-        }
-
-        if (!ObjectResourcePathEncoding.TryReadHandlePath(handle, out string handlePath))
-        {
-            actualPath = string.Empty;
-            return false;
-        }
-
-        actualPath = ObjectResourcePathUtility.NormalizeTrackedPath(handlePath);
-        return actualPath.Length > 0;
-    }
-
     private void RestoreActiveLocalFileJob(ActiveLocalFileJob? previousJob)
         => _ = ObjectThreadLocalUtility.TryWrite(_activeLocalFileJob, previousJob);
 
     private void LogRejectedFileJob(string reason, nint address, string path, long resourceScopeId = 0)
     {
         _resourceTracker.TryGetHandleScope(address, out ObjectResourceScope scope);
-        _logger.LogWarning("object resource file job rejected; reason={Reason}; address=0x{Address:X}; path={Path}; collection={CollectionId}; generation={ResourceScopeId}",
-            reason, (ulong)address, path, scope.ResourceCollectionId, resourceScopeId != 0 ? resourceScopeId : scope.ResourceScopeId);
+        ObjectResourceLog.Write(() => _logger.LogWarning("object resource file job rejected; reason={Reason}; address=0x{Address:X}; path={Path}; collection={CollectionId}; generation={ResourceScopeId}",
+            reason, (ulong)address, path, scope.ResourceCollectionId, resourceScopeId != 0 ? resourceScopeId : scope.ResourceScopeId));
     }
 
     internal void LogFileHookFailure(Exception exception, string hook, ResourceHandle* handle)
@@ -716,13 +711,13 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
     }
 
     private bool CanLoadLocalModels()
-        => _checkFileStateHook != null && _loadMdlFileExternHook != null && _loadMdlFileLocal != null;
+        => _checkFileStateHook != null && _loadMdlFileExternHook != null && _readBindings.LoadModel != null;
 
     private bool CanLoadLocalTextures()
-        => _checkFileStateHook != null && _textureOnLoadHook != null && _loadTexFileLocal != null;
+        => _checkFileStateHook != null && _textureOnLoadHook != null && _readBindings.LoadTexture != null && _readBindings.UpdateTextureCategory != null;
 
     private bool CanLoadLocalSounds()
-        => _soundOnLoadHook != null && _loadScdFileLocal != null;
+        => _soundOnLoadHook != null && _readBindings.LoadSound != null;
 
     private bool CanLoadLocalFileKind(ObjectLocalFileKind kind)
         => kind switch
@@ -741,7 +736,7 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
     private bool CanRouteMemoryResourceKind(string gamePath)
         => ObjectAssetPathRules.ClassifyResourcePath(gamePath) switch
         {
-            ObjectResourcePathKind.Texture or ObjectResourcePathKind.Atex => _textureOnLoadHook != null,
+            ObjectResourcePathKind.Texture => _textureOnLoadHook != null,
             ObjectResourcePathKind.Sound => _soundOnLoadHook != null,
             _ => true,
         };
@@ -752,12 +747,12 @@ internal sealed unsafe class ObjectFileReadService : IDisposable
     private bool CanHandleCustomFileJobs()
         => !IsDisposing && _fileJobHook != null;
 
-    private static ObjectLocalFileKind ClassifyCustomLocalFile(string path)
-        => GameAssetPathRules.ClassifyFilePath(path) switch
+    internal static ObjectLocalFileKind ClassifyLocalResource(ResourceType resourceType)
+        => resourceType switch
         {
-            GameAssetFileKind.Mdl => ObjectLocalFileKind.Model,
-            GameAssetFileKind.Tex => ObjectLocalFileKind.Texture,
-            GameAssetFileKind.Scd => ObjectLocalFileKind.Sound,
+            ResourceType.Mdl => ObjectLocalFileKind.Model,
+            ResourceType.Tex => ObjectLocalFileKind.Texture,
+            ResourceType.Scd => ObjectLocalFileKind.Sound,
             _ => ObjectLocalFileKind.DirectRead,
         };
 

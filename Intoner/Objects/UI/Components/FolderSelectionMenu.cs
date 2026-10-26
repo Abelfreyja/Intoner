@@ -1,11 +1,19 @@
 using Dalamud.Interface;
+using Dalamud.Interface.Utility.Raii;
 using Intoner.Objects.Utils;
 
 namespace Intoner.Objects.UI.Components;
 
 internal static class FolderSelectionMenu
 {
-    public static void DrawPaths(IReadOnlyList<string> paths, string? selectedPath, Action<string> select)
+    public const string RootLabel = "No Folder";
+
+    public static void DrawPaths(
+        IReadOnlyList<string> paths,
+        string? selectedPath,
+        Action<string> select,
+        string rootLabel = RootLabel,
+        FontAwesomeIcon rootIcon = FontAwesomeIcon.TimesCircle)
         => Draw(
             paths,
             selectedPath is not null && string.IsNullOrWhiteSpace(selectedPath),
@@ -14,10 +22,9 @@ internal static class FolderSelectionMenu
             ObjectFolderUtility.GetParentFolderPath,
             ObjectFolderUtility.GetFolderName,
             () => select(string.Empty),
-            select);
-
-    public static string ResolvePathLabel(string path)
-        => string.IsNullOrWhiteSpace(path) ? "Ungrouped" : path;
+            select,
+            rootLabel,
+            rootIcon);
 
     public static void Draw<TFolder>(
         IReadOnlyList<TFolder> folders,
@@ -27,15 +34,20 @@ internal static class FolderSelectionMenu
         Func<TFolder, string> getParentId,
         Func<TFolder, string> getLabel,
         Action selectUngrouped,
-        Action<TFolder> selectFolder)
+        Action<TFolder> selectFolder,
+        string rootLabel = RootLabel,
+        FontAwesomeIcon rootIcon = FontAwesomeIcon.TimesCircle)
     {
-        if (EditorContextMenu.DrawItem(
-                FontAwesomeIcon.TimesCircle,
-                "Ungrouped",
-                selected: ungroupedSelected))
+        using (ImRaii.PushId("folderRoot"))
         {
-            selectUngrouped();
-            return;
+            if (EditorContextMenu.DrawItem(
+                    rootIcon,
+                    rootLabel,
+                    selected: ungroupedSelected))
+            {
+                selectUngrouped();
+                return;
+            }
         }
 
         if (!HierarchyIndex<string, TFolder>.TryCreate(
@@ -50,62 +62,61 @@ internal static class FolderSelectionMenu
             return;
         }
 
+        if (hierarchy.Roots.Count > 0)
+        {
+            EditorContextMenu.DrawSeparator();
+        }
+
         foreach (TFolder folder in hierarchy.Roots)
         {
-            DrawFolder(folder, hierarchy, isSelected, getId, getLabel, selectFolder);
+            DrawFolder(folder);
         }
 
         if (folders.Count == 0)
         {
             EditorContextMenu.DrawHint("No folders available");
         }
-    }
 
-    private static void DrawFolder<TFolder>(
-        TFolder folder,
-        HierarchyIndex<string, TFolder> hierarchy,
-        Func<TFolder, bool> isSelected,
-        Func<TFolder, string> getId,
-        Func<TFolder, string> getLabel,
-        Action<TFolder> selectFolder)
-    {
-        IReadOnlyList<TFolder> children = hierarchy.GetChildren(getId(folder));
-        if (children.Count == 0)
+        void DrawFolder(TFolder folder)
         {
+            IReadOnlyList<TFolder> children = hierarchy.GetChildren(getId(folder));
+            if (children.Count == 0)
+            {
+                if (EditorContextMenu.DrawItem(
+                        FontAwesomeIcon.Folder,
+                        getLabel(folder),
+                        isSelected(folder),
+                        id: getId(folder)))
+                {
+                    selectFolder(folder);
+                }
+
+                return;
+            }
+
+            using EditorContextMenu.SubMenuScope subMenu = EditorContextMenu.BeginSubMenu(
+                $"folderSelection:{getId(folder)}",
+                FontAwesomeIcon.Folder,
+                getLabel(folder));
+            if (!subMenu)
+            {
+                return;
+            }
+
             if (EditorContextMenu.DrawItem(
-                    FontAwesomeIcon.Folder,
-                    getLabel(folder),
+                    FontAwesomeIcon.FolderOpen,
+                    "This Folder",
                     isSelected(folder),
-                    id: getId(folder)))
+                    id: $"{getId(folder)}:self"))
             {
                 selectFolder(folder);
             }
 
-            return;
-        }
-
-        using EditorContextMenu.SubMenuScope subMenu = EditorContextMenu.BeginSubMenu(
-            $"folderSelection:{getId(folder)}",
-            FontAwesomeIcon.Folder,
-            getLabel(folder));
-        if (!subMenu)
-        {
-            return;
-        }
-
-        if (EditorContextMenu.DrawItem(
-                FontAwesomeIcon.FolderOpen,
-                "This Folder",
-                isSelected(folder),
-                id: $"{getId(folder)}:self"))
-        {
-            selectFolder(folder);
-        }
-
-        EditorContextMenu.DrawSeparator();
-        foreach (TFolder child in children)
-        {
-            DrawFolder(child, hierarchy, isSelected, getId, getLabel, selectFolder);
+            EditorContextMenu.DrawSeparator();
+            foreach (TFolder child in children)
+            {
+                DrawFolder(child);
+            }
         }
     }
 }

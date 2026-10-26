@@ -29,7 +29,6 @@ internal sealed record ObjectBoundsSnapshot : SceneItemBoundsSnapshot
     {
         Name = name;
         Kind = kind;
-        LocalBounds = localBounds;
         PlacementClearance = placementClearance;
         PlacementSurfaceSupport = placementSurfaceSupport;
         OverlayShapes = overlayShapes;
@@ -37,21 +36,26 @@ internal sealed record ObjectBoundsSnapshot : SceneItemBoundsSnapshot
 
     public string Name { get; }
     public ObjectKind Kind { get; }
-    public OrientedBounds? LocalBounds { get; }
     public ObjectPlacementClearance? PlacementClearance { get; }
     public ObjectPlacementSurfaceSupport PlacementSurfaceSupport { get; }
     public IReadOnlyList<ObjectOverlayShapeSnapshot>? OverlayShapes { get; init; }
 
     public bool HasSameContent(ObjectBoundsSnapshot other)
-        => Id == other.Id
-           && string.Equals(Name, other.Name, StringComparison.Ordinal)
-           && Kind == other.Kind
-           && Min == other.Min
-           && Max == other.Max
-           && Equals(LocalBounds, other.LocalBounds)
-           && PlacementClearance == other.PlacementClearance
-           && PlacementSurfaceSupport == other.PlacementSurfaceSupport
-           && OverlayShapesEqual(OverlayShapes, other.OverlayShapes);
+        => HasSameContent(other.Id, other.Name, other.Kind, other.Min, other.Max, other.OrientedBounds,
+            other.PlacementClearance, other.PlacementSurfaceSupport, other.OverlayShapes);
+
+    public bool HasSameContent(Guid id, string name, ObjectKind kind, Vector3 min, Vector3 max,
+        SceneOrientedBounds? orientedBounds, ObjectPlacementClearance? placementClearance,
+        ObjectPlacementSurfaceSupport placementSurfaceSupport, IReadOnlyList<ObjectOverlayShapeSnapshot>? overlayShapes)
+        => Id == id
+           && string.Equals(Name, name, StringComparison.Ordinal)
+           && Kind == kind
+           && Min == min
+           && Max == max
+           && OrientedBounds == orientedBounds
+           && PlacementClearance == placementClearance
+           && PlacementSurfaceSupport == placementSurfaceSupport
+           && OverlayShapesEqual(OverlayShapes, overlayShapes);
 
     private static SceneBoundsCategory ResolveCategory(ObjectKind kind)
         => kind switch
@@ -141,7 +145,7 @@ internal sealed record ObjectOverlayShapeSnapshot(
 internal enum ObjectSceneSourceKind
 {
     Standalone = 1,
-    DefaultLayout = 2,
+    PersistentLayout = 2,
     TemporaryLayout = 3,
 }
 
@@ -160,8 +164,8 @@ internal readonly record struct ObjectSceneSource(
     public static ObjectSceneSource CreateStandalone(Guid? layoutId = null)
         => new(ObjectSceneSourceKind.Standalone, layoutId, string.Empty);
 
-    public static ObjectSceneSource CreateDefaultLayout(Guid layoutId)
-        => new(ObjectSceneSourceKind.DefaultLayout, layoutId, layoutId.ToString("D"));
+    public static ObjectSceneSource CreatePersistentLayout(Guid layoutId)
+        => new(ObjectSceneSourceKind.PersistentLayout, layoutId, layoutId.ToString("D"));
 
     public static ObjectSceneSource CreateTemporaryLayout(string sourceKey)
         => new(ObjectSceneSourceKind.TemporaryLayout, null, sourceKey);
@@ -170,7 +174,7 @@ internal readonly record struct ObjectSceneSource(
         => Kind switch
         {
             ObjectSceneSourceKind.Standalone => ObjectSceneLifetimeKind.LocalPersistent,
-            ObjectSceneSourceKind.DefaultLayout => ObjectSceneLifetimeKind.LocalPersistent,
+            ObjectSceneSourceKind.PersistentLayout => ObjectSceneLifetimeKind.LocalPersistent,
             ObjectSceneSourceKind.TemporaryLayout => ObjectSceneLifetimeKind.RuntimeOnly,
             _ => ObjectSceneLifetimeKind.RuntimeOnly,
         };
@@ -197,4 +201,3 @@ internal sealed record ObjectRuntimeStateSnapshot(
     Guid Id,
     ObjectRuntimeStateKind State,
     string? FailureCode);
-

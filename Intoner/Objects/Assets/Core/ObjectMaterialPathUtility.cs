@@ -1,101 +1,90 @@
-using PenumbraMdlFile = Penumbra.GameData.Files.MdlFile;
-using PenumbraMtrlFile = Penumbra.GameData.Files.MtrlFile;
+using Intoner.Objects.Resources;
+using Penumbra.GameData.Data;
+using PenumbraMdlFile = Penumbra.GameData.Files.Models.MdlFile;
+using PenumbraMtrlFile = Penumbra.GameData.Files.Materials.MtrlFile;
 
 namespace Intoner.Objects.Assets;
 
 internal static class ObjectMaterialPathUtility
 {
-    public static IReadOnlyList<string> CollectGameModelMaterialPaths(IObjectAssetGameData gameData, string modelPath)
+    public static AssetDependencyPaths CollectGameModelMaterialPaths(
+        IObjectAssetGameData gameData,
+        string modelPath,
+        CancellationToken cancellationToken = default)
     {
-        string normalizedModelPath = GameAssetPathRules.NormalizeGamePath(modelPath);
+        cancellationToken.ThrowIfCancellationRequested();
+        string normalizedModelPath = ObjectResolvedPath.FromGamePath(modelPath).Path;
+
         if (!GameAssetPathRules.IsFileKind(normalizedModelPath, GameAssetFileKind.Mdl))
         {
-            return [];
+            return AssetDependencyPaths.Empty;
         }
 
-        PenumbraMdlFile? model = TryLoadModel(gameData.GetFile(normalizedModelPath)?.Data);
-        return CollectModelMaterialPaths(
-            normalizedModelPath,
-            model,
-            gameData.FileExists,
-            includeUnresolvedCandidate: false);
+        ObjectAssetFileData file = ObjectAssetFileUtility.ReadGameFile(gameData, normalizedModelPath, cancellationToken);
+        PenumbraMdlFile? model = TryLoadModel(file.Data, cancellationToken);
+        return new(CollectModelMaterialPaths(normalizedModelPath, model, gameData.FileExists, cancellationToken),
+            model is not null || file.Data is null && file.IsComplete);
     }
 
-    public static IReadOnlyList<string> CollectLocalModelMaterialPaths(
+    public static AssetDependencyPaths CollectLocalModelMaterialPaths(
         IObjectAssetGameData gameData,
         string requestedModelPath,
-        string localModelPath)
+        string localModelPath,
+        CancellationToken cancellationToken = default)
     {
-        string normalizedRequestedModelPath = GameAssetPathRules.NormalizeGamePath(requestedModelPath);
+        cancellationToken.ThrowIfCancellationRequested();
+        string normalizedRequestedModelPath = ObjectResolvedPath.FromGamePath(requestedModelPath).Path;
+
         if (!GameAssetPathRules.IsFileKind(normalizedRequestedModelPath, GameAssetFileKind.Mdl))
         {
-            return [];
+            return AssetDependencyPaths.Empty;
         }
 
-        PenumbraMdlFile? model = TryLoadModel(ObjectAssetFileUtility.TryReadLocalFileBytes(localModelPath));
-        return CollectModelMaterialPaths(
-            normalizedRequestedModelPath,
-            model,
-            gameData.FileExists,
-            includeUnresolvedCandidate: true);
+        PenumbraMdlFile? model = TryLoadModel(
+            ObjectAssetFileUtility.TryReadLocalFileBytes(localModelPath, cancellationToken),
+            cancellationToken);
+        return new(CollectModelMaterialPaths(normalizedRequestedModelPath, model, gameData.FileExists, cancellationToken),
+            model is not null);
     }
 
-    public static IReadOnlyList<string> CollectMaterialDependencyPaths(IObjectAssetGameData gameData, string materialPath)
-    {
-        List<string> dependencyPaths = [];
-        HashSet<string> seenPaths = new(StringComparer.OrdinalIgnoreCase);
-        CollectGameMaterialDependencyPaths(gameData, materialPath, dependencyPaths, seenPaths);
-        return dependencyPaths;
-    }
-
-    private static void CollectGameMaterialDependencyPaths(
+    public static AssetDependencyPaths CollectMaterialDependencyPaths(
         IObjectAssetGameData gameData,
         string materialPath,
-        ICollection<string> dependencyPaths,
-        ISet<string> seenPaths)
+        CancellationToken cancellationToken = default)
     {
-        string normalizedMaterialPath = GameAssetPathRules.NormalizeGamePath(materialPath);
+        cancellationToken.ThrowIfCancellationRequested();
+        string normalizedMaterialPath = ObjectResolvedPath.FromGamePath(materialPath).Path;
+
         if (!GameAssetPathRules.IsFileKind(normalizedMaterialPath, GameAssetFileKind.Mtrl))
         {
-            return;
+            return AssetDependencyPaths.Empty;
         }
 
-        try
-        {
-            var gameFile = gameData.GetFile(normalizedMaterialPath);
-            if (gameFile is null)
-            {
-                return;
-            }
-
-            PenumbraMtrlFile material = new(gameFile.Data);
-            if (!material.Valid)
-            {
-                return;
-            }
-
-            CollectMaterialDependencyPaths(material, dependencyPaths, seenPaths);
-        }
-        catch
-        {
-            // ignore invalid material files
-        }
+        ObjectAssetFileData file = ObjectAssetFileUtility.ReadGameFile(gameData, normalizedMaterialPath, cancellationToken);
+        PenumbraMtrlFile? material = TryLoadMaterial(file.Data, cancellationToken);
+        List<string> dependencyPaths = [];
+        CollectMaterialDependencyPaths(material, dependencyPaths, new HashSet<string>(StringComparer.OrdinalIgnoreCase), cancellationToken);
+        return new(dependencyPaths, material is not null || file.Data is null && file.IsComplete);
     }
 
-    public static IReadOnlyList<string> CollectLocalMaterialDependencyPaths(string localMaterialPath)
+    public static AssetDependencyPaths CollectLocalMaterialDependencyPaths(
+        string localMaterialPath,
+        CancellationToken cancellationToken = default)
     {
         List<string> dependencyPaths = [];
         HashSet<string> seenPaths = new(StringComparer.OrdinalIgnoreCase);
-        PenumbraMtrlFile? material = TryLoadMaterial(ObjectAssetFileUtility.TryReadLocalFileBytes(localMaterialPath));
-        CollectMaterialDependencyPaths(material, dependencyPaths, seenPaths);
-        return dependencyPaths;
+        PenumbraMtrlFile? material = TryLoadMaterial(
+            ObjectAssetFileUtility.TryReadLocalFileBytes(localMaterialPath, cancellationToken),
+            cancellationToken);
+        CollectMaterialDependencyPaths(material, dependencyPaths, seenPaths, cancellationToken);
+        return new(dependencyPaths, material is not null);
     }
 
     private static IReadOnlyList<string> CollectModelMaterialPaths(
         string normalizedModelPath,
         PenumbraMdlFile? model,
         Func<string, bool> fileExists,
-        bool includeUnresolvedCandidate)
+        CancellationToken cancellationToken)
     {
         if (model is null)
         {
@@ -104,37 +93,29 @@ internal static class ObjectMaterialPathUtility
 
         List<string> materialPaths = [];
         HashSet<string> seenPaths = new(StringComparer.OrdinalIgnoreCase);
+        HashSet<string> seenMaterialNames = new(StringComparer.OrdinalIgnoreCase);
         foreach (string materialName in model.Materials)
         {
-            if (TryResolveMaterialPath(normalizedModelPath, materialName, fileExists, includeUnresolvedCandidate, out string materialPath))
+            cancellationToken.ThrowIfCancellationRequested();
+            string normalizedMaterialName = ObjectResolvedPath.FromGamePath(materialName).Path;
+
+            if (normalizedMaterialName.Length > 0
+             && seenMaterialNames.Add(normalizedMaterialName)
+             && GameMaterialPathUtility.TryResolveMaterialPath(fileExists, normalizedModelPath, normalizedMaterialName, out string materialPath, allowMissing: true))
             {
                 AddCandidatePath(materialPaths, seenPaths, materialPath);
             }
         }
 
+        cancellationToken.ThrowIfCancellationRequested();
         return materialPaths;
-    }
-
-    private static bool TryResolveMaterialPath(
-        string normalizedModelPath,
-        string materialName,
-        Func<string, bool> fileExists,
-        bool includeUnresolvedCandidate,
-        out string materialPath)
-    {
-        if (GameMaterialPathUtility.TryResolveExistingMaterialPath(fileExists, normalizedModelPath, materialName, out materialPath))
-        {
-            return true;
-        }
-
-        return includeUnresolvedCandidate
-            && GameMaterialPathUtility.TryGetPrimaryMaterialPathCandidate(normalizedModelPath, materialName, out materialPath);
     }
 
     private static void CollectMaterialDependencyPaths(
         PenumbraMtrlFile? material,
         ICollection<string> dependencyPaths,
-        ISet<string> seenPaths)
+        ISet<string> seenPaths,
+        CancellationToken cancellationToken)
     {
         if (material is null)
         {
@@ -143,14 +124,35 @@ internal static class ObjectMaterialPathUtility
 
         foreach (PenumbraMtrlFile.Texture texture in material.Textures)
         {
-            AddCandidatePath(dependencyPaths, seenPaths, texture.Path);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (TextureMapKindResolver.TryResolveTexturePath(texture, out string texturePath))
+            {
+                AddCandidatePath(dependencyPaths, seenPaths, texturePath);
+            }
         }
 
-        AddCandidatePath(dependencyPaths, seenPaths, material.ShaderPackage.Name);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        string shaderName = ObjectResolvedPath.FromGamePath(material.ShaderPackage.Name).Path;
+
+        if (shaderName.Length > 0)
+        {
+            AddCandidatePath(dependencyPaths, seenPaths, GamePaths.Shader(shaderName));
+        }
     }
 
-    private static PenumbraMdlFile? TryLoadModel(byte[]? data)
+    private static PenumbraMdlFile? TryLoadModel(byte[]? data, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        PenumbraMdlFile? model = ModelFileReader.Read(data);
+        cancellationToken.ThrowIfCancellationRequested();
+        return model;
+    }
+
+    private static PenumbraMtrlFile? TryLoadMaterial(byte[]? data, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
         if (data is null)
         {
             return null;
@@ -158,34 +160,22 @@ internal static class ObjectMaterialPathUtility
 
         try
         {
-            PenumbraMdlFile model = new(data);
-            return model.Valid ? model : null;
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private static PenumbraMtrlFile? TryLoadMaterial(byte[]? data)
-    {
-        if (data is null)
-        {
-            return null;
-        }
-
-        try
-        {
+            // material validation requires directories; the native loader also accepts dummy.tex :)
             PenumbraMtrlFile material = new(data);
-            return material.Valid ? material : null;
+            cancellationToken.ThrowIfCancellationRequested();
+            return material;
         }
-        catch
+        catch (OperationCanceledException)
         {
+            throw;
+        }
+        catch (Exception ex) when (ex is IOException or ArgumentException or IndexOutOfRangeException or OverflowException)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
             return null;
         }
     }
 
     private static void AddCandidatePath(ICollection<string> candidates, ISet<string> seenPaths, string path)
-        => _ = GameAssetPathCollectionUtility.AddGamePath(candidates, seenPaths, path);
+        => _ = GameAssetPathCollectionUtility.AddGamePath(candidates, seenPaths, ObjectResolvedPath.FromGamePath(path).Path);
 }
-

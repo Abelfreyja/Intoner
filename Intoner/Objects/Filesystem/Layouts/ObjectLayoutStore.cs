@@ -1,6 +1,7 @@
 using Intoner.Objects.Api;
 using Intoner.Objects.Filesystem.Watching;
 using Intoner.Objects.Models;
+using Intoner.Services.Serialization;
 using Intoner.Services.Storage;
 using Microsoft.Extensions.Logging;
 
@@ -14,6 +15,8 @@ internal interface IObjectLayoutStore : IDisposable
 
     /// <summary> loads all valid saved layout files from disk </summary>
     /// <returns>the loaded layout snapshots</returns>
+    /// <exception cref="IOException"> a saved layout or its directory could not be read </exception>
+    /// <exception cref="UnauthorizedAccessException"> access to saved layouts was denied </exception>
     IReadOnlyList<ObjectLayoutSnapshot> LoadLayouts();
 
     /// <summary> writes one saved layout json file </summary>
@@ -100,7 +103,7 @@ internal sealed class ObjectLayoutStore : IObjectLayoutStore
         {
             string contents = ObjectLayoutJsonSerializer.SerializeLayout(layout);
             _localChanges.TrackWrite(path, contents);
-            _fileSystem.WriteAllTextAtomic(path, contents);
+            JsonDocumentUtility.WriteFile(_fileSystem, path, contents);
             return true;
         }
         catch (Exception ex)
@@ -151,39 +154,30 @@ internal sealed class ObjectLayoutStore : IObjectLayoutStore
     {
         layout = null!;
 
+        string json;
         try
         {
-            string json = _fileSystem.ReadAllText(path);
-            if (ObjectLayoutJsonSerializer.TryDeserializeLayout(json, out layout, out string errorMessage))
-            {
-                return true;
-            }
-
-            _logger.LogWarning("skipping object layout file {Path}: {Reason}", path, errorMessage);
-            return false;
+            json = JsonDocumentUtility.ReadFile(_fileSystem, path);
         }
-        catch (Exception ex)
+        catch (InvalidDataException ex)
         {
-            _logger.LogWarning(ex, "failed to load object layout file {Path}", path);
+            _logger.LogWarning("skipping object layout file {Path}: {Reason}", path, ex.Message);
             return false;
         }
+        if (ObjectLayoutJsonSerializer.TryDeserializeLayout(json, out layout, out string errorMessage))
+        {
+            return true;
+        }
+
+        _logger.LogWarning("skipping object layout file {Path}: {Reason}", path, errorMessage);
+        return false;
     }
 
     private IReadOnlyList<string> EnumerateLayoutFiles()
-    {
-        try
-        {
-            return _fileSystem
-                .EnumerateFiles(_pathService.ObjectLayoutsPath, LayoutFileSearchPattern)
-                .Order(StringComparer.OrdinalIgnoreCase)
-                .ToList();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "failed to enumerate object layout files in {Path}", _pathService.ObjectLayoutsPath);
-            return [];
-        }
-    }
+        => _fileSystem
+            .EnumerateFiles(_pathService.ObjectLayoutsPath, LayoutFileSearchPattern)
+            .Order(StringComparer.OrdinalIgnoreCase)
+            .ToList();
 
     private bool TryDeleteLayoutFile(string path)
     {
@@ -221,6 +215,4 @@ internal sealed class ObjectLayoutStore : IObjectLayoutStore
 
     private string BuildLayoutPath(Guid layoutId)
         => Path.Combine(_pathService.ObjectLayoutsPath, $"{layoutId:D}.json");
-
 }
-

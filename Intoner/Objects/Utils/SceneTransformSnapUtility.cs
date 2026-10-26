@@ -34,11 +34,14 @@ internal static class SceneTransformSnapUtility
     public static Vector3 SnapRotationDegrees(Vector3 rotationDegrees, float stepDegrees)
         => SnapVector(rotationDegrees, stepDegrees);
 
-    public static Vector3 SnapScale(Vector3 scale, float step, float minScale = 0.01f)
+    public static Vector3 SnapScale(Vector3 scale, float step, float minScale = SceneTransformMath.MinimumScale)
         => new(
-            MathF.Max(minScale, SnapValue(scale.X, step)),
-            MathF.Max(minScale, SnapValue(scale.Y, step)),
-            MathF.Max(minScale, SnapValue(scale.Z, step)));
+            SnapScale(scale.X, step, minScale),
+            SnapScale(scale.Y, step, minScale),
+            SnapScale(scale.Z, step, minScale));
+
+    public static float SnapScale(float scale, float step, float minScale = SceneTransformMath.MinimumScale)
+        => MathF.Max(minScale, SnapValue(scale, step));
 
     public static Vector3 SnapVector(Vector3 value, float step)
         => new(
@@ -83,4 +86,3 @@ internal static class SceneTransformSnapUtility
             ? localPosition + origin
             : origin + Vector3.Transform(localPosition, rotation);
 }
-

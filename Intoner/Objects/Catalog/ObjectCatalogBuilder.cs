@@ -1,5 +1,6 @@
 using Dalamud.Plugin.Services;
 using Intoner.Objects.Assets;
+using Intoner.Objects.Models;
 using Intoner.Objects.Utils;
 using Intoner.Services.Loading;
 using Lumina.Excel.Sheets;
@@ -10,9 +11,14 @@ namespace Intoner.Objects.Catalog;
 
 internal sealed class ObjectCatalogBuilder
 {
-    private readonly record struct CatalogCandidate(ObjectCatalogEntry Entry, int Priority);
+    private readonly record struct FurnitureCandidate(
+        string Source,
+        int Priority,
+        ushort ModelKey,
+        ObjectCatalogFurnitureVariant PrimaryVariant,
+        List<ObjectCatalogFurnitureVariant> Variants,
+        SharedGroupAssetInfo Assets);
 
-    private static readonly SharedGroupAssetInfo EmptySharedGroups = new([], [], [], [], []);
     private static readonly IComparer<ObjectCatalogEntry> NameSourcePathComparer = Comparer<ObjectCatalogEntry>.Create(static (left, right) =>
     {
         var nameComparison = StringComparer.OrdinalIgnoreCase.Compare(left.Name, right.Name);
@@ -60,7 +66,7 @@ internal sealed class ObjectCatalogBuilder
         _assetIndex = assetIndex;
     }
 
-    public ObjectCatalogData Build(LoadProgress progress)
+    public ObjectCatalogData Build(ObjectAssetCatalogSnapshot assets, LoadProgress progress)
     {
         LoadProgressPlan progressPlan = progress.CreatePlan();
         LoadProgress bgObjectProgress = progressPlan.Next(38d);
@@ -70,7 +76,7 @@ internal sealed class ObjectCatalogBuilder
         LoadProgress searchProgress = progressPlan.Next(45d);
         long startedAt = Stopwatch.GetTimestamp();
         long phaseStartedAt = startedAt;
-        IReadOnlyList<ObjectCatalogEntry> bgObjectEntries = BuildBgObjectEntries(bgObjectProgress);
+        IReadOnlyList<ObjectCatalogEntry> bgObjectEntries = BuildBgObjectEntries(assets.BgObjects, bgObjectProgress);
         TimeSpan bgObjectTime = Stopwatch.GetElapsedTime(phaseStartedAt);
 
         phaseStartedAt = Stopwatch.GetTimestamp();
@@ -78,7 +84,7 @@ internal sealed class ObjectCatalogBuilder
         TimeSpan furnitureTime = Stopwatch.GetElapsedTime(phaseStartedAt);
 
         phaseStartedAt = Stopwatch.GetTimestamp();
-        IReadOnlyList<ObjectCatalogEntry> vfxEntries = BuildVfxEntries(vfxProgress);
+        IReadOnlyList<ObjectCatalogEntry> vfxEntries = BuildVfxEntries(assets.StandaloneVfx, vfxProgress);
         TimeSpan vfxTime = Stopwatch.GetElapsedTime(phaseStartedAt);
 
         phaseStartedAt = Stopwatch.GetTimestamp();
@@ -102,47 +108,33 @@ internal sealed class ObjectCatalogBuilder
         return catalog;
     }
 
-    public IReadOnlyList<ObjectCatalogEntry> BuildBgObjectEntries(LoadProgress progress)
+    public static IReadOnlyList<ObjectCatalogEntry> BuildBgObjectEntries(IReadOnlyList<BgObjectAsset> assets, LoadProgress progress)
     {
         CancellationToken cancellationToken = progress.CancellationToken;
-        IReadOnlyList<GameDataBgObjectAsset> gameDataAssets = _assetIndex.GetGameDataBgObjectAssets(cancellationToken);
-        IReadOnlyList<ObservedBgAsset> observedAssets = _assetIndex.GetObservedBgObjectAssets(cancellationToken);
-        Dictionary<string, CatalogCandidate> entries = new(gameDataAssets.Count + observedAssets.Count, StringComparer.OrdinalIgnoreCase);
+        List<ObjectCatalogEntry> entries = new(assets.Count);
         int completedAssetCount = 0;
-        int totalAssetCount = gameDataAssets.Count + observedAssets.Count;
-        progress.ReportItems(completedAssetCount, totalAssetCount);
-
-        foreach (GameDataBgObjectAsset asset in gameDataAssets)
+        progress.ReportItems(completedAssetCount, assets.Count);
+        foreach (BgObjectAsset asset in assets)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            AddBgObjectEntry(
-                entries,
+            entries.Add(new ObjectCatalogEntry(
+                ObjectCatalogKind.BgObject,
                 asset.Source,
-                11,
                 asset.RowId,
                 ObjectCatalogLabelUtility.BuildPathLabel(asset.Source, asset.SourcePath),
                 asset.ModelPath,
-                BuildBgObjectInfo(asset),
-                asset.SearchTerms);
-            progress.ReportItems(++completedAssetCount, totalAssetCount);
+                asset.ModelPath,
+                bgObjectInfo: new ObjectCatalogBgObjectInfo(asset.TerritoryIds, asset.TerritoryNames)
+                {
+                    ColliderDefinitions = asset.ColliderDefinitions.Where(static definition => definition.Kind != BgCollisionKind.None).ToArray(),
+                    ColliderDefinitionsComplete = asset.ColliderDefinitionsComplete,
+                },
+                additionalSearchTerms: asset.SearchTerms));
+            progress.ReportItems(++completedAssetCount, assets.Count);
         }
 
-        foreach (ObservedBgAsset observedAsset in observedAssets)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            AddBgObjectEntry(
-                entries,
-                observedAsset.Source,
-                20,
-                rowId: 0,
-                ObjectCatalogLabelUtility.BuildPathLabel(observedAsset.Source, observedAsset.Path),
-                observedAsset.Path,
-                BuildBgObjectInfo(observedAsset.TerritoryIds, observedAsset.TerritoryNames),
-                observedAsset.SearchTerms);
-            progress.ReportItems(++completedAssetCount, totalAssetCount);
-        }
-
-        return MaterializeEntries(entries, NameSourcePathComparer);
+        entries.Sort(NameSourcePathComparer);
+        return entries.ToArray();
     }
 
     public IReadOnlyList<ObjectCatalogEntry> BuildFurnitureEntries(LoadProgress progress)
@@ -151,7 +143,7 @@ internal sealed class ObjectCatalogBuilder
         var housingFurniture = _gameData.GetExcelSheet<HousingFurniture>()!;
         var housingYardObjects = _gameData.GetExcelSheet<HousingYardObject>()!;
         Dictionary<uint, HousingPileFootprint> pileFootprints = BuildPileFootprints(_gameData.GetExcelSheet<HousingPileLimit>()!);
-        Dictionary<string, CatalogCandidate> entries = new(StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, FurnitureCandidate> entries = new(StringComparer.OrdinalIgnoreCase);
         progress.Report(0d);
 
         foreach (HousingFurniture row in housingFurniture)
@@ -189,20 +181,19 @@ internal sealed class ObjectCatalogBuilder
         }
         progress.Report(1d);
 
-        return MaterializeEntries(entries, NameSourcePathComparer);
+        return MaterializeFurnitureEntries(entries);
     }
 
-    public IReadOnlyList<ObjectCatalogEntry> BuildVfxEntries(LoadProgress progress)
+    public static IReadOnlyList<ObjectCatalogEntry> BuildVfxEntries(IReadOnlyList<RuntimeVfxAsset> standaloneVfxAssets, LoadProgress progress)
     {
         CancellationToken cancellationToken = progress.CancellationToken;
-        IReadOnlyList<RuntimeVfxAsset> standaloneVfxAssets = _assetIndex.GetStandaloneVfxAssets(cancellationToken);
-        Dictionary<string, ObjectCatalogEntry> entries = new(standaloneVfxAssets.Count, StringComparer.OrdinalIgnoreCase);
+        List<ObjectCatalogEntry> entries = new(standaloneVfxAssets.Count);
         progress.ReportItems(0, standaloneVfxAssets.Count);
         for (var index = 0; index < standaloneVfxAssets.Count; ++index)
         {
             RuntimeVfxAsset vfxAsset = standaloneVfxAssets[index];
             cancellationToken.ThrowIfCancellationRequested();
-            entries[vfxAsset.Path] = new ObjectCatalogEntry(
+            entries.Add(new ObjectCatalogEntry(
                 ObjectCatalogKind.Vfx,
                 vfxAsset.Source,
                 rowId: 0,
@@ -211,15 +202,16 @@ internal sealed class ObjectCatalogBuilder
                 vfxAsset.Path,
                 vfxInfo: new ObjectCatalogVfxInfo(vfxAsset.LoopFacts),
                 additionalSearchTerms: vfxAsset.SearchTerms,
-                searchProfile: ObjectCatalogSearchProfile.Vfx);
+                searchProfile: ObjectCatalogSearchProfile.Vfx));
             progress.ReportItems(index + 1, standaloneVfxAssets.Count);
         }
 
-        return MaterializeEntries(entries.Values, SourceNamePathComparer);
+        entries.Sort(SourceNamePathComparer);
+        return entries.ToArray();
     }
 
     private void AddFurnitureEntry(
-        Dictionary<string, CatalogCandidate> entries,
+        Dictionary<string, FurnitureCandidate> entries,
         string sourceName,
         int sourcePriority,
         HousingFurniture row,
@@ -232,14 +224,13 @@ internal sealed class ObjectCatalogBuilder
             entries,
             sourceName,
             sourcePriority,
-            row.RowId,
-            name,
+            row.ModelKey,
             sharedGroupPath,
-            BuildFurnitureInfo(row, item, name, pileFootprints));
+            BuildFurnitureVariant(row, item, name, pileFootprints));
     }
 
     private void AddFurnitureEntry(
-        Dictionary<string, CatalogCandidate> entries,
+        Dictionary<string, FurnitureCandidate> entries,
         string sourceName,
         int sourcePriority,
         HousingYardObject row,
@@ -251,164 +242,50 @@ internal sealed class ObjectCatalogBuilder
             entries,
             sourceName,
             sourcePriority,
-            row.RowId,
-            name,
+            row.ModelKey,
             sharedGroupPath,
-            BuildFurnitureInfo(row, item, name));
+            BuildFurnitureVariant(row, item, name));
     }
 
     private void AddFurnitureEntry(
-        Dictionary<string, CatalogCandidate> entries,
+        Dictionary<string, FurnitureCandidate> entries,
         string sourceName,
         int sourcePriority,
-        uint rowId,
-        string name,
+        ushort modelKey,
         string sharedGroupPath,
-        ObjectCatalogFurnitureInfo furnitureInfo)
+        ObjectCatalogFurnitureVariant variant)
     {
-        if (!IsCatalogSharedGroupPathAvailable(sharedGroupPath))
+        if (!_assetIndex.TryGetSharedGroupAssets(sharedGroupPath, out SharedGroupAssetInfo? sharedGroupAssets))
         {
             return;
         }
 
-        SharedGroupAssetInfo sharedGroupAssets = GetSharedGroupAssetsOrEmpty(sharedGroupPath);
-        AddFurnitureCatalogEntry(
-            entries,
-            sourceName,
-            sourcePriority,
-            rowId,
-            name,
-            sharedGroupPath,
-            furnitureInfo,
-            sharedGroupAssets);
-    }
-
-    private static void AddBgObjectEntry(
-        Dictionary<string, CatalogCandidate> entries,
-        string sourceName,
-        int sourcePriority,
-        uint rowId,
-        string name,
-        string modelPath,
-        ObjectCatalogBgObjectInfo? bgObjectInfo,
-        IReadOnlyList<string> searchTerms)
-    {
-        if (entries.TryGetValue(modelPath, out CatalogCandidate existing) && existing.Priority <= sourcePriority)
+        if (entries.TryGetValue(sharedGroupPath, out FurnitureCandidate existing))
         {
-            return;
-        }
-
-        entries[modelPath] = new CatalogCandidate(
-            new ObjectCatalogEntry(
-                ObjectCatalogKind.BgObject,
-                sourceName,
-                rowId,
-                name,
-                modelPath,
-                modelPath,
-                bgObjectInfo: bgObjectInfo,
-                additionalSearchTerms: searchTerms),
-            sourcePriority);
-    }
-
-    private static ObjectCatalogBgObjectInfo? BuildBgObjectInfo(GameDataBgObjectAsset asset)
-        => ObjectCatalogBgObjectInfo.Create(asset.TerritoryIds, asset.TerritoryNames);
-
-    private static ObjectCatalogBgObjectInfo? BuildBgObjectInfo(
-        IReadOnlyList<uint> territoryIds,
-        IReadOnlyList<string> territoryNames)
-        => ObjectCatalogBgObjectInfo.Create(territoryIds, territoryNames);
-
-    private static void AddFurnitureCatalogEntry(
-        Dictionary<string, CatalogCandidate> entries,
-        string sourceName,
-        int sourcePriority,
-        uint rowId,
-        string name,
-        string sharedGroupPath,
-        ObjectCatalogFurnitureInfo furnitureInfo,
-        SharedGroupAssetInfo sharedGroupAssets)
-    {
-        if (entries.TryGetValue(sharedGroupPath, out CatalogCandidate existing))
-        {
-            if (existing.Entry.FurnitureInfo is { } existingFurnitureInfo)
+            if (existing.Priority <= sourcePriority)
             {
-                if (existing.Priority <= sourcePriority)
-                {
-                    ObjectCatalogFurnitureInfo mergedFurnitureInfo = existingFurnitureInfo.AddVariants(furnitureInfo.Variants);
-                    entries[sharedGroupPath] = new CatalogCandidate(
-                        CreateFurnitureCatalogEntry(
-                            existing.Entry.Source,
-                            existing.Entry.RowId,
-                            existing.Entry.Name,
-                            sharedGroupPath,
-                            mergedFurnitureInfo,
-                            sharedGroupAssets),
-                        existing.Priority);
-                    return;
-                }
-
-                furnitureInfo = furnitureInfo.AddVariants(existingFurnitureInfo.Variants);
-            }
-            else if (existing.Priority <= sourcePriority)
-            {
+                existing.Variants.Add(variant);
+                entries[sharedGroupPath] = existing with { Assets = sharedGroupAssets };
                 return;
             }
+
+            existing.Variants.Insert(0, variant);
+            entries[sharedGroupPath] = new(sourceName, sourcePriority, modelKey, variant, existing.Variants, sharedGroupAssets);
+            return;
         }
 
-        entries[sharedGroupPath] = new CatalogCandidate(
-            CreateFurnitureCatalogEntry(
-                sourceName,
-                rowId,
-                name,
-                sharedGroupPath,
-                furnitureInfo,
-                sharedGroupAssets),
-            sourcePriority);
+        entries[sharedGroupPath] = new(sourceName, sourcePriority, modelKey, variant, [variant], sharedGroupAssets);
     }
 
-    private static ObjectCatalogEntry CreateFurnitureCatalogEntry(
-        string sourceName,
-        uint rowId,
-        string name,
-        string sharedGroupPath,
-        ObjectCatalogFurnitureInfo furnitureInfo,
-        SharedGroupAssetInfo sharedGroupAssets)
-        => new(
-            ObjectCatalogKind.Furniture,
-            sourceName,
-            rowId,
-            name,
-            sharedGroupPath,
-            sharedGroupPath,
-            furnitureInfo: furnitureInfo,
-            previewModels: sharedGroupAssets.PreviewModels,
-            additionalSearchTerms: BuildFurnitureSearchTerms(sharedGroupAssets));
-
-    private bool IsCatalogSharedGroupPathAvailable(string sharedGroupPath)
-        => ObjectAssetPathRules.IsCatalogSharedGroupPath(sharedGroupPath)
-        && _gameData.FileExists(sharedGroupPath);
-
-    private SharedGroupAssetInfo GetSharedGroupAssetsOrEmpty(string sharedGroupPath)
-    {
-        if (_assetIndex.TryGetSharedGroupAssets(sharedGroupPath, out SharedGroupAssetInfo? resolvedSharedGroups))
-        {
-            return resolvedSharedGroups;
-        }
-
-        return EmptySharedGroups;
-    }
-
-    private static ObjectCatalogFurnitureInfo BuildFurnitureInfo(
+    private static ObjectCatalogFurnitureVariant BuildFurnitureVariant(
         HousingFurniture row,
         Item? item,
         string name,
         IReadOnlyDictionary<uint, HousingPileFootprint> pileFootprints)
-        => BuildFurnitureInfo(
+        => BuildFurnitureVariant(
             item,
             row.RowId,
             name,
-            row.ModelKey,
             row.DestroyOnRemoval,
             new HousingFurnitureMetadata(
                 HousingFurnitureArea.Indoor,
@@ -419,12 +296,11 @@ internal sealed class ObjectCatalogBuilder
                 row.Placement.RowId,
                 TryResolvePileFootprint(row.AquariumTier, pileFootprints)));
 
-    private static ObjectCatalogFurnitureInfo BuildFurnitureInfo(HousingYardObject row, Item? item, string name)
-        => BuildFurnitureInfo(
+    private static ObjectCatalogFurnitureVariant BuildFurnitureVariant(HousingYardObject row, Item? item, string name)
+        => BuildFurnitureVariant(
             item,
             row.RowId,
             name,
-            row.ModelKey,
             row.DestroyOnRemoval,
             new HousingFurnitureMetadata(
                 HousingFurnitureArea.Outdoor,
@@ -435,11 +311,10 @@ internal sealed class ObjectCatalogBuilder
                 row.Placement.RowId,
                 null));
 
-    private static ObjectCatalogFurnitureInfo BuildFurnitureInfo(
+    private static ObjectCatalogFurnitureVariant BuildFurnitureVariant(
         Item? item,
         uint housingRowId,
         string name,
-        ushort modelKey,
         bool destroyOnRemoval,
         HousingFurnitureMetadata housingMetadata)
     {
@@ -455,7 +330,7 @@ internal sealed class ObjectCatalogBuilder
             category = GetItemCategoryLabel(resolvedItem);
         }
 
-        ObjectCatalogFurnitureVariant variant = new(
+        return new ObjectCatalogFurnitureVariant(
             housingRowId,
             itemRowId,
             name,
@@ -464,8 +339,6 @@ internal sealed class ObjectCatalogBuilder
             housingMetadata,
             category ?? string.Empty,
             destroyOnRemoval);
-
-        return new ObjectCatalogFurnitureInfo(modelKey, variant);
     }
 
     private static Dictionary<uint, HousingPileFootprint> BuildPileFootprints(IEnumerable<HousingPileLimit> rows)
@@ -531,41 +404,26 @@ internal sealed class ObjectCatalogBuilder
         return fallback;
     }
 
-    private static IReadOnlyList<string> BuildFurnitureSearchTerms(SharedGroupAssetInfo sharedGroupAssets)
-        => SearchTermUtility.BuildStableTerms(
-            sharedGroupAssets.BgObjectModelPaths,
-            sharedGroupAssets.NestedSharedGroupPaths,
-            sharedGroupAssets.ReferencedVfxPaths);
-
-    private static ObjectCatalogEntry[] MaterializeEntries(
-        Dictionary<string, CatalogCandidate> candidates,
-        IComparer<ObjectCatalogEntry> comparer)
+    private static ObjectCatalogEntry[] MaterializeFurnitureEntries(Dictionary<string, FurnitureCandidate> candidates)
     {
         List<ObjectCatalogEntry> entries = new(candidates.Count);
-        foreach (CatalogCandidate candidate in candidates.Values)
+        foreach ((string path, FurnitureCandidate candidate) in candidates)
         {
-            entries.Add(candidate.Entry);
+            entries.Add(new ObjectCatalogEntry(
+                ObjectCatalogKind.Furniture,
+                candidate.Source,
+                candidate.PrimaryVariant.HousingRowId,
+                candidate.PrimaryVariant.Name,
+                path,
+                path,
+                furnitureInfo: new ObjectCatalogFurnitureInfo(candidate.ModelKey, candidate.PrimaryVariant, candidate.Variants),
+                previewModels: candidate.Assets.PreviewModels,
+                additionalSearchTerms: ObjectCatalogEntry.BuildFurnitureSearchTerms(candidate.Assets),
+                previewModelDiscoveryComplete: candidate.Assets.IsComplete));
         }
 
-        entries.Sort(comparer);
+        entries.Sort(NameSourcePathComparer);
         return entries.ToArray();
-    }
-
-    private static ObjectCatalogEntry[] MaterializeEntries(
-        IEnumerable<ObjectCatalogEntry> entries,
-        IComparer<ObjectCatalogEntry> comparer)
-    {
-        List<ObjectCatalogEntry> materializedEntries =
-        [
-            .. entries,
-        ];
-        if (materializedEntries.Count == 0)
-        {
-            return [];
-        }
-
-        materializedEntries.Sort(comparer);
-        return materializedEntries.ToArray();
     }
 
     private static string? GetItemCategoryLabel(Item item)
@@ -596,6 +454,4 @@ internal sealed class ObjectCatalogBuilder
             ? null
             : label;
     }
-
 }
-

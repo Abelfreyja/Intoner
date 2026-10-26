@@ -1,5 +1,6 @@
 using Dalamud.Plugin.Services;
 using Microsoft.Extensions.Logging;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 namespace Intoner.Services.Interop;
@@ -12,75 +13,39 @@ internal readonly record struct NativeStaticAddressTarget(string Signature, int 
 
 internal static class NativeAddressResolver
 {
-    private const byte CallOpcode = 0xE8;
-    private const byte JumpOpcode = 0xE9;
+    private static readonly ConditionalWeakTable<ISigScanner, Dictionary<string, nint>> TextMatches = new();
 
     public static nint TryResolveJmpCallTarget(
         ILogger logger,
         ISigScanner sigScanner,
         NativeRelativeBranchTarget target)
-        => TryResolveScannedTextMatch(
-            logger,
-            sigScanner,
-            target.Signature,
-            target.Label,
-            address => TryResolveJmpCallTarget(logger, sigScanner, address, target.Label));
-
-    private static nint TryResolveRelativeBranchTarget(
-        ILogger logger,
-        ISigScanner sigScanner,
-        nint relativeOffsetAddress,
-        string label)
     {
-        try
+        if (!target.Signature.StartsWith("E8 ", StringComparison.OrdinalIgnoreCase)
+            && !target.Signature.StartsWith("E9 ", StringComparison.OrdinalIgnoreCase))
         {
-            var displacement = Marshal.ReadInt32(relativeOffsetAddress);
-            return sigScanner.ResolveRelativeAddress(relativeOffsetAddress + sizeof(int), displacement);
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "failed to resolve relative branch target for {Label}", label);
+            logger.LogWarning("native branch target {Label} must start with E8 or E9", target.Label);
             return nint.Zero;
         }
-    }
 
-    private static nint TryResolveJmpCallTarget(
-        ILogger logger,
-        ISigScanner sigScanner,
-        nint jmpCallAddress,
-        string label)
-    {
-        if (!TryValidateJmpCallOpcode(logger, jmpCallAddress, label))
+        if (TryScanSingleTextMatch(logger, sigScanner, target.Signature, target.Label) == nint.Zero)
         {
             return nint.Zero;
         }
 
-        return TryResolveRelativeBranchTarget(logger, sigScanner, jmpCallAddress + 1, label);
-    }
-
-    private static bool IsJmpCallOpcode(byte opcode)
-        => opcode is CallOpcode or JumpOpcode;
-
-    private static bool TryValidateJmpCallOpcode(ILogger logger, nint address, string label)
-    {
         try
         {
-            var opcode = Marshal.ReadByte(address);
-            if (IsJmpCallOpcode(opcode))
+            if (sigScanner.TryScanText(target.Signature, out nint address) && address != nint.Zero)
             {
-                return true;
+                return address;
             }
 
-            logger.LogWarning(
-                "failed to resolve JMP/CALL target for {Label} because opcode 0x{Opcode:X2} is not E8/E9",
-                label,
-                opcode);
-            return false;
+            logger.LogWarning("failed to resolve relative branch target for {Label}", target.Label);
+            return nint.Zero;
         }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "failed to verify JMP/CALL opcode for {Label}", label);
-            return false;
+            logger.LogWarning(ex, "failed to resolve relative branch target for {Label}", target.Label);
+            return nint.Zero;
         }
     }
 
@@ -89,6 +54,11 @@ internal static class NativeAddressResolver
         ISigScanner sigScanner,
         NativeStaticAddressTarget target)
     {
+        if (TryScanSingleTextMatch(logger, sigScanner, target.Signature, target.Label) == nint.Zero)
+        {
+            return nint.Zero;
+        }
+
         try
         {
             if (sigScanner.TryGetStaticAddressFromSig(target.Signature, out nint address, target.Offset))
@@ -166,6 +136,26 @@ internal static class NativeAddressResolver
         string signature,
         string label)
     {
+        if (!sigScanner.IsCopy)
+        {
+            return ScanSingleTextMatch(logger, sigScanner, signature, label);
+        }
+
+        Dictionary<string, nint> matches = TextMatches.GetOrCreateValue(sigScanner);
+        lock (matches)
+        {
+            if (!matches.TryGetValue(signature, out nint address))
+            {
+                address = ScanSingleTextMatch(logger, sigScanner, signature, label);
+                matches.Add(signature, address);
+            }
+
+            return address;
+        }
+    }
+
+    private static nint ScanSingleTextMatch(ILogger logger, ISigScanner sigScanner, string signature, string label)
+    {
         try
         {
             var results = sigScanner.ScanAllText(signature);
@@ -188,29 +178,6 @@ internal static class NativeAddressResolver
         }
     }
 
-    public static nint TryScanText(
-        ILogger logger,
-        ISigScanner sigScanner,
-        string signature,
-        string label)
-    {
-        try
-        {
-            if (sigScanner.TryScanText(signature, out nint address))
-            {
-                return address;
-            }
-
-            logger.LogWarning("failed to resolve {Label}", label);
-            return nint.Zero;
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "failed to resolve {Label}", label);
-            return nint.Zero;
-        }
-    }
-
     private static nint TryResolveScannedTextMatch(
         ILogger logger,
         ISigScanner sigScanner,
@@ -224,4 +191,3 @@ internal static class NativeAddressResolver
             : resolve(address);
     }
 }
-

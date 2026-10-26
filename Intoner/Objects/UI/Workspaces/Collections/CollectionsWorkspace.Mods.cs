@@ -22,7 +22,7 @@ internal sealed partial class CollectionsWorkspace
         string subtitle = penumbraStatus.IsAvailable
             ? BuildAssignedModsSubtitle(collection.Record.Entries.Count)
             : penumbraStatus.Message;
-        _collectionPanel.DrawObjectCollectionPanel(
+        _columnPanel.DrawPanel(
             "objectCollectionsMods",
             FontAwesomeIcon.Cubes,
             "Penumbra Mods",
@@ -38,14 +38,14 @@ internal sealed partial class CollectionsWorkspace
         ObjectCollectionSnapshot collection,
         DependencyStatus penumbraStatus,
         int visibleModCount,
-        CollectionPanel.ObjectCollectionPanelHeaderLayout layout)
+        EditorColumnPanel.HeaderLayout layout)
     {
         Vector4 accent = ThemeColors.AccentPrimary;
         float rightInset = EditorLayout.Scaled(8f);
         float controlGap = EditorLayout.Scaled(7f);
         float buttonSize = EditorLayout.Scaled(32f);
         float buttonX = layout.Max.X - rightInset - buttonSize;
-        float textRight = CollectionPanel.DrawObjectCollectionPanelSearch(
+        float textRight = EditorColumnPanel.DrawSearch(
             "objectCollectionAssignedModFilter",
             "Filter assigned mods",
             ref _objectCollectionAssignedModFilter,
@@ -100,7 +100,7 @@ internal sealed partial class CollectionsWorkspace
             return;
         }
 
-        float rowHeight = EditorLayout.Scaled(CollectionPanel.CollectionModStyle.RowHeight);
+        float rowHeight = EditorLayout.Scaled(CollectionModStyle.RowHeight);
         using var itemSpacing = ImRaii.PushStyle(ImGuiStyleVar.ItemSpacing, new Vector2(ImGui.GetStyle().ItemSpacing.X, 0f));
         int visiblePosition = 0;
         bool changed = false;
@@ -171,8 +171,8 @@ internal sealed partial class CollectionsWorkspace
             ? ThemeColors.AccentPrimary
             : ThemeColors.AccentGrey;
         Vector4 fill = interaction.Hovered && entry.Enabled
-            ? CollectionPanel.CollectionModStyle.RowHover
-            : CollectionPanel.CollectionModStyle.Row;
+            ? CollectionModStyle.RowHover
+            : CollectionModStyle.Row;
         if (!entry.Enabled)
         {
             fill.W *= 0.70f;
@@ -203,14 +203,14 @@ internal sealed partial class CollectionsWorkspace
             drawList.AddLine(
                 min,
                 new Vector2(max.X, min.Y),
-                ImGui.GetColorU32(CollectionPanel.ObjectCollectionPanelStyle.Divider),
+                ImGui.GetColorU32(EditorColumnPanel.PanelStyle.Divider),
                 EditorLayout.Scaled(1f));
         }
 
-        float buttonSize = EditorLayout.Scaled(CollectionPanel.CollectionModStyle.ActionSize);
+        float buttonSize = EditorLayout.Scaled(CollectionModStyle.ActionSize);
         float controlGap = EditorLayout.Scaled(7f);
         float actionGap = EditorSegmentedControl.Spacing;
-        float priorityWidth = EditorLayout.Scaled(CollectionPanel.CollectionModStyle.PriorityWidth);
+        float priorityWidth = EditorLayout.Scaled(CollectionModStyle.PriorityWidth);
         float rowHeight = max.Y - min.Y;
         float buttonY = min.Y + ((rowHeight - buttonSize) * 0.5f);
         float padX = EditorLayout.Scaled(6f);
@@ -470,14 +470,8 @@ internal sealed partial class CollectionsWorkspace
         float buttonSize)
     {
         Vector2 mousePos = ImGui.GetMousePos();
-        return IsPointInsideRect(mousePos, priorityMin, priorityMax)
-            || IsPointInsideRect(mousePos, enabledPos, enabledPos + new Vector2(buttonSize, buttonSize))
-            || IsPointInsideRect(mousePos, removePos, removePos + new Vector2(buttonSize, buttonSize));
+        return new EditorScreenArea(priorityMin, priorityMax).Contains(mousePos)
+            || new EditorScreenArea(enabledPos, enabledPos + new Vector2(buttonSize)).Contains(mousePos)
+            || new EditorScreenArea(removePos, removePos + new Vector2(buttonSize)).Contains(mousePos);
     }
-
-    private static bool IsPointInsideRect(Vector2 point, Vector2 min, Vector2 max)
-        => point.X >= min.X
-            && point.X <= max.X
-            && point.Y >= min.Y
-            && point.Y <= max.Y;
 }

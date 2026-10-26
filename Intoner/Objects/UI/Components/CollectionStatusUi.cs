@@ -107,7 +107,7 @@ internal static class CollectionStatusUi
         {
             measuredWidth = MathF.Max(
                 measuredWidth,
-                IntonerTooltipContent.MeasureHeaderWidth(
+                IntonerTooltipContent.MeasureItemWidth(
                     FontAwesomeIcon.ExclamationTriangle,
                     "Warning",
                     warning));
@@ -117,7 +117,7 @@ internal static class CollectionStatusUi
         {
             measuredWidth = MathF.Max(
                 measuredWidth,
-                IntonerTooltipContent.MeasureHeaderWidth(
+                IntonerTooltipContent.MeasureItemWidth(
                     FontAwesomeIcon.InfoCircle,
                     "Last resolved data",
                     "Kept in use while this issue is resolved"));

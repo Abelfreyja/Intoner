@@ -18,11 +18,17 @@ internal sealed class SceneItemControls
     private readonly IHistoryCoordinator     _historyCoordinator;
     private readonly IObjectKindService      _objectKindService;
     private readonly IObjectClipboardService _objectClipboard;
+    private readonly IObjectLayoutManager    _layoutManager;
+    private readonly IObjectSceneView        _sceneView;
     private readonly EditorInteraction       _interaction;
     private readonly EditorSceneState        _sceneState;
     private readonly SceneEditorCommands     _sceneCommands;
     private readonly SceneListRow            _sceneListRow;
     private readonly IFurnitureStainService  _furnitureStainService;
+    private readonly ObjectLibraryBrowser    _libraryBrowser;
+
+    private readonly List<EditorIconButton.Item> _selectedActions = [];
+    private readonly Action<string> _executeSelectedObjectAction;
 
     public SceneItemControls(
         IHistoryCoordinator historyCoordinator,
@@ -32,92 +38,26 @@ internal sealed class SceneItemControls
         EditorSceneState sceneState,
         SceneEditorCommands sceneCommands,
         SceneListRow sceneListRow,
-        IFurnitureStainService furnitureStainService)
+        IFurnitureStainService furnitureStainService,
+        IObjectLayoutManager layoutManager,
+        IObjectSceneView sceneView,
+        ObjectLibraryBrowser libraryBrowser)
     {
         _historyCoordinator    = historyCoordinator;
         _objectKindService     = objectKindService;
         _objectClipboard       = objectClipboard;
+        _layoutManager         = layoutManager;
+        _sceneView             = sceneView;
         _interaction           = interaction;
         _sceneState            = sceneState;
         _sceneCommands         = sceneCommands;
         _sceneListRow          = sceneListRow;
         _furnitureStainService = furnitureStainService;
+        _libraryBrowser        = libraryBrowser;
+
+        _executeSelectedObjectAction = ExecuteSelectedObjectAction;
     }
 
-    private void DrawDuplicateSelectedButton()
-    {
-        var selectedExists = _interaction.Selection.HasSelection;
-
-        using (ImRaii.Disabled(!selectedExists))
-        {
-            if (EditorIconButton.DrawDefault("objectDuplicate", FontAwesomeIcon.Copy, "Duplicate Selected"))
-            {
-                IReadOnlyList<SceneItemSnapshot> selectedSnapshots = _sceneState.ResolveSelectedCurrentItems();
-                if (selectedSnapshots.Count > 0)
-                {
-                    _ = _historyCoordinator.TryDuplicateSceneItems(selectedSnapshots);
-                }
-            }
-        }
-    }
-
-    private void DrawMoveSelectedToPlayerButton(bool selectedActive)
-    {
-        var selectedId = _interaction.Selection.PrimaryItemId;
-        var selectedExists = selectedId.HasValue;
-
-        using (ImRaii.Disabled(!selectedExists || !selectedActive))
-        {
-            if (EditorIconButton.DrawDefault("objectMoveToPlayer", FontAwesomeIcon.Running, "Move To Player")
-                && selectedId is { } selectedObjectId
-                && selectedActive)
-            {
-                _ = _historyCoordinator.TryMoveItemToPlayer(selectedObjectId);
-            }
-        }
-    }
-
-    private void DrawToggleLockSelectedButton()
-    {
-        var selectedExists = _interaction.Selection.HasSelection;
-
-        using (ImRaii.Disabled(!selectedExists))
-        {
-            var selectedSnapshots = selectedExists
-                ? _sceneState.ResolveSelectedCurrentItems()
-                : [];
-            var allLocked = selectedSnapshots.Count > 0 && selectedSnapshots.All(static snapshot => snapshot.Locked);
-            var icon = allLocked ? FontAwesomeIcon.Unlock : FontAwesomeIcon.Lock;
-            var tooltip = allLocked ? "Unlock Selected" : "Lock Selected";
-
-            if (EditorIconButton.DrawDefault("objectToggleSelectedLock", icon, tooltip))
-            {
-                _ = _sceneCommands.TrySetSceneItemsLockedWithHistory(selectedSnapshots, !allLocked);
-            }
-        }
-    }
-
-    private void DrawRemoveSelectedButton()
-    {
-        var selectedExists = _interaction.Selection.HasSelection;
-
-        using (ImRaii.Disabled(!selectedExists))
-        {
-            if (EditorIconButton.DrawDefault(
-                    "objectRemoveSelected",
-                    FontAwesomeIcon.Trash,
-                    "Remove Selected",
-                    iconColor: ThemeColors.DimRed,
-                    tooltipTitleColor: ThemeColors.DimRed))
-            {
-                IReadOnlyList<SceneItemSnapshot> selectedSnapshots = _sceneState.ResolveSelectedCurrentItems();
-                if (selectedSnapshots.Count > 0)
-                {
-                    _ = _historyCoordinator.TryRemoveSceneItems(selectedSnapshots);
-                }
-            }
-        }
-    }
 
     internal void DrawDisplayListEntry(
         DisplaySnapshot display,
@@ -138,25 +78,13 @@ internal sealed class SceneItemControls
             Locked = display.Locked,
             Selected = _interaction.Selection.Contains(display.Id),
         };
-        EditorListCard.Interaction interaction = SceneListRow.DrawInteraction(row, rowMetrics);
-        HandleContextMenuSelection(display, interaction.RightClicked);
-        using (EditorContextMenu.PopupScope contextMenu = EditorContextMenu.BeginForLastItem($"##{row.Id}:context"))
-        {
-            if (contextMenu)
-            {
-                DrawSceneItemContextMenu(display, ResolveContextMenuItems(display), []);
-            }
-        }
-
-        _sceneListRow.DrawContent(row, rowMetrics, interaction);
-        HandleSceneListSelection(display, interaction.Clicked, selectableRowOrder);
+        DrawItemRow(display, row, rowMetrics, selectableRowOrder);
     }
 
     internal SceneListRow.RowGeometry DrawPlacedObjectCard(
         ObjectSnapshot snapshot,
         bool isActive,
         bool selected,
-        IReadOnlyList<string> placedFolders,
         IReadOnlyList<Guid> selectableRowOrder,
         SceneListRow.Metrics rowMetrics,
         float? leftInset = null,
@@ -172,9 +100,7 @@ internal sealed class SceneItemControls
             Detail = ObjectSnapshotUtility.GetAssetName(snapshot),
             TypeLabel = _objectKindService.GetDisplayName(snapshot.Kind),
             TypeIcon = SceneItemPresentation.ResolveObjectKindIcon(snapshot.Kind),
-            Status = new SceneListRow.Status(
-                isActive ? "Active" : "Inactive",
-                isActive ? ThemeColors.AccentGreen : ThemeColors.AccentBlue),
+            Status = SceneListRow.Status.Activity(isActive),
             Accent = ThemeColors.AccentPrimary,
             Emphasized = isActive,
             Visible = snapshot.Visible,
@@ -184,13 +110,19 @@ internal sealed class SceneItemControls
             LeftInset = leftInset,
             RightInset = rightInset,
         };
+        return DrawItemRow(snapshot, row, rowMetrics, selectableRowOrder);
+    }
+
+    private SceneListRow.RowGeometry DrawItemRow(SceneItemSnapshot snapshot, SceneListRow.Item row,
+        SceneListRow.Metrics rowMetrics, IReadOnlyList<Guid> selectableRowOrder)
+    {
         EditorListCard.Interaction interaction = SceneListRow.DrawInteraction(row, rowMetrics);
         HandleContextMenuSelection(snapshot, interaction.RightClicked);
         using (EditorContextMenu.PopupScope contextMenu = EditorContextMenu.BeginForLastItem($"##{row.Id}:context"))
         {
             if (contextMenu)
             {
-                DrawSceneItemContextMenu(snapshot, ResolveContextMenuItems(snapshot), placedFolders);
+                DrawSceneItemContextMenu(snapshot, ResolveContextMenuItems(snapshot));
             }
         }
 
@@ -217,6 +149,27 @@ internal sealed class SceneItemControls
         _interaction.SelectionChanged(changed);
     }
 
+    internal SceneListRow.FolderResult DrawGroupRow(SceneGroupSnapshot group, string detail, int memberCount, bool isActive,
+        SceneListRow.Metrics metrics, bool collapsed, IReadOnlyList<Guid> rowOrder, int depth)
+    {
+        SceneListRow.Folder row = new()
+        {
+            Id = $"sceneGroup:{group.Id:N}", Name = group.Name, Detail = detail,
+            Status = SceneListRow.Status.Activity(isActive),
+            Accent = EditorColors.GroupAccent, TypeIcon = FontAwesomeIcon.ObjectGroup, TypeLabel = "Group",
+            ChildCount = memberCount, Collapsed = collapsed, Selectable = true,
+            Selected = _interaction.Selection.Contains(group.Id),
+            Visible = group.Visible, Locked = group.Locked,
+        };
+        SceneListRow.FolderResult result = _sceneListRow.DrawFolder(row, metrics, group,
+            snapshot => DrawSceneItemContextMenu(snapshot, ResolveContextMenuItems(snapshot)),
+            leftInset: depth == 0 ? null : metrics.ChildInset * depth,
+            rightInset: depth == 0 ? null : metrics.ChildRightInset);
+        HandleContextMenuSelection(group, result.RightClicked);
+        HandleSceneListSelection(group, result.Clicked, rowOrder);
+        return result;
+    }
+
     private void HandleContextMenuSelection(SceneItemSnapshot invokedItem, bool rightClicked)
     {
         if (rightClicked && !invokedItem.Locked)
@@ -229,6 +182,8 @@ internal sealed class SceneItemControls
     {
         if (!_interaction.Selection.Contains(invokedItem.Id))
         {
+            if (invokedItem is SceneGroupSnapshot group)
+                return [.. _sceneState.GetEditorSceneData().Objects.Where(snapshot => snapshot.GroupId == group.Id), group];
             return [invokedItem];
         }
 
@@ -238,16 +193,90 @@ internal sealed class SceneItemControls
             : [invokedItem];
     }
 
+    private void DrawGroupContextActions(IReadOnlyList<SceneItemSnapshot> contextItems)
+    {
+        if (EditorContextMenu.DrawItem(FontAwesomeIcon.ObjectGroup, "Group Objects",
+                enabled: SceneEditorCommands.CanGroupItems(contextItems)))
+            _ = _sceneCommands.TryGroupItems(contextItems);
+
+        bool hasGroups = contextItems.Any(static item => item is SceneGroupSnapshot);
+        if (contextItems.Count > 0 && contextItems.All(static item => item is ObjectSnapshot))
+        {
+            IReadOnlyList<SceneGroupSnapshot> targets = _sceneView.GetPlacedGroups();
+            using (EditorContextMenu.SubMenuScope add = EditorContextMenu.BeginSubMenu("addToGroup", FontAwesomeIcon.ObjectGroup, "Add To Group",
+                enabled: targets.Count > 0, tooltip: targets.Count == 0 ? "No groups exist. Use Group Objects to create one from the selection." : null))
+            {
+                if (add)
+                {
+                    foreach (SceneGroupSnapshot target in targets)
+                    {
+                        string? unavailableReason = SceneEditorCommands.GetAddToGroupUnavailableReason(contextItems, target);
+                        if (EditorContextMenu.DrawItem(FontAwesomeIcon.ObjectGroup, target.Name,
+                                enabled: unavailableReason is null, id: $"addToGroup:{target.Id:N}", tooltip: unavailableReason))
+                            _ = _sceneCommands.TryAddToGroup(contextItems, target);
+                    }
+                }
+            }
+            if (contextItems.Any(static snapshot => snapshot is ObjectSnapshot { GroupId: not null })
+                && EditorContextMenu.DrawItem(FontAwesomeIcon.ObjectUngroup, "Remove From Group"))
+                _ = _sceneCommands.TryRemoveFromGroups(contextItems);
+        }
+        if (hasGroups && EditorContextMenu.DrawItem(FontAwesomeIcon.ObjectUngroup, "Ungroup"))
+            _ = _sceneCommands.TryUngroupItems(contextItems);
+        EditorContextMenu.DrawSeparator();
+    }
+
+    private void DrawGroupContextMenu(SceneGroupSnapshot group, IReadOnlyList<SceneItemSnapshot> contextItems)
+    {
+        ObjectSnapshot[] members = _sceneState.GetEditorSceneData().Objects.Where(snapshot => snapshot.GroupId == group.Id).ToArray();
+        SceneSelectionMenu.DrawChildren(_interaction, members);
+        EditorContextMenu.DrawSeparator();
+        DrawSceneItemClipboardActions(contextItems);
+        string? unavailableReason = _sceneCommands.GetPasteIntoGroupUnavailableReason(group);
+        bool canPaste = unavailableReason is null && _objectClipboard.CanPasteObjects(requireObjects: true);
+        if (EditorContextMenu.DrawItem(FontAwesomeIcon.Paste, "Paste into Group", enabled: canPaste,
+                tooltip: unavailableReason ?? (canPaste
+                    ? "Place clipboard objects in this group without moving them. Copied folders and groups are not retained."
+                    : "Clipboard does not contain Intoner objects.")))
+            _ = _sceneCommands.PasteObjectsIntoGroup(group);
+        DrawSceneItemDuplicateAction(contextItems);
+        EditorContextMenu.DrawSeparator();
+        if (EditorContextMenu.DrawItem(FontAwesomeIcon.LayerGroup, "Save Group to Library",
+                enabled: _libraryBrowser.CanSavePlacedObjectsAsPrefab(members.Length)))
+            _libraryBrowser.OpenSaveGroupAsPrefabDialog(group, members.Length);
+        DrawSceneItemDestinationMenu(group, contextItems);
+        if (EditorContextMenu.DrawItem(FontAwesomeIcon.Edit, "Rename Group"))
+        {
+            _interaction.OpenDialog(EditorDialog.Request.TextInput("group-rename", "Rename Group", "Rename",
+                input => _historyCoordinator.TryApplySceneChanges(SceneHistoryKind.Organization, "Rename Group",
+                    [group], [group with { Name = input.Trim() }], [group.Id])) with
+            {
+                InitialValue = group.Name, Placeholder = "group name", Icon = FontAwesomeIcon.ObjectGroup,
+                Accent = EditorColors.GroupAccent,
+                Validate = input => string.IsNullOrWhiteSpace(input) ? "Enter a group name." : null,
+            });
+        }
+        EditorContextMenu.DrawSeparator();
+        DrawSceneItemVisibilityActions(contextItems);
+        EditorContextMenu.DrawSeparator();
+        if (EditorContextMenu.DrawItem(FontAwesomeIcon.ObjectUngroup, "Ungroup"))
+            _ = _sceneCommands.TryUngroupItems(contextItems);
+        DrawSceneItemDeleteAction(contextItems);
+    }
+
     private void DrawSceneItemContextMenu(
         SceneItemSnapshot invokedItem,
-        IReadOnlyList<SceneItemSnapshot> contextItems,
-        IReadOnlyList<string> placedFolders)
+        IReadOnlyList<SceneItemSnapshot> contextItems)
     {
-        List<ObjectSnapshot> selectedObjects = contextItems.OfType<ObjectSnapshot>().ToList();
+        if (invokedItem is SceneGroupSnapshot group)
+        {
+            DrawGroupContextMenu(group, contextItems);
+            return;
+        }
         if (invokedItem is ObjectSnapshot)
         {
-            DrawSceneItemFolderMenu(invokedItem.Id, selectedObjects, placedFolders);
-
+            List<ObjectSnapshot> selectedObjects = contextItems.OfType<ObjectSnapshot>().ToList();
+            DrawSceneItemDestinationMenu(invokedItem, contextItems);
             bool canUnassignCollection = SceneEditorCommands.HasAnyObjectCollectionAssignment(selectedObjects);
             string unassignCollectionLabel = selectedObjects.Count == 1
                 ? "Remove from Collection"
@@ -277,11 +306,25 @@ internal sealed class SceneItemControls
 
         EditorContextMenu.DrawSeparator();
 
+        DrawSceneItemVisibilityActions(contextItems);
+        EditorContextMenu.DrawSeparator();
+        DrawSceneItemDuplicateAction(contextItems);
+        DrawSceneItemClipboardActions(contextItems);
+        EditorContextMenu.DrawSeparator();
+
+        if (invokedItem is ObjectSnapshot)
+            DrawGroupContextActions(contextItems);
+
+        DrawSceneItemDeleteAction(contextItems);
+    }
+
+    private void DrawSceneItemVisibilityActions(IReadOnlyList<SceneItemSnapshot> contextItems)
+    {
         bool allVisible = contextItems.All(static item => item.Visible);
         bool nextVisible = !allVisible;
         if (EditorContextMenu.DrawItem(
                 nextVisible ? FontAwesomeIcon.Eye : FontAwesomeIcon.EyeSlash,
-                SceneEditorCommands.ResolveSceneItemActionTitle(nextVisible ? "Show" : "Hide", contextItems.Count)))
+                ResolveContextActionTitle(nextVisible ? "Show" : "Hide", contextItems)))
         {
             _ = _sceneCommands.TrySetSceneItemsVisibleWithHistory(contextItems, nextVisible);
         }
@@ -290,87 +333,113 @@ internal sealed class SceneItemControls
         bool nextLocked = !allLocked;
         if (EditorContextMenu.DrawItem(
                 nextLocked ? FontAwesomeIcon.Lock : FontAwesomeIcon.Unlock,
-                SceneEditorCommands.ResolveSceneItemActionTitle(nextLocked ? "Lock" : "Unlock", contextItems.Count)))
+                ResolveContextActionTitle(nextLocked ? "Lock" : "Unlock", contextItems)))
         {
             _ = _sceneCommands.TrySetSceneItemsLockedWithHistory(contextItems, nextLocked);
         }
+    }
 
-        EditorContextMenu.DrawSeparator();
-
+    private void DrawSceneItemDuplicateAction(IReadOnlyList<SceneItemSnapshot> contextItems)
+    {
         if (EditorContextMenu.DrawItem(
                 FontAwesomeIcon.Copy,
-                SceneEditorCommands.ResolveSceneItemActionTitle("Duplicate", contextItems.Count)))
+                ResolveContextActionTitle("Duplicate", contextItems)))
         {
             _ = _historyCoordinator.TryDuplicateSceneItems(contextItems);
         }
+    }
 
-        bool canCopyObjects = invokedItem is ObjectSnapshot
-            && selectedObjects.Count == contextItems.Count;
-        string copyLabel = selectedObjects.Count == 1
-            ? "Copy Object"
-            : "Copy Objects";
+    private void DrawSceneItemClipboardActions(IReadOnlyList<SceneItemSnapshot> contextItems)
+    {
+        bool canCopyObjects = contextItems.All(static item => item is ObjectSnapshot or SceneGroupSnapshot);
         if (EditorContextMenu.DrawItem(
                 FontAwesomeIcon.Copy,
-                copyLabel,
+                ResolveContextActionTitle("Copy", contextItems, objects: true),
                 enabled: canCopyObjects)
             && canCopyObjects)
         {
-            _ = _objectClipboard.CopyObjects(selectedObjects);
+            _ = _objectClipboard.CopyObjects(contextItems);
         }
 
-        string cutLabel = selectedObjects.Count == 1
-            ? "Cut Object"
-            : "Cut Objects";
         if (EditorContextMenu.DrawItem(
                 FontAwesomeIcon.Cut,
-                cutLabel,
+                ResolveContextActionTitle("Cut", contextItems, objects: true),
                 enabled: canCopyObjects)
             && canCopyObjects)
         {
-            _ = _sceneCommands.CutObjectsToClipboard(selectedObjects);
+            _ = _sceneCommands.CutObjectsToClipboard(contextItems);
         }
+    }
 
-        EditorContextMenu.DrawSeparator();
+    private void DrawSceneItemDeleteAction(IReadOnlyList<SceneItemSnapshot> contextItems)
+    {
         if (EditorContextMenu.DrawItem(
                 FontAwesomeIcon.Trash,
-                SceneEditorCommands.ResolveSceneItemActionTitle("Delete", contextItems.Count),
+                ResolveContextActionTitle("Delete", contextItems),
                 color: ThemeColors.DimRed))
         {
             _ = _historyCoordinator.TryRemoveSceneItems(contextItems);
         }
     }
 
-    private void DrawSceneItemFolderMenu(
-        Guid invokedItemId,
-        IReadOnlyList<ObjectSnapshot> selectedObjects,
-        IReadOnlyList<string> placedFolders)
+    private static string ResolveContextActionTitle(string action, IReadOnlyList<SceneItemSnapshot> items, bool objects = false)
     {
+        if (SceneGroupUtility.ResolveSelectedGroup(items) is not null)
+            return $"{action} Group";
+        if (objects && items.All(static item => item is ObjectSnapshot))
+            return items.Count == 1 ? $"{action} Object" : $"{action} Objects";
+        return SceneEditorCommands.ResolveSceneItemActionTitle(action, items.Count);
+    }
+
+    private void DrawSceneItemDestinationMenu(
+        SceneItemSnapshot invokedObject,
+        IReadOnlyList<SceneItemSnapshot> selectedObjects)
+    {
+        if (selectedObjects.Any(static item => item is not (ObjectSnapshot or SceneGroupSnapshot)))
+            return;
+        Guid? owner = ObjectFolderUtility.GetItemLayoutId(invokedObject);
         using EditorContextMenu.SubMenuScope assignFolder = EditorContextMenu.BeginSubMenu(
-            $"placedObjectAssignFolder:{invokedItemId}",
+            $"placedObjectDestination:{invokedObject.Id}",
             FontAwesomeIcon.FolderOpen,
-            "Assign Folder");
+            "Move To");
         if (!assignFolder)
         {
             return;
         }
 
-        FolderSelectionMenu.DrawPaths(
-            placedFolders,
-            ResolveCommonFolderPath(selectedObjects),
-            folderPath => _ = _sceneCommands.TrySetObjectFolderWithHistory(selectedObjects, folderPath));
+        string? selectedFolder = ResolveCommonFolderPath(selectedObjects);
+        IReadOnlyList<string> localFolders = _sceneView.GetPlacedFolders(owner);
+        if (localFolders.Count > 0)
+        {
+            using var folderIds = ImRaii.PushId("currentLayoutFolders");
+            FolderSelectionMenu.DrawPaths(localFolders, selectedFolder,
+                folder => SelectDestination(owner, folder));
+            EditorContextMenu.DrawSeparator();
+        }
+
+        ObjectDestinationMenu.Draw(
+            _layoutManager.GetEnabledLayouts(),
+            _sceneView.GetPlacedFolders,
+            owner,
+            selectedFolder,
+            SelectDestination);
+
+        void SelectDestination(Guid? layoutId, string folderPath)
+            => _ = _sceneCommands.TrySetObjectDestinationWithHistory(selectedObjects, layoutId, folderPath);
     }
 
-    private static string? ResolveCommonFolderPath(IReadOnlyList<ObjectSnapshot> snapshots)
+    private static string? ResolveCommonFolderPath(IReadOnlyList<SceneItemSnapshot> snapshots)
     {
         if (snapshots.Count == 0)
         {
             return null;
         }
 
-        string folderPath = snapshots[0].FolderPath;
+        string folderPath = ObjectFolderUtility.GetItemFolderPath(snapshots[0]);
         for (var index = 1; index < snapshots.Count; ++index)
         {
-            if (!string.Equals(folderPath, snapshots[index].FolderPath, StringComparison.OrdinalIgnoreCase))
+            if (ObjectFolderUtility.GetItemLayoutId(snapshots[index]) != ObjectFolderUtility.GetItemLayoutId(snapshots[0])
+                || !string.Equals(folderPath, ObjectFolderUtility.GetItemFolderPath(snapshots[index]), StringComparison.OrdinalIgnoreCase))
             {
                 return null;
             }
@@ -384,14 +453,15 @@ internal sealed class SceneItemControls
         switch (snapshot.Model)
         {
             case BgObjectModel bgObjectModel when !IsApproximatelyDefault(bgObjectModel.DyeColor, Vector4.One):
+                string dyeColorLabel = FormatColorLabel(bgObjectModel.DyeColor);
                 marker = new SceneListRow.ColorMarker(
                     ThemeColors.Color(
                         Math.Clamp(bgObjectModel.DyeColor.X, 0f, 1f),
                         Math.Clamp(bgObjectModel.DyeColor.Y, 0f, 1f),
                         Math.Clamp(bgObjectModel.DyeColor.Z, 0f, 1f),
                         1f),
-                    FormatColorLabel(bgObjectModel.DyeColor),
-                    $"Dye Color: {FormatColorLabel(bgObjectModel.DyeColor)}");
+                    dyeColorLabel,
+                    $"Dye Color: {dyeColorLabel}");
                 return true;
 
             case FurnitureModel furnitureModel when furnitureModel.Color.UseCustomColor:
@@ -417,14 +487,15 @@ internal sealed class SceneItemControls
 
             case LightModel lightModel when !IsApproximatelyDefault(lightModel.Color, new Vector3(20f, 20f, 20f)):
                 var lightColor = Vector3.SquareRoot(lightModel.Color / 6f);
+                string lightColorLabel = FormatColorLabel(lightColor);
                 marker = new SceneListRow.ColorMarker(
                     ThemeColors.Color(
                         Math.Clamp(lightColor.X, 0f, 1f),
                         Math.Clamp(lightColor.Y, 0f, 1f),
                         Math.Clamp(lightColor.Z, 0f, 1f),
                         1f),
-                    FormatColorLabel(lightColor),
-                    $"Light Color: {FormatColorLabel(lightColor)}");
+                    lightColorLabel,
+                    $"Light Color: {lightColorLabel}");
                 return true;
         }
 
@@ -432,39 +503,68 @@ internal sealed class SceneItemControls
         return false;
     }
 
-    internal void DrawSelectedObjectActions(bool selectedActive)
+    internal EditorHeroCard.Actions GetSelectedObjectActions(bool selectedActive, SceneItemSnapshot? selected)
     {
-        DrawCutSelectedObjectsButton();
-        ImGui.SameLine();
-        DrawCopySelectedObjectsButton();
-        ImGui.SameLine();
-        DrawDuplicateSelectedButton();
-        ImGui.SameLine();
-        DrawMoveSelectedToPlayerButton(selectedActive);
-        ImGui.SameLine();
-        DrawToggleLockSelectedButton();
-        ImGui.SameLine();
-        DrawRemoveSelectedButton();
+        IReadOnlyList<SceneItemSnapshot> items = _sceneState.ResolveSelectedCurrentItems();
+        bool hasSelection = items.Count > 0;
+        bool canCopy = hasSelection && items.All(static item => item is ObjectSnapshot or SceneGroupSnapshot);
+        bool allLocked = hasSelection && items.All(static item => item.Locked);
+        _selectedActions.Clear();
+        _selectedActions.Add(new("objectCutClipboard", FontAwesomeIcon.Cut, "Cut Selected", canCopy));
+        _selectedActions.Add(new("objectCopyClipboard", FontAwesomeIcon.Copy, "Copy Selected", canCopy));
+        _selectedActions.Add(new("objectDuplicate", FontAwesomeIcon.Copy, "Duplicate Selected", hasSelection));
+        if (selected is SceneGroupSnapshot)
+            _selectedActions.Add(new("groupUngroup", FontAwesomeIcon.ObjectUngroup, "Ungroup"));
+        else if (selected is ObjectSnapshot)
+            _selectedActions.Add(new("objectGroup", FontAwesomeIcon.ObjectGroup, "Group Objects", SceneEditorCommands.CanGroupItems(items)));
+        _selectedActions.Add(new("objectMoveToPlayer", FontAwesomeIcon.Running, "Move To Player", hasSelection && selectedActive));
+        if (selected is SceneGroupSnapshot group)
+            _selectedActions.Add(new("groupCenterPivot", FontAwesomeIcon.Crosshairs, "Center Group Pivot", !group.Locked));
+        _selectedActions.Add(new("objectToggleSelectedLock", allLocked ? FontAwesomeIcon.Unlock : FontAwesomeIcon.Lock,
+            allLocked ? "Unlock Selected" : "Lock Selected", hasSelection));
+        _selectedActions.Add(new("objectRemoveSelected", FontAwesomeIcon.Trash, "Remove Selected", hasSelection,
+            IconColor: ThemeColors.DimRed, TooltipTitleColor: ThemeColors.DimRed));
+        return new EditorHeroCard.Actions(_selectedActions, _executeSelectedObjectAction);
     }
 
-    internal static Vector2 ResolveSelectedObjectActionsSize()
+    private void ExecuteSelectedObjectAction(string id)
     {
-        static float Edge(FontAwesomeIcon icon)
-            => EditorIconButton.MeasureEdge(icon);
+        IReadOnlyList<SceneItemSnapshot> items = _sceneState.ResolveSelectedCurrentItems();
+        if (items.Count == 0)
+            return;
 
-        float cutEdge = Edge(FontAwesomeIcon.Cut);
-        float copyClipboardEdge = Edge(FontAwesomeIcon.Copy);
-        float copyEdge = Edge(FontAwesomeIcon.Copy);
-        float runningEdge = Edge(FontAwesomeIcon.Running);
-        float lockEdge = MathF.Max(
-            Edge(FontAwesomeIcon.Lock),
-            Edge(FontAwesomeIcon.Unlock));
-        float trashEdge = Edge(FontAwesomeIcon.Trash);
-        float width = cutEdge + copyClipboardEdge + copyEdge + runningEdge + lockEdge + trashEdge + (ImGui.GetStyle().ItemSpacing.X * 5f);
-        float height = MathF.Max(
-            cutEdge,
-            MathF.Max(MathF.Max(MathF.Max(copyClipboardEdge, copyEdge), MathF.Max(runningEdge, lockEdge)), trashEdge));
-        return new Vector2(width, height);
+        switch (id)
+        {
+            case "objectCutClipboard":
+                _ = _sceneCommands.CutObjectsToClipboard(items);
+                break;
+            case "objectCopyClipboard":
+                _ = _objectClipboard.CopyObjects(items);
+                break;
+            case "objectDuplicate":
+                _ = _historyCoordinator.TryDuplicateSceneItems(items);
+                break;
+            case "objectMoveToPlayer":
+                if (_interaction.Selection.PrimaryItemId is { } itemId)
+                    _ = _historyCoordinator.TryMoveItemToPlayer(itemId);
+                break;
+            case "objectToggleSelectedLock":
+                _ = _sceneCommands.TrySetSceneItemsLockedWithHistory(items, !items.All(static item => item.Locked));
+                break;
+            case "objectRemoveSelected":
+                _ = _historyCoordinator.TryRemoveSceneItems(items);
+                break;
+            case "groupCenterPivot":
+                if (items.FirstOrDefault(item => item.Id == _interaction.Selection.PrimaryItemId) is SceneGroupSnapshot group)
+                    _ = _sceneCommands.TryCenterGroupPivot(group);
+                break;
+            case "groupUngroup":
+                _ = _sceneCommands.TryUngroupItems(items);
+                break;
+            case "objectGroup":
+                _ = _sceneCommands.TryGroupItems(items);
+                break;
+        }
     }
 
     private static bool IsApproximatelyDefault(Vector4 value, Vector4 expected, float epsilon = 0.001f)
@@ -474,42 +574,11 @@ internal sealed class SceneItemControls
         => NumericsUtility.IsNearlyEqual(value, expected, epsilon);
 
     private static string FormatColorLabel(Vector4 color)
-        => $"{color.X:0.##}, {color.Y:0.##}, {color.Z:0.##}";
+        => FormatColorLabel(new Vector3(color.X, color.Y, color.Z));
 
     private static string FormatColorLabel(Vector3 color)
         => $"{color.X:0.##}, {color.Y:0.##}, {color.Z:0.##}";
 
     private static string FormatByteColorLabel(Vector4 color)
         => $"{ColorUtility.ToRoundedByteComponent(color.X)}, {ColorUtility.ToRoundedByteComponent(color.Y)}, {ColorUtility.ToRoundedByteComponent(color.Z)}";
-
-    private void DrawCopySelectedObjectsButton()
-        => DrawSelectedObjectClipboardButton(
-            "objectCopyClipboard",
-            FontAwesomeIcon.Copy,
-            "Copy",
-            _objectClipboard.CopyObjects);
-
-    private void DrawCutSelectedObjectsButton()
-        => DrawSelectedObjectClipboardButton(
-            "objectCutClipboard",
-            FontAwesomeIcon.Cut,
-            "Cut",
-            _sceneCommands.CutObjectsToClipboard);
-
-    private void DrawSelectedObjectClipboardButton(
-        string id,
-        FontAwesomeIcon icon,
-        string action,
-        Func<IReadOnlyList<ObjectSnapshot>, bool> execute)
-    {
-        IReadOnlyList<ObjectSnapshot> snapshots = _sceneState.ResolveSelectedClipboardObjects();
-        using (ImRaii.Disabled(snapshots.Count == 0))
-        {
-            string target = snapshots.Count == 1 ? "Selected Object" : $"{snapshots.Count} Selected Objects";
-            if (EditorIconButton.DrawDefault(id, icon, $"{action} {target}"))
-            {
-                _ = execute(snapshots);
-            }
-        }
-    }
 }

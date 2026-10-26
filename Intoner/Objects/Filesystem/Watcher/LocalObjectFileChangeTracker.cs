@@ -1,3 +1,4 @@
+using Intoner.Services.Serialization;
 using Intoner.Services.Storage;
 
 namespace Intoner.Objects.Filesystem.Watching;
@@ -87,7 +88,7 @@ internal sealed class LocalObjectFileChangeTracker
             }
 
             return _files.FileExists(normalizedPath)
-                && string.Equals(_files.ReadAllText(normalizedPath), expected.Contents, StringComparison.Ordinal);
+                && string.Equals(JsonDocumentUtility.ReadFile(_files, normalizedPath), expected.Contents, StringComparison.Ordinal);
         }
         catch
         {

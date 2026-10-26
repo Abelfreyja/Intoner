@@ -1,4 +1,7 @@
+using Intoner.Logging;
+using Intoner.Objects.Runtime;
 using Intoner.Objects.Utils;
+using Intoner.Utils;
 using Microsoft.Extensions.Logging;
 using System.Diagnostics;
 
@@ -16,6 +19,7 @@ internal enum SceneHistoryKind
     Visibility,
     Remove,
     Clear,
+    Layout,
 }
 
 /// <summary> describes one reachable point in scene history </summary>
@@ -28,6 +32,14 @@ internal readonly record struct SceneHistoryEntry(
 {
     public bool IsInitialState => StateIndex == 0;
     public bool HasCheckpoint => !string.IsNullOrWhiteSpace(CheckpointLabel);
+}
+
+/// <summary> holds one checked view of the history timeline </summary>
+internal readonly record struct SceneHistorySnapshot(IReadOnlyList<SceneHistoryEntry> Entries, int CurrentStateIndex,
+    SceneHistoryResult Undo, SceneHistoryResult Redo, SceneHistoryResult LastResult)
+{
+    public SceneHistoryKind? UndoActionKind => CurrentStateIndex > 0 && CurrentStateIndex < Entries.Count ? Entries[CurrentStateIndex].Kind : null;
+    public SceneHistoryKind? RedoActionKind => CurrentStateIndex + 1 < Entries.Count ? Entries[CurrentStateIndex + 1].Kind : null;
 }
 
 /// <summary> stores one internal history step and its timeline metadata </summary>
@@ -55,6 +67,9 @@ internal sealed class SceneHistoryStep
 /// <summary> provides shared labels for scene history description </summary>
 internal static class SceneHistoryDescription
 {
+    public static string GetItemName(SceneItemSnapshot snapshot)
+        => string.IsNullOrWhiteSpace(snapshot.Name) ? snapshot.Id.ToString("D") : snapshot.Name;
+
     /// <summary> gets the label for a history kind </summary>
     public static string GetKindLabel(SceneHistoryKind kind)
         => kind switch
@@ -68,6 +83,7 @@ internal static class SceneHistoryDescription
             SceneHistoryKind.Visibility   => "Visibility",
             SceneHistoryKind.Remove       => "Remove",
             SceneHistoryKind.Clear        => "Clear",
+            SceneHistoryKind.Layout       => "Layout",
             _                              => "Edit",
         };
 
@@ -93,10 +109,13 @@ internal interface ISceneHistoryAction
     SceneHistoryKind Kind { get; }
 
     /// <summary> applies the history action </summary>
-    void Apply();
+    SceneHistoryResult Apply();
+
+    /// <summary> checks whether the expected saved state still permits replay </summary>
+    SceneHistoryResult Validate(bool apply);
 
     /// <summary> reverts the history action </summary>
-    void Revert();
+    SceneHistoryResult Revert();
 }
 
 /// <summary> base class for scene history actions </summary>
@@ -118,30 +137,40 @@ internal abstract class SceneHistoryActionBase : ISceneHistoryAction
 
     public string Title { get; protected set; }
     public SceneHistoryKind Kind { get; protected set; }
-    protected bool IsApplied => _state == ActionState.Applied;
 
-    public void Apply()
+    public SceneHistoryResult Apply()
     {
         Debug.Assert(_state != ActionState.Applied, "history action is already applied");
-        ApplyCore();
-        _state = ActionState.Applied;
+        SceneHistoryResult result = ApplyCore();
+
+        if (result.IsSuccess)
+        {
+            _state = ActionState.Applied;
+        }
+
+        return result;
     }
 
-    public void Revert()
+    public SceneHistoryResult Revert()
     {
         Debug.Assert(_state == ActionState.Applied, "history action is not applied");
-        RevertCore();
-        _state = ActionState.Pending;
+        SceneHistoryResult result = RevertCore();
+
+        if (result.IsSuccess)
+        {
+            _state = ActionState.Pending;
+        }
+
+        return result;
     }
 
-    internal void MarkApplied()
+    internal virtual void MarkRecordedApplied()
         => _state = ActionState.Applied;
 
-    internal virtual void MarkRecordedApplied()
-        => MarkApplied();
+    public virtual SceneHistoryResult Validate(bool apply) => SceneHistoryResult.Success;
 
-    protected abstract void ApplyCore();
-    protected abstract void RevertCore();
+    protected abstract SceneHistoryResult ApplyCore();
+    protected abstract SceneHistoryResult RevertCore();
 }
 
 /// <summary> manages scene undo, redo, checkpoints, and timeline navigation </summary>
@@ -183,19 +212,31 @@ internal interface ISceneHistoryManager
 
     /// <summary> jumps to a specific reachable history state </summary>
     /// <param name="stateIndex">the target state index in the ordered timeline</param>
+    /// <param name="expectedEntries">the timeline snapshot selected by the caller</param>
     /// <returns>true when the target state was reached</returns>
-    bool TryJumpToState(int stateIndex);
+    bool TryJumpToState(int stateIndex, IReadOnlyList<SceneHistoryEntry> expectedEntries);
 
     /// <summary> sets or updates the checkpoint label for a history state </summary>
     /// <param name="stateIndex">the target state index in the ordered timeline</param>
     /// <param name="label">the non empty checkpoint label</param>
+    /// <param name="expectedEntries">the timeline snapshot selected by the caller</param>
     /// <returns>true when the checkpoint label was stored</returns>
-    bool TrySetCheckpoint(int stateIndex, string label);
+    bool TrySetCheckpoint(int stateIndex, string label, IReadOnlyList<SceneHistoryEntry> expectedEntries);
 
     /// <summary> clears the checkpoint label for a history state </summary>
     /// <param name="stateIndex">the target state index in the ordered timeline</param>
+    /// <param name="expectedEntries">the timeline snapshot selected by the caller</param>
     /// <returns>true when the checkpoint label was cleared</returns>
-    bool TryClearCheckpoint(int stateIndex);
+    bool TryClearCheckpoint(int stateIndex, IReadOnlyList<SceneHistoryEntry> expectedEntries);
+
+    /// <summary> reports the latest history result </summary>
+    SceneHistoryResult LastResult { get; }
+
+    /// <summary> captures entries, position, replay checks and the last result under the scene lock </summary>
+    SceneHistorySnapshot GetSnapshot();
+
+    /// <summary> checks the next undo or redo action without changing history </summary>
+    SceneHistoryResult GetAvailability(bool undo);
 
     /// <summary> clears all undo and redo history </summary>
     void ClearHistory();
@@ -204,279 +245,342 @@ internal interface ISceneHistoryManager
 internal sealed class SceneHistoryManager : ISceneHistoryManager
 {
     private const string InitialStateTitle = "Initial State";
-
-    private enum HistoryOperation
-    {
-        Idle,
-        Applying,
-        Undoing,
-        Redoing,
-    }
-
     private readonly ILogger<SceneHistoryManager> _logger;
+    private readonly Lock _stateLock;
+    private SceneHistoryResult _lastResult = SceneHistoryResult.Success;
     private readonly List<SceneHistoryStep> _historySteps = [];
     private IReadOnlyList<SceneHistoryEntry> _entries = [];
-
     private int _currentStateIndex;
-    private HistoryOperation _activeOperation;
+    private bool _changing;
+    private SceneHistoryResult? _recoveryFailure;
 
-    public SceneHistoryManager(ILogger<SceneHistoryManager> logger)
+    public SceneHistoryManager(ILogger<SceneHistoryManager> logger, ObjectStateLock stateLock)
     {
         _logger = logger;
-        ResetTimeline();
+        _stateLock = stateLock.Value;
+        ClearHistory();
     }
 
     public event Action<ISceneHistoryAction>? ActionApplied;
     public event Action<ISceneHistoryAction>? ActionReverted;
+    public IReadOnlyList<SceneHistoryEntry> Entries
+    {
+        get
+        {
+            using Lock.Scope scope = _stateLock.EnterScope();
+            return _entries;
+        }
+    }
+    public int CurrentStateIndex
+    {
+        get
+        {
+            using Lock.Scope scope = _stateLock.EnterScope();
+            return _currentStateIndex;
+        }
+    }
+    public SceneHistoryKind? UndoActionKind => GetActionKind(undo: true);
+    public SceneHistoryKind? RedoActionKind => GetActionKind(undo: false);
+    public SceneHistoryResult LastResult
+    {
+        get
+        {
+            using Lock.Scope scope = _stateLock.EnterScope();
+            return _lastResult;
+        }
+        private set => _lastResult = value;
+    }
 
-    public IReadOnlyList<SceneHistoryEntry> Entries => _entries;
-    public int CurrentStateIndex => _currentStateIndex;
-    public SceneHistoryKind? UndoActionKind => _currentStateIndex > 0 ? _historySteps[_currentStateIndex].Kind : null;
-    public SceneHistoryKind? RedoActionKind => _currentStateIndex + 1 < _historySteps.Count ? _historySteps[_currentStateIndex + 1].Kind : null;
+    public SceneHistorySnapshot GetSnapshot()
+    {
+        using Lock.Scope scope = _stateLock.EnterScope();
+        return new SceneHistorySnapshot(_entries, _currentStateIndex, GetAvailability(undo: true), GetAvailability(undo: false), _lastResult);
+    }
+
+    private SceneHistoryKind? GetActionKind(bool undo)
+    {
+        using Lock.Scope scope = _stateLock.EnterScope();
+        int index = undo ? _currentStateIndex : _currentStateIndex + 1;
+        return index > 0 && index < _historySteps.Count ? _historySteps[index].Kind : null;
+    }
+
+    public SceneHistoryResult GetAvailability(bool undo)
+    {
+        using Lock.Scope scope = _stateLock.EnterScope();
+        if (_recoveryFailure is { } recovery)
+        {
+            return recovery;
+        }
+
+        int index = undo ? _currentStateIndex : _currentStateIndex + 1;
+
+        if (index <= 0 || index >= _historySteps.Count)
+        {
+            return SceneHistoryResult.Failed(undo ? "No change is available to undo." : "No change is available to redo.");
+        }
+
+        return Validate(_historySteps[index].Action!, apply: !undo);
+    }
 
     public void Apply(ISceneHistoryAction action)
     {
-        EnsureHistoryMutationAllowed("cannot apply a history action while scene history is changing");
-
-        _activeOperation = HistoryOperation.Applying;
+        using Lock.Scope scope = _stateLock.EnterScope();
+        EnsureIdle();
+        _changing = true;
         try
         {
-            if (!TryRunHistoryAction(action, apply: true, "apply"))
-            {
-                return;
-            }
+            SceneHistoryResult result = Run(action, apply: true);
 
-            StoreCompletedAction(action, raiseAppliedEvent: true);
+            if (result.IsSuccess)
+            {
+                Store(action);
+            }
+            else if (result.Outcome == SceneHistoryOutcome.RecoveryRequired)
+            {
+                LastResult = SceneHistoryResult.RecoveryRequired($"{result.Message} Recover the workspace and clear history before trying again.");
+                _recoveryFailure = LastResult;
+            }
         }
         finally
         {
-            _activeOperation = HistoryOperation.Idle;
+            _changing = false;
         }
     }
 
     public void RecordCompleted(ISceneHistoryAction action)
     {
-        EnsureHistoryMutationAllowed("cannot record a completed history action while scene history is changing");
+        using Lock.Scope scope = _stateLock.EnterScope();
+        EnsureIdle();
 
-        if (action is not SceneHistoryActionBase completedAction)
+        if (action is not SceneHistoryActionBase completed)
         {
             throw new InvalidOperationException("recorded scene history actions must derive from SceneHistoryActionBase");
         }
 
-        completedAction.MarkRecordedApplied();
-        StoreCompletedAction(action, raiseAppliedEvent: true);
+        _changing = true;
+        try
+        {
+            completed.MarkRecordedApplied();
+            Store(action);
+        }
+        finally
+        {
+            _changing = false;
+        }
     }
 
     public bool Undo()
     {
-        EnsureHistoryMutationAllowed("cannot undo while scene history is changing");
-        if (_currentStateIndex == 0)
-        {
-            return false;
-        }
-
-        var action = _historySteps[_currentStateIndex].Action!;
-        _activeOperation = HistoryOperation.Undoing;
-        try
-        {
-            if (!TryRunHistoryAction(action, apply: false, "undo"))
-            {
-                return false;
-            }
-
-            _currentStateIndex--;
-            ActionReverted?.Invoke(action);
-            return true;
-        }
-        finally
-        {
-            _activeOperation = HistoryOperation.Idle;
-        }
+        using Lock.Scope scope = _stateLock.EnterScope();
+        return Navigate(_currentStateIndex - 1);
     }
 
     public bool Redo()
     {
-        EnsureHistoryMutationAllowed("cannot redo while scene history is changing");
-        if (_currentStateIndex + 1 >= _historySteps.Count)
+        using Lock.Scope scope = _stateLock.EnterScope();
+        return Navigate(_currentStateIndex + 1);
+    }
+
+    public bool TryJumpToState(int stateIndex, IReadOnlyList<SceneHistoryEntry> expectedEntries)
+    {
+        using Lock.Scope scope = _stateLock.EnterScope();
+        EnsureIdle();
+
+        if (!ReferenceEquals(_entries, expectedEntries))
+        {
+            LastResult = SceneHistoryResult.Conflict("History changed. Select the state again.");
+            return false;
+        }
+
+        return Navigate(stateIndex);
+    }
+
+    private bool Navigate(int target)
+    {
+        EnsureIdle();
+
+        if (_recoveryFailure is { } recovery)
+        {
+            LastResult = recovery;
+            return false;
+        }
+
+        if (target < 0 || target >= _historySteps.Count)
         {
             return false;
         }
 
-        var action = _historySteps[_currentStateIndex + 1].Action!;
-        _activeOperation = HistoryOperation.Redoing;
+        if (target == _currentStateIndex)
+        {
+            LastResult = SceneHistoryResult.Success;
+            return true;
+        }
+
+        bool apply = target > _currentStateIndex;
+        int direction = apply ? 1 : -1;
+        int original = _currentStateIndex;
+        List<ISceneHistoryAction> completed = [];
+        _changing = true;
         try
         {
-            if (!TryRunHistoryAction(action, apply: true, "redo"))
+            for (int cursor = original; cursor != target; cursor += direction)
             {
-                return false;
+                ISceneHistoryAction action = _historySteps[apply ? cursor + 1 : cursor].Action!;
+                SceneHistoryResult result = Run(action, apply);
+
+                if (!result.IsSuccess)
+                {
+                    bool restored = true;
+                    for (int index = completed.Count - 1; index >= 0; --index)
+                    {
+                        restored &= Run(completed[index], !apply).IsSuccess;
+                    }
+
+                    LastResult = restored && result.Outcome != SceneHistoryOutcome.RecoveryRequired
+                        ? result
+                        : SceneHistoryResult.RecoveryRequired("History navigation could not restore the saved state. Recover the workspace and clear history before trying again.");
+                    _recoveryFailure = LastResult.Outcome == SceneHistoryOutcome.RecoveryRequired ? LastResult : null;
+                    return false;
+                }
+
+                completed.Add(action);
             }
 
-            _currentStateIndex++;
-            ActionApplied?.Invoke(action);
+            _currentStateIndex = target;
+            LastResult = SceneHistoryResult.Success;
+            foreach (ISceneHistoryAction action in completed)
+            {
+                Notify(action, apply);
+            }
+
             return true;
         }
         finally
         {
-            _activeOperation = HistoryOperation.Idle;
+            _changing = false;
         }
     }
 
-    public bool TryJumpToState(int stateIndex)
+    public bool TrySetCheckpoint(int stateIndex, string label, IReadOnlyList<SceneHistoryEntry> expectedEntries)
     {
-        EnsureHistoryMutationAllowed("cannot jump through scene history while scene history is changing");
-        if (stateIndex < 0 || stateIndex >= _entries.Count)
+        using Lock.Scope scope = _stateLock.EnterScope();
+        EnsureIdle();
+        string normalized = TextUtility.TrimOrEmpty(label);
+
+        if (normalized.Length == 0)
         {
+            LastResult = SceneHistoryResult.Failed("Enter a checkpoint name.");
             return false;
         }
 
-        while (_currentStateIndex > stateIndex)
-        {
-            if (!Undo())
-            {
-                return false;
-            }
-        }
-
-        while (_currentStateIndex < stateIndex)
-        {
-            if (!Redo())
-            {
-                return false;
-            }
-        }
-
-        return _currentStateIndex == stateIndex;
+        return TryUpdateCheckpoint(stateIndex, normalized, expectedEntries);
     }
 
-    public bool TrySetCheckpoint(int stateIndex, string label)
+    public bool TryClearCheckpoint(int stateIndex, IReadOnlyList<SceneHistoryEntry> expectedEntries)
     {
-        EnsureHistoryMutationAllowed("cannot update scene history checkpoints while scene history is changing");
-        if (stateIndex < 0 || stateIndex >= _entries.Count)
-        {
-            return false;
-        }
-
-        var normalizedLabel = TextUtility.TrimOrEmpty(label);
-        if (normalizedLabel.Length == 0)
-        {
-            return false;
-        }
-
-        _historySteps[stateIndex].CheckpointLabel = normalizedLabel;
-        RefreshEntries();
-        return true;
+        using Lock.Scope scope = _stateLock.EnterScope();
+        EnsureIdle();
+        return TryUpdateCheckpoint(stateIndex, null, expectedEntries);
     }
 
-    public bool TryClearCheckpoint(int stateIndex)
+    private bool TryUpdateCheckpoint(int stateIndex, string? label, IReadOnlyList<SceneHistoryEntry> expectedEntries)
     {
-        EnsureHistoryMutationAllowed("cannot update scene history checkpoints while scene history is changing");
-        if (stateIndex < 0 || stateIndex >= _entries.Count)
+        if (!ReferenceEquals(_entries, expectedEntries) || stateIndex < 0 || stateIndex >= _historySteps.Count)
         {
+            LastResult = SceneHistoryResult.Conflict("History changed. Reopen the checkpoint from the current timeline.");
             return false;
         }
 
-        if (string.IsNullOrWhiteSpace(_historySteps[stateIndex].CheckpointLabel))
+        if (!string.Equals(_historySteps[stateIndex].CheckpointLabel, label, StringComparison.Ordinal))
         {
-            return true;
+            _historySteps[stateIndex].CheckpointLabel = label;
+            RefreshEntries();
         }
 
-        _historySteps[stateIndex].CheckpointLabel = null;
-        RefreshEntries();
+        LastResult = _recoveryFailure ?? SceneHistoryResult.Success;
         return true;
     }
 
     public void ClearHistory()
     {
-        EnsureHistoryMutationAllowed("cannot clear scene history while scene history is changing");
-        ResetHistory();
-    }
-
-    private void StoreCompletedAction(ISceneHistoryAction action, bool raiseAppliedEvent)
-    {
-        TrimFutureHistory();
-        _historySteps.Add(
-            new SceneHistoryStep(
-                action,
-                action.Kind,
-                SceneHistoryDescription.GetActionTitle(action.Kind, action.Title),
-                DateTime.UtcNow));
-        _currentStateIndex = _historySteps.Count - 1;
+        using Lock.Scope scope = _stateLock.EnterScope();
+        EnsureIdle();
+        _historySteps.Clear();
+        _historySteps.Add(new SceneHistoryStep(null, null, InitialStateTitle, DateTime.UtcNow));
+        _currentStateIndex = 0;
+        _recoveryFailure = null;
+        LastResult = SceneHistoryResult.Success;
         RefreshEntries();
-
-        if (raiseAppliedEvent)
-        {
-            ActionApplied?.Invoke(action);
-        }
     }
 
-    private void TrimFutureHistory()
-    {
-        for (var i = _historySteps.Count - 1; i > _currentStateIndex; --i)
-        {
-            _historySteps.RemoveAt(i);
-        }
-    }
-
-    private bool TryRunHistoryAction(ISceneHistoryAction action, bool apply, string operation)
+    private SceneHistoryResult Validate(ISceneHistoryAction action, bool apply)
     {
         try
         {
-            if (apply)
-            {
-                action.Apply();
-            }
-            else
-            {
-                action.Revert();
-            }
-
-            return true;
+            return action.Validate(apply);
         }
-        catch (Exception ex)
+        catch (Exception exception)
         {
-            _logger.LogWarning(
-                ex,
-                "scene history {Operation} failed for {HistoryKind} '{HistoryTitle}', clearing history",
-                operation,
-                action.Kind,
-                action.Title);
-            ResetHistory();
-            return false;
+            DiagnosticLog.Write(_logger, LogLevel.Warning, exception, "scene history validation failed for {HistoryTitle}", action.Title);
+            return SceneHistoryResult.Failed("The history action could not be checked.").WithActionContext(action.Title, apply);
         }
     }
 
-    private void ResetHistory()
-        => ResetTimeline();
-
-    private void ResetTimeline()
+    private SceneHistoryResult Run(ISceneHistoryAction action, bool apply)
     {
-        _historySteps.Clear();
-        _historySteps.Add(
-            new SceneHistoryStep(
-                null,
-                null,
-                InitialStateTitle,
-                DateTime.UtcNow));
-        _currentStateIndex = 0;
-        RefreshEntries();
+        SceneHistoryResult result = Validate(action, apply);
+        if (result.IsSuccess)
+        {
+            try
+            {
+                result = apply ? action.Apply() : action.Revert();
+            }
+            catch (Exception exception)
+            {
+                DiagnosticLog.Write(_logger, LogLevel.Warning, exception, "scene history replay failed for {HistoryTitle}", action.Title);
+                result = SceneHistoryResult.RecoveryRequired($"Could not replay \"{action.Title}\". Check the saved state before using history.");
+            }
+        }
+
+        LastResult = result;
+        return result;
     }
+
+    private void Store(ISceneHistoryAction action)
+    {
+        if (_currentStateIndex + 1 < _historySteps.Count)
+        {
+            _historySteps.RemoveRange(_currentStateIndex + 1, _historySteps.Count - _currentStateIndex - 1);
+        }
+
+        _historySteps.Add(new SceneHistoryStep(action, action.Kind, SceneHistoryDescription.GetActionTitle(action.Kind, action.Title), DateTime.UtcNow));
+        _currentStateIndex = _historySteps.Count - 1;
+
+        LastResult = _recoveryFailure ?? SceneHistoryResult.Success;
+
+        RefreshEntries();
+        Notify(action, apply: true);
+    }
+
+    private void Notify(ISceneHistoryAction action, bool apply)
+        => CommittedChangeNotification.Publish(apply ? ActionApplied : ActionReverted, action, _logger, "scene history");
 
     private void RefreshEntries()
     {
         SceneHistoryEntry[] entries = new SceneHistoryEntry[_historySteps.Count];
-        for (var i = 0; i < _historySteps.Count; ++i)
+        for (int index = 0; index < entries.Length; ++index)
         {
-            entries[i] = _historySteps[i].ToEntry(i);
+            entries[index] = _historySteps[index].ToEntry(index);
         }
 
         _entries = Array.AsReadOnly(entries);
     }
 
-    private void EnsureHistoryMutationAllowed(string message)
+    private void EnsureIdle()
     {
-        if (_activeOperation != HistoryOperation.Idle)
+        if (_changing)
         {
-            throw new InvalidOperationException(message);
+            throw new InvalidOperationException("scene history is already changing");
         }
     }
 }

@@ -128,6 +128,7 @@ internal sealed class CoreSettings : ISettingsProvider
                         "Customize how placed list rows are shown.",
                         "ui interface placed list object item row size large compact",
                         [
+                            entries.CreatePlacedLayoutView(),
                             entries.CreatePlacedListRowSize(),
                         ]),
                 ]),
@@ -164,6 +165,7 @@ internal sealed class CoreSettings : ISettingsProvider
                             entries.CreateGizmoColor("gizmoXAxis", "X Axis", "Color of the X axis.", static value => value.XAxis, static (value, color) => value.XAxis = color),
                             entries.CreateGizmoColor("gizmoYAxis", "Y Axis", "Color of the Y axis.", static value => value.YAxis, static (value, color) => value.YAxis = color),
                             entries.CreateGizmoColor("gizmoZAxis", "Z Axis", "Color of the Z axis.", static value => value.ZAxis, static (value, color) => value.ZAxis = color),
+                            entries.CreateGizmoColor("gizmoAxisLabelText", "Axis Label Text", "Text color of the X, Y, and Z labels.", static value => value.AxisLabelText, static (value, color) => value.AxisLabelText = color),
                             entries.CreateGizmoColor("gizmoHighlight", "Highlight", "Color of the hovered or dragged handle or widget.", static value => value.Highlight, static (value, color) => value.Highlight = color),
                             entries.CreateGizmoColor("gizmoCenter", "Center", "Color of the center handle.", static value => value.Center, static (value, color) => value.Center = color),
                             entries.CreateGizmoColor("gizmoInactive", "Inactive", "Color of inactive handles while dragging.", static value => value.Inactive, static (value, color) => value.Inactive = color),

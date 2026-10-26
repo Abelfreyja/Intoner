@@ -1,7 +1,6 @@
-using Intoner.Scene;
-using Intoner.Objects.Models;
 using Intoner.Objects.Runtime;
 using Intoner.Objects.Utils;
+using Intoner.Scene;
 using System.Numerics;
 
 namespace Intoner.Objects.Api;
@@ -75,7 +74,7 @@ internal static class MakePlaceTransformMapper
 
         List<float> location = document.Location;
         List<float> rotation = document.Rotation;
-        if (!SceneTransformMath.TryNormalizeQuaternion(new Quaternion(rotation[0], rotation[1], rotation[2], rotation[3]), out Quaternion quaternion))
+        if (!NumericsUtility.TryNormalize(new Quaternion(rotation[0], rotation[1], rotation[2], rotation[3]), out Quaternion quaternion))
         {
             return false;
         }

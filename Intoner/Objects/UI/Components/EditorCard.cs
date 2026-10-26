@@ -8,6 +8,28 @@ namespace Intoner.Objects.UI.Components;
 
 internal static class EditorCard
 {
+    public static void DrawRemainingSpaceScrollCard(string id, string scrollId, EditorOverlayLayer overlay, Action<float> content)
+    {
+        Vector2 padding = EditorLayout.ResolveObjectListCardPadding();
+        float spacing = ImGui.GetStyle().ItemSpacing.Y;
+        float availableHeight = MathF.Max(1f, ImGui.GetContentRegionAvail().Y - spacing);
+        float innerHeight = MathF.Max(1f, availableHeight - padding.Y * 2f - spacing);
+        Vector4 background = ThemeColors.ButtonDefault with { W = 0.24f };
+        float rounding = EditorLayout.Scaled(8f);
+
+        DrawPanelCard(id, background, ThemeColors.AccentPrimary with { W = 0.18f }, rounding, padding, () =>
+        {
+            using var childBackground = ImRaii.PushColor(ImGuiCol.ChildBg, Vector4.Zero);
+            using var child = EditorScrollList.Begin(scrollId, new Vector2(0f, innerHeight),
+                overlay.CreateScrollPanelOptions(background, rounding, ThemeColors.AccentPrimary));
+
+            if (child)
+            {
+                content(innerHeight);
+            }
+        });
+    }
+
     public static void DrawPanelCard(string id, Vector4 background, Vector4 border, float rounding, Vector2 padding, Action content)
         => DrawPanelCard(id, background, border, rounding, padding, null, ImDrawFlags.RoundCornersAll, null, 0f, content, false);
 
@@ -192,4 +214,3 @@ internal static class EditorCard
             drawAfterSubtitle: drawAfterBadges,
             wrapTitle: wrapTitle);
 }
-

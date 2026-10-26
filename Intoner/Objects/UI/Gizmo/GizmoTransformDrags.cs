@@ -39,8 +39,8 @@ internal abstract class GizmoTransformDragSession
     public bool Matches(Guid itemId, GizmoTransformMode mode)
         => IsDragging && ItemId == itemId && Mode == mode;
 
-    public void RecordAppliedSnapshot(SceneItemSnapshot appliedSnapshot)
-        => _snapshots.Record(appliedSnapshot);
+    public bool MatchesSelection(IReadOnlyList<SceneItemSnapshot> snapshots)
+        => _snapshots.MatchesSelection(snapshots);
 
     public void RecordAppliedSnapshots(IReadOnlyList<SceneItemSnapshot> appliedSnapshots)
         => _snapshots.Record(appliedSnapshots);
@@ -249,6 +249,16 @@ internal sealed class GizmoScaleDragSession : GizmoTransformDragSession
 
     public Vector3 LastScale { get; private set; }
 
+    public bool LastUniform { get; private set; }
+
+    public float MinimumFactor { get; private set; }
+
+    public float LastFactor { get; private set; } = 1f;
+
+    public bool LastAnchored { get; private set; }
+
+    public SceneScaleEdit? ScaleEdit { get; private set; }
+
     public void Begin(
         IReadOnlyList<SceneItemSnapshot> selectedSnapshots,
         SceneItemSnapshot primarySnapshot,
@@ -257,7 +267,11 @@ internal sealed class GizmoScaleDragSession : GizmoTransformDragSession
         Vector2 axisScreenDirection,
         float axisScreenLength,
         Vector3 axisWorldDirection,
-        float axisWorldLength)
+        float axisWorldLength,
+        float minimumFactor,
+        SceneScaleEdit scaleEdit,
+        bool uniform,
+        bool anchored = false)
     {
         Reset();
         BeginCore(
@@ -271,16 +285,36 @@ internal sealed class GizmoScaleDragSession : GizmoTransformDragSession
             axisWorldLength);
         StartScale = primarySnapshot.Transform.Scale;
         LastScale = primarySnapshot.Transform.Scale;
+        MinimumFactor = minimumFactor;
+        ScaleEdit = scaleEdit;
+        LastUniform = uniform;
+        LastAnchored = anchored;
     }
 
-    public void RecordAppliedScale(Vector3 scale)
-        => LastScale = scale;
+    public void RecordAppliedScale(Vector3 scale, bool uniform, bool anchored)
+    {
+        LastScale = scale;
+        LastFactor = uniform ? scale.X / StartScale.X : 1f;
+        LastUniform = uniform;
+        LastAnchored = anchored;
+    }
+
+    public void RecordAppliedFactor(float factor, bool anchored)
+    {
+        LastFactor = factor;
+        LastUniform = true;
+        LastAnchored = anchored;
+    }
 
     public override void Reset()
     {
         ResetCore();
         StartScale = Vector3.One;
         LastScale = Vector3.One;
+        MinimumFactor = 0f;
+        LastFactor = 1f;
+        ScaleEdit = null;
+        LastUniform = false;
+        LastAnchored = false;
     }
 }
-

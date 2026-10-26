@@ -48,17 +48,21 @@ internal interface IObjectKindService
     /// </summary>
     /// <param name="snapshot">The snapshot to sanitize.</param>
     /// <param name="sanitizedSnapshot">The sanitized snapshot when successful.</param>
-    /// <returns>true when the snapshot kind is supported.</returns>
+    /// <returns>True when the snapshot kind, values, and resource path are valid.</returns>
     bool TrySanitizeSnapshot(ObjectSnapshot snapshot, out ObjectSnapshot sanitizedSnapshot);
 }
 
 internal sealed class ObjectKindService : IObjectKindService
 {
-    private readonly ObjectNativeBindings _nativeBindings;
+    private readonly ISceneLocationService _locationService;
+    private readonly CameraCollisionService _cameraCollision;
+    private readonly FurnitureEmoteGuard _emoteGuard;
 
-    public ObjectKindService(ObjectNativeBindings nativeBindings)
+    public ObjectKindService(CameraCollisionService cameraCollision, FurnitureEmoteGuard emoteGuard, ISceneLocationService locationService)
     {
-        _nativeBindings = nativeBindings;
+        _cameraCollision = cameraCollision;
+        _locationService = locationService;
+        _emoteGuard = emoteGuard;
     }
 
     public IReadOnlyList<ObjectKindInfo> GetKindInfos()
@@ -86,7 +90,7 @@ internal sealed class ObjectKindService : IObjectKindService
         => kind switch
         {
             ObjectKind.BgObject => true,
-            ObjectKind.Furniture => _nativeBindings.Furniture.IsAvailable,
+            ObjectKind.Furniture => _cameraCollision.IsFurnitureAvailable && _emoteGuard.IsAvailable,
             ObjectKind.Vfx => true,
             ObjectKind.Light => true,
             _ => false,
@@ -104,10 +108,18 @@ internal sealed class ObjectKindService : IObjectKindService
 
     public bool TrySanitizeSnapshot(ObjectSnapshot snapshot, out ObjectSnapshot sanitizedSnapshot)
     {
-        if (!IsValidSnapshot(snapshot))
+        if (!_locationService.IsValidWorldSelection(snapshot.CreatedIn.Worlds)
+         || snapshot.CreatedIn.HasLocation && !snapshot.CreatedIn.IsAssigned
+         || !IsValidSnapshot(snapshot)
+         || !ObjectSnapshotUtility.TryNormalizeRootResourcePath(snapshot.Model, out ObjectData normalizedModel))
         {
             sanitizedSnapshot = null!;
             return false;
+        }
+
+        if (!ReferenceEquals(snapshot.Model, normalizedModel))
+        {
+            snapshot = snapshot with { Model = normalizedModel };
         }
 
         sanitizedSnapshot = snapshot.Kind switch
@@ -121,7 +133,7 @@ internal sealed class ObjectKindService : IObjectKindService
 
         sanitizedSnapshot = sanitizedSnapshot with
         {
-            CollectionId = SanitizeCollectionId(snapshot.CollectionId),
+            CollectionId = ObjectCollectionKeyUtility.NormalizeCollectionId(snapshot.CollectionId),
         };
         return true;
     }
@@ -135,7 +147,8 @@ internal sealed class ObjectKindService : IObjectKindService
         {
             ObjectKind.BgObject => snapshot.Model is BgObjectModel model
                 && float.IsFinite(model.Transparency)
-                && NumericsUtility.IsFinite(model.DyeColor),
+                && NumericsUtility.IsFinite(model.DyeColor)
+                && (model.ColliderDefinition is null || BgColliderDefinitionUtility.IsValid(model.ColliderDefinition, model.ModelPath)),
             ObjectKind.Furniture => snapshot.Model is FurnitureModel { Color: not null } model
                 && float.IsFinite(model.Transparency)
                 && NumericsUtility.IsFinite(model.Color.CustomColor),
@@ -146,6 +159,9 @@ internal sealed class ObjectKindService : IObjectKindService
             ObjectKind.Light => snapshot.Model is LightModel { Flags: not null, Shape: not null, Shadow: not null } model
                 && Enum.IsDefined(model.LightType)
                 && Enum.IsDefined(model.FalloffType)
+                && (string.IsNullOrEmpty(model.ProjectionTexturePath)
+                    || (LightModel.SupportsProjectionTexture(model.LightType)
+                        && GameAssetPathRules.IsFileKind(model.ProjectionTexturePath, GameAssetFileKind.Tex)))
                 && NumericsUtility.IsFinite(model.Color)
                 && float.IsFinite(model.Intensity)
                 && float.IsFinite(model.Shape.Range)
@@ -163,20 +179,13 @@ internal sealed class ObjectKindService : IObjectKindService
         => new()
         {
             Id = Guid.NewGuid(),
-            Name = SanitizeName(name, kind.ToString()),
-            Kind = kind,
+            Name = TextUtility.TrimOrFallback(name, kind.ToString()),
             Transform = transform with { Scale = Vector3.One },
             Model = model,
             CreatedAtUtc = DateTime.UtcNow,
         };
 
-    private static string SanitizeName(string name, string fallbackName)
-        => TextUtility.TrimOrFallback(name, fallbackName);
-
-    private static string SanitizeCollectionId(string collectionId)
-        => ObjectCollectionKeyUtility.NormalizeCollectionId(collectionId);
-
-    private static Vector3 ClampScale(Vector3 scale, float minScale = 0.01f)
+    private static Vector3 ClampScale(Vector3 scale, float minScale = SceneTransformMath.MinimumScale)
         => new(
             MathF.Max(minScale, scale.X),
             MathF.Max(minScale, scale.Y),
@@ -203,7 +212,7 @@ internal sealed class ObjectKindService : IObjectKindService
         var bgObjectModel = RequireModel<BgObjectModel>(snapshot, ObjectKind.BgObject);
         return snapshot with
         {
-            Name = SanitizeName(snapshot.Name, "BgObject"),
+            Name = TextUtility.TrimOrFallback(snapshot.Name, "BgObject"),
             FolderPath = ObjectFolderUtility.SanitizeFolderPath(snapshot.FolderPath),
             Transform = snapshot.Transform with
             {
@@ -211,7 +220,6 @@ internal sealed class ObjectKindService : IObjectKindService
             },
             Model = bgObjectModel with
             {
-                ModelPath = GameAssetPathRules.NormalizeGamePath(bgObjectModel.ModelPath),
                 Transparency = Math.Clamp(bgObjectModel.Transparency, 0f, 1f),
                 DyeColor = ColorUtility.ClampNormalizedColor(bgObjectModel.DyeColor),
             },
@@ -223,7 +231,7 @@ internal sealed class ObjectKindService : IObjectKindService
         var furnitureModel = RequireModel<FurnitureModel>(snapshot, ObjectKind.Furniture);
         return snapshot with
         {
-            Name = SanitizeName(snapshot.Name, "Furniture"),
+            Name = TextUtility.TrimOrFallback(snapshot.Name, "Furniture"),
             FolderPath = ObjectFolderUtility.SanitizeFolderPath(snapshot.FolderPath),
             Transform = snapshot.Transform with
             {
@@ -231,7 +239,6 @@ internal sealed class ObjectKindService : IObjectKindService
             },
             Model = furnitureModel with
             {
-                SharedGroupPath = GameAssetPathRules.NormalizeGamePath(furnitureModel.SharedGroupPath),
                 Color = furnitureModel.Color with
                 {
                     StainId = Math.Min(furnitureModel.Color.StainId, (byte)(SharedGroupLayoutInstance.ObjectStainCount - 1)),
@@ -250,7 +257,7 @@ internal sealed class ObjectKindService : IObjectKindService
         var vfxModel = RequireModel<VfxModel>(snapshot, ObjectKind.Vfx);
         return snapshot with
         {
-            Name = SanitizeName(snapshot.Name, "VFX"),
+            Name = TextUtility.TrimOrFallback(snapshot.Name, "VFX"),
             FolderPath = ObjectFolderUtility.SanitizeFolderPath(snapshot.FolderPath),
             Transform = snapshot.Transform with
             {
@@ -258,7 +265,6 @@ internal sealed class ObjectKindService : IObjectKindService
             },
             Model = vfxModel with
             {
-                VfxPath = GameAssetPathRules.NormalizeGamePath(vfxModel.VfxPath),
                 Color = ColorUtility.ClampNormalizedColor(vfxModel.Color),
                 Speed = VfxModel.ClampSpeed(vfxModel.Speed),
                 FadeInSeconds = VfxModel.ClampFadeInSeconds(vfxModel.FadeInSeconds),
@@ -275,7 +281,7 @@ internal sealed class ObjectKindService : IObjectKindService
 
         return snapshot with
         {
-            Name = SanitizeName(snapshot.Name, "Light"),
+            Name = TextUtility.TrimOrFallback(snapshot.Name, "Light"),
             FolderPath = ObjectFolderUtility.SanitizeFolderPath(snapshot.FolderPath),
             Model = lightModel with
             {
@@ -303,5 +309,4 @@ internal sealed class ObjectKindService : IObjectKindService
             },
         };
     }
-
 }

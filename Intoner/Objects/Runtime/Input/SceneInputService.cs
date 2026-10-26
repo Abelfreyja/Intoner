@@ -70,7 +70,7 @@ internal interface ISceneInputRegistry
 }
 
 /// <summary> owns explicit pointer interaction with one active scene target </summary>
-internal interface ISceneInputService : IDisposable
+internal interface ISceneInputService : ISceneInputRegistry, IDisposable
 {
     /// <summary> gets whether a scene target currently owns pointer interaction </summary>
     bool IsActive { get; }
@@ -97,7 +97,14 @@ internal interface ISceneInputService : IDisposable
         bool allowNewInput);
 }
 
-internal sealed class SceneInputService : ISceneInputService, ISceneInputRegistry
+/// <summary> registers targets through the session input owner </summary>
+internal sealed class SceneInputRegistry(ISceneInputService input) : ISceneInputRegistry
+{
+    public bool TryRegister(ISceneInputTarget target, out IDisposable? registration)
+        => input.TryRegister(target, out registration);
+}
+
+internal sealed class SceneInputService : ISceneInputService
 {
     private const int HoverMissTolerance = 2;
 
@@ -464,5 +471,4 @@ internal static class ScenePointerButtonExtensions
             ScenePointerButton.Middle => ScenePointerButtons.Middle,
             _ => ScenePointerButtons.None,
         };
-
 }

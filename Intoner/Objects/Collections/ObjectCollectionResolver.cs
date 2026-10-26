@@ -33,13 +33,19 @@ internal interface IObjectCollectionResolver
 
 internal sealed class ObjectCollectionResolver : IObjectCollectionResolver
 {
-    private readonly IObjectModDataSource _modDataSource;
-    private readonly IObjectAssetIndex _assetIndex;
+    private readonly record struct DependencySource(
+        GameAssetFileKind FileKind,
+        ObjectResolvedPathKind PathKind,
+        string Path,
+        string ModelPath);
 
-    public ObjectCollectionResolver(IObjectModDataSource modDataSource, IObjectAssetIndex assetIndex)
+    private readonly IObjectModDataSource _modDataSource;
+    private readonly ObjectAssetDependencyResolver _dependencyResolver;
+
+    public ObjectCollectionResolver(IObjectModDataSource modDataSource, ObjectAssetDependencyResolver dependencyResolver)
     {
         _modDataSource = modDataSource;
-        _assetIndex = assetIndex;
+        _dependencyResolver = dependencyResolver;
     }
 
     public async Task<ObjectCollectionResolveResult> ResolveAsync(
@@ -47,6 +53,8 @@ internal sealed class ObjectCollectionResolver : IObjectCollectionResolver
         IReadOnlyList<ObjectSnapshot> usageSnapshots,
         CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+
         if (usageSnapshots.Count == 0)
         {
             return new ObjectCollectionResolveResult
@@ -56,14 +64,13 @@ internal sealed class ObjectCollectionResolver : IObjectCollectionResolver
             };
         }
 
-        Dictionary<string, ObjectResolvedPath> resolvedPaths = new(StringComparer.OrdinalIgnoreCase);
-        HashSet<string> reachablePaths = new(StringComparer.OrdinalIgnoreCase);
-        HashSet<string> probedPaths = new(StringComparer.OrdinalIgnoreCase);
-        Queue<string> pendingPaths = new();
-        List<string> warnings = [];
-        bool isComplete = true;
+        Dictionary<string, ObjectPathRedirection> redirectsByPath = new(StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, IReadOnlyList<string>> dependenciesByPath = new(StringComparer.OrdinalIgnoreCase);
+        Dictionary<DependencySource, AssetDependencyPaths> dependenciesBySource = [];
+        HashSet<string> rootPaths = CreateUsageRootPaths(usageSnapshots, cancellationToken);
+        HashSet<string> reachablePaths = new(rootPaths, StringComparer.OrdinalIgnoreCase);
+        Queue<string> pendingPaths = new(rootPaths);
 
-        AddUsageRootPaths(usageSnapshots, reachablePaths, pendingPaths);
         if (reachablePaths.Count == 0)
         {
             return new ObjectCollectionResolveResult
@@ -73,123 +80,127 @@ internal sealed class ObjectCollectionResolver : IObjectCollectionResolver
             };
         }
 
-        while (pendingPaths.Count > 0)
-        {
-            HashSet<string> requestedPaths = DrainPendingPaths(pendingPaths, probedPaths);
-            if (requestedPaths.Count == 0)
-            {
-                continue;
-            }
+        ObjectModResolveResult modResult = await _modDataSource.PrepareCollectionAsync(collection, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
 
-            ObjectModResolveResult resolveResult = await _modDataSource.ResolvePathsAsync(
-                collection,
-                requestedPaths,
-                cancellationToken).ConfigureAwait(false);
-            warnings.AddRange(resolveResult.Warnings);
-            isComplete &= resolveResult.IsComplete;
-            if (resolveResult.ResolveState != ObjectCollectionResolveState.Ready)
-            {
-                return new ObjectCollectionResolveResult
-                {
-                    IsComplete = isComplete,
-                    ResolveState = resolveResult.ResolveState,
-                    StatusText = resolveResult.StatusText,
-                    Warnings = ObjectCollectionDiagnosticUtility.NormalizeWarnings(warnings),
-                    KeepLastGoodSnapshot = resolveResult.KeepLastGoodSnapshot,
-                };
-            }
-
-            foreach (string requestedPath in requestedPaths)
-            {
-                probedPaths.Add(requestedPath);
-            }
-
-            foreach ((string requestedPath, ObjectResolvedPath resolvedPath) in resolveResult.ResolvedPaths)
-            {
-                if (reachablePaths.Contains(requestedPath))
-                {
-                    resolvedPaths[requestedPath] = resolvedPath;
-                }
-            }
-
-            foreach (string requestedPath in requestedPaths)
-            {
-                ObjectResolvedPath effectivePath = resolvedPaths.TryGetValue(requestedPath, out ObjectResolvedPath resolvedPath)
-                    ? resolvedPath
-                    : ObjectResolvedPath.FromGamePath(requestedPath);
-                foreach (string dependencyPath in _assetIndex.GetCollectionPathDependencies(requestedPath, effectivePath))
-                {
-                    AddReachablePath(reachablePaths, pendingPaths, dependencyPath);
-                }
-            }
-        }
-
-        if (resolvedPaths.Count == 0)
+        if (modResult.ResolveState != ObjectCollectionResolveState.Ready)
         {
             return new ObjectCollectionResolveResult
             {
-                ResolveState = ObjectCollectionResolveState.Inactive,
-                StatusText = "assigned Penumbra mods expose no redirects used by the active objects in this collection",
-                IsComplete = isComplete,
-                Warnings = ObjectCollectionDiagnosticUtility.NormalizeWarnings(warnings),
-                ResourceViews = BuildResourceViews(usageSnapshots, resolvedPaths),
+                IsComplete = modResult.IsComplete,
+                ResolveState = modResult.ResolveState,
+                StatusText = modResult.StatusText,
+                Warnings = modResult.Warnings,
+                KeepLastGoodSnapshot = modResult.KeepLastGoodSnapshot,
+                ResourceViews = modResult.IsComplete && modResult.ResolveState == ObjectCollectionResolveState.Inactive
+                    ? BuildResourceViews(rootPaths, redirectsByPath, dependenciesByPath, cancellationToken) : [],
             };
         }
 
-        ImmutableArray<ObjectPathRedirection>.Builder redirectBuilder = ImmutableArray.CreateBuilder<ObjectPathRedirection>(resolvedPaths.Count);
-        foreach ((string requestedPath, ObjectResolvedPath resolvedPath) in resolvedPaths)
+        while (pendingPaths.Count > 0)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (!reachablePaths.Contains(requestedPath))
+            string requestedPath = pendingPaths.Dequeue();
+            ObjectResolvedPath effectivePath;
+
+            if (modResult.Redirects.TryResolvePath(requestedPath, out ObjectResolvedPath resolvedPath, cancellationToken))
             {
-                continue;
+                effectivePath = resolvedPath;
+
+                if (ObjectPathRedirectionUtility.TryCreate(requestedPath, resolvedPath, out ObjectPathRedirection redirect))
+                {
+                    redirectsByPath[requestedPath] = redirect;
+                }
+            }
+            else
+            {
+                effectivePath = ObjectResolvedPath.FromGamePath(requestedPath);
             }
 
-            if (ObjectPathRedirectionUtility.TryCreate(requestedPath, resolvedPath, out ObjectPathRedirection redirect))
+            GameAssetFileKind fileKind = GameAssetPathRules.ClassifyNormalizedFilePath(requestedPath);
+            DependencySource source = new(
+                fileKind,
+                effectivePath.Kind,
+                effectivePath.Path.ToLowerInvariant(),
+                fileKind == GameAssetFileKind.Mdl && effectivePath.IsLocalFile
+                    ? requestedPath.ToLowerInvariant()
+                    : string.Empty);
+
+            if (!dependenciesBySource.TryGetValue(source, out AssetDependencyPaths dependencies))
             {
-                redirectBuilder.Add(redirect);
+                dependencies = _dependencyResolver.GetCollectionPathDependencies(requestedPath, effectivePath, cancellationToken);
+                dependenciesBySource.Add(source, dependencies);
+            }
+
+            if (!dependencies.IsComplete)
+            {
+                string message = $"could not read dependencies for {requestedPath}";
+                return new ObjectCollectionResolveResult
+                {
+                    IsComplete = false,
+                    ResolveState = ObjectCollectionResolveState.ResolveFailed,
+                    StatusText = message,
+                    KeepLastGoodSnapshot = true,
+                    Warnings = [.. modResult.Warnings, message],
+                };
+            }
+
+            dependenciesByPath[requestedPath] = dependencies.Paths;
+
+            foreach (string dependencyPath in dependencies.Paths)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                AddReachablePath(reachablePaths, pendingPaths, dependencyPath);
             }
         }
 
+        IReadOnlyList<CollectionResourceView> resourceViews = BuildResourceViews(rootPaths, redirectsByPath, dependenciesByPath, cancellationToken);
+        modResult.Redirects.ThrowIfChanged(cancellationToken);
+
+        ImmutableArray<ObjectPathRedirection>.Builder redirectBuilder = ImmutableArray.CreateBuilder<ObjectPathRedirection>(redirectsByPath.Count);
+        foreach (ObjectPathRedirection redirect in redirectsByPath.Values)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            redirectBuilder.Add(redirect);
+        }
+
+        modResult.Redirects.ThrowIfChanged(cancellationToken);
         return new ObjectCollectionResolveResult
         {
-            IsComplete = isComplete,
+            IsComplete = modResult.IsComplete,
             ResolveState = redirectBuilder.Count == 0
                 ? ObjectCollectionResolveState.Inactive
                 : ObjectCollectionResolveState.Ready,
             StatusText = redirectBuilder.Count == 0
                 ? "assigned Penumbra mods expose no redirects used by the active objects in this collection"
                 : $"resolved {redirectBuilder.Count} redirected object resource paths used by {usageSnapshots.Count} objects",
-            Warnings = ObjectCollectionDiagnosticUtility.NormalizeWarnings(warnings),
+            Warnings = modResult.Warnings,
             Redirects = redirectBuilder.ToImmutable(),
-            ResourceViews = BuildResourceViews(usageSnapshots, resolvedPaths),
+            ResourceViews = resourceViews,
         };
     }
 
-    private static void AddUsageRootPaths(
+    private static HashSet<string> CreateUsageRootPaths(
         IReadOnlyList<ObjectSnapshot> usageSnapshots,
-        HashSet<string> reachablePaths,
-        Queue<string> pendingPaths)
+        CancellationToken cancellationToken)
     {
+        HashSet<string> rootPaths = new(StringComparer.OrdinalIgnoreCase);
         foreach (ObjectSnapshot snapshot in usageSnapshots)
         {
-            AddReachablePath(reachablePaths, pendingPaths, ObjectSnapshotUtility.GetRootResourcePath(snapshot));
-        }
-    }
+            cancellationToken.ThrowIfCancellationRequested();
+            ObjectResourceRoots roots = ObjectResourceRoots.FromModel(snapshot.Model);
 
-    private static HashSet<string> DrainPendingPaths(Queue<string> pendingPaths, ISet<string> probedPaths)
-    {
-        HashSet<string> requestedPaths = new(StringComparer.OrdinalIgnoreCase);
-        while (pendingPaths.Count > 0)
-        {
-            string requestedPath = pendingPaths.Dequeue();
-            if (!probedPaths.Contains(requestedPath))
+            if (ObjectAssetPathRules.IsSupportedResourcePath(roots.Primary))
             {
-                requestedPaths.Add(requestedPath);
+                rootPaths.Add(roots.Primary);
+            }
+
+            if (ObjectAssetPathRules.IsSupportedResourcePath(roots.Collision))
+            {
+                rootPaths.Add(roots.Collision);
             }
         }
 
-        return requestedPaths;
+        return rootPaths;
     }
 
     private static void AddReachablePath(
@@ -197,7 +208,7 @@ internal sealed class ObjectCollectionResolver : IObjectCollectionResolver
         Queue<string> pendingPaths,
         string path)
     {
-        if (!ObjectAssetPathRules.TryNormalizeSupportedResourcePath(path, out string normalizedPath)
+        if (!ObjectResourcePathUtility.TryNormalizeSupportedGamePath(path, out string normalizedPath)
             || !reachablePaths.Add(normalizedPath))
         {
             return;
@@ -206,63 +217,62 @@ internal sealed class ObjectCollectionResolver : IObjectCollectionResolver
         pendingPaths.Enqueue(normalizedPath);
     }
 
-    private IReadOnlyList<CollectionResourceView> BuildResourceViews(
-        IReadOnlyList<ObjectSnapshot> usageSnapshots,
-        IReadOnlyDictionary<string, ObjectResolvedPath> resolvedPaths)
+    private static IReadOnlyList<CollectionResourceView> BuildResourceViews(
+        IReadOnlySet<string> rootPaths,
+        IReadOnlyDictionary<string, ObjectPathRedirection> redirectsByPath,
+        IReadOnlyDictionary<string, IReadOnlyList<string>> dependenciesByPath,
+        CancellationToken cancellationToken)
     {
-        Dictionary<string, CollectionResourceView> viewsByRoot = new(StringComparer.OrdinalIgnoreCase);
-        foreach (ObjectSnapshot snapshot in usageSnapshots)
+        List<CollectionResourceView> views = new(rootPaths.Count);
+        foreach (string rootPath in rootPaths)
         {
-            if (!GameAssetPathRules.TryNormalizeGamePath(ObjectSnapshotUtility.GetRootResourcePath(snapshot), out string rootPath)
-             || viewsByRoot.ContainsKey(rootPath))
-            {
-                continue;
-            }
+            cancellationToken.ThrowIfCancellationRequested();
 
-            viewsByRoot[rootPath] = new CollectionResourceView(
+            views.Add(new CollectionResourceView(
                 rootPath,
-                ResolveResourceViewRedirects(rootPath, resolvedPaths));
+                redirectsByPath.Count == 0
+                    ? []
+                    : ResolveResourceViewRedirects(rootPath, redirectsByPath, dependenciesByPath, cancellationToken)));
         }
 
-        return viewsByRoot.Values
+        return views
             .OrderBy(static view => view.RootPath, StringComparer.OrdinalIgnoreCase)
             .ToImmutableArray();
     }
 
-    private IReadOnlyList<ObjectPathRedirection> ResolveResourceViewRedirects(
+    private static IReadOnlyList<ObjectPathRedirection> ResolveResourceViewRedirects(
         string rootPath,
-        IReadOnlyDictionary<string, ObjectResolvedPath> resolvedPaths)
+        IReadOnlyDictionary<string, ObjectPathRedirection> redirectsByPath,
+        IReadOnlyDictionary<string, IReadOnlyList<string>> dependenciesByPath,
+        CancellationToken cancellationToken)
     {
         HashSet<string> reachablePaths = new(StringComparer.OrdinalIgnoreCase);
-        HashSet<string> probedPaths = new(StringComparer.OrdinalIgnoreCase);
         Queue<string> pendingPaths = new();
-        Dictionary<string, ObjectResolvedPath> viewRedirects = new(StringComparer.OrdinalIgnoreCase);
+        List<ObjectPathRedirection> viewRedirects = [];
 
         AddReachablePath(reachablePaths, pendingPaths, rootPath);
         while (pendingPaths.Count > 0)
         {
-            HashSet<string> requestedPaths = DrainPendingPaths(pendingPaths, probedPaths);
-            foreach (string requestedPath in requestedPaths)
-            {
-                probedPaths.Add(requestedPath);
-                ObjectResolvedPath effectivePath = resolvedPaths.TryGetValue(requestedPath, out ObjectResolvedPath resolvedPath)
-                    ? resolvedPath
-                    : ObjectResolvedPath.FromGamePath(requestedPath);
-                if (resolvedPaths.TryGetValue(requestedPath, out ObjectResolvedPath redirectedPath))
-                {
-                    viewRedirects[requestedPath] = redirectedPath;
-                }
+            cancellationToken.ThrowIfCancellationRequested();
+            string requestedPath = pendingPaths.Dequeue();
 
-                foreach (string dependencyPath in _assetIndex.GetCollectionPathDependencies(requestedPath, effectivePath))
+            if (redirectsByPath.TryGetValue(requestedPath, out ObjectPathRedirection redirect))
+            {
+                viewRedirects.Add(redirect);
+            }
+
+            if (dependenciesByPath.TryGetValue(requestedPath, out IReadOnlyList<string>? dependencies))
+            {
+                foreach (string dependencyPath in dependencies)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     AddReachablePath(reachablePaths, pendingPaths, dependencyPath);
                 }
             }
         }
 
-        return ObjectPathRedirectionUtility.CreateStableList(
-            viewRedirects.Select(static pair =>
-                new ObjectPathRedirection(pair.Key, pair.Value)));
+        return viewRedirects
+            .OrderBy(static redirect => redirect.RequestedPath, StringComparer.OrdinalIgnoreCase)
+            .ToImmutableArray();
     }
 }
-

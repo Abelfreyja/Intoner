@@ -17,7 +17,7 @@ internal static class EditorHeroCard
         Vector4 MessageColor,
         StatusAction? InlineAction = null);
     public readonly record struct StatusAction(FontAwesomeIcon Icon, string Label, string Tooltip, Vector4 Accent);
-    public readonly record struct Actions(Action Render, Vector2 Size);
+    public readonly record struct Actions(IReadOnlyList<EditorIconButton.Item> Items, Action<string> Execute);
     private readonly record struct MessageLines(string First, string Second, bool IsClipped);
 
     private const float MinIdentityWidth = 132f;
@@ -54,7 +54,8 @@ internal static class EditorHeroCard
 
         if (hasStatus)
         {
-            float identityWidth = ResolveIdentityWidth(content, actions?.Size.X ?? 0f, ImGui.GetContentRegionAvail().X);
+            float actionWidth = actions.HasValue ? EditorIconButton.MeasureStrip(actions.Value.Items).X : 0f;
+            float identityWidth = ResolveIdentityWidth(content, actionWidth, ImGui.GetContentRegionAvail().X);
             ImGui.TableSetupColumn("Identity", ImGuiTableColumnFlags.WidthFixed, identityWidth);
             ImGui.TableSetupColumn("Gutter", ImGuiTableColumnFlags.WidthFixed, Scaled(GutterWidth));
             ImGui.TableSetupColumn("Status", ImGuiTableColumnFlags.WidthStretch);
@@ -88,7 +89,8 @@ internal static class EditorHeroCard
             if (actions.HasValue)
             {
                 ImGui.Dummy(new Vector2(0f, Scaled(4f)));
-                actions.Value.Render();
+                if (EditorIconButton.DrawStrip(actions.Value.Items) is { } actionId)
+                    actions.Value.Execute(actionId);
             }
         }
         return MathF.Ceiling(MathF.Max(Scaled(48f), ImGui.GetItemRectMax().Y - start.Y));
@@ -165,64 +167,8 @@ internal static class EditorHeroCard
         float height = ResolveStatusActionButtonHeight(panelSize.Y);
         Vector2 buttonMin = new(panelMin.X + padding.X, panelMin.Y + panelSize.Y - padding.Y - height);
         Vector2 buttonSize = new(MathF.Max(Scaled(1f), panelSize.X - (padding.X * 2f)), height);
-        Vector2 buttonMax = buttonMin + buttonSize;
-
         ImGui.SetCursorScreenPos(buttonMin);
-        bool clicked = ImGui.InvisibleButton("##editorHeroStatusAction", buttonSize);
-        bool hovered = ImGui.IsItemHovered();
-        bool active = ImGui.IsItemActive();
-        EditorTextUtility.ClippedText label = DrawStatusActionButtonFrame(action, buttonMin, buttonMax, hovered, active);
-        AttachStatusActionTooltip(action, hovered, label.IsClipped);
-
-        return clicked;
-    }
-
-    private static EditorTextUtility.ClippedText DrawStatusActionButtonFrame(StatusAction action, Vector2 min, Vector2 max, bool hovered, bool active)
-    {
-        float rounding = Scaled(4f);
-        (Vector4 fill, Vector4 border) = ResolveStatusActionColors(action.Accent, hovered, active);
-        ImDrawListPtr drawList = ImGui.GetWindowDrawList();
-
-        drawList.AddRectFilled(min, max, ImGui.GetColorU32(fill), rounding);
-        drawList.AddRect(min, max, ImGui.GetColorU32(border), rounding);
-
-        EditorIcon.Metrics iconMetrics = EditorIcon.Measure(action.Icon);
-        float gap = Scaled(6f);
-        float labelWidth = MathF.Max(1f, max.X - min.X - iconMetrics.Size.X - gap - Scaled(16f));
-        EditorTextUtility.ClippedText label = EditorTextUtility.ClipTextToWidthResult(action.Label, labelWidth);
-        Vector2 labelSize = ImGui.CalcTextSize(label.Text);
-        float contentWidth = iconMetrics.Size.X + gap + labelSize.X;
-        float contentX = min.X + MathF.Max(Scaled(8f), ((max.X - min.X) - contentWidth) * 0.5f);
-        float centerY = min.Y + ((max.Y - min.Y) * 0.5f);
-        Vector2 iconPos = new(
-            contentX,
-            centerY - (iconMetrics.Size.Y * 0.5f));
-        Vector2 labelPos = new(
-            contentX + iconMetrics.Size.X + gap,
-            centerY - (labelSize.Y * 0.5f));
-        Vector4 textColor = hovered || active
-            ? ThemeColors.Text
-            : ThemeColors.WithAlpha(ThemeColors.TextDisabled, 0.88f);
-        EditorIcon.Draw(drawList, action.Icon, iconMetrics, iconPos, textColor);
-        drawList.AddText(labelPos, ImGui.GetColorU32(textColor), label.Text);
-        return label;
-    }
-
-    private static (Vector4 Fill, Vector4 Border) ResolveStatusActionColors(Vector4 accent, bool hovered, bool active)
-    {
-        if (active)
-        {
-            return (ThemeColors.WithAlpha(accent, 0.16f), ThemeColors.WithAlpha(accent, 0.46f));
-        }
-
-        if (hovered)
-        {
-            return (ThemeColors.WithAlpha(accent, 0.10f), ThemeColors.WithAlpha(accent, 0.34f));
-        }
-
-        return (
-            ThemeColors.WithAlpha(ThemeColors.ButtonDefault, 0.38f),
-            ThemeColors.WithAlpha(ThemeColors.Border, 0.34f));
+        return EditorButton.DrawSubtle("editorHeroStatusAction", action.Icon, action.Label, action.Accent, buttonSize, action.Tooltip);
     }
 
     private static float ResolveStatusActionButtonHeight(float panelHeight)
@@ -295,36 +241,6 @@ internal static class EditorHeroCard
         EditorTextUtility.ClippedText clipped = EditorTextUtility.ClipTextToWidthResult(text, width);
         drawList.AddText(pos, color, clipped.Text);
         EditorTextUtility.AttachTooltipIfClipped(pos, new Vector2(width, ImGui.GetTextLineHeight()), text, clipped.IsClipped);
-    }
-
-    private static void AttachStatusActionTooltip(StatusAction action, bool hovered, bool labelClipped)
-    {
-        if (!hovered)
-        {
-            return;
-        }
-
-        string tooltip = labelClipped
-            ? ResolveActionTooltip(action)
-            : action.Tooltip;
-        if (!string.IsNullOrWhiteSpace(tooltip))
-        {
-            IntonerTooltip.DrawDescription(
-                action.Icon,
-                action.Label,
-                tooltip,
-                new IntonerTooltipOptions { Accent = action.Accent });
-        }
-    }
-
-    private static string ResolveActionTooltip(StatusAction action)
-    {
-        if (string.IsNullOrWhiteSpace(action.Tooltip) || string.Equals(action.Label, action.Tooltip, StringComparison.Ordinal))
-        {
-            return action.Label;
-        }
-
-        return $"{action.Label}\n{action.Tooltip}";
     }
 
     private static Vector2 StatusPadding()

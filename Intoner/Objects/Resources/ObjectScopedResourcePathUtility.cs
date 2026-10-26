@@ -1,6 +1,8 @@
 using Intoner.Objects.Assets;
 using Intoner.Objects.Utils;
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace Intoner.Objects.Resources;
 
@@ -9,7 +11,9 @@ internal readonly record struct ObjectScopedResourcePath(long ResourceScopeId, s
 
 internal static class ObjectScopedResourcePathUtility
 {
-    private const string Prefix = "intoner://";
+    private const string Prefix = "common-intoner://";
+    private const string ObsoletePrefix = "intoner://";
+    private const string RejectedPrefix = Prefix + "rejected/";
     private const string UriMarker = "://";
     private const char Separator = '/';
 
@@ -18,7 +22,9 @@ internal static class ObjectScopedResourcePathUtility
         scopedPath = default;
 
         string normalizedPath = TextUtility.TrimOrEmpty(path);
-        if (!normalizedPath.StartsWith(Prefix, StringComparison.Ordinal))
+
+        if (!normalizedPath.StartsWith(Prefix, StringComparison.Ordinal)
+         || !ObjectResourcePathEncoding.TryGetNativePathByteCount(path, out _))
         {
             return false;
         }
@@ -37,7 +43,8 @@ internal static class ObjectScopedResourcePathUtility
         }
 
         string scopedActualPath = NormalizeActualPath(normalizedPath[(separatorIndex + 1)..]);
-        if (scopedActualPath.Length == 0)
+
+        if (scopedActualPath.Length == 0 || !FitsScopedNativePath(resourceScopeId, scopedActualPath))
         {
             return false;
         }
@@ -50,21 +57,51 @@ internal static class ObjectScopedResourcePathUtility
     {
         string normalizedPath = TextUtility.TrimOrEmpty(path);
         return normalizedPath.Length > 0
-            && !normalizedPath.StartsWith(Prefix, StringComparison.Ordinal)
+            && !IsObjectScopedPath(normalizedPath)
             && !ObjectMemoryResourcePathUtility.IsMemoryResourcePath(normalizedPath)
             && (normalizedPath[0] == '|'
                 || normalizedPath.Contains(UriMarker, StringComparison.Ordinal));
     }
 
     public static bool IsObjectScopedPath(string path)
-        => TextUtility.TrimOrEmpty(path).StartsWith(Prefix, StringComparison.Ordinal);
+    {
+        string normalizedPath = TextUtility.TrimOrEmpty(path);
+        return normalizedPath.StartsWith(Prefix, StringComparison.Ordinal)
+            || normalizedPath.StartsWith(ObsoletePrefix, StringComparison.Ordinal);
+    }
+
+    public static bool IsRejectedPath(string path)
+        => TextUtility.TrimOrEmpty(path).StartsWith(RejectedPrefix, StringComparison.Ordinal);
+
+    public static string CreateRejected(long resourceScopeId, string requestedPath)
+    {
+        if (resourceScopeId < 0)
+        {
+            return string.Empty;
+        }
+
+        Span<byte> hash = stackalloc byte[32];
+        SHA256.HashData(Encoding.UTF8.GetBytes(requestedPath), hash);
+        return $"{RejectedPrefix}{resourceScopeId.ToString(CultureInfo.InvariantCulture)}{Separator}{Convert.ToHexString(hash).ToLowerInvariant()}";
+    }
 
     public static string Create(long resourceScopeId, string path)
     {
+        if (resourceScopeId < 0)
+        {
+            return string.Empty;
+        }
+
         string normalizedPath = NormalizeActualPath(path);
-        return resourceScopeId > 0 && normalizedPath.Length > 0
+
+        if (resourceScopeId == 0 || normalizedPath.Length == 0)
+        {
+            return normalizedPath;
+        }
+
+        return FitsScopedNativePath(resourceScopeId, normalizedPath)
             ? $"{Prefix}{resourceScopeId.ToString(CultureInfo.InvariantCulture)}{Separator}{normalizedPath}"
-            : normalizedPath;
+            : string.Empty;
     }
 
     public static string Strip(string path)
@@ -72,17 +109,36 @@ internal static class ObjectScopedResourcePathUtility
             ? scopedPath.Path
             : path;
 
+    private static bool FitsScopedNativePath(long resourceScopeId, string path)
+    {
+        Span<char> scopeId = stackalloc char[20];
+        _ = resourceScopeId.TryFormat(scopeId, out int scopeIdLength, provider: CultureInfo.InvariantCulture);
+        return ObjectResourcePathEncoding.TryGetNativePathByteCount(path, out int pathByteCount)
+            && Prefix.Length + scopeIdLength + 1 + pathByteCount < ObjectResourcePathEncoding.MaxNativePathByteCount;
+    }
+
     private static string NormalizeActualPath(string path)
     {
-        if (ObjectMemoryResourcePathUtility.IsMemoryResourcePath(path))
+        string normalizedPath = GameAssetPathRules.NormalizeGamePath(path);
+
+        if (ObjectMemoryResourcePathUtility.IsMemoryResourcePath(normalizedPath))
         {
             return ObjectMemoryResourcePathUtility.Normalize(path);
         }
 
-        return ObjectLocalFilePathUtility.IsLocalFilePath(path)
-            ? ObjectLocalFilePathUtility.NormalizeLocalFilePath(path)
-            : GameAssetPathRules.NormalizeGamePath(path);
+        if (!ObjectLocalFilePathUtility.IsLocalFilePath(path))
+        {
+            return ObjectResolvedPath.FromGamePath(normalizedPath).Path;
+        }
+
+        if (IsObjectScopedPath(normalizedPath)
+            || IsForeignScopedPath(normalizedPath) && !ObjectLocalFilePathUtility.IsLocalFilePath(normalizedPath))
+        {
+            return string.Empty;
+        }
+
+        normalizedPath = ObjectLocalFilePathUtility.NormalizeLocalFilePath(path);
+        return IsObjectScopedPath(normalizedPath) || IsForeignScopedPath(normalizedPath)
+            ? string.Empty : normalizedPath;
     }
 }
-
-

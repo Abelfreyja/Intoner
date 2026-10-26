@@ -1,4 +1,4 @@
-using System.Diagnostics.CodeAnalysis;
+using Intoner.Objects.Resources;
 
 namespace Intoner.Objects.Assets;
 
@@ -6,70 +6,63 @@ internal sealed class ObjectAssetSharedGroupCache(IObjectAssetGameData gameData)
 {
     private readonly IObjectAssetGameData _gameData = gameData;
 
-    public bool TryGetOrAnalyzeThreadSafe(
-        CatalogAssetState state,
-        Lock stateLock,
-        string sharedGroupPath,
-        [NotNullWhen(true)] out SharedGroupAssetInfo? sharedGroupAssets)
+    public SharedGroupAssetInfo? GetOrAnalyzeThreadSafe(Dictionary<string, SharedGroupAssetInfo> sharedGroups, Lock stateLock, string sharedGroupPath)
     {
-        if (!TryNormalizeExistingPath(sharedGroupPath, out string? normalizedPath))
+        string path = ObjectResolvedPath.FromGamePath(sharedGroupPath).Path;
+
+        if (!ObjectAssetPathRules.IsCatalogSharedGroupPath(path))
         {
-            sharedGroupAssets = null;
-            return false;
+            return null;
         }
 
         lock (stateLock)
         {
-            if (state.SharedGroups.TryGetValue(normalizedPath, out sharedGroupAssets))
+            if (sharedGroups.TryGetValue(path, out SharedGroupAssetInfo? cached))
             {
-                return true;
+                return cached;
             }
         }
 
-        SharedGroupAssetInfo analyzedAssets = Analyze(normalizedPath);
+        SharedGroupAssetInfo analyzed = SharedGroupAssetResolver.AnalyzeSharedGroup(_gameData, path);
         lock (stateLock)
         {
-            if (!state.SharedGroups.TryGetValue(normalizedPath, out SharedGroupAssetInfo? cachedAssets))
+            if (sharedGroups.TryGetValue(path, out SharedGroupAssetInfo? cached))
             {
-                state.SharedGroups[normalizedPath] = analyzedAssets;
-                sharedGroupAssets = analyzedAssets;
+                return cached;
             }
-            else
+
+            if (analyzed.IsComplete)
             {
-                sharedGroupAssets = cachedAssets;
+                sharedGroups[path] = analyzed;
             }
-        }
 
-        return true;
+            return analyzed;
+        }
     }
 
-    public bool TryGetOrAnalyzeFromState(
-        CatalogAssetState state,
-        string sharedGroupPath,
-        [NotNullWhen(true)] out SharedGroupAssetInfo? sharedGroupAssets)
+    public SharedGroupAssetInfo? GetOrAnalyze(Dictionary<string, SharedGroupAssetInfo> sharedGroups, string sharedGroupPath, CancellationToken cancellationToken = default)
     {
-        if (!TryNormalizeExistingPath(sharedGroupPath, out string? normalizedPath))
+        cancellationToken.ThrowIfCancellationRequested();
+        string path = ObjectResolvedPath.FromGamePath(sharedGroupPath).Path;
+
+        if (!ObjectAssetPathRules.IsCatalogSharedGroupPath(path))
         {
-            sharedGroupAssets = null;
-            return false;
+            return null;
         }
 
-        if (!state.SharedGroups.TryGetValue(normalizedPath, out sharedGroupAssets))
+        if (sharedGroups.TryGetValue(path, out SharedGroupAssetInfo? cached))
         {
-            sharedGroupAssets = Analyze(normalizedPath);
-            state.SharedGroups[normalizedPath] = sharedGroupAssets;
+            return cached;
         }
 
-        return true;
-    }
+        SharedGroupAssetInfo analyzed = SharedGroupAssetResolver.AnalyzeSharedGroup(_gameData, path, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
 
-    private bool TryNormalizeExistingPath(string sharedGroupPath, [NotNullWhen(true)] out string? normalizedPath)
-    {
-        normalizedPath = GameAssetPathRules.NormalizeGamePath(sharedGroupPath);
-        return ObjectAssetPathRules.IsCatalogSharedGroupPath(normalizedPath)
-            && _gameData.FileExists(normalizedPath);
-    }
+        if (analyzed.IsComplete)
+        {
+            sharedGroups[path] = analyzed;
+        }
 
-    private SharedGroupAssetInfo Analyze(string normalizedPath)
-        => SharedGroupAssetResolver.AnalyzeSharedGroup(_gameData, normalizedPath);
+        return analyzed;
+    }
 }

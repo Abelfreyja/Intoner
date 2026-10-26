@@ -23,6 +23,7 @@ internal sealed class DebugWorkspace
     private readonly IObjectLayoutManager _layoutManager;
     private readonly IClipboardTextService _clipboardText;
     private readonly EditorOverlayLayer _editorOverlayLayer;
+    private readonly ObjectFrameworkDiagnostics _frameworkDiagnostics;
     private const string ObjectIpcTemporarySourceKeySample = "ipc-tester";
     private const string ObjectIpcTemporarySourceNameSample = "IPC Tester Temporary";
     private const int ObjectIpcTextInputMaxLength = 256;
@@ -50,50 +51,28 @@ internal sealed class DebugWorkspace
         IObjectRevisionTracker revisionTracker,
         IObjectLayoutManager layoutManager,
         IClipboardTextService clipboardText,
-        EditorOverlayLayer editorOverlayLayer)
+        EditorOverlayLayer editorOverlayLayer,
+        ObjectFrameworkDiagnostics frameworkDiagnostics)
     {
-        _session            = session;
-        _samples            = samples;
-        _sceneView          = sceneView;
-        _revisionTracker    = revisionTracker;
-        _layoutManager      = layoutManager;
-        _clipboardText      = clipboardText;
-        _editorOverlayLayer = editorOverlayLayer;
+        _session              = session;
+        _samples              = samples;
+        _sceneView            = sceneView;
+        _revisionTracker      = revisionTracker;
+        _layoutManager        = layoutManager;
+        _clipboardText        = clipboardText;
+        _editorOverlayLayer   = editorOverlayLayer;
+        _frameworkDiagnostics = frameworkDiagnostics;
     }
 
     private static string FormatOnOff(bool value)
         => value ? "on" : "off";
 
     private void DrawObjectIpcTesterCard(string id)
-    {
-        var padding = new Vector2(10f * ImGuiHelpers.GlobalScale, 8f * ImGuiHelpers.GlobalScale);
-        var availableHeight = MathF.Max(1f, ImGui.GetContentRegionAvail().Y - ImGui.GetStyle().ItemSpacing.Y);
-        var innerHeight = MathF.Max(1f, availableHeight - (padding.Y * 2f) - ImGui.GetStyle().ItemSpacing.Y);
-        var background = ThemeColors.ButtonDefault with { W = 0.24f };
-        var rounding = 8f * ImGuiHelpers.GlobalScale;
-
-        EditorCard.DrawPanelCard(
-            id,
-            background,
-            ThemeColors.AccentPrimary with { W = 0.18f },
-            rounding,
-            padding,
-            () =>
-            {
-                using var childBg = ImRaii.PushColor(ImGuiCol.ChildBg, Vector4.Zero);
-                using var child = EditorScrollList.Begin(
-                    $"##{id}_scroll",
-                    new Vector2(0f, innerHeight),
-                    _editorOverlayLayer.CreateScrollPanelOptions(background, rounding, ThemeColors.AccentPrimary));
-                if (child)
-                {
-                    DrawObjectIpcTesterContent();
-                }
-            });
-    }
+        => EditorCard.DrawRemainingSpaceScrollCard(id, $"##{id}_scroll", _editorOverlayLayer, _ => DrawObjectIpcTesterContent());
 
     private void DrawObjectIpcTesterContent()
     {
+        DrawFrameworkPerformance();
         EnsureObjectIpcTesterPayloads();
 
         ImGui.TextUnformatted("Object IPC Tester");
@@ -110,10 +89,39 @@ internal sealed class DebugWorkspace
         DrawObjectIpcTesterResultSection();
     }
 
+    private void DrawFrameworkPerformance()
+    {
+        if (!ImGui.CollapsingHeader("Framework Performance", ImGuiTreeNodeFlags.DefaultOpen))
+        {
+            return;
+        }
+
+        using (ImRaii.Disabled(_frameworkDiagnostics.IsCapturing))
+        {
+            if (ImGui.Button("Capture 300 Frames"))
+            {
+                _frameworkDiagnostics.RequestCapture();
+            }
+        }
+
+        ImGui.SameLine();
+        ImGui.TextDisabled(_frameworkDiagnostics.IsCapturing ? "capturing" : "idle");
+        string report = _frameworkDiagnostics.LastReport;
+        if (report.Length != 0)
+        {
+            if (ImGui.Button("Copy Capture"))
+            {
+                _clipboardText.WriteText(report);
+            }
+            ImGui.TextUnformatted(report);
+        }
+        ImGui.Separator();
+    }
+
     private void DrawObjectIpcTesterToolbar()
     {
         var hasSelectedObject = _samples.TryResolveSelectedObjectIpcSnapshot(out _);
-        var hasDefaultLayout = _layoutManager.GetDefaultLayoutId().HasValue;
+        var hasCreationLayout = _layoutManager.GetCreationLayoutId().HasValue;
         using (ImRaii.Disabled(!hasSelectedObject))
         {
             if (ImGui.Button("Load Selected Object"))
@@ -123,11 +131,11 @@ internal sealed class DebugWorkspace
         }
 
         ImGui.SameLine();
-        using (ImRaii.Disabled(!hasDefaultLayout))
+        using (ImRaii.Disabled(!hasCreationLayout))
         {
-            if (ImGui.Button("Use Default Layout Id"))
+            if (ImGui.Button("Use Creation Layout Id"))
             {
-                _objectIpcLayoutIdInput = _layoutManager.GetDefaultLayoutId()?.ToString() ?? string.Empty;
+                _objectIpcLayoutIdInput = _layoutManager.GetCreationLayoutId()?.ToString() ?? string.Empty;
             }
         }
 
@@ -158,13 +166,13 @@ internal sealed class DebugWorkspace
         var referenceLabel = _samples.TryResolveReferenceObjectIpcSnapshot(out var snapshot)
             ? $"{snapshot.Name} | {snapshot.Id}"
             : "none";
-        var defaultLayoutLabel = _layoutManager.GetDefaultLayoutId()?.ToString() ?? "none";
+        var creationLayoutLabel = _layoutManager.GetCreationLayoutId()?.ToString() ?? "standalone";
         var eventLabel = string.IsNullOrWhiteSpace(_session.LastEventLabel)
             ? "none"
             : $"{_session.LastEventLabel} | {EditorTimestampFormatter.FormatFull(_session.LastEventAtUtc)}";
 
         ImGui.TextDisabled($"reference object: {referenceLabel}");
-        ImGui.TextDisabled($"default layout: {defaultLayoutLabel}");
+        ImGui.TextDisabled($"creation layout: {creationLayoutLabel}");
         ImGui.TextDisabled($"event monitor: {FormatOnOff(_session.EventMonitorEnabled)} | last event: {eventLabel}");
     }
 
@@ -301,10 +309,10 @@ internal sealed class DebugWorkspace
                 layoutId,
                 nameof(ObjectIpcEndpoints.Layouts.Get)));
         DrawObjectIpcQueryRow<Guid?>(
-            "GetDefaultLayout",
-            ObjectIpcEndpoints.Layouts.GetDefault.Name,
-            "Query##objectIpcGetDefaultLayout",
-            nameof(ObjectIpcEndpoints.Layouts.GetDefault));
+            "GetCreationLayout",
+            ObjectIpcEndpoints.Layouts.GetCreation.Name,
+            "Query##objectIpcGetCreationLayout",
+            nameof(ObjectIpcEndpoints.Layouts.GetCreation));
         DrawObjectIpcActionRow(
             "CreateLayout",
             ObjectIpcEndpoints.Layouts.Create.Name,
@@ -323,34 +331,45 @@ internal sealed class DebugWorkspace
                         _objectIpcSaveLayoutNameInput),
                     nameof(ObjectIpcEndpoints.Layouts.SaveCurrent))));
         DrawObjectIpcLayoutIdActionRow(
-            "SetDefaultLayout",
-            ObjectIpcEndpoints.Layouts.SetDefault.Name,
-            "##objectIpcSetDefaultLayoutId",
-            "Invoke##objectIpcSetDefaultLayout",
-            nameof(ObjectIpcEndpoints.Layouts.SetDefault),
+            "ToggleEnabledLayout",
+            ObjectIpcEndpoints.Layouts.SetEnabled.Name,
+            "##objectIpcSetEnabledLayoutId",
+            "Invoke##objectIpcSetEnabledLayout",
+            nameof(ObjectIpcEndpoints.Layouts.SetEnabled),
             layoutId =>
             {
                 ObjectRevisionSnapshot revisions = _revisionTracker.GetSnapshot();
                 long layoutRevision = _layoutManager.TryGetLayout(layoutId, out ObjectLayoutSnapshot layout)
                     ? layout.Revision
                     : 1;
-                _session.InvokeObjectIpcFunc<SavedObjectLayoutSetDefaultRequest, SavedObjectLayoutMutationResult>(
-                    ObjectIpcEndpoints.Layouts.SetDefault.Name,
-                    new SavedObjectLayoutSetDefaultRequest(
+                _session.InvokeObjectIpcFunc<SavedObjectLayoutSetEnabledRequest, SavedObjectLayoutMutationResult>(
+                    ObjectIpcEndpoints.Layouts.SetEnabled.Name,
+                    new SavedObjectLayoutSetEnabledRequest(
                         revisions.PersistentSceneRevision,
                         layoutRevision,
-                        layoutId),
-                    nameof(ObjectIpcEndpoints.Layouts.SetDefault));
+                        layoutId,
+                        !_layoutManager.IsLayoutEnabled(layoutId)),
+                    nameof(ObjectIpcEndpoints.Layouts.SetEnabled));
             });
         DrawObjectIpcActionRow(
-            "ClearDefaultLayout",
-            ObjectIpcEndpoints.Layouts.ClearDefault.Name,
+            "SetStandaloneCreation",
+            ObjectIpcEndpoints.Layouts.SetCreation.Name,
             DrawEmptyObjectIpcInput,
-            () => DrawObjectIpcInvokeButton("Invoke##objectIpcClearDefaultLayout", () =>
-                _session.InvokeObjectIpcFunc<long, SavedObjectLayoutMutationResult>(
-                    ObjectIpcEndpoints.Layouts.ClearDefault.Name,
-                    _revisionTracker.GetPersistentSceneRevision(),
-                    nameof(ObjectIpcEndpoints.Layouts.ClearDefault))));
+            () => DrawObjectIpcInvokeButton("Invoke##objectIpcStandaloneCreation", () =>
+                _session.InvokeObjectIpcFunc<CreationLayoutRequest, SavedObjectLayoutMutationResult>(
+                    ObjectIpcEndpoints.Layouts.SetCreation.Name,
+                    new CreationLayoutRequest(_revisionTracker.GetPersistentSceneRevision(), null),
+                    nameof(ObjectIpcEndpoints.Layouts.SetCreation))));
+        DrawObjectIpcLayoutIdActionRow(
+            "SetCreationLayout",
+            ObjectIpcEndpoints.Layouts.SetCreation.Name,
+            "##objectIpcSetCreationLayoutId",
+            "Invoke##objectIpcSetCreationLayout",
+            nameof(ObjectIpcEndpoints.Layouts.SetCreation),
+            layoutId => _session.InvokeObjectIpcFunc<CreationLayoutRequest, SavedObjectLayoutMutationResult>(
+                ObjectIpcEndpoints.Layouts.SetCreation.Name,
+                new CreationLayoutRequest(_revisionTracker.GetPersistentSceneRevision(), layoutId),
+                nameof(ObjectIpcEndpoints.Layouts.SetCreation)));
         DrawObjectIpcLayoutIdActionRow(
             "DeleteLayout",
             ObjectIpcEndpoints.Layouts.Delete.Name,
@@ -590,7 +609,7 @@ internal sealed class DebugWorkspace
 
     private void SyncObjectIpcTesterInputsFromScene()
     {
-        _objectIpcLayoutIdInput = _layoutManager.GetDefaultLayoutId()?.ToString() ?? string.Empty;
+        _objectIpcLayoutIdInput = _layoutManager.GetCreationLayoutId()?.ToString() ?? string.Empty;
         if (_samples.TryResolveReferenceObjectIpcSnapshot(out var snapshot))
         {
             _objectIpcObjectIdInput = snapshot.Id.ToString();
@@ -606,7 +625,7 @@ internal sealed class DebugWorkspace
         }
 
         _objectIpcObjectIdInput = snapshot.Id.ToString();
-        _objectIpcLayoutIdInput = _layoutManager.GetDefaultLayoutId()?.ToString() ?? string.Empty;
+        _objectIpcLayoutIdInput = _layoutManager.GetCreationLayoutId()?.ToString() ?? string.Empty;
         if (_samples.TryResolveSelectedPersistedObjectIpcSnapshot(out var persistedSnapshot))
         {
             ResetObjectIpcMutationSamples(persistedSnapshot);
@@ -816,15 +835,17 @@ internal sealed class DebugWorkspace
 
     private void DrawObjectIpcLayoutIdInput(string id)
     {
-        var buttonWidth = ObjectIpcSideButtonWidth * ImGuiHelpers.GlobalScale;
+        const string buttonLabel = "Creation";
+        float buttonWidth = MathF.Max(ObjectIpcSideButtonWidth * ImGuiHelpers.GlobalScale,
+            ImGui.CalcTextSize(buttonLabel).X + ImGui.GetStyle().FramePadding.X * 2f);
         ImGui.SetNextItemWidth(MathF.Max(1f, ImGui.GetContentRegionAvail().X - buttonWidth - ImGui.GetStyle().ItemSpacing.X));
         ImGui.InputTextWithHint(id, "layout id", ref _objectIpcLayoutIdInput, ObjectIpcGuidInputMaxLength);
         ImGui.SameLine();
-        using (ImRaii.Disabled(!_layoutManager.GetDefaultLayoutId().HasValue))
+        using (ImRaii.Disabled(!_layoutManager.GetCreationLayoutId().HasValue))
         {
-            if (ImGui.Button($"Default{id}", new Vector2(buttonWidth, 0f)))
+            if (ImGui.Button($"{buttonLabel}{id}", new Vector2(buttonWidth, 0f)))
             {
-                _objectIpcLayoutIdInput = _layoutManager.GetDefaultLayoutId()?.ToString() ?? string.Empty;
+                _objectIpcLayoutIdInput = _layoutManager.GetCreationLayoutId()?.ToString() ?? string.Empty;
             }
         }
     }

@@ -2,18 +2,20 @@ namespace Intoner.Services.Configuration;
 
 internal sealed class LayoutConfiguration
 {
-    public required Guid? DefaultLayoutId { get; set; }
+    public required List<Guid> EnabledLayoutIds { get; set; }
+    public required Guid? CreationLayoutId { get; set; }
 
     public static LayoutConfiguration CreateDefault()
         => new()
         {
-            DefaultLayoutId = null,
+            EnabledLayoutIds = [],
+            CreationLayoutId = null,
         };
 
     public LayoutConfiguration Copy()
         => new()
         {
-            DefaultLayoutId = DefaultLayoutId,
+            EnabledLayoutIds = [.. EnabledLayoutIds],
+            CreationLayoutId = CreationLayoutId,
         };
 }
-

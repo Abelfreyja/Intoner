@@ -21,22 +21,27 @@ internal interface IObjectSceneView
     IReadOnlyList<ObjectSnapshot> GetPlacedObjectSnapshots();
 
     /// <summary>
-    /// Gets all explicit and object included folders for the current persisted scene.
+    /// Gets flat editing groups owned by the current persistent workspace.
     /// </summary>
-    /// <returns>The ordered folder paths for the current persisted scene.</returns>
-    IReadOnlyList<string> GetPlacedFolders();
+    IReadOnlyList<SceneGroupSnapshot> GetPlacedGroups();
+
+    /// <summary>
+    /// Gets explicit and object included folders for one persistent owner.
+    /// </summary>
+    /// <param name="layoutId">Enabled layout id, or null for standalone folders.</param>
+    /// <returns>The ordered folder paths for this owner.</returns>
+    IReadOnlyList<string> GetPlacedFolders(Guid? layoutId);
+
+    /// <summary>
+    /// Gets the destination for new objects, or null for standalone storage.
+    /// </summary>
+    Guid? GetCreationLayoutId();
 
     /// <summary>
     /// Gets persisted standalone objects that are not part of a layout.
     /// </summary>
     /// <returns>The standalone object snapshots.</returns>
     IReadOnlyList<ObjectSnapshot> GetStandaloneObjectSnapshots();
-
-    /// <summary>
-    /// Gets the full composed object scene.
-    /// </summary>
-    /// <returns>The composed scene object snapshots.</returns>
-    IReadOnlyList<ObjectSnapshot> GetSceneObjectSnapshots();
 
     /// <summary>
     /// Gets the current bounds snapshots for active objects.
@@ -63,7 +68,7 @@ internal interface IObjectSceneView
     long GetSceneRevision();
 
     /// <summary>
-    /// Gets the persistent-scene revision for standalone objects and the default layout.
+    /// Gets the persistent scene revision for standalone objects and enabled layouts.
     /// </summary>
     /// <returns>The current persistent scene revision.</returns>
     long GetPersistentSceneRevision();
@@ -86,7 +91,7 @@ internal interface IObjectSceneView
     /// Tries to resolve one object from the current persistent scene.
     /// </summary>
     /// <param name="id">The object id.</param>
-    /// <param name="snapshot">The resolved standalone or default layout snapshot when found.</param>
+    /// <param name="snapshot"> the resolved standalone or enabled layout snapshot when found </param>
     /// <returns>true when the current persistent scene contains the object.</returns>
     bool TryGetPersistentSceneObjectSnapshot(Guid id, out ObjectSnapshot snapshot);
 
@@ -135,17 +140,21 @@ internal sealed class ObjectSceneView : IObjectSceneView
     public IReadOnlyList<ObjectSnapshot> GetObjectSnapshots()
         => _scene.GetObjectSnapshots();
 
+    public IReadOnlyList<SceneGroupSnapshot> GetPlacedGroups()
+        => _persistenceState.GetPersistedGroups();
+
     public IReadOnlyList<ObjectSnapshot> GetPlacedObjectSnapshots()
         => _persistenceState.GetPersistedSnapshots();
 
-    public IReadOnlyList<string> GetPlacedFolders()
-        => _objectFolderService.GetSceneFolders(GetPlacedObjectSnapshots());
+    public IReadOnlyList<string> GetPlacedFolders(Guid? layoutId)
+        => _objectFolderService.GetSceneFolders(
+            _persistenceState.GetPersistedSnapshots(layoutId).Concat<ObjectSceneItemSnapshot>(_persistenceState.GetPersistedGroups(layoutId)), layoutId);
+
+    public Guid? GetCreationLayoutId()
+        => _persistenceState.TryGetCreationLayout(out ObjectLayoutSnapshot layout) ? layout.Id : null;
 
     public IReadOnlyList<ObjectSnapshot> GetStandaloneObjectSnapshots()
         => _persistenceState.GetStandaloneSnapshots();
-
-    public IReadOnlyList<ObjectSnapshot> GetSceneObjectSnapshots()
-        => _snapshotResolver.GetSceneSnapshots();
 
     public IReadOnlyList<ObjectBoundsSnapshot> GetObjectBoundsSnapshots()
         => _scene.GetBoundsSnapshots();
@@ -184,4 +193,3 @@ internal sealed class ObjectSceneView : IObjectSceneView
     public bool TryGetRuntimeStateSnapshot(Guid id, out ObjectRuntimeStateSnapshot snapshot)
         => _scene.TryGetRuntimeStateSnapshot(id, _snapshotResolver.GetSceneSnapshots(), out snapshot);
 }
-

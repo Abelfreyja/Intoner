@@ -1,3 +1,4 @@
+using Dalamud.Bindings.ImGui;
 using Intoner.Objects.Utils;
 using System.Numerics;
 using System.Runtime.InteropServices;
@@ -9,6 +10,12 @@ internal sealed class DrawBatch
     private readonly List<LinePrimitive>   _lines            = [];
     private readonly List<PointPrimitive>  _points           = [];
     private readonly List<ScreenPrimitive> _screenPrimitives = [];
+    private readonly List<TextPrimitive>   _texts            = [];
+
+    public ScreenAnchor? ScreenAnchor { get; set; }
+
+    public ReadOnlySpan<TextPrimitive> Texts
+        => CollectionsMarshal.AsSpan(_texts);
 
     public ReadOnlySpan<LinePrimitive> Lines
         => CollectionsMarshal.AsSpan(_lines);
@@ -20,7 +27,18 @@ internal sealed class DrawBatch
         => CollectionsMarshal.AsSpan(_screenPrimitives);
 
     public bool IsEmpty
-        => _lines.Count == 0 && _points.Count == 0 && _screenPrimitives.Count == 0;
+        => _lines.Count == 0 && _points.Count == 0 && _screenPrimitives.Count == 0 && _texts.Count == 0;
+
+    public void AddText(Vector2 position, string text, TextStyle style, ImFontPtr font = default, float fontSize = 0f, bool followAnchor = true)
+    {
+        if (string.IsNullOrEmpty(text) || !NumericsUtility.IsFinite(position))
+        {
+            return;
+        }
+
+        _texts.Add(new TextPrimitive(position, text, font.IsNull ? ImGui.GetFont() : font,
+            fontSize > 0f ? fontSize : ImGui.GetFontSize(), style, followAnchor ? ScreenAnchor : null));
+    }
 
     public void AddLine(Vector3 start, Vector3 end, Vector4 color, float thickness)
     {
@@ -181,6 +199,8 @@ internal sealed class DrawBatch
         _lines.Clear();
         _points.Clear();
         _screenPrimitives.Clear();
+        _texts.Clear();
+        ScreenAnchor = null;
     }
 
     public void AddPolyline(ReadOnlySpan<Vector3> points, bool closed, Vector4 color, float thickness)
@@ -233,4 +253,3 @@ internal readonly record struct ScreenPrimitive(
     ScreenLineCaps Caps,
     Vector2 Previous,
     Vector2 Next);
-

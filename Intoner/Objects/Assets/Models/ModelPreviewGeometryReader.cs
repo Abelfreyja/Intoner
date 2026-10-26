@@ -1,7 +1,10 @@
+using Intoner.Objects.Utils;
 using Lumina.Data.Parsing;
-using Penumbra.GameData.Files.ModelStructs;
+using Penumbra.GameData.Files.Models;
+using System.Buffers.Binary;
 using System.Numerics;
-using MdlFile = Penumbra.GameData.Files.MdlFile;
+using System.Runtime.InteropServices;
+using MdlFile = Penumbra.GameData.Files.Models.MdlFile;
 
 namespace Intoner.Objects.Assets;
 
@@ -9,15 +12,10 @@ internal static class ModelPreviewGeometryReader
 {
     private const int MaxStreams = 3;
 
-    private sealed class PreviewVertexFormat(
-        List<MdlStructs.VertexElement> sortedElements,
-        MdlStructs.VertexElement positionElement,
-        MdlStructs.VertexElement? uvElement)
-    {
-        public List<MdlStructs.VertexElement> SortedElements { get; } = sortedElements;
-        public MdlStructs.VertexElement PositionElement { get; } = positionElement;
-        public MdlStructs.VertexElement? UvElement { get; } = uvElement;
-    }
+    [StructLayout(LayoutKind.Auto)]
+    private readonly record struct PreviewVertexFormat(
+        MdlStructs.VertexElement PositionElement,
+        MdlStructs.VertexElement? UvElement);
 
     internal sealed class PreviewTexture(byte[] rgbaPixels, int width, int height)
     {
@@ -48,21 +46,51 @@ internal static class ModelPreviewGeometryReader
         public float Radius { get; } = radius;
     }
 
-    internal sealed class PreviewGeometry(
-        Vector3[] positions,
-        Vector2[] texCoords,
-        int[] indices,
-        int[] triangleMaterialIndices,
-        PreviewMaterial[] materials)
+    internal sealed class PreviewGeometry
     {
-        public Vector3[] Positions { get; } = positions;
-        public Vector2[] TexCoords { get; } = texCoords;
-        public int[] Indices { get; } = indices;
-        public int[] TriangleMaterialIndices { get; } = triangleMaterialIndices;
-        public PreviewMaterial[] Materials { get; } = materials;
-        public PreviewBounds Bounds { get; } = BuildPreviewBounds(positions);
-        public int TriangleCount { get; } = Math.Min(indices.Length / 3, triangleMaterialIndices.Length);
-        public long EstimatedByteCount { get; } = EstimatePreviewGeometryByteCount(positions, texCoords, indices, triangleMaterialIndices);
+        public PreviewGeometry(
+            Vector3[] positions,
+            Vector2[] texCoords,
+            int[] indices,
+            int[] triangleMaterialIndices,
+            PreviewMaterial[] materials)
+            : this(positions, texCoords, indices, triangleMaterialIndices, materials,
+                BuildPreviewBounds(positions), EstimatePreviewGeometryByteCount(positions, texCoords, indices, triangleMaterialIndices))
+        { }
+
+        private PreviewGeometry(
+            Vector3[] positions,
+            Vector2[] texCoords,
+            int[] indices,
+            int[] triangleMaterialIndices,
+            PreviewMaterial[] materials,
+            PreviewBounds bounds,
+            long byteCount)
+        {
+            Positions = positions;
+            TexCoords = texCoords;
+            Indices = indices;
+            TriangleMaterialIndices = triangleMaterialIndices;
+            Materials = materials;
+            Bounds = bounds;
+            EstimatedByteCount = byteCount;
+        }
+
+        public Vector3[] Positions { get; }
+        public Vector2[] TexCoords { get; }
+        public int[] Indices { get; }
+        public int[] TriangleMaterialIndices { get; }
+        public PreviewMaterial[] Materials { get; }
+        public PreviewBounds Bounds { get; }
+        public int TriangleCount => Math.Min(Indices.Length / 3, TriangleMaterialIndices.Length);
+        public long EstimatedByteCount { get; }
+
+        public PreviewGeometry CreateRenderSnapshot()
+            => new(Positions, TexCoords, Indices, TriangleMaterialIndices,
+                Array.ConvertAll(Materials, static material => new PreviewMaterial(
+                    material.Name, material.DiffuseTexturePath, material.DiffuseTexture,
+                    material.ApplyAlphaClip, material.EnableTransparency, material.Transparency)),
+                Bounds, EstimatedByteCount);
 
         private static PreviewBounds BuildPreviewBounds(IReadOnlyList<Vector3> positions)
         {
@@ -75,14 +103,22 @@ internal static class ModelPreviewGeometryReader
                 max = Vector3.Max(max, positions[i]);
             }
 
-            var center = (min + max) * 0.5f;
-            var radiusSquared = 0f;
+            Vector3 center = new(
+                (float)(((double)min.X + max.X) * 0.5),
+                (float)(((double)min.Y + max.Y) * 0.5),
+                (float)(((double)min.Z + max.Z) * 0.5));
+            double radiusSquared = 0;
             for (var i = 0; i < positions.Count; i++)
             {
-                radiusSquared = MathF.Max(radiusSquared, Vector3.DistanceSquared(positions[i], center));
+                Vector3 position = positions[i];
+                double x = (double)position.X - center.X;
+                double y = (double)position.Y - center.Y;
+                double z = (double)position.Z - center.Z;
+                radiusSquared = Math.Max(radiusSquared, x * x + y * y + z * z);
             }
 
-            return new PreviewBounds(center, MathF.Max(0.001f, MathF.Sqrt(radiusSquared)));
+            float radius = (float)Math.Sqrt(radiusSquared);
+            return new PreviewBounds(center, MathF.Max(0.001f, radius));
         }
 
         private static long EstimatePreviewGeometryByteCount(
@@ -104,8 +140,9 @@ internal static class ModelPreviewGeometryReader
         geometry = null!;
         reason = null;
 
-        var mdl = new MdlFile(data);
-        if (!mdl.Valid)
+        MdlFile? mdl = ModelFileReader.Read(data);
+
+        if (mdl is null)
         {
             reason = "Invalid model file.";
             return false;
@@ -117,7 +154,7 @@ internal static class ModelPreviewGeometryReader
             return false;
         }
 
-        var meshes = mdl.Meshes.ToArray();
+        MeshStruct[] meshes = mdl.Meshes;
         if (mdl.LodCount <= 0 || meshes.Length == 0)
         {
             reason = "Model does not contain previewable meshes.";
@@ -134,16 +171,16 @@ internal static class ModelPreviewGeometryReader
 
         var lodMeshStart = (int)lod.MeshIndex;
         var lodMeshEnd = lodMeshStart + lod.MeshCount;
-        if (lodMeshStart < 0 || lodMeshEnd > meshes.Length)
+        if (lodMeshStart < 0 || lodMeshEnd > meshes.Length || lodMeshEnd > mdl.VertexDeclarations.Length)
         {
             reason = "Model LOD mesh range is invalid.";
             return false;
         }
 
-        var positions = new List<Vector3>();
-        var texCoords = new List<Vector2>();
-        var indices = new List<int>();
-        var triangleMaterialIndices = new List<int>();
+        List<Vector3> positions = [];
+        List<Vector2> texCoords = [];
+        List<int> indices = [];
+        List<int> triangleMaterialIndices = [];
         var materials = Array.ConvertAll(mdl.Materials, static name => new PreviewMaterial(name, null, null, false, false, 1f));
         string? firstReason = null;
 
@@ -158,14 +195,17 @@ internal static class ModelPreviewGeometryReader
 
             if (!TryBuildPreviewVertexFormat(mdl.VertexDeclarations[meshIndex], out var format, out var formatReason))
             {
-                firstReason ??= $"Mesh {meshIndex}: {formatReason}";
-                continue;
+                reason = $"Mesh {meshIndex}: {formatReason}";
+                return false;
             }
 
-            var meshSubMeshes = mdl.SubMeshes
-                .Skip(mesh.SubMeshIndex)
-                .Take(mesh.SubMeshCount)
-                .ToArray();
+            if (mesh.SubMeshIndex + mesh.SubMeshCount > mdl.SubMeshes.Length)
+            {
+                reason = $"Mesh {meshIndex}: Submesh range is invalid.";
+                return false;
+            }
+
+            ReadOnlySpan<MdlStructs.SubmeshStruct> meshSubMeshes = mdl.SubMeshes.AsSpan(mesh.SubMeshIndex, mesh.SubMeshCount);
 
             if (!TryDecodePreviewMeshData(
                     mdl,
@@ -178,16 +218,15 @@ internal static class ModelPreviewGeometryReader
                     out var subMeshIndices,
                     out var decodeReason))
             {
-                firstReason ??= $"Mesh {meshIndex}: {decodeReason}";
-                continue;
+                reason = $"Mesh {meshIndex}: {decodeReason}";
+                return false;
             }
 
-            var baseVertexIndex = positions.Count;
-            for (var i = 0; i < previewPositions.Length; i++)
-            {
-                positions.Add(previewPositions[i]);
-                texCoords.Add(previewTexCoords[i]);
-            }
+            int baseVertexIndex = positions.Count;
+            positions.EnsureCapacity(checked(baseVertexIndex + previewPositions.Length));
+            texCoords.EnsureCapacity(checked(baseVertexIndex + previewTexCoords.Length));
+            positions.AddRange(previewPositions);
+            texCoords.AddRange(previewTexCoords);
 
             var materialIndex = format.UvElement.HasValue && mesh.MaterialIndex < materials.Length ? mesh.MaterialIndex : -1;
             foreach (var subMesh in subMeshIndices)
@@ -208,77 +247,65 @@ internal static class ModelPreviewGeometryReader
             return false;
         }
 
-        geometry = new PreviewGeometry(
+        PreviewGeometry previewGeometry = new(
             positions.ToArray(),
             texCoords.ToArray(),
             indices.ToArray(),
             triangleMaterialIndices.ToArray(),
             materials);
+
+        if (!NumericsUtility.IsFinite(previewGeometry.Bounds.Center) || !float.IsFinite(previewGeometry.Bounds.Radius))
+        {
+            reason = "Model bounds contain a non-finite value.";
+            return false;
+        }
+
+        geometry = previewGeometry;
         return true;
     }
-
-    public static bool TryLoadPreviewGeometry(
-        byte[] data,
-        out PreviewGeometry geometry,
-        out string? reason)
-        => TryLoad(data, out geometry, out reason);
 
     private static bool TryBuildPreviewVertexFormat(
         MdlStructs.VertexDeclarationStruct declaration,
         out PreviewVertexFormat format,
         out string? reason)
     {
-        format = default!;
+        format = default;
         reason = null;
+        MdlStructs.VertexElement? position = null;
+        MdlStructs.VertexElement? uv = null;
 
-        var elements = declaration.VertexElements;
-        foreach (var element in elements)
+        foreach (MdlStructs.VertexElement element in declaration.VertexElements)
         {
-            if (element.Stream >= MaxStreams)
+            if ((MdlFile.VertexUsage)element.Usage == MdlFile.VertexUsage.Position)
             {
-                reason = "Vertex stream index out of range.";
-                return false;
-            }
+                if (position.HasValue || GetVertexSize((MdlFile.VertexType)element.Type) == 0)
+                {
+                    reason = "Expected one supported position element.";
+                    return false;
+                }
 
-            if (!CanReadPreviewVertexType((MdlFile.VertexType)element.Type))
+                position = element;
+            }
+            else if ((MdlFile.VertexUsage)element.Usage == MdlFile.VertexUsage.UV
+                  && (!uv.HasValue || element.UsageIndex < uv.Value.UsageIndex))
             {
-                reason = $"Unsupported preview vertex type {(MdlFile.VertexType)element.Type}.";
-                return false;
+                uv = element;
             }
         }
 
-        var positionElements = elements
-            .Where(static element => (MdlFile.VertexUsage)element.Usage == MdlFile.VertexUsage.Position)
-            .ToArray();
-        if (positionElements.Length != 1)
+        if (!position.HasValue)
         {
-            reason = "Expected single position element.";
+            reason = "Expected one supported position element.";
             return false;
         }
 
-        var positionType = (MdlFile.VertexType)positionElements[0].Type;
-        if (!CanReadPreviewPositionType(positionType))
+        if (uv.HasValue && GetVertexSize((MdlFile.VertexType)uv.Value.Type) == 0)
         {
-            reason = $"Unsupported position element type {positionType}.";
+            reason = "Expected a supported UV element.";
             return false;
         }
 
-        MdlStructs.VertexElement? uvElement = null;
-        foreach (var element in elements
-                     .Where(static element => (MdlFile.VertexUsage)element.Usage == MdlFile.VertexUsage.UV)
-                     .OrderBy(static element => element.UsageIndex))
-        {
-            if (CanReadPreviewUvType((MdlFile.VertexType)element.Type))
-            {
-                uvElement = element;
-                break;
-            }
-        }
-
-        format = new PreviewVertexFormat(
-            elements.OrderBy(static element => element.Offset).ToList(),
-            positionElements[0],
-            uvElement);
+        format = new PreviewVertexFormat(position.Value, uv);
         return true;
     }
 
@@ -287,7 +314,7 @@ internal static class ModelPreviewGeometryReader
         int lodIndex,
         MeshStruct mesh,
         PreviewVertexFormat format,
-        MdlStructs.SubmeshStruct[] meshSubMeshes,
+        ReadOnlySpan<MdlStructs.SubmeshStruct> meshSubMeshes,
         out Vector3[] positions,
         out Vector2[] texCoords,
         out int[][] subMeshIndices,
@@ -297,109 +324,123 @@ internal static class ModelPreviewGeometryReader
         texCoords = [];
         subMeshIndices = [];
         reason = null;
+        ReadOnlySpan<byte> data = mdl.RemainingData;
+        long vertexBufferEnd = (long)mdl.VertexOffset[lodIndex] + mdl.VertexBufferSize[lodIndex];
 
-        if (meshSubMeshes.Length == 0)
+        if (vertexBufferEnd > data.Length
+         || !TryGetElementRange(mdl, lodIndex, mesh, format.PositionElement, vertexBufferEnd, out int positionStart, out int positionStride))
         {
-            subMeshIndices = [ReadIndices(mdl, lodIndex, mesh)];
+            reason = "Position buffer range is invalid.";
+            return false;
         }
-        else if (!TryBuildSubMeshIndices(mdl, lodIndex, mesh, meshSubMeshes, out subMeshIndices, out reason))
+
+        int uvStart = 0;
+        int uvStride = 0;
+
+        if (format.UvElement is MdlStructs.VertexElement uv
+         && !TryGetElementRange(mdl, lodIndex, mesh, uv, vertexBufferEnd, out uvStart, out uvStride))
+        {
+            reason = "UV buffer range is invalid.";
+            return false;
+        }
+
+        long indexStart = (long)mdl.IndexOffset[lodIndex] + (long)mesh.StartIndex * sizeof(ushort);
+        long indexEnd = indexStart + (long)mesh.IndexCount * sizeof(ushort);
+        long indexBufferEnd = (long)mdl.IndexOffset[lodIndex] + mdl.IndexBufferSize[lodIndex];
+
+        if (indexStart > data.Length || indexEnd > data.Length || indexEnd > indexBufferEnd || mesh.IndexCount > int.MaxValue)
+        {
+            reason = "Index buffer range is invalid.";
+            return false;
+        }
+
+        int[] meshIndices = new int[(int)mesh.IndexCount];
+
+        for (int index = 0; index < meshIndices.Length; ++index)
+        {
+            int vertexIndex = BinaryPrimitives.ReadUInt16LittleEndian(data.Slice((int)indexStart + index * sizeof(ushort)));
+
+            if (vertexIndex >= mesh.VertexCount)
+            {
+                reason = "Mesh index refers to a missing vertex.";
+                return false;
+            }
+
+            meshIndices[index] = vertexIndex;
+        }
+
+        subMeshIndices = meshSubMeshes.Length == 0 ? [meshIndices] : new int[meshSubMeshes.Length][];
+
+        for (int subMeshIndex = 0; subMeshIndex < meshSubMeshes.Length; ++subMeshIndex)
+        {
+            MdlStructs.SubmeshStruct subMesh = meshSubMeshes[subMeshIndex];
+            long relativeOffset = (long)subMesh.IndexOffset - mesh.StartIndex;
+
+            if (relativeOffset < 0 || relativeOffset + subMesh.IndexCount > meshIndices.Length)
+            {
+                reason = "Submesh index range is invalid.";
+                return false;
+            }
+
+            subMeshIndices[subMeshIndex] = meshIndices.AsSpan((int)relativeOffset, (int)subMesh.IndexCount).ToArray();
+        }
+
+        positions = new Vector3[mesh.VertexCount];
+        texCoords = new Vector2[mesh.VertexCount];
+
+        for (int vertexIndex = 0; vertexIndex < mesh.VertexCount; ++vertexIndex)
+        {
+            Vector4 position = ReadPreviewVertex((MdlFile.VertexType)format.PositionElement.Type,
+                data.Slice(positionStart + vertexIndex * positionStride));
+
+            if (!float.IsFinite(position.X) || !float.IsFinite(position.Y) || !float.IsFinite(position.Z))
+            {
+                reason = "Position contains a non-finite value.";
+                return false;
+            }
+
+            positions[vertexIndex] = new Vector3(position.X, position.Y, position.Z);
+
+            if (format.UvElement is MdlStructs.VertexElement uvElement)
+            {
+                Vector4 uvValue = ReadPreviewVertex((MdlFile.VertexType)uvElement.Type,
+                    data.Slice(uvStart + vertexIndex * uvStride));
+                texCoords[vertexIndex] = new Vector2(uvValue.X, uvValue.Y);
+            }
+        }
+
+        return true;
+    }
+
+    private static bool TryGetElementRange(
+        MdlFile mdl,
+        int lodIndex,
+        MeshStruct mesh,
+        MdlStructs.VertexElement element,
+        long bufferEnd,
+        out int start,
+        out int stride)
+    {
+        start = 0;
+        stride = 0;
+
+        if (element.Stream >= MaxStreams)
         {
             return false;
         }
 
-        var vertexCount = mesh.VertexCount;
-        positions = new Vector3[vertexCount];
-        texCoords = new Vector2[vertexCount];
+        int size = GetVertexSize((MdlFile.VertexType)element.Type);
+        stride = mesh.VertexBufferStride(element.Stream);
+        long offset = (long)mdl.VertexOffset[lodIndex] + mesh.VertexBufferOffset(element.Stream) + element.Offset;
+        long end = offset + (long)(mesh.VertexCount - 1) * stride + size;
 
-        var streams = new BinaryReader[MaxStreams];
-        for (var streamIndex = 0; streamIndex < MaxStreams; streamIndex++)
+        if (size == 0 || element.Offset + size > stride || offset > int.MaxValue || end > bufferEnd)
         {
-            streams[streamIndex] = new BinaryReader(new MemoryStream(mdl.RemainingData));
-            streams[streamIndex].BaseStream.Position = mdl.VertexOffset[lodIndex] + mesh.VertexBufferOffset(streamIndex);
+            return false;
         }
 
-        for (var vertexIndex = 0; vertexIndex < vertexCount; vertexIndex++)
-        {
-            foreach (var element in format.SortedElements)
-            {
-                var usage = (MdlFile.VertexUsage)element.Usage;
-                var type = (MdlFile.VertexType)element.Type;
-                var stream = streams[element.Stream];
-
-                if (usage == MdlFile.VertexUsage.Position && IsSameElement(element, format.PositionElement))
-                {
-                    positions[vertexIndex] = ReadPreviewPosition(type, stream);
-                    continue;
-                }
-
-                if (format.UvElement.HasValue
-                 && usage == MdlFile.VertexUsage.UV
-                 && IsSameElement(element, format.UvElement.Value))
-                {
-                    texCoords[vertexIndex] = ReadPreviewUv(type, stream);
-                    continue;
-                }
-
-                _ = ReadAndDiscard(type, stream);
-            }
-        }
-
-        foreach (var stream in streams)
-        {
-            stream.Dispose();
-        }
-
+        start = (int)offset;
         return true;
-    }
-
-    private static bool TryBuildSubMeshIndices(
-        MdlFile mdl,
-        int lodIndex,
-        MeshStruct mesh,
-        MdlStructs.SubmeshStruct[] meshSubMeshes,
-        out int[][] subMeshIndices,
-        out string? reason)
-    {
-        reason = null;
-        subMeshIndices = new int[meshSubMeshes.Length][];
-        var meshIndices = ReadIndices(mdl, lodIndex, mesh);
-
-        for (var subMeshIndex = 0; subMeshIndex < meshSubMeshes.Length; subMeshIndex++)
-        {
-            var subMesh = meshSubMeshes[subMeshIndex];
-            if (subMesh.IndexCount == 0)
-            {
-                subMeshIndices[subMeshIndex] = [];
-                continue;
-            }
-
-            var relativeOffset = (int)(subMesh.IndexOffset - mesh.StartIndex);
-            if (relativeOffset < 0 || relativeOffset + subMesh.IndexCount > meshIndices.Length)
-            {
-                reason = "Submesh index range out of bounds.";
-                return false;
-            }
-
-            var slice = new int[subMesh.IndexCount];
-            Array.Copy(meshIndices, relativeOffset, slice, 0, slice.Length);
-            subMeshIndices[subMeshIndex] = slice;
-        }
-
-        return true;
-    }
-
-    private static int[] ReadIndices(MdlFile mdl, int lodIndex, MeshStruct mesh)
-    {
-        using var reader = new BinaryReader(new MemoryStream(mdl.RemainingData));
-        reader.BaseStream.Position = mdl.IndexOffset[lodIndex] + mesh.StartIndex * sizeof(ushort);
-
-        var indices = new int[mesh.IndexCount];
-        for (var i = 0; i < indices.Length; i++)
-        {
-            indices[i] = reader.ReadUInt16();
-        }
-
-        return indices;
     }
 
     private static bool HasShapeData(MdlFile mdl)
@@ -408,177 +449,59 @@ internal static class ModelPreviewGeometryReader
             || mdl.ShapeValues.Length > 0
             || mdl.NeckMorphs.Length > 0;
 
-    private static bool CanReadPreviewPositionType(MdlFile.VertexType type)
+    private static int GetVertexSize(MdlFile.VertexType type)
         => type switch
         {
-            MdlFile.VertexType.Single3 => true,
-            MdlFile.VertexType.Single4 => true,
-            MdlFile.VertexType.Half4 => true,
-            MdlFile.VertexType.Short4 => true,
-            MdlFile.VertexType.NShort4 => true,
-            MdlFile.VertexType.UShort4 => true,
-            MdlFile.VertexType.UByte4 => true,
-            MdlFile.VertexType.NByte4 => true,
-            _ => false,
+            MdlFile.VertexType.Single1 => 4,
+            MdlFile.VertexType.Single2 => 8,
+            MdlFile.VertexType.Single3 => 12,
+            MdlFile.VertexType.Single4 => 16,
+            MdlFile.VertexType.Half2 or MdlFile.VertexType.Short2 or MdlFile.VertexType.NShort2
+                or MdlFile.VertexType.UShort2 or MdlFile.VertexType.UByte4 or MdlFile.VertexType.NByte4 => 4,
+            MdlFile.VertexType.Half4 or MdlFile.VertexType.Short4 or MdlFile.VertexType.NShort4
+                or MdlFile.VertexType.UShort4 => 8,
+            _ => 0,
         };
 
-    private static bool CanReadPreviewUvType(MdlFile.VertexType type)
-        => type switch
-        {
-            MdlFile.VertexType.Single1 => true,
-            MdlFile.VertexType.Half2 => true,
-            MdlFile.VertexType.Single2 => true,
-            MdlFile.VertexType.Short2 => true,
-            MdlFile.VertexType.NShort2 => true,
-            MdlFile.VertexType.UShort2 => true,
-            MdlFile.VertexType.Half4 => true,
-            MdlFile.VertexType.Single4 => true,
-            MdlFile.VertexType.Short4 => true,
-            MdlFile.VertexType.NShort4 => true,
-            MdlFile.VertexType.UShort4 => true,
-            _ => false,
-        };
-
-    private static bool CanReadPreviewVertexType(MdlFile.VertexType type)
-        => type switch
-        {
-            MdlFile.VertexType.Single1 => true,
-            MdlFile.VertexType.Single2 => true,
-            MdlFile.VertexType.Single3 => true,
-            MdlFile.VertexType.Single4 => true,
-            MdlFile.VertexType.Half2 => true,
-            MdlFile.VertexType.Half4 => true,
-            MdlFile.VertexType.UByte4 => true,
-            MdlFile.VertexType.NByte4 => true,
-            MdlFile.VertexType.Short2 => true,
-            MdlFile.VertexType.Short4 => true,
-            MdlFile.VertexType.NShort2 => true,
-            MdlFile.VertexType.NShort4 => true,
-            MdlFile.VertexType.UShort2 => true,
-            MdlFile.VertexType.UShort4 => true,
-            _ => false,
-        };
-
-    private static Vector3 ReadPreviewPosition(MdlFile.VertexType type, BinaryReader reader)
-        => type switch
-        {
-            MdlFile.VertexType.Single3 => ReadPosition(reader),
-            MdlFile.VertexType.Single4 => ReadPositionWithW(reader, out _),
-            MdlFile.VertexType.Half4 => ToPreviewPosition(ReadAndDiscard(type, reader)),
-            MdlFile.VertexType.Short4 => ToPreviewPosition(ReadAndDiscard(type, reader)),
-            MdlFile.VertexType.NShort4 => ToPreviewPosition(ReadAndDiscard(type, reader)),
-            MdlFile.VertexType.UShort4 => ToPreviewPosition(ReadAndDiscard(type, reader)),
-            MdlFile.VertexType.UByte4 => ToPreviewPosition(ReadAndDiscard(type, reader)),
-            MdlFile.VertexType.NByte4 => ToPreviewPosition(ReadAndDiscard(type, reader)),
-            _ => throw new InvalidOperationException($"Unsupported preview position type {type}"),
-        };
-
-    private static Vector2 ReadPreviewUv(MdlFile.VertexType type, BinaryReader reader)
-        => type switch
-        {
-            MdlFile.VertexType.Single1 => new Vector2(reader.ReadSingle(), 0f),
-            MdlFile.VertexType.Half2 => new Vector2(ReadHalf(reader), ReadHalf(reader)),
-            MdlFile.VertexType.Single2 => new Vector2(reader.ReadSingle(), reader.ReadSingle()),
-            MdlFile.VertexType.Short2 => ReadShort2(reader),
-            MdlFile.VertexType.NShort2 => ReadNShort2(reader),
-            MdlFile.VertexType.UShort2 => ReadUShort2(reader),
-            MdlFile.VertexType.Half4 => ToPreviewUv(ReadAndDiscard(type, reader)),
-            MdlFile.VertexType.Single4 => ToPreviewUv(ReadAndDiscard(type, reader)),
-            MdlFile.VertexType.Short4 => ToPreviewUv(ReadAndDiscard(type, reader)),
-            MdlFile.VertexType.NShort4 => ToPreviewUv(ReadAndDiscard(type, reader)),
-            MdlFile.VertexType.UShort4 => ToPreviewUv(ReadAndDiscard(type, reader)),
-            _ => throw new InvalidOperationException($"Unsupported preview uv type {type}"),
-        };
-
-    private static bool IsSameElement(MdlStructs.VertexElement left, MdlStructs.VertexElement right)
-        => left.Stream == right.Stream
-        && left.Offset == right.Offset
-        && left.Type == right.Type
-        && left.Usage == right.Usage
-        && left.UsageIndex == right.UsageIndex;
-
-    private static Vector3 ReadPosition(BinaryReader reader)
-        => new(reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle());
-
-    private static Vector3 ReadPositionWithW(BinaryReader reader, out float w)
+    private static Vector4 ReadPreviewVertex(MdlFile.VertexType type, ReadOnlySpan<byte> data)
     {
-        var x = reader.ReadSingle();
-        var y = reader.ReadSingle();
-        var z = reader.ReadSingle();
-        w = reader.ReadSingle();
-        return new Vector3(x, y, z);
-    }
-
-    private static Vector2 ReadShort2(BinaryReader reader)
-        => new(reader.ReadInt16(), reader.ReadInt16());
-
-    private static Vector2 ReadUShort2(BinaryReader reader)
-        => new(reader.ReadUInt16(), reader.ReadUInt16());
-
-    private static Vector2 ReadUShort2Normalized(BinaryReader reader)
-        => new(reader.ReadUInt16() / (float)ushort.MaxValue, reader.ReadUInt16() / (float)ushort.MaxValue);
-
-    private static Vector2 ReadNShort2(BinaryReader reader)
-    {
-        var value = ReadUShort2Normalized(reader);
-        return (value * 2f) - Vector2.One;
-    }
-
-    private static Vector4 ReadUByte4(BinaryReader reader)
-        => new(
-            reader.ReadByte() / 255f,
-            reader.ReadByte() / 255f,
-            reader.ReadByte() / 255f,
-            reader.ReadByte() / 255f);
-
-    private static Vector4 ReadNByte4(BinaryReader reader)
-        => (ReadUByte4(reader) * 2f) - Vector4.One;
-
-    private static Vector4 ReadShort4(BinaryReader reader)
-        => new(reader.ReadInt16(), reader.ReadInt16(), reader.ReadInt16(), reader.ReadInt16());
-
-    private static Vector4 ReadUShort4(BinaryReader reader)
-        => new(reader.ReadUInt16(), reader.ReadUInt16(), reader.ReadUInt16(), reader.ReadUInt16());
-
-    private static Vector4 ReadUShort4Normalized(BinaryReader reader)
-        => new(
-            reader.ReadUInt16() / (float)ushort.MaxValue,
-            reader.ReadUInt16() / (float)ushort.MaxValue,
-            reader.ReadUInt16() / (float)ushort.MaxValue,
-            reader.ReadUInt16() / (float)ushort.MaxValue);
-
-    private static Vector4 ReadNShort4(BinaryReader reader)
-        => (ReadUShort4Normalized(reader) * 2f) - Vector4.One;
-
-    private static Vector4 ReadAndDiscard(MdlFile.VertexType type, BinaryReader reader)
-        => type switch
+        switch (type)
         {
-            MdlFile.VertexType.Single1 => new Vector4(reader.ReadSingle(), 0, 0, 0),
-            MdlFile.VertexType.Single2 => new Vector4(reader.ReadSingle(), reader.ReadSingle(), 0, 0),
-            MdlFile.VertexType.Single3 => new Vector4(reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle(), 0),
-            MdlFile.VertexType.Single4 => new Vector4(reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle()),
-            MdlFile.VertexType.Half2 => new Vector4(ReadHalf(reader), ReadHalf(reader), 0, 0),
-            MdlFile.VertexType.Half4 => new Vector4(ReadHalf(reader), ReadHalf(reader), ReadHalf(reader), ReadHalf(reader)),
-            MdlFile.VertexType.UByte4 => ReadUByte4(reader),
-            MdlFile.VertexType.NByte4 => ReadNByte4(reader),
-            MdlFile.VertexType.Short2 => ToVector4(ReadShort2(reader)),
-            MdlFile.VertexType.Short4 => ReadShort4(reader),
-            MdlFile.VertexType.NShort2 => ToVector4(ReadNShort2(reader)),
-            MdlFile.VertexType.NShort4 => ReadNShort4(reader),
-            MdlFile.VertexType.UShort2 => ToVector4(ReadUShort2(reader)),
-            MdlFile.VertexType.UShort4 => ReadUShort4(reader),
-            _ => Vector4.Zero,
+            case MdlFile.VertexType.Single1:
+                return new Vector4(BinaryPrimitives.ReadSingleLittleEndian(data), 0, 0, 0);
+            case MdlFile.VertexType.Single2:
+                return new Vector4(MemoryMarshal.Read<Vector2>(data), 0, 0);
+            case MdlFile.VertexType.Single3:
+                return new Vector4(MemoryMarshal.Read<Vector3>(data), 0);
+            case MdlFile.VertexType.Single4:
+                return MemoryMarshal.Read<Vector4>(data);
+        }
+
+        int components = type switch
+        {
+            MdlFile.VertexType.Half4 or MdlFile.VertexType.Short4
+                or MdlFile.VertexType.NShort4 or MdlFile.VertexType.UShort4
+                or MdlFile.VertexType.UByte4 or MdlFile.VertexType.NByte4 => 4,
+            _ => 2,
         };
+        int componentSize = GetVertexSize(type) / components;
+        Vector4 value = default;
 
-    private static Vector3 ToPreviewPosition(Vector4 value)
-        => new(value.X, value.Y, value.Z);
+        for (int component = 0; component < components; ++component)
+        {
+            ReadOnlySpan<byte> bytes = data[(component * componentSize)..];
+            value[component] = type switch
+            {
+                MdlFile.VertexType.Half2 or MdlFile.VertexType.Half4 => (float)BitConverter.UInt16BitsToHalf(BinaryPrimitives.ReadUInt16LittleEndian(bytes)),
+                MdlFile.VertexType.Short2 or MdlFile.VertexType.Short4 => BinaryPrimitives.ReadInt16LittleEndian(bytes),
+                MdlFile.VertexType.NShort2 or MdlFile.VertexType.NShort4 => Math.Max(BinaryPrimitives.ReadInt16LittleEndian(bytes) / (float)short.MaxValue, -1f),
+                MdlFile.VertexType.UShort2 or MdlFile.VertexType.UShort4 => BinaryPrimitives.ReadUInt16LittleEndian(bytes),
+                MdlFile.VertexType.UByte4 => bytes[0],
+                MdlFile.VertexType.NByte4 => bytes[0] / 255f,
+                _ => throw new InvalidOperationException($"Unsupported preview vertex type {type}"),
+            };
+        }
 
-    private static Vector2 ToPreviewUv(Vector4 value)
-        => new(value.X, value.Y);
-
-    private static Vector4 ToVector4(Vector2 value)
-        => new(value.X, value.Y, 0, 0);
-
-    private static float ReadHalf(BinaryReader reader)
-        => (float)BitConverter.UInt16BitsToHalf(reader.ReadUInt16());
+        return value;
+    }
 }

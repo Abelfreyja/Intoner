@@ -1,4 +1,3 @@
-using Intoner.Objects.Assets;
 using Intoner.Objects.Utils;
 using Microsoft.Extensions.Logging;
 using System.Collections.Immutable;
@@ -16,7 +15,6 @@ internal sealed class ObjectMemoryResourceRegistry
         = ImmutableDictionary.Create<string, ObjectMemoryResource>(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, HashSet<string>> _pathsByOwner = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, int> _ownerCountByPath = new(StringComparer.OrdinalIgnoreCase);
-    private long _nextResourceId;
 
     public ObjectMemoryResourceRegistry(ILogger<ObjectMemoryResourceRegistry> logger)
     {
@@ -31,7 +29,7 @@ internal sealed class ObjectMemoryResourceRegistry
             throw new ArgumentException("memory resource owner id must not be empty", nameof(ownerId));
         }
 
-        if (!ObjectAssetPathRules.TryNormalizeSupportedResourcePath(gamePath, out string normalizedGamePath))
+        if (!ObjectResourcePathUtility.TryNormalizeSupportedGamePath(gamePath, out string normalizedGamePath))
         {
             throw new ArgumentException("memory resource game path must be a supported object resource path", nameof(gamePath));
         }
@@ -41,8 +39,14 @@ internal sealed class ObjectMemoryResourceRegistry
             throw new ArgumentException("memory resource data must not be empty", nameof(data));
         }
 
-        long resourceId = Interlocked.Increment(ref _nextResourceId);
+        long resourceId = ObjectResourceIdentity.Next();
         string memoryPath = ObjectMemoryResourcePathUtility.Create(resourceId, normalizedGamePath);
+
+        if (memoryPath.Length == 0)
+        {
+            throw new ArgumentException("memory resource path must fit the native UTF8 path buffer without embedded nulls", nameof(gamePath));
+        }
+
         ObjectMemoryResource resource = new(
             memoryPath,
             normalizedGamePath,
@@ -166,4 +170,3 @@ internal sealed class ObjectMemoryResourceRegistry
         }
     }
 }
-

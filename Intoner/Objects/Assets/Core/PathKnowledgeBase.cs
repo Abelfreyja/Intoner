@@ -1,4 +1,6 @@
+using Intoner.Objects.Resources;
 using Intoner.Objects.Utils;
+using System.Diagnostics.CodeAnalysis;
 
 namespace Intoner.Objects.Assets;
 
@@ -16,7 +18,7 @@ internal sealed class PathKnowledgeBase
         IEnumerable<string>? searchTerms = null,
         KnownVfxFamily vfxFamily = KnownVfxFamily.None)
     {
-        string normalizedPath = GameAssetPathRules.NormalizeGamePath(path);
+        string normalizedPath = ObjectResolvedPath.FromGamePath(path).Path;
         AssetPathKind kind = ObjectAssetPathRules.ClassifyKnownAssetPath(normalizedPath);
         if (kind == AssetPathKind.Unknown)
         {
@@ -32,34 +34,23 @@ internal sealed class PathKnowledgeBase
         return assetPathState.Merge(source, contract, vfxFamily, searchTerms);
     }
 
-    public IReadOnlyList<string> GetSearchTerms(string path)
-        => TryGetState(path, out KnownAssetPathState? state) && state is not null
-            ? state.GetSearchTerms()
-            : [];
+    public bool TryGetPath(string path, [NotNullWhen(true)] out KnownAssetPath? asset)
+    {
+        asset = null;
 
-    public AssetPathContract GetContracts(string path)
-        => TryGetState(path, out KnownAssetPathState? state) && state is not null
-            ? state.Contracts
-            : AssetPathContract.None;
+        if (!_paths.TryGetValue(ObjectResolvedPath.FromGamePath(path).Path, out KnownAssetPathState? state))
+        {
+            return false;
+        }
 
-    public KnownVfxFamily GetVfxFamily(string path)
-        => TryGetState(path, out KnownAssetPathState? state) && state is not null
-            ? state.VfxFamily
-            : KnownVfxFamily.None;
-
-    public IEnumerable<KnownAssetPath> Enumerate()
-        => _paths.Values
-            .Select(static assetPathState => assetPathState.ToKnownAssetPath())
-            .OrderBy(static knownAssetPath => knownAssetPath.Path, StringComparer.OrdinalIgnoreCase);
-
-    private bool TryGetState(string path, out KnownAssetPathState? state)
-        => _paths.TryGetValue(GameAssetPathRules.NormalizeGamePath(path), out state);
+        asset = state.GetSnapshot();
+        return true;
+    }
 
     private sealed class KnownAssetPathState
     {
-        private IReadOnlyList<string>? _searchTerms;
-        private HashSet<string>? _mergedSearchTerms;
-        private IReadOnlyList<string>? _stableSearchTerms;
+        private readonly HashSet<string> _searchTerms = new(StringComparer.OrdinalIgnoreCase);
+        private KnownAssetPath? _snapshot;
         private bool _includePathSegments;
 
         public KnownAssetPathState(string path, AssetPathKind kind)
@@ -91,56 +82,23 @@ internal sealed class PathKnowledgeBase
             bool changed = previousSources != Sources
                 || previousContracts != Contracts
                 || previousFamily != VfxFamily;
-            if (searchTerms is not null && MergeSearchTerms(searchTerms))
+
+            if (searchTerms is not null)
             {
-                changed = true;
-                _stableSearchTerms = null;
+                changed |= SearchTermUtility.AddTerms(_searchTerms, searchTerms);
             }
 
-            if (changed && !_includePathSegments)
+            if (changed)
             {
                 _includePathSegments = true;
-                _stableSearchTerms = null;
+                _snapshot = null;
             }
 
             return changed;
         }
 
-        public IReadOnlyList<string> GetSearchTerms()
-            => _stableSearchTerms ??= BuildSearchTerms();
-
-        public KnownAssetPath ToKnownAssetPath()
-            => new(
-                Path,
-                Kind,
-                Sources,
-                Contracts,
-                VfxFamily,
-                GetSearchTerms());
-
-        private bool MergeSearchTerms(IEnumerable<string> searchTerms)
-        {
-            if (_mergedSearchTerms is not null)
-            {
-                return SearchTermUtility.AddTerms(_mergedSearchTerms, searchTerms);
-            }
-
-            if (_searchTerms is null)
-            {
-                IReadOnlyList<string> capturedTerms = searchTerms as IReadOnlyList<string>
-                    ?? SearchTermUtility.BuildStableTerms(searchTerms);
-                if (!capturedTerms.Any(static term => !string.IsNullOrWhiteSpace(term)))
-                {
-                    return false;
-                }
-
-                _searchTerms = capturedTerms;
-                return true;
-            }
-
-            _mergedSearchTerms = SearchTermUtility.CreateSet(_searchTerms);
-            return SearchTermUtility.AddTerms(_mergedSearchTerms, searchTerms);
-        }
+        public KnownAssetPath GetSnapshot()
+            => _snapshot ??= new(Path, Kind, Sources, Contracts, VfxFamily, BuildSearchTerms());
 
         private IReadOnlyList<string> BuildSearchTerms()
         {
@@ -150,17 +108,9 @@ internal sealed class PathKnowledgeBase
                 _ = SearchTermUtility.AddPathSegments(searchTerms, Path);
             }
 
-            if (_mergedSearchTerms is not null)
-            {
-                _ = SearchTermUtility.AddTerms(searchTerms, _mergedSearchTerms);
-            }
-            else if (_searchTerms is not null)
-            {
-                _ = SearchTermUtility.AddTerms(searchTerms, _searchTerms);
-            }
+            _ = SearchTermUtility.AddTerms(searchTerms, _searchTerms);
 
             return SearchTermUtility.BuildStableTerms(searchTerms);
         }
     }
 }
-

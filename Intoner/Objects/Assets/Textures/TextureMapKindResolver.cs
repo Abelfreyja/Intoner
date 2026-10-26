@@ -1,5 +1,8 @@
+using Intoner.Objects.Resources;
+using Lumina.Data.Parsing;
 using Penumbra.GameData.Data;
 using Penumbra.GameData.Files;
+using Penumbra.GameData.Files.Materials;
 
 namespace Intoner.Objects.Assets;
 
@@ -52,38 +55,56 @@ internal static class TextureMapKindResolver
     {
         texturePath = string.Empty;
 
-        foreach (var sampler in material.ShaderPackage.Samplers)
+        foreach (Sampler sampler in material.ShaderPackage.Samplers)
         {
-            if (!TryMapSamplerId(sampler.SamplerId, out var candidateKind) || candidateKind != kind)
+            if (!TryMapSamplerId(sampler.SamplerId, out TextureMapKind candidateKind) || candidateKind != kind)
+            {
                 continue;
+            }
 
             if (!TryResolveTexturePath(material, sampler.TextureIndex, out texturePath))
+            {
                 continue;
+            }
 
             return true;
         }
 
-        foreach (var texture in material.Textures)
+        for (int textureIndex = 0; textureIndex < material.Textures.Length; textureIndex++)
         {
-            if (!TryResolveTexturePath(texture, out var candidatePath))
-                continue;
+            bool hasKnownSampler = false;
+            foreach (Sampler sampler in material.ShaderPackage.Samplers)
+            {
+                if (sampler.TextureIndex != textureIndex || !TryMapSamplerId(sampler.SamplerId, out _))
+                {
+                    continue;
+                }
 
-            if (GuessFromFileName(candidatePath) == kind)
+                hasKnownSampler = true;
+                break;
+            }
+
+            if (hasKnownSampler || !TryResolveTexturePath(material, textureIndex, out string candidatePath))
+            {
+                continue;
+            }
+
+            TextureMapKind candidateKind = GuessFromFileName(candidatePath);
+
+            if (candidateKind == kind
+             || (kind == TextureMapKind.Diffuse && candidateKind == TextureMapKind.Unknown && material.Textures.Length == 1))
             {
                 texturePath = candidatePath;
                 return true;
             }
         }
 
-        if (kind == TextureMapKind.Diffuse && material.Textures.Length == 1)
-            return TryResolveTexturePath(material, 0, out texturePath);
-
         return false;
     }
 
     public static TextureMapKind GuessFromFileName(string path)
     {
-        var normalized = Normalize(path);
+        var normalized = NormalizeLookupPath(path);
         var fileNameWithExtension = Path.GetFileName(normalized);
         var fileNameWithoutExtension = Path.GetFileNameWithoutExtension(normalized);
         if (string.IsNullOrEmpty(fileNameWithExtension) && string.IsNullOrEmpty(fileNameWithoutExtension))
@@ -92,7 +113,7 @@ internal static class TextureMapKindResolver
         if (normalized.Contains("/eye/eyelids_shadow.tex", StringComparison.Ordinal))
             return TextureMapKind.Normal;
 
-        if (normalized.Contains("/ui/map/", StringComparison.Ordinal) && !string.IsNullOrEmpty(fileNameWithoutExtension))
+        if (normalized.StartsWith("ui/map/", StringComparison.Ordinal) && !string.IsNullOrEmpty(fileNameWithoutExtension))
         {
             if (fileNameWithoutExtension.EndsWith("m_m", StringComparison.Ordinal)
                 || fileNameWithoutExtension.EndsWith("m_s", StringComparison.Ordinal))
@@ -108,10 +129,6 @@ internal static class TextureMapKindResolver
         {
             if (!string.IsNullOrEmpty(fileNameWithExtension) &&
                 fileNameWithExtension.Contains(token, StringComparison.OrdinalIgnoreCase))
-                return kind;
-
-            if (!string.IsNullOrEmpty(fileNameWithoutExtension) &&
-                fileNameWithoutExtension.Contains(token, StringComparison.OrdinalIgnoreCase))
                 return kind;
         }
 
@@ -144,31 +161,29 @@ internal static class TextureMapKindResolver
 
     public static bool TryResolveTexturePath(in MtrlFile.Texture texture, out string texturePath)
     {
-        var resolvedPath = GamePaths.Tex.HandleDx11Path(texture, out var dx11Path)
-            ? dx11Path
-            : texture.Path;
+        MtrlFile.Texture normalizedTexture = texture;
+        normalizedTexture.Path = ObjectResolvedPath.FromGamePath(texture.Path).Path;
 
-        texturePath = NormalizeGamePath(resolvedPath);
-        return !string.IsNullOrWhiteSpace(texturePath);
-    }
+        if (normalizedTexture.Path.Length == 0)
+        {
+            texturePath = string.Empty;
+            return false;
+        }
 
-    private static string Normalize(string? path)
-    {
-        if (string.IsNullOrWhiteSpace(path))
-            return string.Empty;
+        if (string.Equals(normalizedTexture.Path, "dummy.tex", StringComparison.OrdinalIgnoreCase))
+        {
+            texturePath = GamePaths.Tex.Dummy;
+            return true;
+        }
 
-        return path.Replace('\\', '/').ToLowerInvariant();
+        _ = GamePaths.Tex.HandleDx11Path(normalizedTexture, out string path);
+        texturePath = ObjectResolvedPath.FromGamePath(path).Path;
+        return texturePath.Length > 0;
     }
 
     internal static string NormalizeLookupPath(string? path)
         => NormalizeGamePath(path).ToLowerInvariant();
 
     internal static string NormalizeGamePath(string? path)
-    {
-        if (string.IsNullOrWhiteSpace(path))
-            return string.Empty;
-
-        return path.Replace('\\', '/').TrimStart('/');
-    }
+        => GameAssetPathRules.NormalizeGamePath(path ?? string.Empty);
 }
-

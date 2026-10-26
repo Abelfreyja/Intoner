@@ -11,7 +11,6 @@ using Intoner.Objects.Runtime;
 using Intoner.Objects.UI.Components;
 using Intoner.Objects.Utils;
 using Intoner.UI.Performance;
-using System.Globalization;
 using System.Numerics;
 
 namespace Intoner.Objects.UI;
@@ -67,12 +66,6 @@ internal sealed class ObjectCatalogBrowser
         Grid,
     }
 
-    internal enum CatalogGridTileImageSource
-    {
-        Preview,
-        ItemIcon,
-    }
-
     internal void DrawCatalogPanel(ObjectCatalogData catalog)
     {
         if (_browserSelection.Source == CreateBrowserSelection.CreateBrowserSource.Library)
@@ -94,6 +87,8 @@ internal sealed class ObjectCatalogBrowser
                     entry => _draft.BgObject.Model = _draft.BgObject.Model with
                     {
                         ModelPath = ObjectCreationDraft.ToggleCatalogSelectionPath(_draft.BgObject.Model.ModelPath, entry.PlacementPath),
+                        ColliderDefinition = string.Equals(_draft.BgObject.Model.ModelPath, entry.PlacementPath, StringComparison.OrdinalIgnoreCase)
+                            ? null : entry.BgObjectInfo?.DefaultColliderDefinition,
                     },
                     "No bgobject entries match the current filter.");
                 break;
@@ -236,8 +231,6 @@ internal sealed class ObjectCatalogBrowser
                 DrawCatalogGridTile(
                     $"bgobjectCatalogGrid:{entry.Source}:{entry.RowId}:{entry.PlacementPath}",
                     entry,
-                    entry.Name,
-                    null,
                     string.Equals(selectedPath, entry.PlacementPath, StringComparison.OrdinalIgnoreCase),
                     () => onSelect(entry),
                     tileSize);
@@ -350,13 +343,10 @@ internal sealed class ObjectCatalogBrowser
                 DrawCatalogGridTile(
                     $"furnitureCatalogGrid:{entry.Entry.Source}:{entry.Variant.HousingRowId}:{entry.Variant.ItemRowId}:{entry.Entry.PlacementPath}",
                     entry.Entry,
-                    entry.Variant.Name,
-                    entry.Variant.HousingRowId,
                     _draft.IsFurnitureCatalogSelection(entry),
                     () => onSelect(entry),
                     tileSize,
-                    imageSource: CatalogGridTileImageSource.ItemIcon,
-                    itemIconId: GetFurnitureCatalogItemIconId(entry));
+                    entry.Variant);
                 _libraryBrowser.DrawCatalogEntryLibraryContext(
                     $"furniture-grid:{entry.Entry.Source}:{entry.Variant.HousingRowId}:{entry.Variant.ItemRowId}:{entry.Entry.PlacementPath}",
                     entry.Variant.Name,
@@ -557,18 +547,16 @@ internal sealed class ObjectCatalogBrowser
     private void DrawCatalogGridTile(
         string id,
         ObjectCatalogEntry entry,
-        string displayName,
-        uint? displayRowId,
         bool selected,
         Action onSelect,
         Vector2 size,
-        CatalogGridTileImageSource imageSource = CatalogGridTileImageSource.Preview,
-        uint? itemIconId = null)
+        ObjectCatalogFurnitureVariant? furniture = null)
     {
         float scale = ImGuiHelpers.GlobalScale;
         float innerPadding = 8f * scale;
         PreviewRender.Result? preview = null;
-        if (imageSource == CatalogGridTileImageSource.Preview)
+
+        if (furniture is null)
         {
             preview = string.IsNullOrWhiteSpace(entry.PlacementPath)
                 ? new PreviewRender.Result(null, false, "Preview unavailable")
@@ -587,7 +575,15 @@ internal sealed class ObjectCatalogBrowser
         if (hovered)
         {
             ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
-            DrawCatalogEntryTooltip(entry, displayName, displayRowId, preview);
+
+            if (furniture is not null)
+            {
+                FurnitureDataTooltip.Draw(furniture, entry.DisplayPath);
+            }
+            else
+            {
+                DrawCatalogEntryTooltip(entry, preview);
+            }
         }
 
         var min = ImGui.GetItemRectMin();
@@ -618,9 +614,9 @@ internal sealed class ObjectCatalogBrowser
         drawList.AddRectFilled(min, max, ImGui.GetColorU32(fill), rounding);
         drawList.AddRect(min, max, ImGui.GetColorU32(border), rounding, ImDrawFlags.None, hovered || selected ? 1.35f * scale : 1f * scale);
 
-        if (imageSource == CatalogGridTileImageSource.ItemIcon)
+        if (furniture is not null)
         {
-            DrawCatalogItemIconTileContent(drawList, previewMin, previewMax, imageRounding, itemIconId, accent);
+            DrawCatalogItemIconTileContent(drawList, previewMin, previewMax, imageRounding, furniture.IconId, accent);
         }
         else if (preview is { } resolvedPreview && resolvedPreview.Texture is not null)
         {
@@ -695,8 +691,6 @@ internal sealed class ObjectCatalogBrowser
 
     private static void DrawCatalogEntryTooltip(
         ObjectCatalogEntry entry,
-        string displayName,
-        uint? displayRowId,
         PreviewRender.Result? preview)
     {
         (FontAwesomeIcon icon, string kind) = entry.Kind switch
@@ -710,15 +704,8 @@ internal sealed class ObjectCatalogBrowser
         IntonerTooltip.Draw(
             () =>
             {
-                IntonerTooltipContent.Header(icon, displayName, kind);
+                IntonerTooltipContent.Header(icon, entry.Name, kind);
                 IntonerTooltipContent.Separator();
-
-                if (displayRowId is { } rowId)
-                {
-                    IntonerTooltipContent.Property(
-                        "Game data",
-                        $"Row {rowId.ToString(CultureInfo.InvariantCulture)}");
-                }
 
                 IntonerTooltipContent.Property("Source", entry.Source);
                 IntonerTooltipContent.Property("Asset", entry.DisplayPath);

@@ -2,6 +2,7 @@ using Intoner.Objects.Api;
 using Intoner.Objects.Models;
 using Intoner.Objects.Runtime;
 using Intoner.Services.Configuration;
+using Intoner.Services.Serialization;
 using Intoner.Services.Storage;
 using Microsoft.Extensions.Logging;
 
@@ -50,18 +51,20 @@ internal sealed class ObjectLayoutAutoSaveService : IObjectLayoutAutoSaveService
 
     internal void FrameworkUpdate(DateTime now)
     {
-        LayoutAutoSaveConfiguration configuration = _configurationService.Current.LayoutAutoSave;
-        if (!configuration.Enabled)
-        {
-            return;
-        }
-
         if (now < _nextSaveAtUtc)
         {
             return;
         }
 
+        LayoutAutoSaveConfiguration configuration = _configurationService.Current.LayoutAutoSave;
+
+        if (!configuration.Enabled)
+        {
+            return;
+        }
+
         _nextSaveAtUtc = now + ResolveInterval(configuration);
+
         if (!_recoveryService.TryPrepareSession())
         {
             return;
@@ -80,15 +83,16 @@ internal sealed class ObjectLayoutAutoSaveService : IObjectLayoutAutoSaveService
         try
         {
             ObjectPersistentWorkspaceSnapshot workspace = _persistenceState.CaptureWorkspace(savedAtUtc);
-            if (workspace.Objects.Count == 0 && workspace.StandaloneFolders.Count == 0 && workspace.DefaultLayoutFolders.Count == 0)
+            if (workspace.StandaloneObjects.Count == 0 && workspace.StandaloneGroups.Count == 0
+                && workspace.StandaloneFolders.Count == 0 && workspace.Layouts.Count == 0)
             {
                 _fileSystem.DeleteFile(_pathService.ObjectAutosaveCurrentPath);
             }
             else
             {
                 ObjectLayoutAutosaveDocument document = ObjectLayoutJsonSerializer.BuildAutosaveDocument(
-                    workspace with { Name = $"{workspace.Name} autosave" });
-                _fileSystem.WriteAllTextAtomic(
+                    workspace);
+                JsonDocumentUtility.WriteFile(_fileSystem,
                     _pathService.ObjectAutosaveCurrentPath,
                     ObjectLayoutJsonSerializer.SerializeAutosave(document));
             }
@@ -104,4 +108,3 @@ internal sealed class ObjectLayoutAutoSaveService : IObjectLayoutAutoSaveService
     private static TimeSpan ResolveInterval(LayoutAutoSaveConfiguration configuration)
         => TimeSpan.FromSeconds(configuration.IntervalSeconds);
 }
-

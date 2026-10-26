@@ -1,4 +1,3 @@
-using System.Diagnostics;
 
 namespace Intoner.Objects.Assets;
 
@@ -14,10 +13,7 @@ internal static class SqpackIndexFileSystem
     {
         sqpackRoot = string.Empty;
 
-        string? executablePath = Process.GetCurrentProcess().MainModule?.FileName;
-        string gameDirectory = executablePath is null
-            ? string.Empty
-            : Path.GetDirectoryName(executablePath) ?? string.Empty;
+        string? gameDirectory = Path.GetDirectoryName(Environment.ProcessPath);
         if (string.IsNullOrWhiteSpace(gameDirectory))
         {
             return false;
@@ -42,4 +38,3 @@ internal static class SqpackIndexFileSystem
         }
     }
 }
-

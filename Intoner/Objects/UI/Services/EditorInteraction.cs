@@ -1,4 +1,6 @@
+using Intoner.Objects.Runtime;
 using Intoner.Objects.UI.Components;
+using Intoner.Scene;
 using Intoner.Services.Input;
 
 namespace Intoner.Objects.UI.Services;
@@ -8,6 +10,8 @@ internal sealed class EditorInteraction : IDisposable
     private readonly IHistoryCoordinator _history;
     private readonly Gizmo _gizmo;
     private readonly IShortcutService _shortcuts;
+    private readonly IObjectWorkspaceHistory _workspaceHistory;
+    private readonly ISceneLocationService _locations;
 
     public EditorSelectionService Selection { get; }
     public EditorDialog Dialog { get; } = new();
@@ -18,17 +22,33 @@ internal sealed class EditorInteraction : IDisposable
         EditorSelectionService selection,
         IHistoryCoordinator history,
         Gizmo gizmo,
-        IShortcutService shortcuts)
+        IShortcutService shortcuts,
+        IObjectWorkspaceHistory workspaceHistory,
+        ISceneLocationService locations)
     {
         Selection = selection;
         _history = history;
         _gizmo = gizmo;
         _shortcuts = shortcuts;
+        _workspaceHistory = workspaceHistory;
+        _locations = locations;
+        _workspaceHistory.MutationStarting += CommitPendingHistory;
+        _locations.TransitionStarted += CancelLocationInteractions;
         _history.ConnectSelectionHandlers(CaptureSelection, ApplySelection);
     }
 
     public void Dispose()
-        => _history.DisconnectSelectionHandlers();
+    {
+        _workspaceHistory.MutationStarting -= CommitPendingHistory;
+        _locations.TransitionStarted -= CancelLocationInteractions;
+        _history.DisconnectSelectionHandlers();
+    }
+
+    private void CancelLocationInteractions()
+    {
+        _history.CommitPendingInspectorEdits();
+        _gizmo.CancelPreviewInteractions();
+    }
 
     public Guid[] CaptureSelection()
         => [.. Selection.SelectedItemIds];
@@ -53,14 +73,13 @@ internal sealed class EditorInteraction : IDisposable
         }
 
         _history.CommitPendingInspectorEdits();
-        _gizmo.CancelInteractions();
+        _gizmo.ExitGroupPivotEditing();
     }
 
     public void CommitPendingHistory()
     {
         _history.CommitPendingInspectorEdits();
         _gizmo.CancelInteractions();
-        _history.PrepareForMutation();
     }
 
     public void OpenDialog(EditorDialog.Request request)

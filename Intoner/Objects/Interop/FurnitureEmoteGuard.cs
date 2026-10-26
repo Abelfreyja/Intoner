@@ -1,347 +1,199 @@
 using Dalamud.Hooking;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game.Control;
-using FFXIVClientStructs.FFXIV.Client.LayoutEngine;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine.Group;
+using Intoner.Logging;
 using Intoner.Services.Interop;
-using Intoner.Utils;
 using Microsoft.Extensions.Logging;
 using System.Numerics;
 using System.Runtime.InteropServices;
 
-namespace Intoner.Objects.Interop;
-
-internal sealed unsafe class FurnitureEmoteGuard : IDisposable
+namespace Intoner.Objects.Interop
 {
-    [StructLayout(LayoutKind.Sequential, Size = 0x40)]
-    private struct SnapResult
+    internal sealed unsafe class FurnitureEmoteGuard : FrameworkNativeService
     {
-        public Vector3 PrimaryPosition;
-        public float PrimaryRotation;
-        private fixed byte _padding0[12];
-        public Vector3 FallbackPosition;
-        public float FallbackRotation;
-        private fixed byte _padding1[12];
-        public nint LayoutInstance;
-    }
-
-    private delegate bool ResolveSnapDelegate(nint actor, SnapResult* result);
-    private delegate bool ExecuteEmoteDelegate(nint emoteManager, ushort emoteId, EmoteController.PlayEmoteOption* playEmoteOption);
-
-    private readonly ILogger<FurnitureEmoteGuard> _logger;
-    private readonly IGameInteropProvider         _gameInteropProvider;
-    private readonly ISigScanner                  _sigScanner;
-
-    private readonly Lock _hookStateLock = new();
-    private readonly Lock _trackedInstancesLock = new();
-    private readonly Dictionary<nint, HashSet<nint>> _trackedInstanceGroups = [];
-    private readonly HashSet<nint> _trackedInstances = [];
-
-    private Hook<ExecuteEmoteDelegate>?  _executeEmoteHook;
-    private Hook<ResolveSnapDelegate>?   _snapVariantZeroHook;
-    private Hook<ResolveSnapDelegate>?   _snapVariantOneHook;
-    private ExecuteEmoteDelegate?        _executeEmoteOriginal;
-    private ResolveSnapDelegate?         _snapVariantZeroOriginal;
-    private ResolveSnapDelegate?         _snapVariantOneOriginal;
-    private readonly DisposalState _disposeState = new();
-    private Task?                        _hookInitializationTask;
-    private bool                         _hooksDisposed;
-
-    public FurnitureEmoteGuard(ILogger<FurnitureEmoteGuard> logger, IGameInteropProvider gameInteropProvider, ISigScanner sigScanner)
-    {
-        _logger              = logger;
-        _gameInteropProvider = gameInteropProvider;
-        _sigScanner          = sigScanner;
-
-        StartHookInitialization();
-    }
-
-    private void StartHookInitialization()
-    {
-        Task hookInitializationTask;
-        lock (_hookStateLock)
+        [StructLayout(LayoutKind.Sequential, Size = 0x40)]
+        private struct SnapResult
         {
-            if (_hookInitializationTask != null || _disposeState.IsDisposing)
+            public Vector3 PrimaryPosition;
+            public float PrimaryRotation;
+            private fixed byte _padding0[12];
+            public Vector3 FallbackPosition;
+            public float FallbackRotation;
+            private fixed byte _padding1[12];
+            public nint LayoutInstance;
+        }
+
+        [return: MarshalAs(UnmanagedType.I1)]
+        private delegate bool ResolveSnapDelegate(nint actor, SnapResult* result);
+
+        private readonly ILogger<FurnitureEmoteGuard> _logger;
+        private readonly IGameInteropProvider         _gameInteropProvider;
+
+        private readonly nint _snapVariantZeroAddress;
+        private readonly nint _snapVariantOneAddress;
+
+        private readonly Lock _trackedInstancesLock = new();
+        private readonly Dictionary<nint, HashSet<nint>> _trackedInstanceGroups = [];
+        private readonly HashSet<nint> _trackedInstances = [];
+
+        private Hook<EmoteManager.Delegates.ExecuteEmote>? _executeEmoteHook;
+        private Hook<ResolveSnapDelegate>?  _snapVariantZeroHook;
+        private Hook<ResolveSnapDelegate>?  _snapVariantOneHook;
+        private int _available;
+
+        public bool IsAvailable => !IsDisposing && Volatile.Read(ref _available) != 0;
+
+        public FurnitureEmoteGuard(
+            ILogger<FurnitureEmoteGuard> logger,
+            IGameInteropProvider gameInteropProvider,
+            ISigScanner sigScanner,
+            IFramework framework)
+            : base(framework, logger)
+        {
+            _logger              = logger;
+            _gameInteropProvider = gameInteropProvider;
+
+            _snapVariantZeroAddress = NativeAddressResolver.TryResolveJmpCallTarget(logger, sigScanner, IntonerSignatures.FurnitureSnapZero);
+            _snapVariantOneAddress = NativeAddressResolver.TryResolveJmpCallTarget(logger, sigScanner, IntonerSignatures.FurnitureSnapOne);
+        }
+
+        protected override void InitializeCore()
+        {
+            try
+            {
+                _executeEmoteHook = Hooks.Add(InteropHookUtility.CreateHookFromAddress<EmoteManager.Delegates.ExecuteEmote>(
+                    _logger, _gameInteropProvider, IntonerSignatures.FurnitureExecuteEmote, ExecuteEmoteDetour));
+                _snapVariantZeroHook = Hooks.Add(InteropHookUtility.CreateHookFromAddress<ResolveSnapDelegate>(
+                    _logger, _gameInteropProvider, _snapVariantZeroAddress, ResolveSnapVariantZeroDetour, IntonerSignatures.FurnitureSnapZero));
+                _snapVariantOneHook = Hooks.Add(InteropHookUtility.CreateHookFromAddress<ResolveSnapDelegate>(
+                    _logger, _gameInteropProvider, _snapVariantOneAddress, ResolveSnapVariantOneDetour, IntonerSignatures.FurnitureSnapOne));
+                if (_executeEmoteHook is null || _snapVariantZeroHook is null || _snapVariantOneHook is null || !Hooks.Enable())
+                {
+                    throw new InvalidOperationException("required furniture emote hooks are unavailable");
+                }
+
+                Volatile.Write(ref _available, 1);
+            }
+            catch (Exception ex)
+            {
+                Hooks.Dispose();
+                _logger.LogWarning(ex, "furniture emote guard failed to initialize emote hooks");
+            }
+        }
+
+        public void RegisterInstanceTree(nint instance, IReadOnlyList<nint> instances)
+        {
+            if (instance == 0)
             {
                 return;
             }
 
-            _hookInitializationTask = Task.Run(InitializeHooks);
-            hookInitializationTask = _hookInitializationTask;
+            HashSet<nint> trackedAddresses = new(instances);
+
+            lock (_trackedInstancesLock)
+            {
+                if (IsDisposing)
+                {
+                    return;
+                }
+
+                RemoveTrackedGroup(instance);
+                _trackedInstanceGroups[instance] = trackedAddresses;
+                _trackedInstances.UnionWith(trackedAddresses);
+            }
         }
 
-        _ = hookInitializationTask.ContinueWith(
-            _ => DisposeHooksIfRequested(),
-            CancellationToken.None,
-            TaskContinuationOptions.ExecuteSynchronously,
-            TaskScheduler.Default);
-    }
-
-    private void InitializeHooks()
-    {
-        try
+        public void UnregisterInstanceTree(SharedGroupLayoutInstance* instance)
         {
-            _snapVariantZeroHook = CreateSnapHook(IntonerSignatures.FurnitureSnapZero, ResolveSnapVariantZeroDetour);
-            _snapVariantOneHook = CreateSnapHook(IntonerSignatures.FurnitureSnapOne, ResolveSnapVariantOneDetour);
-            _executeEmoteHook = CreateExecuteEmoteHook();
-            _executeEmoteOriginal = _executeEmoteHook?.Original;
-            _snapVariantZeroOriginal = _snapVariantZeroHook?.Original;
-            _snapVariantOneOriginal = _snapVariantOneHook?.Original;
-
-            if (IsDisposeRequested())
+            if (instance == null)
             {
-                DisposeInitializedHooks();
                 return;
             }
 
-            _executeEmoteHook?.Enable();
-            _snapVariantZeroHook?.Enable();
-            _snapVariantOneHook?.Enable();
-
-            if (_executeEmoteHook == null || _snapVariantZeroHook == null || _snapVariantOneHook == null)
+            lock (_trackedInstancesLock)
             {
-                _logger.LogWarning("furniture emote guard did not resolve all emote hooks");
+                RemoveTrackedGroup((nint)instance);
             }
         }
-        catch (Exception ex)
+
+        private bool ExecuteEmoteDetour(EmoteManager* emoteManager, ushort emoteId, EmoteController.PlayEmoteOption* playEmoteOption)
         {
-            _logger.LogWarning(ex, "furniture emote guard failed to initialize emote hooks");
-            DisposeInitializedHooks();
-        }
-    }
+            using InteropHookCollection.CallbackScope callback = Hooks.EnterCallback();
 
-    private Hook<ExecuteEmoteDelegate>? CreateExecuteEmoteHook()
-    {
-        if (IntonerSignatures.FurnitureExecuteEmote.Address == nint.Zero)
-        {
-            _logger.LogWarning("furniture emote guard could not resolve EmoteManager.ExecuteEmote from FFXIVClientStructs");
-            return null;
-        }
+            if (_executeEmoteHook is null)
+            {
+                return false;
+            }
 
-        // explicit layout targets bypass the wrapper snap helpers, so clear helper layouts here too
-        return InteropHookUtility.CreateHookFromAddress<ExecuteEmoteDelegate>(
-            _logger,
-            _gameInteropProvider,
-            IntonerSignatures.FurnitureExecuteEmote,
-            ExecuteEmoteDetour);
-    }
+            if (callback.IsActive && playEmoteOption != null && IsTrackedInstance((nint)playEmoteOption->Layout))
+            {
+                EmoteController.PlayEmoteOption sanitizedOption = *playEmoteOption;
+                sanitizedOption.Layout = null;
+                DiagnosticLog.Write(() => _logger.LogInformation(
+                    "cleared helper furniture layout from play emote option for emote 0x{EmoteId:X}", emoteId));
+                return _executeEmoteHook.OriginalDisposeSafe(emoteManager, emoteId, &sanitizedOption);
+            }
 
-    private Hook<ResolveSnapDelegate>? CreateSnapHook(NativeRelativeBranchTarget target, ResolveSnapDelegate detour)
-    {
-        nint functionAddress = NativeAddressResolver.TryResolveJmpCallTarget(_logger, _sigScanner, target);
-        return InteropHookUtility.CreateHookFromAddress(_logger, _gameInteropProvider, functionAddress, detour, target);
-    }
-
-    public void RegisterInstanceTree(SharedGroupLayoutInstance* instance)
-    {
-        if (instance == null)
-        {
-            return;
+            return _executeEmoteHook.OriginalDisposeSafe(emoteManager, emoteId, playEmoteOption);
         }
 
-        // snap targets can point at child layout instances, not only the shared group root
-        var trackedAddresses = new HashSet<nint>();
-        CollectTrackedInstances((ILayoutInstance*)instance, trackedAddresses);
+        private bool ResolveSnapVariantZeroDetour(nint actor, SnapResult* result)
+            => ResolveSnapDetour(_snapVariantZeroHook, actor, result);
 
-        lock (_trackedInstancesLock)
-        {
-            ReplaceTrackedGroup((nint)instance, trackedAddresses);
-        }
-    }
+        private bool ResolveSnapVariantOneDetour(nint actor, SnapResult* result)
+            => ResolveSnapDetour(_snapVariantOneHook, actor, result);
 
-    public void UnregisterInstanceTree(SharedGroupLayoutInstance* instance)
-    {
-        if (instance == null)
+        private bool ResolveSnapDetour(Hook<ResolveSnapDelegate>? hook, nint actor, SnapResult* result)
         {
-            return;
-        }
+            using InteropHookCollection.CallbackScope callback = Hooks.EnterCallback();
 
-        lock (_trackedInstancesLock)
-        {
-            RemoveTrackedGroup((nint)instance);
-        }
-    }
+            if (hook is null)
+            {
+                return false;
+            }
 
-    private bool ExecuteEmoteDetour(nint emoteManager, ushort emoteId, EmoteController.PlayEmoteOption* playEmoteOption)
-    {
-        var executeEmoteOriginal = _executeEmoteOriginal;
-        if (executeEmoteOriginal == null)
-        {
+            bool resolved = hook.OriginalDisposeSafe(actor, result);
+
+            if (!resolved || result == null || !callback.IsActive || !IsTrackedInstance(result->LayoutInstance))
+            {
+                return resolved;
+            }
+
+            nint layoutInstance = result->LayoutInstance;
+            *result = default;
+            DiagnosticLog.Write(() => _logger.LogInformation(
+                "blocked emote snap onto helper furniture instance 0x{Address:X}", (ulong)layoutInstance));
             return false;
         }
 
-        if (playEmoteOption == null || !IsTrackedInstance((nint)playEmoteOption->Layout))
+        internal bool IsTrackedInstance(nint layoutInstance)
         {
-            return executeEmoteOriginal(emoteManager, emoteId, playEmoteOption);
-        }
-
-        var sanitizedOption = *playEmoteOption;
-        sanitizedOption.Layout = null;
-
-        _logger.LogInformation(
-            "cleared helper furniture layout from play emote option for emote 0x{EmoteId:X}",
-            emoteId);
-
-        return executeEmoteOriginal(emoteManager, emoteId, &sanitizedOption);
-    }
-
-    private bool ResolveSnapVariantZeroDetour(nint actor, SnapResult* result)
-    {
-        var snapVariantZeroOriginal = _snapVariantZeroOriginal;
-        if (snapVariantZeroOriginal == null)
-        {
-            return false;
-        }
-
-        return ResolveSnapDetour(snapVariantZeroOriginal, actor, result);
-    }
-
-    private bool ResolveSnapVariantOneDetour(nint actor, SnapResult* result)
-    {
-        var snapVariantOneOriginal = _snapVariantOneOriginal;
-        if (snapVariantOneOriginal == null)
-        {
-            return false;
-        }
-
-        return ResolveSnapDetour(snapVariantOneOriginal, actor, result);
-    }
-
-    private bool ResolveSnapDetour(ResolveSnapDelegate original, nint actor, SnapResult* result)
-    {
-        var resolved = original(actor, result);
-        if (!resolved || result == null)
-        {
-            return resolved;
-        }
-
-        // wrapper based sit or doze snaps report the chosen layout instance here
-        var layoutInstance = result->LayoutInstance;
-        if (!IsTrackedInstance(layoutInstance))
-        {
-            return resolved;
-        }
-
-        *result = default;
-        _logger.LogInformation(
-            "blocked emote snap onto helper furniture instance 0x{Address:X}",
-            (ulong)layoutInstance);
-        return false;
-    }
-
-    private bool IsTrackedInstance(nint layoutInstance)
-    {
-        lock (_trackedInstancesLock)
-        {
-            return _trackedInstances.Contains(layoutInstance);
-        }
-    }
-
-    private static void CollectTrackedInstances(ILayoutInstance* instance, HashSet<nint> trackedAddresses)
-    {
-        if (instance == null)
-        {
-            return;
-        }
-
-        trackedAddresses.Add((nint)instance);
-        if (instance->Id.Type != InstanceType.SharedGroup)
-        {
-            return;
-        }
-
-        var sharedGroup = (SharedGroupLayoutInstance*)instance;
-        foreach (var child in sharedGroup->Instances.Instances)
-        {
-            var node = child.Value;
-            if (node == null || node->Instance == null)
+            lock (_trackedInstancesLock)
             {
-                continue;
-            }
-
-            CollectTrackedInstances(node->Instance, trackedAddresses);
-        }
-    }
-
-    private void ReplaceTrackedGroup(nint rootInstance, HashSet<nint> trackedAddresses)
-    {
-        RemoveTrackedGroup(rootInstance);
-        _trackedInstanceGroups[rootInstance] = trackedAddresses;
-
-        foreach (var trackedAddress in trackedAddresses)
-        {
-            _trackedInstances.Add(trackedAddress);
-        }
-    }
-
-    private void RemoveTrackedGroup(nint rootInstance)
-    {
-        if (!_trackedInstanceGroups.Remove(rootInstance, out var trackedAddresses))
-        {
-            return;
-        }
-
-        foreach (var trackedAddress in trackedAddresses)
-        {
-            _trackedInstances.Remove(trackedAddress);
-        }
-    }
-
-    public void Dispose()
-    {
-        if (!_disposeState.TryBeginDispose())
-        {
-            return;
-        }
-
-        DisposeHooksIfRequested();
-    }
-
-    private bool IsDisposeRequested()
-        => _disposeState.IsDisposing;
-
-    private void DisposeHooksIfRequested()
-    {
-        lock (_hookStateLock)
-        {
-            if (!_disposeState.IsDisposing || _hookInitializationTask is { IsCompleted: false })
-            {
-                return;
+                return _trackedInstances.Contains(layoutInstance);
             }
         }
 
-        DisposeInitializedHooks();
-    }
-
-    private void DisposeInitializedHooks()
-    {
-        Hook<ExecuteEmoteDelegate>? executeEmoteHook;
-        Hook<ResolveSnapDelegate>? snapVariantZeroHook;
-        Hook<ResolveSnapDelegate>? snapVariantOneHook;
-
-        lock (_hookStateLock)
+        private void RemoveTrackedGroup(nint rootInstance)
         {
-            if (_hooksDisposed)
+            if (!_trackedInstanceGroups.Remove(rootInstance, out HashSet<nint>? trackedAddresses))
             {
                 return;
             }
 
-            _hooksDisposed = true;
-
-            executeEmoteHook    = _executeEmoteHook;
-            snapVariantZeroHook = _snapVariantZeroHook;
-            snapVariantOneHook  = _snapVariantOneHook;
+            _trackedInstances.ExceptWith(trackedAddresses);
         }
 
-        InteropHookUtility.DisposeHook(executeEmoteHook);
-        InteropHookUtility.DisposeHook(snapVariantZeroHook);
-        InteropHookUtility.DisposeHook(snapVariantOneHook);
-
-        lock (_trackedInstancesLock)
+        protected override void DisposeCore()
         {
-            _trackedInstanceGroups.Clear();
-            _trackedInstances.Clear();
+            Volatile.Write(ref _available, 0);
+            base.DisposeCore();
+            lock (_trackedInstancesLock)
+            {
+                _trackedInstanceGroups.Clear();
+                _trackedInstances.Clear();
+            }
         }
     }
 }
-

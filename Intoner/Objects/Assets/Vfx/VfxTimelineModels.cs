@@ -1,6 +1,22 @@
+using System.Runtime.InteropServices;
 using Intoner.Objects.Utils;
 
 namespace Intoner.Objects.Assets;
+
+[StructLayout(LayoutKind.Auto)]
+internal readonly record struct TmbVfxReference(
+    string Path,
+    RuntimeVfxEvidence Evidence,
+    VfxTimelineContext ContextFlags)
+{
+    public IReadOnlyList<string> SearchTerms
+        => new VfxTimelineReferenceInfo(Evidence, ContextFlags).BuildSearchTerms();
+}
+
+[StructLayout(LayoutKind.Auto)]
+internal readonly record struct TmbVfxReferenceCollection(
+    IReadOnlyList<TmbVfxReference> References,
+    bool IsComplete);
 
 [Flags]
 internal enum VfxTimelineContext : byte
@@ -26,6 +42,10 @@ internal readonly record struct VfxTimelineReferenceInfo(
 
     public bool HasEvidence
         => NormalizedEvidence != RuntimeVfxEvidence.None;
+
+    public bool IsCoveredBy(VfxTimelineReferenceInfo other)
+        => (NormalizedEvidence & ~other.NormalizedEvidence) == RuntimeVfxEvidence.None
+            && (Context & ~other.Context) == VfxTimelineContext.None;
 
     public VfxTimelineReferenceInfo Merge(VfxTimelineReferenceInfo other)
         => new(NormalizedEvidence | other.NormalizedEvidence, Context | other.Context);
@@ -86,4 +106,3 @@ internal static class VfxTimelineContextExtensions
     public static bool HasAny(this VfxTimelineContext value, VfxTimelineContext flags)
         => (value & flags) != VfxTimelineContext.None;
 }
-

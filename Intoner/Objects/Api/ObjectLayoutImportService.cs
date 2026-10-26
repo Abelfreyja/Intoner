@@ -34,17 +34,20 @@ internal sealed class ObjectLayoutImportService(
                 return ObjectLayoutTransferResult.Failure(housingModeError);
             }
 
-            if (!objectIdentityService.TryValidateSavedLayoutAddition(payload.Snapshots, out Guid conflictingId))
+            if (!objectIdentityService.TryValidateSavedLayoutAddition(payload.Snapshots, out Guid conflictingId, payload.Groups))
             {
                 return ObjectLayoutTransferResult.Failure($"The imported layout contains object id {conflictingId:D}, which is already owned by another scene source.");
             }
 
-            if (!layoutManager.TryCreateLayout(payload.Name, payload.Snapshots, payload.Folders, out ObjectLayoutSnapshot layout))
+            if (!layoutManager.TryCreateLayout(payload.Name, payload.Snapshots, payload.Folders, out ObjectLayoutSnapshot layout, payload.Groups))
             {
                 return ObjectLayoutTransferResult.Failure("Failed to save the imported layout.");
             }
 
-            return new ObjectLayoutTransferResult(true, layout, payload.SuccessMessage);
+            return new ObjectLayoutTransferResult(true, layout, payload.SuccessMessage)
+            {
+                RecoveryNotes = payload.RecoveryNotes,
+            };
         }
     }
 }

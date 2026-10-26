@@ -1,61 +1,72 @@
+using Intoner.Objects.Resources;
+
 namespace Intoner.Objects.Assets;
 
 internal static class GameMaterialPathUtility
 {
-    public static bool TryResolveExistingMaterialPath(
+    public static bool TryResolveMaterialPath(
         Func<string, bool> fileExists,
         string modelPath,
         string materialName,
-        out string materialPath)
-    {
-        foreach (string candidate in CollectMaterialPathCandidates(modelPath, materialName))
-        {
-            if (!fileExists(candidate))
-            {
-                continue;
-            }
-
-            materialPath = candidate;
-            return true;
-        }
-
-        materialPath = string.Empty;
-        return false;
-    }
-
-    public static bool TryGetPrimaryMaterialPathCandidate(string modelPath, string materialName, out string materialPath)
+        out string materialPath,
+        bool allowMissing = false)
     {
         IReadOnlyList<string> candidates = CollectMaterialPathCandidates(modelPath, materialName);
+        string? primaryCandidate = null;
+
         foreach (string candidate in candidates)
         {
-            if (IsQualifiedMaterialPath(candidate))
+            if (fileExists(candidate))
             {
                 materialPath = candidate;
                 return true;
             }
+
+            if (primaryCandidate is null && IsQualifiedMaterialPath(candidate))
+            {
+                primaryCandidate = candidate;
+            }
         }
 
-        if (candidates.Count == 0)
-        {
-            materialPath = string.Empty;
-            return false;
-        }
-
-        materialPath = candidates[0];
-        return true;
+        materialPath = allowMissing && candidates.Count > 0
+            ? primaryCandidate ?? candidates[0]
+            : string.Empty;
+        return materialPath.Length > 0;
     }
 
-    private static IReadOnlyList<string> CollectMaterialPathCandidates(string modelPath, string materialName)
+    public static bool TryNormalizeMaterialRequest(
+        string modelPath,
+        string materialName,
+        out string normalizedModelPath,
+        out string normalizedMaterialName)
     {
-        string normalizedMaterialName = GameAssetPathRules.NormalizeGamePath(materialName);
-        if (string.IsNullOrWhiteSpace(normalizedMaterialName))
+        normalizedModelPath = ObjectResolvedPath.FromGamePath(modelPath).Path;
+        normalizedMaterialName = ObjectResolvedPath.FromGamePath(materialName).Path;
+
+        if (!GameAssetPathRules.IsFileKind(normalizedModelPath, GameAssetFileKind.Mdl)
+         || string.IsNullOrWhiteSpace(normalizedMaterialName))
         {
-            return [];
+            return false;
         }
 
         if (!GameAssetPathRules.IsFileKind(normalizedMaterialName, GameAssetFileKind.Mtrl))
         {
-            normalizedMaterialName += ".mtrl";
+            normalizedMaterialName = ObjectResolvedPath.FromGamePath(normalizedMaterialName + ".mtrl").Path;
+        }
+
+        return normalizedMaterialName.Length > 0;
+    }
+
+    private static IReadOnlyList<string> CollectMaterialPathCandidates(string modelPath, string materialName)
+    {
+        if (!TryNormalizeMaterialRequest(modelPath, materialName, out string normalizedModelPath, out string normalizedMaterialName))
+        {
+            return [];
+        }
+
+        if (IsQualifiedMaterialPath(normalizedMaterialName))
+        {
+            return [normalizedMaterialName];
         }
 
         List<string> candidates = [];
@@ -63,7 +74,7 @@ internal static class GameMaterialPathUtility
         AddMaterialPathCandidate(candidates, seenCandidates, normalizedMaterialName);
 
         string fileName = Path.GetFileName(normalizedMaterialName);
-        string modelDirectory = GetGameDirectory(modelPath);
+        string modelDirectory = GetGameDirectory(normalizedModelPath);
         string modelParentDirectory = GetGameDirectory(modelDirectory);
         string materialDirectory = CombineGamePath(modelParentDirectory, "material");
         AddMaterialPathCandidatesForDirectory(candidates, seenCandidates, modelDirectory, normalizedMaterialName, fileName);
@@ -74,7 +85,7 @@ internal static class GameMaterialPathUtility
     }
 
     private static void AddMaterialPathCandidate(ICollection<string> candidates, ISet<string> seenCandidates, string path)
-        => _ = GameAssetPathCollectionUtility.AddGamePath(candidates, seenCandidates, path);
+        => _ = GameAssetPathCollectionUtility.AddGamePath(candidates, seenCandidates, ObjectResolvedPath.FromGamePath(path).Path);
 
     private static void AddMaterialPathCandidatesForDirectory(
         ICollection<string> candidates,

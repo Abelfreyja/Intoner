@@ -173,18 +173,7 @@ internal sealed class DebugIpcSamples
     }
 
     private ObjectLocationData BuildObjectIpcCreationData()
-    {
-        var context = _sceneView.GetCurrentLocationContext();
-        return new ObjectLocationData(
-            context.WorldId,
-            context.WorldName,
-            context.TerritoryId,
-            context.TerritoryName,
-            context.DivisionId,
-            context.WardId,
-            context.HouseId,
-            context.RoomId);
-    }
+        => ObjectApiMapper.ToLocation(_sceneView.GetCurrentLocationContext());
 
     internal bool TryResolveSelectedObjectIpcSnapshot(out ObjectSnapshot snapshot)
         => TryResolveSelectedIpcSnapshot(persistedOnly: false, out snapshot);

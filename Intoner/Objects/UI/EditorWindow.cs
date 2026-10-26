@@ -24,6 +24,7 @@ internal sealed class EditorWindow : IntonerWindow, IDisposable
         => !_editorContentDrawnThisFrame
            && _configurationService.Current.Ui.ShowSceneToolsWithoutEditor;
 
+    private readonly IUiBuilder                     _uiBuilder;
     private readonly EditorWorkspaceHost            _workspaces;
     private readonly IObjectSceneView               _sceneView;
     private readonly IHistoryCoordinator            _historyCoordinator;
@@ -62,9 +63,11 @@ internal sealed class EditorWindow : IntonerWindow, IDisposable
         BackdropRenderer windowBackdropRenderer,
         TitleBarIconRenderer titleBarIconRenderer,
         EditorTitleBarIndicatorService titleBarIndicatorService,
-        TitleBarWindowMetrics titleBarWindowMetrics)
+        TitleBarWindowMetrics titleBarWindowMetrics,
+        IUiBuilder uiBuilder)
         : base(buildInfo.WindowName, uiPerformance)
     {
+        _uiBuilder                     = uiBuilder;
         _workspaces                    = workspaces;
         _sceneView                     = sceneView;
         _historyCoordinator            = historyCoordinator;
@@ -81,6 +84,9 @@ internal sealed class EditorWindow : IntonerWindow, IDisposable
         _titleBarIndicatorService      = titleBarIndicatorService;
         _titleBarWindowMetrics         = titleBarWindowMetrics;
         _mainWindowRequestSubscription = mediator.Subscribe<IntonerMainWindowRequest>(this, HandleMainWindowRequest);
+        _uiBuilder.HideUi += DeactivateEditorInteraction;
+
+        _windowBackdropRenderer.GetEffect<GlassEffect>();
 
         RespectCloseHotkey = true;
         ShowCloseButton = true;
@@ -99,13 +105,10 @@ internal sealed class EditorWindow : IntonerWindow, IDisposable
             return;
         }
 
-        if (_configurationService.Current.Ui.EnableShortcutsWithoutEditor)
-        {
-            _shortcutHandler.HandleEditorShortcuts();
-            return;
-        }
-
-        _shortcuts.DeactivateAll();
+        bool shortcutsAllowed = !_interaction.Dialog.IsOpen && _configurationService.Current.Ui.EnableShortcutsWithoutEditor;
+        _shortcutHandler.HandleEditorShortcuts(
+            commandsEnabled: shortcutsAllowed,
+            sceneToolsEnabled: shortcutsAllowed && ShouldDrawSceneToolsWithoutEditor);
     }
 
     internal void DrawSceneToolsWithoutEditor()
@@ -135,10 +138,7 @@ internal sealed class EditorWindow : IntonerWindow, IDisposable
 
     public override void OnClose()
     {
-        _editorContentDrawnThisFrame = false;
-        _editorContentWasDrawn = false;
-        _shortcuts.DeactivateAll();
-        _sceneOverlay.Deactivate();
+        DeactivateEditorInteraction();
         _interaction.Dialog.Dismiss();
         _startupView.DismissSplashScreen();
         _startupView.SetSplashScreenStatus(null, isError: false);
@@ -147,10 +147,19 @@ internal sealed class EditorWindow : IntonerWindow, IDisposable
 
     public void Dispose()
     {
+        _uiBuilder.HideUi -= DeactivateEditorInteraction;
         _mainWindowRequestSubscription.Dispose();
-        _sceneOverlay.Deactivate();
+        DeactivateEditorInteraction();
         _windowBackgroundColorScope?.Dispose();
         _windowBackgroundColorScope = null;
+    }
+
+    private void DeactivateEditorInteraction()
+    {
+        _editorContentDrawnThisFrame = false;
+        _editorContentWasDrawn = false;
+        _shortcuts.DeactivateAll();
+        _sceneOverlay.Deactivate();
     }
 
     private void HandleMainWindowRequest(IntonerMainWindowRequest request)
@@ -324,27 +333,27 @@ internal sealed class EditorWindow : IntonerWindow, IDisposable
             return;
         }
 
-        var drawList = ImGui.GetWindowDrawList();
+        DrawWindowBackground(ImGui.GetWindowDrawList(), area, _editorOverlayLayer.BackgroundColor, _windowBackdropRenderer);
+    }
 
+    internal static void DrawWindowBackground(ImDrawListPtr drawList, EditorOverlayArea area, Vector4 backgroundColor, BackdropRenderer renderer)
+    {
         drawList.PushClipRect(area.Min, area.Max, false);
         try
         {
-            if (IsWindowBackgroundBlurActive())
-            {
-                _windowBackdropRenderer.GetEffect<GlassEffect>().DrawRegion(
+            if (!IsWindowBackgroundBlurActive()
+                || !renderer.GetEffect<GlassEffect>().DrawRegion(
                     drawList,
                     area.Min,
                     area.Max,
                     area.Rounding,
-                    CreateWindowBodyGlassStyle(_editorOverlayLayer.BackgroundColor),
-                    area.RoundingFlags);
-            }
-            else
+                    CreateWindowBodyGlassStyle(backgroundColor),
+                    area.RoundingFlags))
             {
                 drawList.AddRectFilled(
                     area.Min,
                     area.Max,
-                    ImGui.GetColorU32(_editorOverlayLayer.BackgroundColor),
+                    ImGui.GetColorU32(backgroundColor),
                     area.Rounding,
                     area.RoundingFlags);
             }

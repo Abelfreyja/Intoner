@@ -1,21 +1,34 @@
+using Intoner.Objects.Resources;
+
 namespace Intoner.Objects.Assets;
 
-internal sealed class VfxTimelineReferenceCache(IObjectAssetGameData gameData)
+internal sealed class VfxTimelineReferenceCache
 {
-    private readonly IObjectAssetGameData _gameData = gameData;
-    private readonly Dictionary<string, IReadOnlyList<TmbVfxReference>> _references = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, TmbVfxReferenceCollection> _references = new(StringComparer.OrdinalIgnoreCase);
 
-    public IReadOnlyList<TmbVfxReference> Get(string timelinePath)
+    public TmbVfxReferenceCollection Get(IObjectAssetGameData gameData, string timelinePath, CancellationToken cancellationToken = default)
     {
-        string normalizedTimelinePath = GameAssetPathRules.NormalizeGamePath(timelinePath);
-        if (_references.TryGetValue(normalizedTimelinePath, out IReadOnlyList<TmbVfxReference>? references))
+        cancellationToken.ThrowIfCancellationRequested();
+        string normalizedTimelinePath = ObjectResolvedPath.FromGamePath(timelinePath).Path;
+        if (_references.TryGetValue(normalizedTimelinePath, out TmbVfxReferenceCollection references))
         {
             return references;
         }
 
-        references = VfxAssetAnalyzer.CollectTmbVfxReferences(_gameData, normalizedTimelinePath);
-        _references.Add(normalizedTimelinePath, references);
+        if (!GameAssetPathRules.IsFileKind(normalizedTimelinePath, GameAssetFileKind.Tmb))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return new([], false);
+        }
+
+        references = TmbVfxReferenceReader.CollectReferences(gameData, normalizedTimelinePath, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (references.IsComplete)
+        {
+            _references.Add(normalizedTimelinePath, references);
+        }
+
         return references;
     }
 }
-

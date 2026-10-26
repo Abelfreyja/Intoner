@@ -1,5 +1,6 @@
 using Dalamud.Hooking;
 using Dalamud.Plugin.Services;
+using Intoner.Logging;
 using Microsoft.Extensions.Logging;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
@@ -15,7 +16,12 @@ internal static class InteropHookUtility
         NativeDirectSignatureTarget target,
         TDelegate detour)
         where TDelegate : Delegate
-        => CreateHook(logger, gameInteropProvider, sigScanner, target.Signature, detour, target.Label);
+    {
+        nint address = NativeAddressResolver.TryScanSingleTextMatch(logger, sigScanner, target.Signature, target.Label);
+        return address == nint.Zero
+            ? null
+            : CreateHookFromAddress(logger, gameInteropProvider, address, detour, target.Label);
+    }
 
     public static Hook<TDelegate>? CreateHook<TDelegate>(
         ILogger logger,
@@ -29,21 +35,6 @@ internal static class InteropHookUtility
         return address == nint.Zero
             ? null
             : CreateHookFromAddress(logger, gameInteropProvider, address, detour, target);
-    }
-
-    public static Hook<TDelegate>? CreateHook<TDelegate>(
-        ILogger logger,
-        IGameInteropProvider gameInteropProvider,
-        ISigScanner sigScanner,
-        string signature,
-        TDelegate detour,
-        string label)
-        where TDelegate : Delegate
-    {
-        nint address = NativeAddressResolver.TryScanText(logger, sigScanner, signature, label);
-        return address == nint.Zero
-            ? null
-            : CreateHookFromAddress(logger, gameInteropProvider, address, detour, label);
     }
 
     public static Hook<TDelegate>? CreateHookFromAddress<TDelegate>(
@@ -101,19 +92,11 @@ internal static class InteropHookUtility
         ISigScanner sigScanner,
         NativeDirectSignatureTarget target)
         where TDelegate : Delegate
-        => CreateDelegate<TDelegate>(logger, sigScanner, target.Signature, target.Label);
-
-    public static TDelegate? CreateDelegate<TDelegate>(
-        ILogger logger,
-        ISigScanner sigScanner,
-        string signature,
-        string label)
-        where TDelegate : Delegate
     {
-        nint address = NativeAddressResolver.TryScanText(logger, sigScanner, signature, label);
+        nint address = NativeAddressResolver.TryScanSingleTextMatch(logger, sigScanner, target.Signature, target.Label);
         return address == nint.Zero
             ? null
-            : CreateDelegateFromAddress<TDelegate>(logger, address, label);
+            : CreateDelegateFromAddress<TDelegate>(logger, address, target.Label);
     }
 
     public static TDelegate? CreateDelegateFromAddress<TDelegate>(
@@ -138,19 +121,18 @@ internal static class InteropHookUtility
         }
     }
 
-    public static Action CreateEnableAction<TDelegate>(Hook<TDelegate>? hook)
-        where TDelegate : Delegate
-        => () => hook?.Enable();
-
-    public static Action CreateDisposeAction<TDelegate>(Hook<TDelegate>? hook)
-        where TDelegate : Delegate
-        => () => DisposeHook(hook);
-
-    public static void DisposeHook<TDelegate>(Hook<TDelegate>? hook)
-        where TDelegate : Delegate
+    public static bool DisposeHook(ILogger logger, IDalamudHook? hook)
     {
-        hook?.Disable();
-        hook?.Dispose();
+        try
+        {
+            hook?.Dispose();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            DiagnosticLog.Write(() => logger.LogError(ex, "failed to dispose native hook"));
+            return false;
+        }
     }
 
     private static bool TryValidateExecutableAddress(ILogger logger, nint address, string label, string action)
@@ -248,4 +230,3 @@ internal static class InteropHookUtility
         return false;
     }
 }
-

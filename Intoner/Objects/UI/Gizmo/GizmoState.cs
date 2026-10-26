@@ -10,13 +10,23 @@ internal sealed class GizmoState
 {
     public GizmoAxisVisualState[] TranslationAxes { get; } = new GizmoAxisVisualState[GizmoAxisUtility.AxisCount];
 
-    public GizmoAxisVisualState[] ScaleAxes { get; } = new GizmoAxisVisualState[GizmoAxisUtility.AxisCount];
+    public GizmoAxisVisualState[] ScaleAxes { get; } = new GizmoAxisVisualState[GizmoAxisUtility.AxisCount * 2];
 
     public GizmoAxisProjectionState[] LocalAxisProjections { get; } = new GizmoAxisProjectionState[GizmoAxisUtility.AxisCount];
 
     public GizmoAxisProjectionState[] WorldAxisProjections { get; } = new GizmoAxisProjectionState[GizmoAxisUtility.AxisCount];
 
     public int InteractionRevision { get; private set; }
+
+    public Guid? PivotEditGroupId { get; private set; }
+
+    public void SetPivotEditGroup(Guid? groupId)
+    {
+        if (PivotEditGroupId == groupId)
+            return;
+        PivotEditGroupId = groupId;
+        TouchInteraction();
+    }
 
     public GizmoTranslationDragSession TranslationDrag { get; } = new();
 
@@ -52,14 +62,8 @@ internal sealed class GizmoState
         CachedFrame = null;
     }
 
-    private void InvalidateCachedFrame()
-        => CachedFrame = null;
-
     public void NotifyInteractionStateChanged()
         => TouchInteraction();
-
-    public void NotifyFrameStateChanged()
-        => InvalidateCachedFrame();
 
     public void BeginSurfaceDrag(
         IReadOnlyList<SceneItemSnapshot> selectedSnapshots,
@@ -95,17 +99,6 @@ internal sealed class GizmoState
         TouchInteraction();
     }
 
-    public void SetRadialActionsPage(bool value)
-    {
-        if (RadialActionsPage == value)
-        {
-            return;
-        }
-
-        RadialActionsPage = value;
-        TouchInteraction();
-    }
-
     public void ToggleRadialActionsPage()
     {
         RadialActionsPage = !RadialActionsPage;
@@ -138,4 +131,3 @@ internal sealed class GizmoState
     public void StoreCachedFrame(in GizmoFrameRequest request, in GizmoFrame frame)
         => CachedFrame = new GizmoCachedFrame(request, frame);
 }
-

@@ -40,7 +40,7 @@ internal sealed partial class CollectionsWorkspace
             : assignedSnapshots
                 .Where(snapshot => SceneItemPresentation.MatchesObjectSearchFilter(snapshot, activeObjectIds.Contains(snapshot.Id), filter))
                 .ToList();
-        _collectionPanel.DrawObjectCollectionPanel(
+        _columnPanel.DrawPanel(
             "objectCollectionsObjectsSection",
             FontAwesomeIcon.Cube,
             "Assigned Objects",
@@ -48,7 +48,7 @@ internal sealed partial class CollectionsWorkspace
             ThemeColors.AccentPrimary,
             width,
             height,
-            layout => CollectionPanel.DrawObjectCollectionPanelSearch(
+            layout => EditorColumnPanel.DrawSearch(
                 "objectCollectionAssignedObjectFilter",
                 "Filter assigned objects",
                 ref _objectCollectionAssignedObjectFilter,
@@ -80,7 +80,6 @@ internal sealed partial class CollectionsWorkspace
             return;
         }
 
-        IReadOnlyList<string> placedFolders = _sceneView.GetPlacedFolders();
         IReadOnlyList<Guid> selectableRowOrder = visibleSnapshots
             .Where(static snapshot => !snapshot.Locked)
             .Select(static snapshot => snapshot.Id)
@@ -98,7 +97,6 @@ internal sealed partial class CollectionsWorkspace
                 snapshot,
                 activeObjectIds.Contains(snapshot.Id),
                 _interaction.Selection.Contains(snapshot.Id),
-                placedFolders,
                 selectableRowOrder,
                 rowMetrics));
     }

@@ -26,14 +26,45 @@ internal static class EditorBadgeRenderer
     private const float ThumbnailHeight = 18f;
     private const float ThumbnailSpacing = 2f;
 
+    [StructLayout(LayoutKind.Auto)]
+    private readonly record struct ContentMetrics(EditorIcon.Metrics Icon, Vector2 TextSize, float TextOffset, float ContentWidth, float Width);
+
     public static float Height => Scaled(BadgeHeight);
+
+    public static void DrawPairContents(ImDrawListPtr drawList, EditorBadge first, EditorBadge second, Vector2 min, Vector2 max)
+    {
+        float width = MathF.Max(0f, max.X - min.X);
+
+        if (width <= 0f)
+        {
+            return;
+        }
+
+        ContentMetrics secondMetrics = MeasureContent(second);
+        float secondWidth = MathF.Min(width, secondMetrics.Width);
+        ContentMetrics firstMetrics = width > secondWidth ? MeasureContent(first) : default;
+        float firstWidth = MathF.Min(firstMetrics.Width, width - secondWidth);
+        float height = max.Y - min.Y;
+
+        if (firstWidth > 0f)
+        {
+            DrawSegment(drawList, first, firstMetrics, min, new Vector2(firstWidth, height), secondWidth > 0f,
+                1f, hoverFeedback: false);
+        }
+
+        if (secondWidth > 0f)
+        {
+            DrawSegment(drawList, second, secondMetrics, min + new Vector2(firstWidth, 0f), new Vector2(secondWidth, height), false,
+                1f, hoverFeedback: false);
+        }
+    }
 
     public static void Draw(EditorBadge badge)
     {
         Vector2 min = ImGui.GetCursorScreenPos();
         float width = MathF.Min(MeasureWidth(badge), MathF.Max(0f, ImGui.GetContentRegionAvail().X));
         ImGui.Dummy(new Vector2(width, Height));
-        DrawGroup(ImGui.GetWindowDrawList(), null, badge, min.X, min.Y, width, Height, false, 1f, Surface.Panel, null);
+        DrawGroup(ImGui.GetWindowDrawList(), null, badge, min, width, false, 1f, Surface.Panel, null);
     }
 
     public static float DrawRightAligned(
@@ -49,18 +80,8 @@ internal static class EditorBadgeRenderer
     {
         float width = MeasureGroupWidth(badges, trailingBadge);
         float left = right - width;
-        DrawGroup(
-            drawList,
-            badges,
-            trailingBadge,
-            left,
-            top,
-            width,
-            Height,
-            selected,
-            contentAlpha,
-            panelSurface ? Surface.Panel : Surface.Row,
-            borderColor);
+        DrawGroup(drawList, badges, trailingBadge, new Vector2(left, top), width, selected, contentAlpha,
+            panelSurface ? Surface.Panel : Surface.Row, borderColor);
         return left;
     }
 
@@ -76,23 +97,14 @@ internal static class EditorBadgeRenderer
         Vector4? borderColor = null)
     {
         float width = MeasureGroupWidth(badges, null);
+
         if (maxRight is { } right)
         {
             width = MathF.Min(width, MathF.Max(0f, right - left));
         }
 
-        DrawGroup(
-            drawList,
-            badges,
-            null,
-            left,
-            top,
-            width,
-            Height,
-            selected,
-            contentAlpha,
-            panelSurface ? Surface.Panel : Surface.Row,
-            borderColor);
+        DrawGroup(drawList, badges, null, new Vector2(left, top), width, selected, contentAlpha,
+            panelSurface ? Surface.Panel : Surface.Row, borderColor);
         return left + width;
     }
 
@@ -124,6 +136,7 @@ internal static class EditorBadgeRenderer
             {
                 float badgeWidth = MeasureWidth(badges[start + count]);
                 float trailingWidth = start + count == badges.Count - 1 ? actionWidth : 0f;
+
                 if (wrap && count > 0 && width + badgeWidth + trailingWidth > availableWidth)
                 {
                     break;
@@ -137,21 +150,9 @@ internal static class EditorBadgeRenderer
             width = MathF.Min(width + (hasAction ? actionWidth : 0f), availableWidth);
             Vector2 topLeft = ImGui.GetCursorScreenPos();
             ImGui.Dummy(new Vector2(width, height));
-            DrawGroup(
-                ImGui.GetWindowDrawList(),
-                badges,
-                hasAction ? action!.Value.Badge : null,
-                topLeft.X,
-                topLeft.Y,
-                width,
-                height,
-                selected,
-                1f,
-                Surface.Panel,
-                borderColor,
-                start,
-                count,
-                reserveTrailingBadge: hasAction);
+            DrawGroup(ImGui.GetWindowDrawList(), badges, hasAction ? action!.Value.Badge : null, topLeft, width,
+                selected, 1f, Surface.Panel, borderColor, start, count, reserveTrailingBadge: hasAction);
+
             if (hasAction && width > 0f)
             {
                 Vector2 actionSize = new(MathF.Min(actionWidth, width), height);
@@ -202,10 +203,8 @@ internal static class EditorBadgeRenderer
         ImDrawListPtr drawList,
         IReadOnlyList<EditorBadge>? badges,
         EditorBadge? trailingBadge,
-        float left,
-        float top,
+        Vector2 min,
         float width,
-        float height,
         bool selected,
         float contentAlpha,
         Surface surface,
@@ -216,13 +215,21 @@ internal static class EditorBadgeRenderer
     {
         int badgeCount = visibleBadgeCount ?? badges?.Count ?? 0;
         int segmentCount = badgeCount + (trailingBadge.HasValue ? 1 : 0);
+
         if (segmentCount == 0 || width <= 0f)
         {
             return;
         }
 
-        Vector2 min = new(left, top);
-        Vector2 max = new(left + width, top + height);
+        float height = Height;
+        Vector2 max = min + new Vector2(width, height);
+        EditorScreenArea clip = new(drawList.GetClipRectMin(), drawList.GetClipRectMax());
+
+        if (!clip.Intersects(min, max))
+        {
+            return;
+        }
+
         float rounding = Scaled(5f);
         const float panelAlpha = 0.50f;
         Vector4 background = surface == Surface.Panel
@@ -231,6 +238,7 @@ internal static class EditorBadgeRenderer
         drawList.AddRectFilled(min, max, ImGui.GetColorU32(background), rounding);
         Vector4 border = borderColor ?? (selected ? ThemeColors.AccentPrimary : ThemeColors.Border);
         float borderAlpha = 0.50f;
+
         if (selected)
         {
             borderAlpha = 0.44f;
@@ -249,103 +257,71 @@ internal static class EditorBadgeRenderer
             ImDrawFlags.None,
             Scaled(1f));
 
-        float segmentLeft = left;
-        float trailingWidth = reserveTrailingBadge && trailingBadge is { } reserved
-            ? MathF.Min(width, MeasureWidth(reserved))
-            : 0f;
+        float segmentLeft = min.X;
+        ContentMetrics trailingMetrics = reserveTrailingBadge && trailingBadge is { } trailing ? MeasureContent(trailing) : default;
+        float trailingWidth = reserveTrailingBadge ? MathF.Min(width, trailingMetrics.Width) : 0f;
         float remainingWidth = width - trailingWidth;
-        for (int index = 0; index < badgeCount; ++index)
+        for (int index = 0; index < badgeCount && remainingWidth > 0f; ++index)
         {
             EditorBadge badge = badges![badgeStart + index];
-            float measuredWidth = MeasureWidth(badge);
-            float segmentWidth = MathF.Min(measuredWidth, remainingWidth);
-            if (segmentWidth <= 0f)
-            {
-                break;
-            }
+            ContentMetrics metrics = MeasureContent(badge);
+            float segmentWidth = MathF.Min(metrics.Width, remainingWidth);
 
             remainingWidth -= segmentWidth;
-            DrawSegment(
-                drawList,
-                badge,
-                segmentLeft,
-                top,
-                segmentWidth,
-                height,
-                index + 1 < segmentCount && (remainingWidth > 0f || trailingWidth > 0f),
-                segmentWidth < measuredWidth,
-                contentAlpha);
+            DrawSegment(drawList, badge, metrics, new Vector2(segmentLeft, min.Y), new Vector2(segmentWidth, height),
+                index + 1 < segmentCount && (remainingWidth > 0f || trailingWidth > 0f), contentAlpha);
             segmentLeft += segmentWidth;
         }
 
         if (trailingWidth > 0f)
         {
-            segmentLeft = left + width - trailingWidth;
+            segmentLeft = min.X + width - trailingWidth;
             remainingWidth = trailingWidth;
         }
 
-        if (trailingBadge is { } trailing && remainingWidth > 0f)
+        if (trailingBadge is { } last && remainingWidth > 0f)
         {
-            float measuredWidth = MeasureWidth(trailing);
-            float segmentWidth = MathF.Min(measuredWidth, remainingWidth);
-            DrawSegment(
-                drawList,
-                trailing,
-                segmentLeft,
-                top,
-                segmentWidth,
-                height,
-                drawSeparator: false,
-                clipped: segmentWidth < measuredWidth,
-                contentAlpha: contentAlpha);
+            if (!reserveTrailingBadge)
+            {
+                trailingMetrics = MeasureContent(last);
+            }
+
+            float segmentWidth = MathF.Min(trailingMetrics.Width, remainingWidth);
+            DrawSegment(drawList, last, trailingMetrics, new Vector2(segmentLeft, min.Y), new Vector2(segmentWidth, height),
+                drawSeparator: false, contentAlpha: contentAlpha);
         }
     }
 
     public static float MeasureWidth(EditorBadge badge)
+        => badge.Style == EditorBadgeStyle.IconOnly ? Height : MeasureContent(badge).Width;
+
+    private static ContentMetrics MeasureContent(EditorBadge badge)
     {
-        if (badge.Style == EditorBadgeStyle.IconOnly)
-        {
-            return Scaled(24f);
-        }
-
-        float width = Scaled(12f);
-        if (badge.Thumbnails is { } thumbnails)
-        {
-            width += MeasureThumbnailStripWidth(thumbnails.Count);
-        }
-        else if (badge.Icon is { } icon)
-        {
-            width += EditorIcon.Measure(icon, IconScale).Size.X;
-        }
-
-        if (!string.IsNullOrEmpty(badge.Text))
-        {
-            if (badge.Icon is not null || badge.Thumbnails is not null)
-            {
-                width += Scaled(4f);
-            }
-
-            width += ImGui.CalcTextSize(badge.Text).X;
-        }
-
-        return width;
+        EditorIcon.Metrics icon = badge.Thumbnails is null && badge.Icon is { } value
+            ? EditorIcon.Measure(value, IconScale)
+            : default;
+        Vector2 textSize = string.IsNullOrEmpty(badge.Text) ? Vector2.Zero : ImGui.CalcTextSize(badge.Text);
+        float visualWidth = badge.Thumbnails is { } thumbnails ? MeasureThumbnailStripWidth(thumbnails.Count) : icon.Size.X;
+        float gap = visualWidth > 0f && textSize.X > 0f ? Scaled(4f) : 0f;
+        float contentWidth = visualWidth + textSize.X + gap;
+        float width = badge.Style == EditorBadgeStyle.IconOnly ? Height : contentWidth + Scaled(12f);
+        return new ContentMetrics(icon, textSize, visualWidth + gap, contentWidth, width);
     }
 
     private static void DrawSegment(
         ImDrawListPtr drawList,
         EditorBadge badge,
-        float left,
-        float top,
-        float width,
-        float height,
+        in ContentMetrics metrics,
+        Vector2 min,
+        Vector2 size,
         bool drawSeparator,
-        bool clipped,
-        float contentAlpha)
+        float contentAlpha,
+        bool hoverFeedback = true)
     {
-        Vector2 min = new(left, top);
-        Vector2 max = new(left + width, top + height);
+        Vector2 max = min + size;
         Vector4 color = badge.Color ?? ThemeColors.AccentPrimary;
-        bool hovered = IntonerTooltip.IsAreaHovered(min, max);
+        bool hovered = hoverFeedback && IntonerTooltip.IsAreaHovered(min, max);
+
         if (hovered)
         {
             float inset = Scaled(1f);
@@ -359,7 +335,7 @@ internal static class EditorBadgeRenderer
         drawList.PushClipRect(min, max, true);
         try
         {
-            DrawContent(drawList, badge, min, width, height, color, contentAlpha);
+            DrawContent(drawList, badge, metrics, min, size, color, contentAlpha);
         }
         finally
         {
@@ -376,50 +352,54 @@ internal static class EditorBadgeRenderer
                 Scaled(1f));
         }
 
-        DrawTooltip(badge, color, clipped, hovered);
+        DrawTooltip(badge, color, size.X < metrics.Width, hovered);
     }
 
     private static void DrawContent(
         ImDrawListPtr drawList,
         EditorBadge badge,
+        in ContentMetrics metrics,
         Vector2 min,
-        float width,
-        float height,
+        Vector2 size,
         Vector4 color,
         float contentAlpha)
     {
-        EditorIcon.Metrics iconMetrics = badge.Icon is { } icon
-            ? EditorIcon.Measure(icon, IconScale)
-            : default;
-        Vector2 textSize = string.IsNullOrEmpty(badge.Text) ? Vector2.Zero : ImGui.CalcTextSize(badge.Text);
-        float visualWidth = badge.Thumbnails is { } thumbnails
-            ? MeasureThumbnailStripWidth(thumbnails.Count)
-            : iconMetrics.Size.X;
-        float contentWidth = visualWidth + textSize.X;
-        if (visualWidth > 0f && textSize.X > 0f)
-        {
-            contentWidth += Scaled(4f);
-        }
+        float contentX = min.X + MathF.Max(0f, (size.X - metrics.ContentWidth) * 0.5f);
 
-        float contentX = min.X + MathF.Max(0f, (width - contentWidth) * 0.5f);
         if (badge.Thumbnails is { } thumbnailStrip)
         {
             Vector2 thumbnailSize = new(
                 Scaled(ThumbnailWidth),
-                MathF.Min(Scaled(ThumbnailHeight), height - Scaled(4f)));
-            float thumbnailTop = CenterY(min.Y, height, thumbnailSize.Y);
+                MathF.Max(0f, MathF.Min(Scaled(ThumbnailHeight), size.Y - Scaled(4f))));
+            float thumbnailTop = EditorLayout.CenterY(min.Y, size.Y, thumbnailSize.Y);
             float thumbnailStep = thumbnailSize.X + Scaled(ThumbnailSpacing);
-            for (int index = 0; index < thumbnailStrip.Count; ++index)
+            EditorIcon.Metrics fallbackMetrics = badge.Icon is { } fallback ? EditorIcon.Measure(fallback, IconScale) : default;
+            EditorScreenArea clip = new(drawList.GetClipRectMin(), drawList.GetClipRectMax());
+            int firstThumbnail = Math.Max(0, (int)MathF.Floor((clip.Min.X - contentX) / thumbnailStep));
+            for (int index = firstThumbnail; index < thumbnailStrip.Count; ++index)
             {
                 Vector2 thumbnailMin = new(contentX + (thumbnailStep * index), thumbnailTop);
+                Vector2 thumbnailMax = thumbnailMin + thumbnailSize;
+
+                if (thumbnailMin.X >= clip.Max.X)
+                {
+                    break;
+                }
+
+                if (!clip.Intersects(thumbnailMin, thumbnailMax))
+                {
+                    continue;
+                }
+
                 IDalamudTextureWrap? thumbnail = thumbnailStrip.GetTexture(index);
+
                 if (thumbnail is not null)
                 {
                     EditorImage.DrawCover(
                         drawList,
                         thumbnail,
                         thumbnailMin,
-                        thumbnailMin + thumbnailSize,
+                        thumbnailMax,
                         Scaled(3f),
                         contentAlpha);
                 }
@@ -428,18 +408,12 @@ internal static class EditorBadgeRenderer
                     DrawThumbnailFallback(
                         drawList,
                         fallbackIcon,
-                        iconMetrics,
+                        fallbackMetrics,
                         thumbnailMin,
-                        thumbnailMin + thumbnailSize,
+                        thumbnailMax,
                         color,
                         contentAlpha);
                 }
-            }
-
-            contentX += visualWidth;
-            if (textSize.X > 0f)
-            {
-                contentX += Scaled(4f);
             }
         }
         else if (badge.Icon is { } badgeIcon)
@@ -447,23 +421,18 @@ internal static class EditorBadgeRenderer
             EditorIcon.Draw(
                 drawList,
                 badgeIcon,
-                iconMetrics,
-                new Vector2(contentX, CenterY(min.Y, height, iconMetrics.Size.Y)),
+                metrics.Icon,
+                new Vector2(contentX, EditorLayout.CenterY(min.Y, size.Y, metrics.Icon.Size.Y)),
                 color with { W = 0.94f * contentAlpha });
-            contentX += iconMetrics.Size.X;
-            if (textSize.X > 0f)
-            {
-                contentX += Scaled(4f);
-            }
         }
 
-        if (textSize.X > 0f)
+        if (metrics.TextSize.X > 0f)
         {
             Vector4 textColor = badge.Style == EditorBadgeStyle.Muted
                 ? ThemeColors.TextDisabled with { W = 0.82f * contentAlpha }
                 : ThemeColors.Text with { W = 0.88f * contentAlpha };
             drawList.AddText(
-                new Vector2(contentX, CenterY(min.Y, height, textSize.Y)),
+                new Vector2(contentX + metrics.TextOffset, EditorLayout.CenterY(min.Y, size.Y, metrics.TextSize.Y)),
                 ImGui.GetColorU32(textColor),
                 badge.Text);
         }
@@ -526,7 +495,7 @@ internal static class EditorBadgeRenderer
             iconMetrics,
             new Vector2(
                 min.X + MathF.Max(0f, (size.X - iconMetrics.Size.X) * 0.5f),
-                CenterY(min.Y, size.Y, iconMetrics.Size.Y)),
+                EditorLayout.CenterY(min.Y, size.Y, iconMetrics.Size.Y)),
             color with { W = 0.78f * contentAlpha });
     }
 
@@ -534,9 +503,6 @@ internal static class EditorBadgeRenderer
         => count <= 0
             ? 0f
             : (Scaled(ThumbnailWidth) * count) + (Scaled(ThumbnailSpacing) * (count - 1));
-
-    private static float CenterY(float top, float height, float contentHeight)
-        => top + MathF.Max(0f, (height - contentHeight) * 0.5f);
 
     private static float Scaled(float value)
         => value * ImGuiHelpers.GlobalScale;

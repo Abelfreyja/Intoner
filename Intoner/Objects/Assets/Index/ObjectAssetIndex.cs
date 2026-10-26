@@ -1,13 +1,20 @@
 using Dalamud.Plugin.Services;
 using Intoner.Objects.Assets.Cache;
+using Intoner.Objects.Utils;
 using Intoner.Services.Configuration;
 using Intoner.Services.Loading;
-using Intoner.Objects.Resources;
 using Microsoft.Extensions.Logging;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 
 namespace Intoner.Objects.Assets;
+
+/// <summary> catalog assets captured with their section versions </summary>
+internal readonly record struct ObjectAssetCatalogSnapshot(
+    IReadOnlyList<BgObjectAsset> BgObjects,
+    long BgObjectVersion,
+    IReadOnlyList<RuntimeVfxAsset> StandaloneVfx,
+    long StandaloneVfxVersion);
 
 /// <summary> provides runtime discovered asset data used to populate object catalog entries </summary>
 internal interface IObjectAssetIndex : ILoadOperation
@@ -21,37 +28,16 @@ internal interface IObjectAssetIndex : ILoadOperation
     /// <returns>true when the shared group could be resolved</returns>
     bool TryGetSharedGroupAssets(string sharedGroupPath, [NotNullWhen(true)] out SharedGroupAssetInfo? sharedGroupAssets);
 
-    /// <summary> gets observed bgobject model assets discovered outside the built in lumina paths </summary>
-    /// <param name="cancellationToken">cancels waiting for asset loading</param>
-    IReadOnlyList<ObservedBgAsset> GetObservedBgObjectAssets(CancellationToken cancellationToken = default);
-
-    /// <summary> gets bgobject model assets resolved from static game data sources </summary>
-    /// <param name="cancellationToken">cancels waiting for asset loading</param>
-    IReadOnlyList<GameDataBgObjectAsset> GetGameDataBgObjectAssets(CancellationToken cancellationToken = default);
-
-    /// <summary> gets standalone vfx assets that currently pass the analysis policy </summary>
-    /// <param name="cancellationToken">cancels waiting for asset loading</param>
-    IReadOnlyList<RuntimeVfxAsset> GetStandaloneVfxAssets(CancellationToken cancellationToken = default);
+    /// <summary> captures bgobject and standalone vfx assets with their current section versions </summary>
+    /// <param name="cancellationToken">cancels asset loading and snapshot capture</param>
+    /// <returns>the assets and their versions captured together</returns>
+    ObjectAssetCatalogSnapshot GetCatalogSnapshot(CancellationToken cancellationToken = default);
 
     /// <summary> evaluates standalone placement support for one vfx path </summary>
     /// <param name="vfxPath">the raw or normalized vfx path to inspect</param>
     /// <param name="report">the resulting standalone classification report when evaluation succeeds</param>
     /// <returns>true when the path resolves to a readable avfx and the classifier could evaluate it</returns>
     bool TryGetStandaloneVfxReport(string vfxPath, [NotNullWhen(true)] out VfxStandaloneReport? report);
-
-    /// <summary> gets the current bgobject section version for catalog projection updates </summary>
-    /// <param name="cancellationToken">cancels waiting for asset loading</param>
-    long GetBgObjectSectionVersion(CancellationToken cancellationToken = default);
-
-    /// <summary> gets the current standalone vfx section version for catalog projection updates </summary>
-    /// <param name="cancellationToken">cancels waiting for asset loading</param>
-    long GetStandaloneVfxSectionVersion(CancellationToken cancellationToken = default);
-
-    /// <summary> gets explicit dependencies for one object resource path </summary>
-    /// <param name="requestedPath">the original requested game path</param>
-    /// <param name="effectivePath">the resolved path</param>
-    /// <returns>the normalized dependency paths from the effective path</returns>
-    IReadOnlyList<string> GetCollectionPathDependencies(string requestedPath, ObjectResolvedPath effectivePath);
 }
 
 internal sealed class ObjectAssetIndex : IObjectAssetIndex, IDisposable
@@ -60,7 +46,6 @@ internal sealed class ObjectAssetIndex : IObjectAssetIndex, IDisposable
     private readonly IObjectAssetCacheService _cacheService;
     private readonly IObjectAssetCacheInvalidationService _cacheInvalidationService;
     private readonly ObjectAssetCacheWriter _cacheWriter;
-    private readonly ObjectAssetDependencyResolver _dependencyResolver;
     private readonly ObjectAssetSharedGroupCache _sharedGroupCache;
     private readonly ObjectAssetStateIngestor _stateIngestor;
     private readonly ObjectAssetStandaloneVfxCatalog _standaloneVfxCatalog;
@@ -69,16 +54,9 @@ internal sealed class ObjectAssetIndex : IObjectAssetIndex, IDisposable
     private readonly ObjectAssetObserver? _observer;
     private readonly ObjectAssetStaticDiscovery _staticDiscovery;
     private readonly bool _runtimeCaptureEnabled;
-    private static readonly IComparer<ObservedBgAsset> ObservedBgAssetComparer = Comparer<ObservedBgAsset>.Create(static (left, right) =>
+    private static readonly IComparer<BgObjectAsset> BgObjectAssetComparer = Comparer<BgObjectAsset>.Create(static (left, right) =>
     {
-        var sourceComparison = StringComparer.OrdinalIgnoreCase.Compare(left.Source, right.Source);
-        return sourceComparison != 0
-            ? sourceComparison
-            : StringComparer.OrdinalIgnoreCase.Compare(left.Path, right.Path);
-    });
-    private static readonly IComparer<GameDataBgObjectAsset> GameDataBgObjectAssetComparer = Comparer<GameDataBgObjectAsset>.Create(static (left, right) =>
-    {
-        var sourceComparison = StringComparer.OrdinalIgnoreCase.Compare(left.Source, right.Source);
+        int sourceComparison = StringComparer.OrdinalIgnoreCase.Compare(left.Source, right.Source);
         return sourceComparison != 0
             ? sourceComparison
             : StringComparer.OrdinalIgnoreCase.Compare(left.ModelPath, right.ModelPath);
@@ -98,7 +76,6 @@ internal sealed class ObjectAssetIndex : IObjectAssetIndex, IDisposable
         ILoggerFactory loggerFactory,
         IObjectAssetCacheService cacheService,
         IObjectAssetCacheInvalidationService cacheInvalidationService,
-        ObjectAssetDependencyResolver dependencyResolver,
         ObjectAssetSharedGroupCache sharedGroupCache,
         ObjectAssetStateIngestor stateIngestor,
         ObjectAssetStandaloneVfxCatalog standaloneVfxCatalog,
@@ -110,7 +87,6 @@ internal sealed class ObjectAssetIndex : IObjectAssetIndex, IDisposable
         _logger = logger;
         _cacheService = cacheService;
         _cacheInvalidationService = cacheInvalidationService;
-        _dependencyResolver = dependencyResolver;
         _sharedGroupCache = sharedGroupCache;
         _stateIngestor = stateIngestor;
         _standaloneVfxCatalog = standaloneVfxCatalog;
@@ -166,72 +142,30 @@ internal sealed class ObjectAssetIndex : IObjectAssetIndex, IDisposable
     public bool TryGetSharedGroupAssets(string sharedGroupPath, [NotNullWhen(true)] out SharedGroupAssetInfo? sharedGroupAssets)
     {
         CatalogAssetState state = _load.Get();
-        return _sharedGroupCache.TryGetOrAnalyzeThreadSafe(state, _stateLock, sharedGroupPath, out sharedGroupAssets);
+        sharedGroupAssets = _sharedGroupCache.GetOrAnalyzeThreadSafe(state.SharedGroups, _stateLock, sharedGroupPath);
+        return sharedGroupAssets is { Exists: true };
     }
 
-    public IReadOnlyList<string> GetCollectionPathDependencies(string requestedPath, ObjectResolvedPath effectivePath)
+    public ObjectAssetCatalogSnapshot GetCatalogSnapshot(CancellationToken cancellationToken = default)
     {
-        CatalogAssetState state = _load.Get();
-        return _dependencyResolver.GetCollectionPathDependencies(
-            requestedPath,
-            effectivePath,
-            state,
-            _stateLock);
-    }
-
-    public IReadOnlyList<ObservedBgAsset> GetObservedBgObjectAssets(CancellationToken cancellationToken = default)
-    {
-        var state = _load.Get(cancellationToken);
-        lock (_stateLock)
-        {
-            if (!state.ObservedBgSnapshotDirty && state.ObservedBgSnapshot is not null)
-            {
-                return state.ObservedBgSnapshot;
-            }
-
-            ObservedBgAsset[] snapshot = BgAssetProjection.BuildObservedSnapshot(
-                state.BgModels.Values,
-                state.KnowledgeBase,
-                ObservedBgAssetComparer);
-            state.ObservedBgSnapshot = snapshot;
-            state.ObservedBgSnapshotDirty = false;
-            return snapshot;
-        }
-    }
-
-    public IReadOnlyList<GameDataBgObjectAsset> GetGameDataBgObjectAssets(CancellationToken cancellationToken = default)
-    {
-        var state = _load.Get(cancellationToken);
-        lock (_stateLock)
-        {
-            if (!state.GameDataBgSnapshotDirty && state.GameDataBgSnapshot is not null)
-            {
-                return state.GameDataBgSnapshot;
-            }
-
-            GameDataBgObjectAsset[] snapshot = BgAssetProjection.BuildGameDataSnapshot(
-                state.GameDataBgObjects.Values,
-                GameDataBgObjectAssetComparer);
-            state.GameDataBgSnapshot = snapshot;
-            state.GameDataBgSnapshotDirty = false;
-            return snapshot;
-        }
-    }
-
-    public IReadOnlyList<RuntimeVfxAsset> GetStandaloneVfxAssets(CancellationToken cancellationToken = default)
-    {
+        cancellationToken.ThrowIfCancellationRequested();
         CatalogAssetState state = _load.Get(cancellationToken);
+
         lock (_stateLock)
         {
-            if (!state.StandaloneVfxSnapshotDirty && state.StandaloneVfxSnapshot is not null)
-            {
-                return state.StandaloneVfxSnapshot;
-            }
-
-            RuntimeVfxAsset[] snapshot = ObjectAssetStandaloneVfxCatalog.BuildSnapshot(state, RuntimeVfxAssetComparer);
-            state.StandaloneVfxSnapshot = snapshot;
+            cancellationToken.ThrowIfCancellationRequested();
+            BgObjectAsset[] bgObjects = !state.BgObjectSnapshotDirty && state.BgObjectSnapshot is not null
+                ? state.BgObjectSnapshot
+                : BgAssetProjection.BuildSnapshot(state, BgObjectAssetComparer);
+            RuntimeVfxAsset[] standaloneVfx = !state.StandaloneVfxSnapshotDirty && state.StandaloneVfxSnapshot is not null
+                ? state.StandaloneVfxSnapshot
+                : ObjectAssetStandaloneVfxCatalog.BuildSnapshot(state, RuntimeVfxAssetComparer);
+            cancellationToken.ThrowIfCancellationRequested();
+            state.BgObjectSnapshot = bgObjects;
+            state.StandaloneVfxSnapshot = standaloneVfx;
+            state.BgObjectSnapshotDirty = false;
             state.StandaloneVfxSnapshotDirty = false;
-            return snapshot;
+            return new(bgObjects, state.BgObjectSectionVersion, standaloneVfx, state.StandaloneVfxSectionVersion);
         }
     }
 
@@ -250,24 +184,6 @@ internal sealed class ObjectAssetIndex : IObjectAssetIndex, IDisposable
         }
     }
 
-    public long GetBgObjectSectionVersion(CancellationToken cancellationToken = default)
-    {
-        var state = _load.Get(cancellationToken);
-        lock (_stateLock)
-        {
-            return state.BgObjectSectionVersion;
-        }
-    }
-
-    public long GetStandaloneVfxSectionVersion(CancellationToken cancellationToken = default)
-    {
-        var state = _load.Get(cancellationToken);
-        lock (_stateLock)
-        {
-            return state.StandaloneVfxSectionVersion;
-        }
-    }
-
     private CatalogAssetState BuildInitialState(LoadProgress progress)
     {
         CancellationToken cancellationToken = progress.CancellationToken;
@@ -278,19 +194,17 @@ internal sealed class ObjectAssetIndex : IObjectAssetIndex, IDisposable
         LoadProgress ingestionProgress = progressPlan.Next(68d);
         LoadProgress saveProgress = progressPlan.Next(2d);
         long startedAt = Stopwatch.GetTimestamp();
-        CatalogAssetState state = new();
-        string currentGameVersion = _cacheInvalidationService.CurrentGameVersion;
-        string currentSqpackIndexFingerprint = _cacheInvalidationService.CurrentSqpackIndexFingerprint;
         ObjectAssetCacheSectionSet requestedSections = _runtimeCaptureEnabled
             ? ObjectAssetCacheSectionSet.All
             : ObjectAssetCacheSectionSet.AllStatic;
-        ObjectAssetCacheManifest? cacheManifest = _cacheService.TryLoadManifest();
-        ObjectAssetCacheSectionSet reusableSections = _cacheInvalidationService.GetReusableSections(
-            cacheManifest,
-            requestedSections);
-        ObjectAssetCacheLoadResult cacheLoadResult = cacheManifest is not null && reusableSections != ObjectAssetCacheSectionSet.None
-            ? _cacheService.Load(cacheManifest, reusableSections)
-            : ObjectAssetCacheLoadResult.Empty;
+        ObjectAssetCacheLoadRequest cacheRequest = _cacheInvalidationService.CreateLoadRequest(requestedSections);
+        CatalogAssetState state = new()
+        {
+            Language = cacheRequest.Language,
+        };
+        string currentGameVersion = cacheRequest.GameVersion ?? string.Empty;
+        string currentSqpackIndexFingerprint = cacheRequest.SqpackIndexFingerprint ?? string.Empty;
+        ObjectAssetCacheLoadResult cacheLoadResult = _cacheService.Load(cacheRequest);
         cacheProgress.Report(1d);
         TimeSpan cacheLoadTime = Stopwatch.GetElapsedTime(startedAt);
 
@@ -319,7 +233,8 @@ internal sealed class ObjectAssetIndex : IObjectAssetIndex, IDisposable
             ingestionProgress);
         TimeSpan ingestionTime = Stopwatch.GetElapsedTime(startedAt) - cacheLoadTime - discoveryTime;
         state.SqpackIndexFingerprint = currentSqpackIndexFingerprint;
-        ObjectAssetCacheSectionSet startupDirtySections = (ObjectAssetCacheSectionSet.AllStatic & ~loadedStaticSections) | overlayDirtySections;
+        ObjectAssetCacheSectionSet rebuiltStaticSections = staticDiscoverySnapshot.CompleteSections & ~loadedStaticSections;
+        ObjectAssetCacheSectionSet startupDirtySections = rebuiltStaticSections | overlayDirtySections;
         state.DirtyCacheSections = startupDirtySections;
         state.CacheRevision = startupDirtySections == ObjectAssetCacheSectionSet.None ? 0 : 1;
 
@@ -330,7 +245,7 @@ internal sealed class ObjectAssetIndex : IObjectAssetIndex, IDisposable
                 state,
                 loadedStaticSections != ObjectAssetCacheSectionSet.AllStatic
                     ? "saved object asset cache after rebuilding static discovery"
-                    : "saved object asset cache after removing static overlay duplicates");
+                    : "saved object asset cache after updating runtime metadata");
         }
 
         saveProgress.Report(1d);
@@ -339,7 +254,7 @@ internal sealed class ObjectAssetIndex : IObjectAssetIndex, IDisposable
             "loaded object asset state with {KnownPathCount} known paths, {BgModelCount} observed bg models, and {VfxCount} standalone vfx assets in {ElapsedMilliseconds:F0} ms (cache {CacheMilliseconds:F0} ms, discovery {DiscoveryMilliseconds:F0} ms, ingestion {IngestionMilliseconds:F0} ms)",
             state.KnowledgeBase.Count,
             state.BgModels.Count,
-            state.VfxAssets.Count,
+            state.VfxAssets.Values.Count(static asset => asset.Report?.IsSupportedStandalone == true),
             Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds,
             cacheLoadTime.TotalMilliseconds,
             discoveryTime.TotalMilliseconds,
@@ -391,6 +306,22 @@ internal sealed class ObjectAssetIndex : IObjectAssetIndex, IDisposable
             return;
         }
 
+        ObjectTerritoryMetadata territoryMetadata;
+        try
+        {
+            territoryMetadata = _stateIngestor.CaptureObservationTerritory(observations);
+        }
+        catch (Exception ex)
+        {
+            if (Volatile.Read(ref _disposeRequested) != 0)
+            {
+                return;
+            }
+
+            _logger.LogWarning(ex, "failed to read asset observation territory");
+            territoryMetadata = ObjectTerritoryMetadata.Empty;
+        }
+
         var stateChanged = false;
         var projectionChanged = false;
 
@@ -401,20 +332,26 @@ internal sealed class ObjectAssetIndex : IObjectAssetIndex, IDisposable
                 return;
             }
 
-            foreach (var observation in observations)
+            long cacheRevision = state.CacheRevision;
+            long bgVersion = state.BgObjectSectionVersion;
+            long vfxVersion = state.StandaloneVfxSectionVersion;
+            foreach (ObjectAssetObservation observation in observations)
             {
-                ObservationApplyResult result = _stateIngestor.ApplyObservation(state, observation);
-                if (result == ObservationApplyResult.None)
+                try
                 {
-                    continue;
+                    ObservationApplyResult result = _stateIngestor.ApplyObservation(state, observation, territoryMetadata);
+                    stateChanged |= result != ObservationApplyResult.None;
+                    projectionChanged |= result == ObservationApplyResult.ProjectionChanged;
                 }
-
-                stateChanged = true;
-                if (result == ObservationApplyResult.ProjectionChanged)
+                catch (Exception ex)
                 {
-                    projectionChanged = true;
+                    _logger.LogWarning(ex, "failed to observe object asset {Path}", observation.Path);
                 }
             }
+
+            stateChanged |= state.CacheRevision != cacheRevision;
+            projectionChanged |= state.BgObjectSectionVersion != bgVersion
+                || state.StandaloneVfxSectionVersion != vfxVersion;
         }
 
         if (!stateChanged)

@@ -1,3 +1,5 @@
+using System.Text;
+
 namespace Intoner.Services.Storage;
 
 /// <summary> provides shared plugin file operations </summary>
@@ -40,6 +42,13 @@ internal interface IPluginFileSystem
     /// <returns>the file contents</returns>
     string ReadAllText(string path);
 
+    /// <summary> reads text after checking the opened file size, preventing writes until reading completes </summary>
+    /// <param name="path">the file path to read</param>
+    /// <param name="maximumBytes">the largest accepted file size in bytes</param>
+    /// <returns>the file contents</returns>
+    /// <exception cref="InvalidDataException">the opened file exceeds the size limit</exception>
+    string ReadAllText(string path, long maximumBytes);
+
     /// <summary> gets the current file length </summary>
     /// <param name="path">the file path to inspect</param>
     /// <returns>the file length in bytes</returns>
@@ -76,9 +85,16 @@ internal sealed class PluginFileSystem : IPluginFileSystem
         => Directory.CreateDirectory(path);
 
     public IReadOnlyList<string> EnumerateFiles(string path, string pattern)
-        => Directory.Exists(path)
-            ? Directory.EnumerateFiles(path, pattern, SearchOption.TopDirectoryOnly).ToList()
-            : [];
+    {
+        try
+        {
+            return Directory.EnumerateFiles(path, pattern, SearchOption.TopDirectoryOnly).ToList();
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return [];
+        }
+    }
 
     public byte[] ReadAllBytes(string path)
         => File.ReadAllBytes(path);
@@ -111,7 +127,21 @@ internal sealed class PluginFileSystem : IPluginFileSystem
     }
 
     public string ReadAllText(string path)
-        => File.ReadAllText(path);
+        => ReadAllText(path, long.MaxValue);
+
+    public string ReadAllText(string path, long maximumBytes)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(maximumBytes);
+        using FileStream stream = new(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+
+        if (stream.Length > maximumBytes)
+        {
+            throw new InvalidDataException($"The file exceeds the {maximumBytes} byte limit.");
+        }
+
+        using StreamReader reader = new(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+        return reader.ReadToEnd();
+    }
 
     public long GetFileLength(string path)
         => new FileInfo(path).Length;
@@ -169,4 +199,3 @@ internal sealed class PluginFileSystem : IPluginFileSystem
         }
     }
 }
-

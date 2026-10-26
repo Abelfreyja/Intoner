@@ -21,11 +21,19 @@ internal sealed partial class EditorToolbar
     private readonly ISceneHistoryManager         _sceneHistoryManager;
     private readonly IObjectHousingModePolicy     _housingModePolicy;
     private readonly IIntonerConfigurationService _configurationService;
+    private readonly IShortcutService             _shortcuts;
     private readonly Gizmo                        _gizmo;
-    private readonly HistoryWorkspace            _history;
+    private readonly HistoryWorkspace             _history;
     private readonly EditorOverlayLayer           _editorOverlayLayer;
     private readonly EdgeGlowRenderer             _edgeGlowRenderer;
     private readonly CreateBrowserSelection       _browserSelection;
+
+    private IReadOnlyList<ObjectSnapshot>? _countedObjects;
+    private readonly Dictionary<ObjectKind, int> _objectCountsByKind = [];
+
+    private readonly Action _toggleTransformSpace;
+    private readonly Action _drawTransformSpaceTooltip;
+    private readonly Action _drawScaleTooltip;
     private ToolbarDockPosition _toolbarDockPosition = ToolbarDockPosition.Top;
     private bool _openToolbarDockPopupNextFrame;
     private const string ToolbarDockPopupId = "##objectToolbarDockPopup";
@@ -34,11 +42,16 @@ internal sealed partial class EditorToolbar
     private const int ToolbarBoundsButtonCount = 2;
     private const int ToolbarGizmoButtonCount = 5;
     private const int ToolbarHistoryButtonCount = 2;
+    private static readonly IReadOnlyList<IntonerTooltipKeyHint> GizmoModeKeyHints =
+    [
+        new(KeyboardModifiers.Shift, "and click to toggle independently"),
+    ];
 
     public EditorToolbar(
         ISceneHistoryManager sceneHistoryManager,
         IObjectHousingModePolicy housingModePolicy,
         IIntonerConfigurationService configurationService,
+        IShortcutService shortcuts,
         Gizmo gizmo,
         HistoryWorkspace history,
         EditorOverlayLayer editorOverlayLayer,
@@ -48,12 +61,17 @@ internal sealed partial class EditorToolbar
         _sceneHistoryManager  = sceneHistoryManager;
         _housingModePolicy    = housingModePolicy;
         _configurationService = configurationService;
+        _shortcuts            = shortcuts;
         _toolbarDockPosition  = configurationService.Current.Ui.ToolbarPosition;
         _gizmo                = gizmo;
         _history              = history;
         _editorOverlayLayer   = editorOverlayLayer;
         _edgeGlowRenderer     = edgeGlowRenderer;
         _browserSelection     = browserSelection;
+
+        _toggleTransformSpace      = gizmo.ToggleTransformSpace;
+        _drawTransformSpaceTooltip = DrawTransformSpaceTooltip;
+        _drawScaleTooltip          = DrawScaleToolbarTooltip;
     }
 
     public void OpenDockMenu()
@@ -97,7 +115,7 @@ internal sealed partial class EditorToolbar
             _railColumn++;
             if (_railColumn < RailColumns)
             {
-                ImGui.SameLine();
+                ImGui.SameLine(0f, ResolveToolbarRailItemGap());
                 return;
             }
 
@@ -108,6 +126,7 @@ internal sealed partial class EditorToolbar
         {
             if (Mode == ToolbarSurfaceMode.Rail && RailColumns > 1 && _railColumn != 0)
             {
+                using var spacing = PushToolbarItemSpacing(Mode);
                 ImGui.NewLine();
             }
 
@@ -142,16 +161,13 @@ internal sealed partial class EditorToolbar
     internal void DrawToolbarPanel(IReadOnlyList<ObjectSnapshot> objects, SceneItemSnapshot? selected, IReadOnlyList<SceneItemSnapshot> activeSelectedItems, EditorDockPanelContext context)
     {
         ToolbarSurfaceContext surface = ResolveToolbarSurfaceContext(context);
-        using var railSpacing = surface.Mode == ToolbarSurfaceMode.Rail
-            ? ImRaii.PushStyle(ImGuiStyleVar.ItemSpacing, new Vector2(ResolveToolbarRailItemGap(), ResolveToolbarRailItemGap()))
-            : default;
         DrawToolbarPanelCore(objects, selected, activeSelectedItems, ref surface);
         _editorOverlayLayer.CaptureCurrentWindow();
     }
 
     private void DrawToolbarPanelCore(IReadOnlyList<ObjectSnapshot> objects, SceneItemSnapshot? selected, IReadOnlyList<SceneItemSnapshot> activeSelectedItems, ref ToolbarSurfaceContext surface)
     {
-        var countsByKind = BuildToolbarObjectCountsByKind(objects);
+        var countsByKind = GetObjectCountsByKind(objects);
 
         DrawToolbarKindGroup(countsByKind, ref surface);
         DrawToolbarGroupSeparator(ref surface);
@@ -184,8 +200,9 @@ internal sealed partial class EditorToolbar
 
     private void DrawToolbarHistoryGroup(ref ToolbarSurfaceContext surface)
     {
-        var canUndo = _sceneHistoryManager.UndoActionKind is not null;
-        var canRedo = _sceneHistoryManager.RedoActionKind is not null;
+        SceneHistorySnapshot snapshot = _sceneHistoryManager.GetSnapshot();
+        var canUndo = snapshot.UndoActionKind is not null && snapshot.Undo.IsSuccess;
+        var canRedo = snapshot.RedoActionKind is not null && snapshot.Redo.IsSuccess;
         var undoAccent = canUndo ? ThemeColors.AccentBlue : (Vector4?)null;
         var redoAccent = canRedo ? ThemeColors.AccentPrimary : (Vector4?)null;
 
@@ -199,7 +216,6 @@ internal sealed partial class EditorToolbar
                 false,
                 () => _ = _history.TryUndoHistory(),
                 undoAccent,
-                useAccentFill: false,
                 useNeutralHoverFill: true,
                 hoverBorderColor: undoAccent,
                 drawTooltip: () => _history.DrawToolbarHistoryTooltip(undo: true, undoAccent ?? ThemeColors.AccentBlue),
@@ -218,7 +234,6 @@ internal sealed partial class EditorToolbar
                 false,
                 () => _ = _history.TryRedoHistory(),
                 redoAccent,
-                useAccentFill: false,
                 useNeutralHoverFill: true,
                 hoverBorderColor: redoAccent,
                 drawTooltip: () => _history.DrawToolbarHistoryTooltip(undo: false, redoAccent ?? ThemeColors.AccentPrimary),
@@ -231,21 +246,31 @@ internal sealed partial class EditorToolbar
         DrawBoundsToolbarButton(surface.Mode);
         surface.AdvanceItem();
 
-        DrawHeaderActionButton(
-            "##objectBoundsSpace",
-            GetBoundsSpaceToggleIcon(),
-            GetBoundsSpaceToggleLabel(),
-            "Toggle bounds and gizmo transforms between world and local space.",
-            false,
-            ToggleBoundsOverlaySpace,
-            EditorColors.BoundsSpaceAccent(_gizmo.Settings.BoundsOverlaySpace),
-            mode: surface.Mode);
+        using (ImRaii.Disabled(!_gizmo.CanToggleTransformSpace))
+        {
+            DrawHeaderActionButton(
+                "##objectBoundsSpace",
+                GetBoundsSpaceToggleIcon(),
+                GetBoundsSpaceToggleLabel(),
+                string.Empty,
+                false,
+                _toggleTransformSpace,
+                EditorColors.BoundsSpaceAccent(_gizmo.Settings.BoundsOverlaySpace),
+                drawTooltip: _drawTransformSpaceTooltip,
+                mode: surface.Mode);
+        }
     }
 
     private void DrawToolbarGizmoGroup(SceneItemSnapshot? selected, IReadOnlyList<SceneItemSnapshot> activeSelectedItems, ref ToolbarSurfaceContext surface)
     {
         var scaleEnabled = _gizmo.CanUseScaleGizmo(activeSelectedItems);
-        var scaleTooltip = ResolveScaleGizmoTooltip(selected, activeSelectedItems);
+        _scaleUniformRequired = selected is not null && GizmoScaling.RequiresUniform(selected, activeSelectedItems.Count);
+        _scaleUnavailableReason = selected switch
+        {
+            null => "Select a placed item to use the gizmo",
+            _ when activeSelectedItems.Count > 0 && !scaleEnabled => "The selection contains an item that does not support scaling.",
+            _ => string.Empty,
+        };
 
         DrawHeaderGizmoModeButton(
             "##objectGizmoMove",
@@ -273,11 +298,13 @@ internal sealed partial class EditorToolbar
             "##objectGizmoScale",
             FontAwesomeIcon.CompressArrowsAlt,
             "Scale",
-            scaleTooltip,
+            string.Empty,
             GizmoTransformMode.Scale,
             selected,
             enabled: activeSelectedItems.Count == 0 || scaleEnabled,
-            surfaceMode: surface.Mode);
+            surfaceMode: surface.Mode,
+            drawTooltip: _drawScaleTooltip);
+        DrawScaleOptionsPopup();
         surface.AdvanceItem();
 
         DrawTransformSnapToolbarButton(surface.Mode);
@@ -300,28 +327,22 @@ internal sealed partial class EditorToolbar
         ImGui.SameLine();
     }
 
-    private string ResolveScaleGizmoTooltip(SceneItemSnapshot? selected, IReadOnlyList<SceneItemSnapshot> activeSelectedItems)
+    private IReadOnlyDictionary<ObjectKind, int> GetObjectCountsByKind(IReadOnlyList<ObjectSnapshot> objects)
     {
-        if (activeSelectedItems.Count > 1)
+        if (ReferenceEquals(_countedObjects, objects))
         {
-            return "Select one scalable item to use the scale gizmo.";
+            return _objectCountsByKind;
         }
 
-        return selected is not null && !_gizmo.CanUseScaleGizmo(selected)
-            ? "This item does not support scaling."
-            : "Toggle the local scale gizmo.";
-    }
-
-    private static Dictionary<ObjectKind, int> BuildToolbarObjectCountsByKind(IReadOnlyList<ObjectSnapshot> objects)
-    {
-        Dictionary<ObjectKind, int> countsByKind = new();
+        _objectCountsByKind.Clear();
         foreach (ObjectSnapshot entry in objects)
         {
-            countsByKind.TryGetValue(entry.Kind, out int count);
-            countsByKind[entry.Kind] = count + 1;
+            _objectCountsByKind.TryGetValue(entry.Kind, out int count);
+            _objectCountsByKind[entry.Kind] = count + 1;
         }
 
-        return countsByKind;
+        _countedObjects = objects;
+        return _objectCountsByKind;
     }
 
     private static float ResolveToolbarDockPadEdge()
@@ -453,8 +474,8 @@ internal sealed partial class EditorToolbar
         string title,
         string text,
         Vector4 accent,
-        EditorToolbarTooltipKeyHint? keyHint = null)
-        => EditorToolbarTooltip.Draw(icon, title, accent, [], [], keyHint, text);
+        IReadOnlyList<IntonerTooltipKeyHint> keyHints)
+        => EditorToolbarTooltip.Draw(icon, title, accent, [], [], keyHints, text);
 
     [StructLayout(LayoutKind.Auto)]
     internal readonly record struct ToolbarButtonContentMetrics(
@@ -509,6 +530,60 @@ internal sealed partial class EditorToolbar
                 contentStartY + metrics.Icon.Size.Y + (5f * ImGuiHelpers.GlobalScale)),
             ImGui.GetColorU32(color),
             label);
+    }
+
+    private static void DrawToolbarStateBands(ImDrawListPtr drawList, Vector2 min, Vector2 max,
+        ReadOnlySpan<(Vector4 Accent, bool Enabled)> bands, float peakAlpha)
+    {
+        float scale = ImGuiHelpers.GlobalScale;
+        float inset = 3f * scale;
+        Vector2 innerMin = min + new Vector2(inset);
+        Vector2 innerMax = max - new Vector2(inset);
+        float bandGap = MathF.Max(1f * scale, 1f);
+        float bandWidth = (innerMax.X - innerMin.X - bandGap * (bands.Length - 1)) / bands.Length;
+
+        if (bandWidth <= 0f)
+        {
+            return;
+        }
+
+        float left = innerMin.X;
+        for (int index = 0; index < bands.Length; ++index)
+        {
+            float right = index == bands.Length - 1 ? innerMax.X : left + bandWidth;
+            (Vector4 accent, bool enabled) = bands[index];
+            DrawToolbarStateBand(drawList, new Vector2(left, innerMin.Y), new Vector2(right, innerMax.Y), accent, enabled, peakAlpha);
+            left = right + bandGap;
+        }
+    }
+
+    private static void DrawToolbarStateBand(ImDrawListPtr drawList, Vector2 min, Vector2 max, Vector4 accent, bool enabled, float peakAlpha)
+    {
+        if (!enabled || !EditorInputUtility.HasArea(min, max))
+        {
+            return;
+        }
+
+        var midY = min.Y + ((max.Y - min.Y) * 0.56f);
+        var middleAlpha = ThemeColors.WithAlpha(accent, peakAlpha);
+        var topAlpha = ThemeColors.WithAlpha(accent, peakAlpha * 0.22f);
+        var fadeAlpha = ThemeColors.WithAlpha(accent, peakAlpha * 0.18f);
+
+        drawList.AddRectFilledMultiColor(
+            min,
+            new Vector2(max.X, midY),
+            ImGui.GetColorU32(topAlpha),
+            ImGui.GetColorU32(topAlpha),
+            ImGui.GetColorU32(middleAlpha),
+            ImGui.GetColorU32(middleAlpha));
+
+        drawList.AddRectFilledMultiColor(
+            new Vector2(min.X, midY),
+            max,
+            ImGui.GetColorU32(middleAlpha),
+            ImGui.GetColorU32(middleAlpha),
+            ImGui.GetColorU32(fadeAlpha),
+            ImGui.GetColorU32(fadeAlpha));
     }
 
     private static void DrawToolbarButtonBorder(
@@ -579,7 +654,7 @@ internal sealed partial class EditorToolbar
         using var hoveredButton = ImRaii.PushColor(ImGuiCol.ButtonHovered, neutralButtonColor);
         using var activeButton = ImRaii.PushColor(ImGuiCol.ButtonActive, neutralButtonColor);
 
-        if (ImGui.Button(id, buttonSize))
+        if (DrawToolbarButton(id, buttonSize, mode))
         {
             _browserSelection.SetDraftKind(kind);
             selected = true;
@@ -612,7 +687,7 @@ internal sealed partial class EditorToolbar
         if (itemHovered)
         {
             var countLabel = count == 1 ? "1 placed" : $"{count} placed";
-            DrawToolbarTextTooltip(icon, label, countLabel, accentColor);
+            DrawToolbarTextTooltip(icon, label, countLabel, accentColor, []);
         }
     }
 
@@ -672,13 +747,12 @@ internal sealed partial class EditorToolbar
         bool selected,
         Action onClick,
         Vector4? accentColor = null,
-        bool useAccentFill = true,
         bool useNeutralHoverFill = false,
         Vector4? hoverBorderColor = null,
         Action<ImDrawListPtr, Vector2, Vector2, bool, bool>? drawBackground = null,
         Action? drawTooltip = null,
         ToolbarSurfaceMode mode = ToolbarSurfaceMode.Strip,
-        EditorToolbarTooltipKeyHint? keyHint = null)
+        IReadOnlyList<IntonerTooltipKeyHint>? keyHints = null)
     {
         var buttonEdge = ResolveToolbarButtonEdge(mode);
         var buttonSize = new Vector2(buttonEdge, buttonEdge);
@@ -689,7 +763,7 @@ internal sealed partial class EditorToolbar
         using var selectedButton = selected
             ? ImRaii.PushColor(ImGuiCol.Button, ImGui.GetColorU32(ImGuiCol.ButtonActive))
             : default;
-        bool useAccentButtonFill = accentColor.HasValue && useAccentFill;
+        bool useAccentButtonFill = accentColor.HasValue && !useNeutralHoverFill;
         uint hoveredColor = useAccentButtonFill
             ? ImGui.GetColorU32(accentColor!.Value with { W = 0.25f })
             : neutralButtonColor;
@@ -703,7 +777,7 @@ internal sealed partial class EditorToolbar
             ? ImRaii.PushColor(ImGuiCol.ButtonActive, activeColor)
             : default;
 
-        if (ImGui.Button(id, buttonSize))
+        if (DrawToolbarButton(id, buttonSize, mode))
         {
             onClick();
         }
@@ -724,7 +798,7 @@ internal sealed partial class EditorToolbar
 
         DrawToolbarButtonContent(drawList, icon, label, mode, min, buttonSize, contentMetrics, drawColor);
 
-        if (itemHovered)
+        if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
         {
             if (drawTooltip is not null)
             {
@@ -732,11 +806,11 @@ internal sealed partial class EditorToolbar
             }
             else if (!string.IsNullOrWhiteSpace(tooltip))
             {
-                DrawToolbarTextTooltip(icon, label, tooltip, accentColor ?? hoverBorderColor ?? ThemeColors.AccentPrimary, keyHint);
+                DrawToolbarTextTooltip(icon, label, tooltip, accentColor ?? hoverBorderColor ?? ThemeColors.AccentPrimary, keyHints ?? []);
             }
             else if (mode == ToolbarSurfaceMode.Rail)
             {
-                DrawToolbarTextTooltip(icon, label, string.Empty, accentColor ?? hoverBorderColor ?? ThemeColors.AccentPrimary, keyHint);
+                DrawToolbarTextTooltip(icon, label, string.Empty, accentColor ?? hoverBorderColor ?? ThemeColors.AccentPrimary, keyHints ?? []);
             }
         }
     }
@@ -757,6 +831,7 @@ internal sealed partial class EditorToolbar
 
     private static void DrawVerticalToolbarGroupSeparator()
     {
+        using var spacing = PushToolbarItemSpacing(ToolbarSurfaceMode.Rail);
         var separatorHeight = ResolveToolbarRailSeparatorHeight();
         var drawList = ImGui.GetWindowDrawList();
         var start = ImGui.GetCursorScreenPos();
@@ -774,6 +849,17 @@ internal sealed partial class EditorToolbar
 
     private static float ResolveToolbarRailSeparatorHeight()
         => 10f * ImGuiHelpers.GlobalScale;
+
+    private static ImRaii.StyleDisposable? PushToolbarItemSpacing(ToolbarSurfaceMode mode)
+        => mode == ToolbarSurfaceMode.Rail
+            ? ImRaii.PushStyle(ImGuiStyleVar.ItemSpacing, new Vector2(ResolveToolbarRailItemGap()))
+            : default;
+
+    private static bool DrawToolbarButton(string id, Vector2 size, ToolbarSurfaceMode mode)
+    {
+        using var spacing = PushToolbarItemSpacing(mode);
+        return ImGui.Button(id, size);
+    }
 
     private void DrawToolbarDockPad()
     {
@@ -861,7 +947,7 @@ internal sealed partial class EditorToolbar
 
         if (ImGui.IsItemHovered())
         {
-            DrawToolbarTextTooltip(icon, "Toolbar Dock", tooltip, accentColor);
+            DrawToolbarTextTooltip(icon, "Toolbar Dock", tooltip, accentColor, []);
         }
     }
 
@@ -878,10 +964,16 @@ internal sealed partial class EditorToolbar
             ? "World"
             : "Local";
 
-    private void ToggleBoundsOverlaySpace()
-        => _gizmo.Settings.BoundsOverlaySpace = _gizmo.Settings.BoundsOverlaySpace == BoundsOverlaySpace.World
-            ? BoundsOverlaySpace.Local
-            : BoundsOverlaySpace.World;
+    private void DrawTransformSpaceTooltip()
+    {
+        KeyboardGesture? gesture = _shortcuts.GetGesture(EditorShortcuts.ToggleTransformSpace);
+        DrawToolbarTextTooltip(
+            GetBoundsSpaceToggleIcon(),
+            GetBoundsSpaceToggleLabel(),
+            EditorShortcuts.ToggleTransformSpace.Description,
+            EditorColors.BoundsSpaceAccent(_gizmo.Settings.BoundsOverlaySpace),
+            gesture is { } binding ? [new IntonerTooltipKeyHint(binding, "to switch transform space")] : []);
+    }
 
     private void DrawHeaderGizmoModeButton(
         string id,
@@ -891,9 +983,10 @@ internal sealed partial class EditorToolbar
         GizmoTransformMode mode,
         SceneItemSnapshot? selected,
         bool enabled,
-        ToolbarSurfaceMode surfaceMode = ToolbarSurfaceMode.Strip)
+        ToolbarSurfaceMode surfaceMode = ToolbarSurfaceMode.Strip,
+        Action? drawTooltip = null)
     {
-        var accentColor = GetGizmoModeAccentColor(mode);
+        var accentColor = EditorColors.TransformModeAccent(mode);
         var isActive = (_gizmo.Settings.Mode & mode) != GizmoTransformMode.None;
         Vector4? buttonAccentColor = enabled && isActive ? accentColor : null;
         Vector4? buttonHoverBorderColor = enabled ? accentColor : null;
@@ -904,22 +997,19 @@ internal sealed partial class EditorToolbar
                 id,
                 icon,
                 label,
-                selected is null
+                drawTooltip is null && selected is null
                     ? $"{tooltip}\nSelect a placed item to use the gizmo"
                     : tooltip,
-                false,
+                mode == GizmoTransformMode.Scale && ImGui.IsPopupOpen(ScaleOptionsPopupId),
                 () => ToggleGizmoMode(mode),
                 buttonAccentColor,
-                useAccentFill: false,
                 useNeutralHoverFill: true,
                 hoverBorderColor: buttonHoverBorderColor,
+                drawTooltip: drawTooltip,
                 mode: surfaceMode,
-                keyHint: new EditorToolbarTooltipKeyHint(KeyboardModifiers.Shift, "and click to toggle independently"));
+                keyHints: GizmoModeKeyHints);
         }
     }
-
-    private static Vector4 GetGizmoModeAccentColor(GizmoTransformMode mode)
-        => EditorColors.TransformModeAccent(mode);
 
     private void ToggleGizmoMode(GizmoTransformMode mode)
         => _gizmo.Settings.ToggleMode(mode, ImGui.GetIO().KeyShift);

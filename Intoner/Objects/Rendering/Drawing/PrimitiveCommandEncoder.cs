@@ -10,7 +10,8 @@ internal sealed class PrimitiveCommandEncoder
     public void Clear()
         => Commands.Clear();
 
-    public bool Append(in DrawContext context, DrawBatch batch)
+    /// <summary> encodes a batch </summary>
+    public bool Append(in DrawContext context, DrawBatch batch, NativeTextTextureCache? textTextures)
     {
         if (batch.IsEmpty)
         {
@@ -47,7 +48,24 @@ internal sealed class PrimitiveCommandEncoder
                 primitive.Thickness,
                 primitive.Caps,
                 primitive.Previous,
-                primitive.Next));
+                primitive.Next,
+                batch.ScreenAnchor));
+        }
+
+        foreach (TextPrimitive text in batch.Texts)
+        {
+            if (textTextures is not null && textTextures.TryAcquire(text, context.AlphaMultiplier, out PrimitiveTexture? texture))
+            {
+                try
+                {
+                    Vector2 position = text.Anchor.HasValue ? text.Position : text.Position - context.ViewportPos;
+                    Commands.Add(new TextCommand(position, texture, text.Anchor));
+                }
+                finally
+                {
+                    texture.Release();
+                }
+            }
         }
 
         return Commands.Count != initialPrimitiveCount;
@@ -67,4 +85,3 @@ internal sealed class PrimitiveCommandEncoder
             ? 0
             : (uint)(Math.Clamp(value, 0f, 1f) * 255f + 0.5f);
 }
-

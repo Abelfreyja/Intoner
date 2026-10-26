@@ -1,14 +1,28 @@
+using Intoner.Displays;
 using Intoner.Objects.Models;
 using Intoner.Objects.Runtime;
 using Intoner.Objects.Utils;
 using Intoner.Scene;
-using Microsoft.Extensions.Logging;
+using System.Collections.Frozen;
+using System.Numerics;
 
 namespace Intoner.Objects.UI.Services;
 
 /// <summary> coordinates scene editor undo and redo recording around editor mutations </summary>
 internal interface IHistoryCoordinator : IDisposable
 {
+    /// <summary> applies and records checked item and folder changes together </summary>
+    bool TryApplyFolderChange(SceneHistoryKind kind, string title, IReadOnlyList<SceneItemSnapshot> beforeSnapshots,
+        IReadOnlyList<SceneItemSnapshot> requestedSnapshots, ObjectFolderSceneState beforeFolders, ObjectFolderSceneState afterFolders,
+        IReadOnlyList<Guid>? selectionAfterApply = null, IReadOnlyList<Guid>? selectionAfterRevert = null);
+    /// <summary> centers the group pivot on its members </summary>
+    bool TryCenterGroupPivot(SceneGroupSnapshot group);
+    /// <summary> edits pivot position and orientation </summary>
+    void ApplyInspectorGroupPivotEdit(string editId, string title, SceneGroupSnapshot group, Vector3 position, Vector3 rotationDegrees);
+    /// <summary> applies a checked batch </summary>
+    bool TryApplySceneChanges(SceneHistoryKind kind, string title, IReadOnlyList<SceneItemSnapshot> before,
+        IReadOnlyList<SceneItemSnapshot> after, IReadOnlyList<Guid> selectionAfter);
+
     /// <summary> connects selection callbacks used for history restore and capture </summary>
     /// <param name="captureSelectionIds">reads the current editor selection ids</param>
     /// <param name="applySelectionIds">applies a restored editor selection</param>
@@ -17,17 +31,13 @@ internal interface IHistoryCoordinator : IDisposable
     /// <summary> clears any connected selection callbacks </summary>
     void DisconnectSelectionHandlers();
 
-    /// <summary> refreshes the active creation context and clears history when the location changes </summary>
+    /// <summary> finishes inspector edits when the current location changes, retaining history </summary>
     /// <param name="currentContext">the latest object creation context</param>
-    /// <param name="commitPendingChanges">commits any pending editor change before the context swap</param>
-    /// <returns>true when the context changed and history was reset</returns>
-    bool RefreshContext(SceneCreationContext currentContext, Action commitPendingChanges);
+    /// <returns>true when the location context changed</returns>
+    bool RefreshContext(SceneCreationContext currentContext);
 
     /// <summary> forces any pending inspector edits to become one history step </summary>
     void CommitPendingInspectorEdits();
-
-    /// <summary> commits pending edits and validates history before a tracked persistent mutation starts </summary>
-    void PrepareForMutation();
 
     /// <summary> applies one inspector edit and records it when the edit is finished </summary>
     /// <param name="editId">stable editor local id for the edited field</param>
@@ -49,7 +59,7 @@ internal interface IHistoryCoordinator : IDisposable
     /// <summary> tries to jump to a reachable history state index </summary>
     /// <param name="stateIndex">the target history state index</param>
     /// <returns>true when the jump succeeded</returns>
-    bool TryJumpToState(int stateIndex);
+    bool TryJumpToState(int stateIndex, IReadOnlyList<SceneHistoryEntry> expectedEntries);
 
     /// <summary> tries to create one object and record the change </summary>
     /// <param name="title">display title for the history entry</param>
@@ -70,11 +80,11 @@ internal interface IHistoryCoordinator : IDisposable
     /// <returns>true when the move succeeded and was recorded</returns>
     bool TryMoveItemToPlayer(Guid itemId);
 
-    /// <summary> changes only an object's world and records the applied location for undo </summary>
-    /// <param name="snapshot"> the unchanged object snapshot shown by the location editor </param>
-    /// <param name="world"> the destination world resolved from the game sheets </param>
-    /// <returns> true when the checked world change succeeded and was recorded </returns>
-    bool TryChangeObjectWorld(ObjectSnapshot snapshot, SceneWorldInfo world);
+    /// <summary> changes the selected objects location in one history step </summary>
+    /// <param name="snapshots">the object snapshots shown by the location editor</param>
+    /// <param name="change">the world visibility and optional housing address</param>
+    /// <returns>true when the location change succeeded and was recorded</returns>
+    bool TryChangeObjectLocation(IReadOnlyList<ObjectSnapshot> snapshots, SceneLocationChange change);
 
     /// <summary> tries to apply one selected object update batch and record the change </summary>
     /// <param name="kind">main history kind for the update</param>
@@ -102,88 +112,77 @@ internal interface IHistoryCoordinator : IDisposable
     /// <returns>true when the remove batch succeeded and was recorded</returns>
     bool TryRemoveSceneItems(IReadOnlyList<SceneItemSnapshot> selectedSnapshots);
 
-    /// <summary> tries to clear all placed objects in the confirmed scene revision and record the change </summary>
+    /// <summary> tries to clear the confirmed placed objects and groups and record the change </summary>
     /// <param name="persistentRevision">the persistent scene revision shown when the clear was confirmed</param>
+    /// <param name="targets">the objects and groups included in the clear confirmation</param>
     /// <returns>true when the clear succeeded and was recorded</returns>
-    bool TryClearPlacedObjects(long persistentRevision);
+    bool TryClearPlacedObjects(long persistentRevision, IReadOnlyList<ObjectSceneItemSnapshot> targets);
 
-    /// <summary> records one completed before and after snapshot change </summary>
-    /// <param name="kind">main history kind for the change</param>
-    /// <param name="title">display title for the history entry</param>
-    /// <param name="beforeSnapshots">snapshots captured before the change</param>
-    /// <param name="afterSnapshots">snapshots captured after the change</param>
-    /// <param name="selectionAfterApply">optional selection to restore after apply or redo</param>
-    /// <param name="selectionAfterRevert">optional selection to restore after revert or undo</param>
-    /// <returns>true when a replayable history action was recorded</returns>
-    bool TryRecordCompletedAction(SceneHistoryKind kind, string title, IReadOnlyList<SceneItemSnapshot> beforeSnapshots, IReadOnlyList<SceneItemSnapshot> afterSnapshots, IReadOnlyList<Guid>? selectionAfterApply, IReadOnlyList<Guid>? selectionAfterRevert);
+    /// <summary> commits and records a completed scene preview together </summary>
+    bool TryCommitSceneEdit(SceneEditSession edit, SceneHistoryKind kind, string title,
+        IReadOnlyList<SceneItemSnapshot> beforeSnapshots, IReadOnlyList<SceneItemSnapshot> afterSnapshots,
+        IReadOnlyList<Guid>? selectionAfterApply, IReadOnlyList<Guid>? selectionAfterRevert);
 
-    /// <summary> records an already applied history action and synchronizes persistent revision tracking </summary>
-    /// <param name="action">the completed action to record</param>
-    void RecordCompletedAction(ISceneHistoryAction action);
+    /// <summary> creates a display and records its placement </summary>
+    bool TryCreateDisplay(SceneTransform transform);
 }
 
 internal sealed class HistoryCoordinator : IHistoryCoordinator
 {
-    private sealed class PendingInspectorEdit
+    private sealed class PendingInspectorEdit(
+        string editId,
+        string title,
+        SceneHistoryKind kind,
+        Guid itemId,
+        IReadOnlyList<SceneItemSnapshot> startSnapshots,
+        Guid[] selectionIds,
+        bool editGroupPivot,
+        IReadOnlyList<SceneItemSnapshot> storedItems)
     {
-        public PendingInspectorEdit(
-            string editId,
-            string title,
-            SceneHistoryKind kind,
-            Guid itemId,
-            SceneItemSnapshot startSnapshot,
-            SceneItemSnapshot latestSnapshot,
-            IReadOnlyList<Guid> selectionIds)
-        {
-            EditId = editId;
-            Title = title;
-            Kind = kind;
-            ItemId = itemId;
-            StartSnapshot = startSnapshot;
-            LatestSnapshot = latestSnapshot;
-            SelectionIds = [.. selectionIds];
-        }
-
-        public string EditId { get; }
-        public string Title { get; }
-        public SceneHistoryKind Kind { get; }
-        public Guid ItemId { get; }
-        public SceneItemSnapshot StartSnapshot { get; }
-        public SceneItemSnapshot LatestSnapshot { get; set; }
-        public Guid[] SelectionIds { get; }
+        public string EditId { get; } = editId;
+        public string Title { get; } = title;
+        public SceneHistoryKind Kind { get; } = kind;
+        public Guid ItemId { get; } = itemId;
+        public IReadOnlyList<SceneItemSnapshot> StartSnapshots { get; } = startSnapshots;
+        public IReadOnlyList<SceneItemSnapshot> LatestSnapshots { get; set; } = startSnapshots;
+        public Guid[] SelectionIds { get; } = selectionIds;
+        public bool EditGroupPivot { get; } = editGroupPivot;
+        public IReadOnlyList<SceneItemSnapshot> StoredItems { get; } = storedItems;
+        public long HistoryRevision { get; set; }
     }
 
-    private readonly ILogger<HistoryCoordinator> _logger;
+    private readonly Lock _stateLock;
     private readonly ISceneHistoryManager _historyManager;
     private readonly IObjectMutationService _mutationService;
     private readonly IObjectOrganizationService _organizationService;
     private readonly IObjectSceneView _sceneView;
     private readonly ISceneItemService _sceneItemService;
+    private readonly IDisplayService _displayService;
     private readonly IScenePlacementService _placementService;
     private PendingInspectorEdit? _pendingInspectorEdit;
 
     private Func<IReadOnlyList<Guid>>? _captureSelectionIds;
     private Action<IReadOnlyList<Guid>?>? _applySelectionIds;
     private SceneCreationContext? _currentContext;
-    private long _historyPersistentSceneRevision;
 
     public HistoryCoordinator(
-        ILogger<HistoryCoordinator> logger,
         ISceneHistoryManager historyManager,
         IObjectMutationService mutationService,
         IObjectOrganizationService organizationService,
         IObjectSceneView sceneView,
         ISceneItemService sceneItemService,
-        IScenePlacementService placementService)
+        IDisplayService displayService,
+        IScenePlacementService placementService,
+        ObjectStateLock stateLock)
     {
-        _logger = logger;
+        _stateLock = stateLock.Value;
         _historyManager = historyManager;
         _mutationService = mutationService;
         _organizationService = organizationService;
         _sceneView = sceneView;
         _sceneItemService = sceneItemService;
+        _displayService = displayService;
         _placementService = placementService;
-        _historyPersistentSceneRevision = _sceneItemService.GetRevisions().Persistent;
 
         _historyManager.ActionApplied += HandleHistoryActionApplied;
         _historyManager.ActionReverted += HandleHistoryActionReverted;
@@ -191,6 +190,7 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
 
     public void ConnectSelectionHandlers(Func<IReadOnlyList<Guid>> captureSelectionIds, Action<IReadOnlyList<Guid>?> applySelectionIds)
     {
+        using Lock.Scope scope = _stateLock.EnterScope();
         ArgumentNullException.ThrowIfNull(captureSelectionIds);
         ArgumentNullException.ThrowIfNull(applySelectionIds);
 
@@ -200,61 +200,94 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
 
     public void DisconnectSelectionHandlers()
     {
+        using Lock.Scope scope = _stateLock.EnterScope();
         _captureSelectionIds = null;
         _applySelectionIds = null;
     }
 
-    public bool RefreshContext(SceneCreationContext currentContext, Action commitPendingChanges)
+    public bool RefreshContext(SceneCreationContext currentContext)
     {
+        using Lock.Scope scope = _stateLock.EnterScope();
         ArgumentNullException.ThrowIfNull(currentContext);
-        ArgumentNullException.ThrowIfNull(commitPendingChanges);
 
         if (Equals(_currentContext, currentContext))
         {
             return false;
         }
 
-        commitPendingChanges();
-        _historyManager.ClearHistory();
-        TrackPersistentSceneRevision();
+        CommitPendingInspectorEdits();
         _currentContext = currentContext;
         return true;
     }
 
     public void CommitPendingInspectorEdits()
     {
-        if (_pendingInspectorEdit is null)
+        using Lock.Scope scope = _stateLock.EnterScope();
+        if (_pendingInspectorEdit is not { } edit)
         {
             return;
         }
 
-        FinalizeInspectorSnapshotEdit();
-    }
-
-    public void PrepareForMutation()
-    {
-        CommitPendingInspectorEdits();
-        ResetHistoryForUntrackedPersistentChange();
+        _pendingInspectorEdit = null;
+        RecordItemHistory(edit.Kind, CaptureItemHistory(edit.Title, edit.StartSnapshots, edit.LatestSnapshots, edit.StoredItems),
+            edit.SelectionIds, edit.SelectionIds);
     }
 
     public void ApplyInspectorSnapshotEdit(string editId, SceneHistoryKind kind, string title, SceneItemSnapshot startSnapshot, SceneItemSnapshot? nextSnapshot, bool recordImmediately = false)
+        => ApplyInspectorSnapshotEdit(editId, kind, title, startSnapshot, nextSnapshot, recordImmediately, false);
+
+    public void ApplyInspectorGroupPivotEdit(string editId, string title, SceneGroupSnapshot group, Vector3 position, Vector3 rotationDegrees)
     {
+        using Lock.Scope scope = _stateLock.EnterScope();
+        if (group.Locked || !NumericsUtility.IsFinite(position) || !NumericsUtility.IsFinite(rotationDegrees))
+            return;
+        ApplyInspectorSnapshotEdit(editId, SceneHistoryKind.Transform, title, group,
+            group with { Transform = group.Transform with { Position = position, RotationDegrees = rotationDegrees } }, false, true);
+    }
+
+    private void ApplyInspectorSnapshotEdit(string editId, SceneHistoryKind kind, string title, SceneItemSnapshot startSnapshot,
+        SceneItemSnapshot? nextSnapshot, bool recordImmediately, bool editGroupPivot)
+    {
+        using Lock.Scope scope = _stateLock.EnterScope();
         if (_pendingInspectorEdit is not null
             && (!string.Equals(_pendingInspectorEdit.EditId, editId, StringComparison.Ordinal)
-                || _pendingInspectorEdit.ItemId != startSnapshot.Id))
+                || _pendingInspectorEdit.ItemId != startSnapshot.Id
+                || _pendingInspectorEdit.EditGroupPivot != editGroupPivot))
         {
-            FinalizeInspectorSnapshotEdit();
+            CommitPendingInspectorEdits();
         }
 
-        if (nextSnapshot is not null)
+        if (_pendingInspectorEdit is { } pending && pending.HistoryRevision != _sceneItemService.GetHistoryRevision())
         {
-            ResetHistoryForUntrackedPersistentChange();
-            if (!_sceneItemService.Update(nextSnapshot, out SceneItemSnapshot appliedSnapshot).IsApplied())
+            SceneItemHistoryChange change = CaptureItemHistory(pending.Title, pending.StartSnapshots, pending.LatestSnapshots, pending.StoredItems);
+
+            if (!change.HasChanges || !change.Validate(apply: false).IsSuccess)
+            {
+                CommitPendingInspectorEdits();
+            }
+        }
+
+        if (nextSnapshot is not null && !Equals(startSnapshot, nextSnapshot))
+        {
+            long? expectedRevision = startSnapshot is SceneGroupSnapshot
+                ? _sceneItemService.GetRevisions().Persistent
+                : null;
+
+            if (!TryResolveItemChanges(startSnapshot, nextSnapshot, out IReadOnlyList<SceneItemSnapshot> before,
+                    out IReadOnlyList<SceneItemSnapshot> after, editGroupPivot))
             {
                 return;
             }
 
-            TrackPersistentSceneRevision();
+            IReadOnlyList<SceneItemSnapshot> storedItems = _pendingInspectorEdit?.StoredItems ?? _sceneItemService.GetStoredItems().ToArray();
+
+            if (!TryApplySnapshotChanges(before, after, out IReadOnlyList<SceneItemSnapshot> applied, expectedRevision))
+            {
+                return;
+            }
+
+            long historyRevision = _sceneItemService.GetHistoryRevision();
+
             if (_pendingInspectorEdit is null)
             {
                 _pendingInspectorEdit = new PendingInspectorEdit(
@@ -262,19 +295,19 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
                     title,
                     kind,
                     startSnapshot.Id,
-                    startSnapshot,
-                    appliedSnapshot,
-                    CaptureCurrentSelectionIds());
+                    before,
+                    [.. CaptureCurrentSelectionIds()],
+                    editGroupPivot,
+                    storedItems);
             }
-            else
-            {
-                _pendingInspectorEdit.LatestSnapshot = appliedSnapshot;
-            }
+
+            _pendingInspectorEdit.LatestSnapshots = applied;
+            _pendingInspectorEdit.HistoryRevision = historyRevision;
         }
 
         if (recordImmediately)
         {
-            FinalizeInspectorSnapshotEdit();
+            CommitPendingInspectorEdits();
         }
     }
 
@@ -284,12 +317,13 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
     public bool TryRedo()
         => TryReplayHistory(_historyManager.Redo);
 
-    public bool TryJumpToState(int stateIndex)
-        => TryReplayHistory(() => _historyManager.TryJumpToState(stateIndex));
+    public bool TryJumpToState(int stateIndex, IReadOnlyList<SceneHistoryEntry> expectedEntries)
+        => TryReplayHistory(() => _historyManager.TryJumpToState(stateIndex, expectedEntries));
 
     public bool TryCreateObject(string title, ObjectKind kind, ObjectPlacementOverrides? overrides)
     {
-        PrepareForMutation();
+        using Lock.Scope scope = _stateLock.EnterScope();
+        CommitPendingInspectorEdits();
         var selectionBefore = CaptureCurrentSelectionIds();
         var createdId = _mutationService.CreateObjectAtPlayer(kind, out var createdSnapshot, overrides);
         if (!createdId.HasValue)
@@ -302,6 +336,7 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
 
     public bool TryAssignObjectCollection(string title, string collectionId, IReadOnlyList<ObjectSnapshot> snapshots)
     {
+        using Lock.Scope scope = _stateLock.EnterScope();
         string normalizedCollectionId = ObjectCollectionKeyUtility.NormalizeCollectionId(collectionId);
         IReadOnlyList<ObjectSnapshot> beforeSnapshots = snapshots
             .Where(snapshot => !string.Equals(
@@ -314,7 +349,7 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
             return false;
         }
 
-        PrepareForMutation();
+        CommitPendingInspectorEdits();
         if (!_organizationService.AssignCollection(
                 normalizedCollectionId,
                 beforeSnapshots,
@@ -335,14 +370,14 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
 
     public bool TryMoveItemToPlayer(Guid itemId)
     {
-        PrepareForMutation();
+        using Lock.Scope scope = _stateLock.EnterScope();
+        CommitPendingInspectorEdits();
         if (!_sceneItemService.TryGetPlacedItem(itemId, out SceneItemSnapshot beforeSnapshot)
             || !_placementService.TryResolveFromPlayer(out SceneTransform placement))
         {
             return false;
         }
 
-        var selectionIds = CaptureCurrentSelectionIds();
         SceneItemSnapshot requestedSnapshot = beforeSnapshot with
         {
             Transform = beforeSnapshot.Transform with
@@ -351,18 +386,74 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
                 RotationDegrees = placement.RotationDegrees,
             },
         };
-        if (!_sceneItemService.Update(requestedSnapshot, out SceneItemSnapshot movedSnapshot).IsApplied())
-        {
-            return false;
-        }
-
-        return TryRecordCompletedAction(
+        if (beforeSnapshot is SceneGroupSnapshot group)
+            return TryTransformGroup(group, requestedSnapshot.Transform);
+        return TryApplySceneChanges(
             SceneHistoryKind.Move,
             "Move Item To Player",
             [beforeSnapshot],
-            [movedSnapshot],
-            selectionIds,
-            selectionIds);
+            [requestedSnapshot],
+            CaptureCurrentSelectionIds());
+    }
+
+    private bool TryTransformGroup(SceneGroupSnapshot group, SceneTransform transform)
+    {
+        using Lock.Scope scope = _stateLock.EnterScope();
+        CommitPendingInspectorEdits();
+        long revision = _sceneItemService.GetRevisions().Persistent;
+        return TryResolveItemChanges(group, group with { Transform = transform }, out IReadOnlyList<SceneItemSnapshot> before,
+                out IReadOnlyList<SceneItemSnapshot> after)
+            && TryApplySceneChanges(SceneHistoryKind.Transform, "Transform Group", before, after, CaptureCurrentSelectionIds(), revision);
+    }
+
+    public bool TryCenterGroupPivot(SceneGroupSnapshot group)
+    {
+        using Lock.Scope scope = _stateLock.EnterScope();
+        if (group.Locked)
+            return false;
+        CommitPendingInspectorEdits();
+        long revision = _sceneItemService.GetRevisions().Persistent;
+        IReadOnlyList<ObjectSnapshot> members = _sceneView.GetPlacedObjectSnapshots().Where(snapshot => snapshot.GroupId == group.Id).ToArray();
+        if (members.Count == 0)
+            return false;
+        Vector3 position = SceneSelectionTransformMath.ResolveSelectionPivotPosition(members, new SceneItemBoundsLookup(_sceneView.GetObjectBoundsSnapshots()));
+        return TryApplySceneChanges(SceneHistoryKind.Transform, "Center Group Pivot", [group],
+            [group with { Transform = group.Transform with { Position = position } }], [group.Id], revision);
+    }
+
+    private bool TryResolveItemChanges(SceneItemSnapshot start, SceneItemSnapshot next,
+        out IReadOnlyList<SceneItemSnapshot> before, out IReadOnlyList<SceneItemSnapshot> after, bool editGroupPivot = false,
+        ILookup<Guid?, ObjectSnapshot>? groupMembers = null)
+    {
+        before = [];
+        after = [];
+        if (start is not SceneGroupSnapshot group || next is not SceneGroupSnapshot requested)
+        {
+            before = [start];
+            after = [next];
+            return true;
+        }
+
+        IReadOnlyList<ObjectSnapshot> members = [];
+        if (!editGroupPivot)
+            members = groupMembers is null
+                ? _sceneView.GetPlacedObjectSnapshots().Where(snapshot => snapshot.GroupId == group.Id).ToArray()
+                : groupMembers[group.Id].ToArray();
+        IReadOnlySet<Guid> scalableMembers = FrozenSet<Guid>.Empty;
+        if (!editGroupPivot && group.Transform != requested.Transform)
+        {
+            HashSet<Guid> scalable = [];
+            foreach (ObjectSnapshot member in members)
+            {
+                if (!_sceneItemService.TryGetManipulation(member, out SceneItemManipulationPolicy policy))
+                    return false;
+                if (policy.Describe(member).SupportsScale)
+                    scalable.Add(member.Id);
+            }
+            scalableMembers = scalable;
+        }
+
+        return SceneGroupUtility.TryPlanChange(group, requested, members, scalableMembers, editGroupPivot, out before, out after);
     }
 
     public bool TryApplySelectedSnapshotUpdate(SceneHistoryKind kind, string title, IReadOnlyList<ObjectSnapshot> selectedSnapshots, Func<ObjectSnapshot, ObjectSnapshot> updateFactory)
@@ -372,35 +463,28 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
             selectedSnapshots,
             snapshot => updateFactory((ObjectSnapshot)snapshot));
 
-    public bool TryChangeObjectWorld(ObjectSnapshot snapshot, SceneWorldInfo world)
+    public bool TryChangeObjectLocation(IReadOnlyList<ObjectSnapshot> snapshots, SceneLocationChange change)
     {
-        if (!snapshot.CreatedIn.Scope.IsValid || world.Id == 0 || world.Id == snapshot.CreatedIn.WorldId)
+        if (snapshots.Any(static snapshot => !snapshot.CreatedIn.IsAssigned))
         {
             return false;
         }
 
-        PrepareForMutation();
-        ObjectSnapshot requested = snapshot with
+        return TryApplySelectedSnapshotUpdate(SceneHistoryKind.Organization, "Change Location", snapshots, snapshot =>
         {
-            CreatedIn = snapshot.CreatedIn with { WorldId = world.Id, WorldName = world.Name },
-        };
-        SceneItemSnapshot applied = null!;
-        SceneMutationStatus status = _sceneItemService.ApplyChanges(
-            [new SceneItemSnapshotChange(snapshot, requested)],
-            () => _sceneItemService.TryGetPlacedItem(snapshot.Id, out applied));
-        if (!status.IsApplied())
-        {
-            return false;
-        }
+            SceneCreationContext location = change.Apply(snapshot.CreatedIn);
 
-        IReadOnlyList<Guid> selectionIds = CaptureCurrentSelectionIds();
-        return TryRecordCompletedAction(
-            SceneHistoryKind.Organization,
-            "Change Object World",
-            [snapshot],
-            [applied],
-            selectionIds,
-            selectionIds);
+            if (location == snapshot.CreatedIn)
+            {
+                return snapshot;
+            }
+
+            return snapshot with
+            {
+                CreatedIn = location,
+                GroupId = location.HasSameLocation(snapshot.CreatedIn) ? snapshot.GroupId : null,
+            };
+        });
     }
 
     public bool TryApplySceneItemUpdate(
@@ -409,46 +493,60 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
         IReadOnlyList<SceneItemSnapshot> selectedSnapshots,
         Func<SceneItemSnapshot, SceneItemSnapshot> updateFactory)
     {
+        using Lock.Scope scope = _stateLock.EnterScope();
         if (selectedSnapshots.Count == 0)
         {
             return false;
         }
 
-        PrepareForMutation();
+        CommitPendingInspectorEdits();
         var beforeSnapshots = new List<SceneItemSnapshot>(selectedSnapshots.Count);
         var requestedSnapshots = new List<SceneItemSnapshot>(selectedSnapshots.Count);
+        HashSet<Guid> transformedGroups = kind == SceneHistoryKind.Transform
+            ? selectedSnapshots.OfType<SceneGroupSnapshot>().Select(static group => group.Id).ToHashSet()
+            : [];
+        long? expectedRevision = transformedGroups.Count > 0 ? _sceneItemService.GetRevisions().Persistent : null;
+        ILookup<Guid?, ObjectSnapshot>? groupMembers = null;
         foreach (SceneItemSnapshot snapshot in selectedSnapshots)
         {
+            if (snapshot is ObjectSnapshot { GroupId: { } groupId } && transformedGroups.Contains(groupId))
+                continue;
             SceneItemSnapshot nextSnapshot = updateFactory(snapshot);
             if (Equals(snapshot, nextSnapshot))
             {
                 continue;
             }
 
-            beforeSnapshots.Add(snapshot);
-            requestedSnapshots.Add(nextSnapshot);
+            if (snapshot is SceneGroupSnapshot && kind == SceneHistoryKind.Transform)
+            {
+                groupMembers ??= _sceneView.GetPlacedObjectSnapshots()
+                    .Where(member => member.GroupId is Guid id && transformedGroups.Contains(id))
+                    .ToLookup(static member => member.GroupId);
+                if (!TryResolveItemChanges(snapshot, nextSnapshot, out IReadOnlyList<SceneItemSnapshot> before,
+                        out IReadOnlyList<SceneItemSnapshot> after, groupMembers: groupMembers))
+                    return false;
+                beforeSnapshots.AddRange(before);
+                requestedSnapshots.AddRange(after);
+            }
+            else
+            {
+                beforeSnapshots.Add(snapshot);
+                requestedSnapshots.Add(nextSnapshot);
+            }
         }
 
-        if (requestedSnapshots.Count == 0
-            || !_sceneItemService.UpdateMany(
-                requestedSnapshots,
-                out IReadOnlyList<SceneItemSnapshot> afterSnapshots).IsApplied())
-        {
-            return false;
-        }
-
-        var selectionIds = CaptureCurrentSelectionIds();
-        return TryRecordCompletedAction(kind, title, beforeSnapshots, afterSnapshots, selectionIds, selectionIds);
+        return TryApplySceneChanges(kind, title, beforeSnapshots, requestedSnapshots, CaptureCurrentSelectionIds(), expectedRevision);
     }
 
     public bool TryDuplicateSceneItems(IReadOnlyList<SceneItemSnapshot> selectedSnapshots)
     {
+        using Lock.Scope scope = _stateLock.EnterScope();
         if (selectedSnapshots.Count == 0)
         {
             return false;
         }
 
-        PrepareForMutation();
+        CommitPendingInspectorEdits();
         var selectionBefore = CaptureCurrentSelectionIds();
         if (!_sceneItemService.DuplicateMany(
                 selectedSnapshots,
@@ -470,65 +568,120 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
             selectionBefore);
     }
 
+    public bool TryApplySceneChanges(SceneHistoryKind kind, string title, IReadOnlyList<SceneItemSnapshot> before,
+        IReadOnlyList<SceneItemSnapshot> after, IReadOnlyList<Guid> selectionAfter)
+        => TryApplySceneChanges(kind, title, before, after, selectionAfter, null);
+
+    private bool TryApplySceneChanges(SceneHistoryKind kind, string title, IReadOnlyList<SceneItemSnapshot> before,
+        IReadOnlyList<SceneItemSnapshot> after, IReadOnlyList<Guid> selectionAfter, long? expectedPersistentRevision)
+    {
+        using Lock.Scope scope = _stateLock.EnterScope();
+        CommitPendingInspectorEdits();
+        IReadOnlyList<Guid> selectionBefore = CaptureCurrentSelectionIds();
+        return TryApplySnapshotChanges(before, after, out IReadOnlyList<SceneItemSnapshot> applied, expectedPersistentRevision)
+            && TryRecordCompletedAction(kind, title, before, applied, selectionAfter, selectionBefore);
+    }
+
+    private bool TryApplySnapshotChanges(IReadOnlyList<SceneItemSnapshot> before,
+        IReadOnlyList<SceneItemSnapshot> after, out IReadOnlyList<SceneItemSnapshot> applied, long? expectedPersistentRevision = null)
+    {
+        applied = [];
+        IReadOnlyList<SceneItemSnapshotChange> changes = SceneItemHistoryChanges.Build(before, after);
+        if (changes.Count == 0)
+            return false;
+        HashSet<SceneItemSnapshot> unchanged = [.. before];
+        unchanged.IntersectWith(after);
+        IReadOnlyList<SceneItemSnapshot> resolved = [];
+        SceneMutationStatus status = unchanged.Count == 0 && !expectedPersistentRevision.HasValue
+            ? _sceneItemService.ApplyChanges(changes, ResolveApplied)
+            : _sceneItemService.ApplyChanges(changes, unchanged, ResolveApplied, expectedPersistentRevision);
+        if (!status.IsApplied())
+            return false;
+        applied = resolved;
+        return true;
+
+        bool ResolveApplied()
+            => _sceneItemService.TryResolvePlacedItems(after, out resolved);
+    }
+
     public bool TryRemoveSceneItems(IReadOnlyList<SceneItemSnapshot> selectedSnapshots)
+        => TryApplySceneChanges(SceneHistoryKind.Remove, selectedSnapshots.Count == 1 ? "Remove Item" : "Remove Items",
+            selectedSnapshots, [], []);
+
+    public bool TryClearPlacedObjects(long persistentRevision, IReadOnlyList<ObjectSceneItemSnapshot> targets)
     {
-        if (selectedSnapshots.Count == 0)
+        using Lock.Scope scope = _stateLock.EnterScope();
+        CommitPendingInspectorEdits();
+
+        if (_sceneItemService.GetRevisions().Persistent != persistentRevision || targets.Count == 0)
         {
             return false;
         }
 
-        PrepareForMutation();
-        var selectionBefore = CaptureCurrentSelectionIds();
-        IReadOnlyList<SceneItemSnapshotChange> changes = selectedSnapshots
-            .Select(static snapshot => new SceneItemSnapshotChange(snapshot, null))
-            .ToList();
-        if (!_sceneItemService.ApplyChanges(changes).IsApplied())
-        {
-            return false;
-        }
-
-        return TryRecordCompletedAction(
-            SceneHistoryKind.Remove,
-            selectedSnapshots.Count == 1 ? "Remove Item" : "Remove Items",
-            selectedSnapshots,
-            [],
-            Array.Empty<Guid>(),
-            selectionBefore);
+        IReadOnlyList<Guid> selectionBefore = CaptureCurrentSelectionIds();
+        HashSet<Guid> removedIds = targets.Select(static item => item.Id).ToHashSet();
+        Guid[] selectionAfter = selectionBefore.Where(id => !removedIds.Contains(id)).ToArray();
+        return TryApplySnapshotChanges(targets, [], out IReadOnlyList<SceneItemSnapshot> applied, persistentRevision)
+            && TryRecordCompletedAction(SceneHistoryKind.Clear, "Clear Placed Objects", targets, applied, selectionAfter, selectionBefore);
     }
 
-    public bool TryClearPlacedObjects(long persistentRevision)
+    public bool TryApplyFolderChange(SceneHistoryKind kind, string title, IReadOnlyList<SceneItemSnapshot> beforeSnapshots,
+        IReadOnlyList<SceneItemSnapshot> requestedSnapshots, ObjectFolderSceneState beforeFolders, ObjectFolderSceneState afterFolders,
+        IReadOnlyList<Guid>? selectionAfterApply = null, IReadOnlyList<Guid>? selectionAfterRevert = null)
     {
-        PrepareForMutation();
-        if (_sceneItemService.GetRevisions().Persistent != persistentRevision)
+        using Lock.Scope scope = _stateLock.EnterScope();
+
+        if (SceneItemHistoryChanges.Build(beforeSnapshots, requestedSnapshots).Count == 0
+            && ObjectFolderSceneStateUtility.StatesMatch(beforeFolders, afterFolders))
         {
             return false;
         }
 
-        var persistedSnapshots = _sceneView.GetPlacedObjectSnapshots();
-        if (_sceneItemService.GetRevisions().Persistent != persistentRevision || persistedSnapshots.Count == 0)
+        CommitPendingInspectorEdits();
+        IReadOnlyList<SceneItemSnapshot> stored = _sceneItemService.GetStoredItems();
+
+        if (!_organizationService.ApplyFolderChange(beforeSnapshots, requestedSnapshots, beforeFolders, afterFolders,
+                out IReadOnlyList<SceneItemSnapshot> applied).IsApplied())
         {
             return false;
         }
 
-        var selectionBefore = CaptureCurrentSelectionIds();
-        IReadOnlyList<SceneItemSnapshotChange> changes = persistedSnapshots
-            .Select(static snapshot => new SceneItemSnapshotChange(snapshot, null))
-            .ToList();
-        if (!_sceneItemService.ApplyChanges(changes).IsApplied())
+        SceneItemHistoryChange items = CaptureItemHistory(title, beforeSnapshots, applied, stored);
+
+        if (!items.HasChanges && ObjectFolderSceneStateUtility.StatesMatch(beforeFolders, afterFolders))
         {
             return false;
         }
 
-        return TryRecordCompletedAction(
-            SceneHistoryKind.Clear,
-            "Clear Placed Objects",
-            persistedSnapshots,
-            [],
-            Array.Empty<Guid>(),
-            selectionBefore);
+        ISceneHistoryAction action = new ObjectOrganizationHistoryAction(_organizationService, items, kind, beforeFolders, afterFolders);
+
+        RecordCompletedAction(action, selectionAfterApply, selectionAfterRevert);
+        return true;
     }
 
-    public bool TryRecordCompletedAction(
+    private SceneItemHistoryChange CaptureItemHistory(string title, IReadOnlyList<SceneItemSnapshot> before,
+        IReadOnlyList<SceneItemSnapshot> after, IReadOnlyList<SceneItemSnapshot> stored)
+        => new(_sceneItemService, title, SceneItemHistoryChanges.Build(before, after), before.Intersect(after).ToArray(), stored);
+
+    public bool TryCreateDisplay(SceneTransform transform)
+    {
+        using Lock.Scope scope = _stateLock.EnterScope();
+        CommitPendingInspectorEdits();
+        IReadOnlyList<Guid> selectionBefore = CaptureCurrentSelectionIds();
+        return _displayService.TryCreate(new DisplaySettings(), transform, true, out DisplaySnapshot created)
+            && TryRecordCompletedAction(SceneHistoryKind.Create, "Create Display", [], [created], [created.Id], selectionBefore);
+    }
+
+    public bool TryCommitSceneEdit(SceneEditSession edit, SceneHistoryKind kind, string title,
+        IReadOnlyList<SceneItemSnapshot> beforeSnapshots, IReadOnlyList<SceneItemSnapshot> afterSnapshots,
+        IReadOnlyList<Guid>? selectionAfterApply, IReadOnlyList<Guid>? selectionAfterRevert)
+    {
+        using Lock.Scope scope = _stateLock.EnterScope();
+        SceneItemHistoryChange change = CaptureItemHistory(title, beforeSnapshots, afterSnapshots, _sceneItemService.GetStoredItems());
+        return edit.Commit().IsApplied() && RecordItemHistory(kind, change, selectionAfterApply, selectionAfterRevert);
+    }
+
+    private bool TryRecordCompletedAction(
         SceneHistoryKind kind,
         string title,
         IReadOnlyList<SceneItemSnapshot> beforeSnapshots,
@@ -536,37 +689,31 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
         IReadOnlyList<Guid>? selectionAfterApply,
         IReadOnlyList<Guid>? selectionAfterRevert)
     {
-        IReadOnlyList<SceneItemSnapshotChange> changes = SceneItemHistoryChanges.Build(
-            beforeSnapshots,
-            afterSnapshots);
-        if (changes.Count == 0)
+        using Lock.Scope scope = _stateLock.EnterScope();
+        return RecordItemHistory(kind, CaptureItemHistory(title, beforeSnapshots, afterSnapshots, _sceneItemService.GetStoredItems()),
+            selectionAfterApply, selectionAfterRevert);
+    }
+
+    private bool RecordItemHistory(SceneHistoryKind kind, SceneItemHistoryChange change,
+        IReadOnlyList<Guid>? selectionAfterApply, IReadOnlyList<Guid>? selectionAfterRevert)
+    {
+        if (!change.HasChanges)
         {
-            // completed edits can advance the revision without changing their final snapshots
-            TrackPersistentSceneRevision();
             return false;
         }
 
-        RecordCompletedAction(
-            new SelectionHistoryAction(
-                new SceneItemHistoryAction(_sceneItemService, kind, title, changes),
-                selectionAfterApply,
-                selectionAfterRevert));
+        RecordCompletedAction(new SceneItemHistoryAction(kind, change), selectionAfterApply, selectionAfterRevert);
         return true;
     }
 
-    public void RecordCompletedAction(ISceneHistoryAction action)
-    {
-        ArgumentNullException.ThrowIfNull(action);
-
-        // selection restoration runs synchronously while recording, so track first
-        // to avoid treating the completed mutation as an external scene change
-        TrackPersistentSceneRevision();
-        _historyManager.RecordCompleted(action);
-        TrackPersistentSceneRevision();
-    }
+    private void RecordCompletedAction(ISceneHistoryAction action,
+        IReadOnlyList<Guid>? selectionAfterApply, IReadOnlyList<Guid>? selectionAfterRevert)
+        => _historyManager.RecordCompleted(selectionAfterApply is null && selectionAfterRevert is null
+            ? action : new SelectionHistoryAction(action, selectionAfterApply, selectionAfterRevert));
 
     public void Dispose()
     {
+        using Lock.Scope scope = _stateLock.EnterScope();
         _historyManager.ActionApplied -= HandleHistoryActionApplied;
         _historyManager.ActionReverted -= HandleHistoryActionReverted;
         _pendingInspectorEdit = null;
@@ -614,66 +761,20 @@ internal sealed class HistoryCoordinator : IHistoryCoordinator
     private IReadOnlyList<Guid> CaptureCurrentSelectionIds()
         => _captureSelectionIds?.Invoke() ?? Array.Empty<Guid>();
 
-    private void FinalizeInspectorSnapshotEdit()
-    {
-        if (_pendingInspectorEdit is not { } edit)
-        {
-            return;
-        }
-
-        if (ResetHistoryForUntrackedPersistentChange())
-        {
-            return;
-        }
-
-        _pendingInspectorEdit = null;
-        IReadOnlyList<SceneItemSnapshotChange> changes = SceneItemHistoryChanges.Build(
-            [edit.StartSnapshot],
-            [edit.LatestSnapshot]);
-        if (changes.Count > 0)
-        {
-            RecordCompletedAction(
-                new SelectionHistoryAction(
-                    new SceneItemHistoryAction(_sceneItemService, edit.Kind, edit.Title, changes),
-                    edit.SelectionIds,
-                    edit.SelectionIds));
-        }
-    }
-
     private bool TryReplayHistory(Func<bool> replay)
     {
-        PrepareForMutation();
-
-        bool replayed = replay();
-        TrackPersistentSceneRevision();
-        return replayed;
-    }
-
-    private bool ResetHistoryForUntrackedPersistentChange()
-    {
-        long persistentSceneRevision = _sceneItemService.GetRevisions().Persistent;
-        if (_historyPersistentSceneRevision == persistentSceneRevision)
+        lock (_stateLock)
         {
-            return false;
-        }
+            CommitPendingInspectorEdits();
+            long revision = _sceneItemService.GetStoredRevision();
+            bool replayed = replay();
 
-        bool historyWasActive = _historyManager.UndoActionKind is not null
-            || _historyManager.RedoActionKind is not null
-            || _pendingInspectorEdit is not null;
-        if (historyWasActive)
-        {
-            _pendingInspectorEdit = null;
-            _historyManager.ClearHistory();
-            _logger.LogDebug(
-                "cleared scene history after persistent scene revision changed outside history from {TrackedRevision} to {CurrentRevision}",
-                _historyPersistentSceneRevision,
-                persistentSceneRevision);
-        }
+            if (_sceneItemService.GetStoredRevision() != revision)
+            {
+                _sceneItemService.ReconcileStoredChanges();
+            }
 
-        _historyPersistentSceneRevision = persistentSceneRevision;
-        return historyWasActive;
+            return replayed;
+        }
     }
-
-    private void TrackPersistentSceneRevision()
-        => _historyPersistentSceneRevision = _sceneItemService.GetRevisions().Persistent;
 }

@@ -1,4 +1,5 @@
 using Intoner.Scene;
+using Intoner.Objects.Models;
 using Intoner.Objects.Utils;
 using System.Numerics;
 using System.Runtime.InteropServices;
@@ -13,13 +14,6 @@ internal readonly record struct GizmoSurfaceDragSelectionResult(Vector3 PivotPos
 
 internal static class GizmoSurfaceDragSolver
 {
-    public static Quaternion ResolveRotationSteps(
-        Quaternion startRotation,
-        IReadOnlyList<GizmoSurfaceDragRotationStep> rotationSteps,
-        Vector3? surfaceNormal,
-        Vector3? cameraRight)
-        => ResolveRotationSequence(startRotation, rotationSteps, surfaceNormal, cameraRight);
-
     public static GizmoSurfaceDragSingleResult ResolveSingle(
         SceneSurfaceHit hit,
         SceneItemSnapshot startSnapshot,
@@ -50,7 +44,7 @@ internal static class GizmoSurfaceDragSolver
                     surfaceNormal);
             }
 
-            rotationQuaternion = ResolveRotationSequence(rotationQuaternion, rotationSteps, rotationSurfaceNormal, cameraRight);
+            rotationQuaternion = ResolveRotationSteps(rotationQuaternion, rotationSteps, rotationSurfaceNormal, cameraRight);
             if (!forceSurfaceAlignment && !usePlacementOrigin)
             {
                 var minimumSupport = ResolveEntrySurfaceSupport(primaryEntry, rotationQuaternion, surfaceNormal);
@@ -59,7 +53,7 @@ internal static class GizmoSurfaceDragSolver
         }
         else
         {
-            rotationQuaternion = ResolveRotationSequence(rotationQuaternion, rotationSteps, null, cameraRight);
+            rotationQuaternion = ResolveRotationSteps(rotationQuaternion, rotationSteps, null, cameraRight);
         }
 
         return new GizmoSurfaceDragSingleResult(
@@ -104,19 +98,19 @@ internal static class GizmoSurfaceDragSolver
                     surfaceNormal);
             }
 
-            groupRotation = ResolveRotationSequence(
+            groupRotation = ResolveRotationSteps(
                 groupRotation,
                 rotationSteps,
                 rotationSurfaceNormal,
                 cameraRight);
 
-            var groupDelta = GizmoSelectionTransformUtility.ResolveRotationDelta(startRotationQuaternion, groupRotation);
+            var groupDelta = SceneTransformMath.ResolveRotationDelta(startRotationQuaternion, groupRotation);
             var supportOffset = ResolveSelectionSurfaceSupportOffset(selectionEntries, groupDelta, surfaceNormal);
             pivotPosition = hit.Point - (surfaceNormal * supportOffset);
         }
         else
         {
-            groupRotation = ResolveRotationSequence(
+            groupRotation = ResolveRotationSteps(
                 groupRotation,
                 rotationSteps,
                 null,
@@ -127,7 +121,7 @@ internal static class GizmoSurfaceDragSolver
         return true;
     }
 
-    private static Quaternion ResolveRotationSequence(
+    public static Quaternion ResolveRotationSteps(
         Quaternion startRotation,
         IReadOnlyList<GizmoSurfaceDragRotationStep> rotationSteps,
         Vector3? surfaceNormal,
@@ -191,6 +185,11 @@ internal static class GizmoSurfaceDragSolver
         var minimumSupport = float.PositiveInfinity;
         foreach (var entry in selectionEntries)
         {
+            if (entry.Snapshot is SceneGroupSnapshot)
+            {
+                continue;
+            }
+
             var rotatedPivotOffset = Vector3.Transform(entry.PivotOffset, groupDelta);
             var entryRotation = SceneTransformMath.NormalizeQuaternion(groupDelta * entry.StartRotationQuaternion);
             var support = Vector3.Dot(rotatedPivotOffset, surfaceNormal) + ResolveEntrySurfaceSupport(entry, entryRotation, surfaceNormal);
@@ -212,4 +211,3 @@ internal static class GizmoSurfaceDragSolver
         return Vector3.Dot(centerOffset, surfaceNormal) - supportExtent;
     }
 }
-

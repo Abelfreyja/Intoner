@@ -1,4 +1,5 @@
 using Intoner.Objects.Models;
+using Intoner.Objects.Resources;
 using Intoner.Scene;
 using System.Runtime.InteropServices;
 
@@ -166,7 +167,7 @@ internal sealed class ObjectSceneState : IObjectSceneState
 {
     private readonly Lock _stateLock;
     private readonly Dictionary<Guid, ObjectSceneEntry> _entries = [];
-    private IReadOnlyList<ObjectSceneEntry> _entrySnapshot = Array.Empty<ObjectSceneEntry>();
+    private IReadOnlyList<ObjectSceneEntry>? _entrySnapshot = Array.Empty<ObjectSceneEntry>();
     private IReadOnlyList<ObjectBoundsSnapshot> _boundsSnapshots = Array.Empty<ObjectBoundsSnapshot>();
     private readonly Dictionary<Guid, string> _runtimeFailureCodes = [];
 
@@ -206,7 +207,7 @@ internal sealed class ObjectSceneState : IObjectSceneState
     {
         lock (_stateLock)
         {
-            return _entrySnapshot;
+            return _entrySnapshot ??= Array.AsReadOnly(_entries.Values.ToArray());
         }
     }
 
@@ -294,7 +295,7 @@ internal sealed class ObjectSceneState : IObjectSceneState
             }
 
             _entries[entry.Snapshot.Id] = entry;
-            RebuildEntrySnapshotLocked();
+            _entrySnapshot = null;
             _runtimeFailureCodes.Remove(entry.Snapshot.Id);
             ++_activeRevision;
         }
@@ -312,7 +313,7 @@ internal sealed class ObjectSceneState : IObjectSceneState
 
             RemoveBoundsLocked(id);
 
-            RebuildEntrySnapshotLocked();
+            _entrySnapshot = null;
 
             _runtimeFailureCodes.Remove(id);
             ++_activeRevision;
@@ -368,7 +369,7 @@ internal sealed class ObjectSceneState : IObjectSceneState
 
         for (int index = 0; index < current.Count; ++index)
         {
-            if (!current[index].HasSameContent(next[index]))
+            if (!ReferenceEquals(current[index], next[index]) && !current[index].HasSameContent(next[index]))
             {
                 return false;
             }
@@ -377,19 +378,36 @@ internal sealed class ObjectSceneState : IObjectSceneState
         return true;
     }
 
-    private void RebuildEntrySnapshotLocked()
-        => _entrySnapshot = Array.AsReadOnly(_entries.Values.ToArray());
-
     private void RemoveBoundsLocked(Guid id)
     {
-        ObjectBoundsSnapshot[] retainedBounds = _boundsSnapshots
-            .Where(snapshot => snapshot.Id != id)
-            .ToArray();
-        if (retainedBounds.Length != _boundsSnapshots.Count)
+        int retainedCount = 0;
+        for (int index = 0; index < _boundsSnapshots.Count; ++index)
         {
-            _boundsSnapshots = Array.AsReadOnly(retainedBounds);
-            ++_boundsRevision;
+            if (_boundsSnapshots[index].Id != id)
+            {
+                ++retainedCount;
+            }
         }
+
+        if (retainedCount == _boundsSnapshots.Count)
+        {
+            return;
+        }
+
+        ObjectBoundsSnapshot[] retainedBounds = new ObjectBoundsSnapshot[retainedCount];
+        int retainedIndex = 0;
+        for (int index = 0; index < _boundsSnapshots.Count; ++index)
+        {
+            ObjectBoundsSnapshot snapshot = _boundsSnapshots[index];
+
+            if (snapshot.Id != id)
+            {
+                retainedBounds[retainedIndex++] = snapshot;
+            }
+        }
+
+        _boundsSnapshots = Array.AsReadOnly(retainedBounds);
+        ++_boundsRevision;
     }
 
     public void SetRuntimeFailure(Guid id, string code)
@@ -496,12 +514,26 @@ internal sealed class ObjectSceneState : IObjectSceneState
 
 internal sealed class ObjectSceneEntry
 {
+    private ObjectSnapshot? _overlaySource;
+    private IReadOnlyList<ObjectOverlayShapeSnapshot>? _overlayShapes;
+
     public required IObjectRuntime Runtime { get; init; }
     public required ObjectSceneSource Source { get; init; }
     public SceneResourceCollectionState ResourceCollection { get; init; }
 
     public ObjectSnapshot Snapshot
         => Runtime.Snapshot;
+
+    public IReadOnlyList<ObjectOverlayShapeSnapshot>? GetOverlayShapes(ObjectSnapshot snapshot)
+    {
+        if (!ReferenceEquals(_overlaySource, snapshot))
+        {
+            _overlayShapes = ObjectScene.CreateOverlayShapes(snapshot);
+            _overlaySource = snapshot;
+        }
+
+        return _overlayShapes;
+    }
 }
 
 internal enum SceneResourceCollectionStatus
@@ -513,21 +545,18 @@ internal enum SceneResourceCollectionStatus
 [StructLayout(LayoutKind.Auto)]
 internal readonly record struct SceneResourceCollectionState(
     SceneResourceCollectionStatus Status,
-    long Revision)
+    ObjectResourceRevision Revision)
 {
-    public static SceneResourceCollectionState Pending { get; } = new(SceneResourceCollectionStatus.Pending, 0);
+    public static SceneResourceCollectionState Pending { get; } = new(SceneResourceCollectionStatus.Pending, default);
 
-    public static SceneResourceCollectionState Current(long revision)
-        => new(SceneResourceCollectionStatus.Current, NormalizeRevision(revision));
+    public static SceneResourceCollectionState Current(ObjectResourceRevision? revision)
+        => revision is { } current ? new(SceneResourceCollectionStatus.Current, current) : Pending;
 
-    public bool MatchesCurrentRevision(long revision)
-        => Status == SceneResourceCollectionStatus.Current && Revision == NormalizeRevision(revision);
+    public SceneResourceCollectionState WithRevision(ObjectResourceRevision? revision)
+        => revision is { } current ? this with { Revision = current } : Pending;
 
-    public bool IsPendingWithoutRuntimeRevision(long revision)
-        => Status == SceneResourceCollectionStatus.Pending && NormalizeRevision(revision) == 0;
-
-    private static long NormalizeRevision(long revision)
-        => revision < 0 ? 0 : revision;
+    public bool MatchesCurrentRevision(ObjectResourceRevision? revision)
+        => Status == SceneResourceCollectionStatus.Current && Revision == revision;
 }
 
 [StructLayout(LayoutKind.Auto)]
@@ -537,5 +566,3 @@ internal readonly record struct ObjectSceneRefreshState(
     bool NeedsRefresh,
     bool IsZoning,
     long Revision);
-
-

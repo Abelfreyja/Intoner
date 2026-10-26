@@ -1,12 +1,11 @@
 using Intoner.Objects.Assets;
+using Intoner.Objects.Resources;
 using Intoner.Objects.Utils;
 using Penumbra.GameData.Data;
 using Penumbra.GameData.Enums;
 using Penumbra.GameData.Structs;
-using Penumbra.String;
 using Penumbra.String.Classes;
 using System.Collections.Immutable;
-using System.Text;
 using System.Text.Json;
 
 namespace Intoner.Objects.Collections;
@@ -97,7 +96,9 @@ internal sealed class PenumbraModData
         foreach (JsonProperty redirect in paths.Value.EnumerateObject())
         {
             string gamePath = redirect.Name;
-            if (!TryNormalizeGamePath(gamePath, out string normalizedGamePath))
+            string normalizedGamePath = ObjectResolvedPath.FromGamePath(gamePath).Path;
+
+            if (normalizedGamePath.Length == 0 || !ObjectResourcePathEncoding.TryGetGamePathByteCount(gamePath, out _))
             {
                 continue;
             }
@@ -126,28 +127,10 @@ internal sealed class PenumbraModData
                 normalizedTargetPath = TextUtility.TrimOrEmpty(targetPath);
             }
 
-            normalizedPaths.TryAdd(normalizedGamePath, normalizedTargetPath);
+            normalizedPaths.TryAdd(gamePath, normalizedTargetPath);
         }
 
         return normalizedPaths.ToImmutableDictionary(StringComparer.OrdinalIgnoreCase);
-    }
-
-    private static bool TryNormalizeGamePath(string path, out string normalizedPath)
-    {
-        normalizedPath = string.Empty;
-        byte[] utf8Path = Encoding.UTF8.GetBytes(path);
-        if (!Utf8GamePath.FromSpan(utf8Path, MetaDataComputation.All, out Utf8GamePath gamePath)
-         || gamePath.IsEmpty)
-        {
-            return false;
-        }
-
-        using (gamePath)
-        {
-            normalizedPath = gamePath.ToString();
-        }
-
-        return true;
     }
 }
 
@@ -458,6 +441,7 @@ internal sealed class PenumbraModMetadataReader
 
     public PenumbraModMetadata Load(string modRootPath, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         string normalizedRootPath = PenumbraModPath.NormalizeRoot(modRootPath);
         string metadataPath = Path.Combine(normalizedRootPath, "meta.json");
         Exception? lastException = null;
@@ -473,12 +457,15 @@ internal sealed class PenumbraModMetadataReader
                     if (_cache.TryGetValue(normalizedRootPath, out CacheEntry? cached)
                      && string.Equals(cached.Signature, signature, StringComparison.Ordinal))
                     {
+                        cancellationToken.ThrowIfCancellationRequested();
                         return cached.Metadata;
                     }
                 }
 
                 PenumbraModMetadata metadata = ReadMetadata(metadataPath);
+                cancellationToken.ThrowIfCancellationRequested();
                 string parsedSignature = BuildSignature(metadataPath);
+
                 if (!string.Equals(signature, parsedSignature, StringComparison.Ordinal))
                 {
                     throw new IOException($"Penumbra metadata changed while reading '{metadataPath}'");
@@ -486,6 +473,7 @@ internal sealed class PenumbraModMetadataReader
 
                 lock (_cacheLock)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     _cache[normalizedRootPath] = new CacheEntry(parsedSignature, metadata);
                 }
 
@@ -503,6 +491,7 @@ internal sealed class PenumbraModMetadataReader
             }
         }
 
+        cancellationToken.ThrowIfCancellationRequested();
         throw new InvalidDataException($"failed to read Penumbra metadata from '{metadataPath}'", lastException);
     }
 

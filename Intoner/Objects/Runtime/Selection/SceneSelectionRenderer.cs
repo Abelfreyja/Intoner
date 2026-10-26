@@ -38,45 +38,53 @@ internal sealed class SceneSelectionRenderer : IDisposable
     {
         _device = device;
         _geometryProvider = geometryProvider;
-        Context = device.ImmediateContext;
-        _vertexShader = VertexShader.CreateVertexShader(device);
-        _pixelShader = PixelShader.CreatePixelShader(device);
-        _inputLayout = VertexShader.CreateInputLayout(
-            device,
-            [new InputElement("POSITION", 0, Format.R32G32B32_Float, 0, 0)]);
-        ConstantBuffer = new Buffer(
-            device,
-            Marshal.SizeOf<SelectionConstants>(),
-            ResourceUsage.Default,
-            BindFlags.ConstantBuffer,
-            CpuAccessFlags.None,
-            ResourceOptionFlags.None,
-            0);
-        _rasterizerState = new RasterizerState(device, new RasterizerStateDescription
+        try
         {
-            CullMode = CullMode.None,
-            FillMode = FillMode.Solid,
-            IsDepthClipEnabled = true,
-            IsMultisampleEnabled = false,
-            IsFrontCounterClockwise = false,
-            IsScissorEnabled = true,
-        });
-        _forwardDepthStencilState = new DepthStencilState(device, new DepthStencilStateDescription
+            Context = device.ImmediateContext;
+            _vertexShader = VertexShader.CreateVertexShader(device);
+            _pixelShader = PixelShader.CreatePixelShader(device);
+            _inputLayout = VertexShader.CreateInputLayout(
+                device,
+                [new InputElement("POSITION", 0, Format.R32G32B32_Float, 0, 0)]);
+            ConstantBuffer = new Buffer(
+                device,
+                Marshal.SizeOf<SelectionConstants>(),
+                ResourceUsage.Default,
+                BindFlags.ConstantBuffer,
+                CpuAccessFlags.None,
+                ResourceOptionFlags.None,
+                0);
+            _rasterizerState = new RasterizerState(device, new RasterizerStateDescription
+            {
+                CullMode = CullMode.None,
+                FillMode = FillMode.Solid,
+                IsDepthClipEnabled = true,
+                IsMultisampleEnabled = false,
+                IsFrontCounterClockwise = false,
+                IsScissorEnabled = true,
+            });
+            _forwardDepthStencilState = new DepthStencilState(device, new DepthStencilStateDescription
+            {
+                IsDepthEnabled = true,
+                DepthComparison = Comparison.LessEqual,
+                DepthWriteMask = DepthWriteMask.All,
+                IsStencilEnabled = false,
+            });
+            _reverseDepthStencilState = new DepthStencilState(device, new DepthStencilStateDescription
+            {
+                IsDepthEnabled = true,
+                DepthComparison = Comparison.GreaterEqual,
+                DepthWriteMask = DepthWriteMask.All,
+                IsStencilEnabled = false,
+            });
+            _meshCache = new SelectionMeshCache(device, geometryProvider);
+            _viewportTargets = new SelectionViewportTargets(device);
+        }
+        catch
         {
-            IsDepthEnabled = true,
-            DepthComparison = Comparison.LessEqual,
-            DepthWriteMask = DepthWriteMask.All,
-            IsStencilEnabled = false,
-        });
-        _reverseDepthStencilState = new DepthStencilState(device, new DepthStencilStateDescription
-        {
-            IsDepthEnabled = true,
-            DepthComparison = Comparison.GreaterEqual,
-            DepthWriteMask = DepthWriteMask.All,
-            IsStencilEnabled = false,
-        });
-        _meshCache = new SelectionMeshCache(device, geometryProvider);
-        _viewportTargets = new SelectionViewportTargets(device);
+            DisposeResources();
+            throw;
+        }
     }
 
     public DeviceContext Context { get; }
@@ -109,17 +117,28 @@ internal sealed class SceneSelectionRenderer : IDisposable
 
     public void Dispose()
     {
-        _viewportTargets.Dispose();
-        _meshCache.Dispose();
-        ConstantBuffer.Dispose();
-        _reverseDepthStencilState.Dispose();
-        _forwardDepthStencilState.Dispose();
-        _rasterizerState.Dispose();
-        _inputLayout.Dispose();
-        _pixelShader.Dispose();
-        _vertexShader.Dispose();
-        Context.Dispose();
-        _device.Dispose();
+        try
+        {
+            DisposeResources();
+        }
+        finally
+        {
+            _device.Dispose();
+        }
+    }
+
+    private void DisposeResources()
+    {
+        _viewportTargets?.Dispose();
+        _meshCache?.Dispose();
+        ConstantBuffer?.Dispose();
+        _reverseDepthStencilState?.Dispose();
+        _forwardDepthStencilState?.Dispose();
+        _rasterizerState?.Dispose();
+        _inputLayout?.Dispose();
+        _pixelShader?.Dispose();
+        _vertexShader?.Dispose();
+        Context?.Dispose();
     }
 
     private void PrepareFrame(in SceneSelectionQuery query, bool useReverseDepth)
@@ -346,15 +365,28 @@ internal sealed class SceneSelectionRenderer : IDisposable
                 vertices[index] = new SelectionVertex(geometry.Positions[index]);
             }
 
-            var vertexBuffer = Buffer.Create(device, BindFlags.VertexBuffer, vertices);
-            var indexData = new uint[geometry.Indices.Length];
-            for (var index = 0; index < geometry.Indices.Length; index++)
+            Buffer? vertexBuffer = null;
+            Buffer? indexBuffer = null;
+            try
             {
-                indexData[index] = (uint)Math.Max(0, geometry.Indices[index]);
-            }
+                vertexBuffer = Buffer.Create(device, BindFlags.VertexBuffer, vertices);
+                uint[] indexData = new uint[geometry.Indices.Length];
+                for (int index = 0; index < geometry.Indices.Length; index++)
+                {
+                    indexData[index] = (uint)Math.Max(0, geometry.Indices[index]);
+                }
 
-            var indexBuffer = Buffer.Create(device, BindFlags.IndexBuffer, indexData);
-            return new UploadedMesh(vertexBuffer, indexBuffer, indexData.Length);
+                indexBuffer = Buffer.Create(device, BindFlags.IndexBuffer, indexData);
+                UploadedMesh mesh = new(vertexBuffer, indexBuffer, indexData.Length);
+                vertexBuffer = null;
+                indexBuffer = null;
+                return mesh;
+            }
+            finally
+            {
+                indexBuffer?.Dispose();
+                vertexBuffer?.Dispose();
+            }
         }
     }
 
@@ -473,6 +505,4 @@ internal sealed class SceneSelectionRenderer : IDisposable
             _readbackHeight = 0;
         }
     }
-
 }
-

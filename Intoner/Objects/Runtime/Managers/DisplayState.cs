@@ -100,7 +100,7 @@ internal sealed class DisplayState : IDisposable
         appliedSnapshot = Sanitize(snapshot);
         lock (_stateLock)
         {
-            if (!_snapshots.TryGetValue(appliedSnapshot.Id, out DisplaySnapshot? current))
+            if (!_persistence.CanWrite || !_snapshots.TryGetValue(appliedSnapshot.Id, out DisplaySnapshot? current))
             {
                 appliedSnapshot = null!;
                 return false;
@@ -120,9 +120,10 @@ internal sealed class DisplayState : IDisposable
 
     public bool TryRemove(Guid id, out DisplaySnapshot removedSnapshot)
     {
+        removedSnapshot = null!;
         lock (_stateLock)
         {
-            if (!_snapshots.TryGetValue(id, out removedSnapshot!))
+            if (!_persistence.CanWrite || !_snapshots.TryGetValue(id, out removedSnapshot!))
             {
                 removedSnapshot = null!;
                 return false;
@@ -150,6 +151,11 @@ internal sealed class DisplayState : IDisposable
 
         lock (_stateLock)
         {
+            if (!_persistence.CanWrite)
+            {
+                return false;
+            }
+
             var nextSnapshots = new Dictionary<Guid, DisplaySnapshot>(_snapshots);
             bool identitiesChanged = false;
             bool stateChanged = false;
@@ -322,7 +328,7 @@ internal sealed class DisplayState : IDisposable
 
     private bool TryRestoreLocked(DisplaySnapshot snapshot)
     {
-        if (_snapshots.ContainsKey(snapshot.Id)
+        if (!_persistence.CanWrite || _snapshots.ContainsKey(snapshot.Id)
             || !TryReserveIdentities(_snapshots.Keys.Append(snapshot.Id).ToArray()))
         {
             return false;
@@ -353,13 +359,9 @@ internal sealed class DisplayState : IDisposable
             .Select(Sanitize)
             .OrderBy(static entry => entry.CreatedAtUtc)
             .ToArray();
-        for (int index = 0; index < snapshots.Length; ++index)
+        foreach (DisplaySnapshot snapshot in snapshots)
         {
-            DisplaySnapshot snapshot = snapshots[index];
-            if (!_snapshots.TryAdd(snapshot.Id, snapshot))
-            {
-                _logger.LogWarning("ignored duplicate persisted display {ItemId}", snapshot.Id);
-            }
+            _snapshots.Add(snapshot.Id, snapshot);
         }
 
         while (_snapshots.Count > 0
@@ -367,11 +369,13 @@ internal sealed class DisplayState : IDisposable
         {
             if (conflictingId != Guid.Empty && _snapshots.Remove(conflictingId))
             {
-                _logger.LogWarning("ignored persisted display with conflicting scene item id {ItemId}", conflictingId);
+                _persistence.BlockWrites();
+                _logger.LogWarning("ignored persisted display with conflicting scene item id {ItemId}; display writes are disabled", conflictingId);
                 continue;
             }
 
-            _logger.LogError("could not register persisted display identities");
+            _persistence.BlockWrites();
+            _logger.LogError("could not register persisted display identities; display writes are disabled");
             _snapshots.Clear();
         }
     }
@@ -419,6 +423,6 @@ internal sealed class DisplayState : IDisposable
 
     private static Vector3 ClampScale(Vector3 scale)
         => NumericsUtility.IsFinite(scale)
-            ? Vector3.Max(scale, new Vector3(0.01f))
+            ? Vector3.Max(scale, new Vector3(SceneTransformMath.MinimumScale))
             : Vector3.One;
 }

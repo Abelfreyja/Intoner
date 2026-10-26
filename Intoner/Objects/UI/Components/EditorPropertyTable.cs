@@ -33,28 +33,40 @@ internal static class EditorPropertyTable
         return table;
     }
 
-    public static void NextRow(string title, float actionWidth = 0f, Action? drawActions = null)
+    public static void NextRow(string title, float actionWidth = 0f, Action? drawActions = null, string? originalValue = null)
     {
         ImGui.TableNextRow(ImGuiTableRowFlags.None, ImGui.GetFrameHeight() + (2f * ImGuiHelpers.GlobalScale));
         ImGui.TableNextColumn();
         ImGui.AlignTextToFramePadding();
-        DrawLabel(title, actionWidth, drawActions);
+        DrawLabel(title, actionWidth, drawActions, originalValue);
 
         ImGui.TableNextColumn();
         ImGui.SetNextItemWidth(-1f);
     }
 
-    private static void DrawLabel(string title, float actionWidth, Action? drawActions)
+    private static void DrawLabel(string title, float actionWidth, Action? drawActions, string? originalValue)
     {
-        if (drawActions is null || actionWidth <= 0f)
-        {
-            ImGui.TextUnformatted(title);
-            return;
-        }
-
         float startX = ImGui.GetCursorPosX();
         float availableWidth = ImGui.GetContentRegionAvail().X;
-        ImGui.TextUnformatted(title);
+
+        if (originalValue is null)
+        {
+            ImGui.TextUnformatted(title);
+        }
+        else
+        {
+            ImGui.TextColored(ThemeColors.AccentPrimary, $"{title} *");
+
+            if (ImGui.IsItemHovered())
+            {
+                IntonerTooltip.DrawText($"Original: {originalValue}");
+            }
+        }
+
+        if (drawActions is null || actionWidth <= 0f)
+        {
+            return;
+        }
 
         float actionX = startX + MathF.Max(0f, availableWidth - actionWidth);
         ImGui.SameLine();
@@ -68,16 +80,24 @@ internal static class EditorPropertyTable
         return ImGui.Checkbox($"##{id}", ref value);
     }
 
+    public static bool InputText(string id, string title, ref string value, int maxLength)
+    {
+        NextRow(title);
+        value ??= string.Empty;
+        return ImGui.InputText($"##{id}", ref value, maxLength);
+    }
+
     public static bool SliderFloat(string id, string title, ref float value, float min, float max, string format)
     {
         NextRow(title);
         return ImGui.SliderFloat($"##{id}", ref value, min, max, format);
     }
 
-    public static bool DragFloat(string id, string title, ref float value, float speed, float min, float max, string format)
+    public static bool DragFloat(string id, string title, ref float value, float speed, float min, float max, string format,
+        float actionWidth = 0f, Action? drawActions = null, Vector4? borderColor = null, Action<int>? onActivated = null)
     {
-        NextRow(title);
-        return ImGui.DragFloat($"##{id}", ref value, speed, min, max, format);
+        NextRow(title, actionWidth, drawActions);
+        return DrawFloatInput(id, ref value, speed, min, max, format, MathF.Max(1f, ImGui.GetContentRegionAvail().X), borderColor, onActivated);
     }
 
     public static bool DragFloat3(
@@ -89,14 +109,16 @@ internal static class EditorPropertyTable
         float max,
         string format,
         float actionWidth = 0f,
-        Action? drawActions = null)
+        Action? drawActions = null,
+        Action<int>? onActivated = null)
     {
         NextRow(title, actionWidth, drawActions);
-        return DrawDragFloat3Inputs(id, ref value, speed, min, max, format);
+        return DrawDragFloat3Inputs(id, ref value, speed, min, max, format, onActivated);
     }
 
-    private static bool DrawDragFloat3Inputs(string id, ref Vector3 value, float speed, float min, float max, string format)
+    private static bool DrawDragFloat3Inputs(string id, ref Vector3 value, float speed, float min, float max, string format, Action<int>? onActivated)
     {
+        using var group = ImRaii.Group();
         float x = value.X;
         float y = value.Y;
         float z = value.Z;
@@ -113,9 +135,9 @@ internal static class EditorPropertyTable
             axisGap = 0f;
         }
 
-        DrawAxisFloatInline($"{id}_x", "X", AxisXColor, ref x, speed, min, max, format, inputWidth, 0f, axisValueGap, ref changed);
-        DrawAxisFloatInline($"{id}_y", "Y", AxisYColor, ref y, speed, min, max, format, inputWidth, axisGap, axisValueGap, ref changed);
-        DrawAxisFloatInline($"{id}_z", "Z", AxisZColor, ref z, speed, min, max, format, inputWidth, axisGap, axisValueGap, ref changed);
+        DrawAxis($"{id}_x", "X", 0, AxisXColor, ref x, 0f);
+        DrawAxis($"{id}_y", "Y", 1, AxisYColor, ref y, axisGap);
+        DrawAxis($"{id}_z", "Z", 2, AxisZColor, ref z, axisGap);
 
         if (!changed)
         {
@@ -124,35 +146,45 @@ internal static class EditorPropertyTable
 
         value = new Vector3(x, y, z);
         return true;
+
+        void DrawAxis(string inputId, string axis, int axisIndex, Vector4 color, ref float axisValue, float leadingGap)
+        {
+            if (leadingGap > 0f)
+            {
+                ImGui.SameLine(0f, leadingGap);
+            }
+
+            ImGui.AlignTextToFramePadding();
+            using (ImRaii.PushColor(ImGuiCol.Text, color))
+            {
+                ImGui.TextUnformatted(axis);
+            }
+
+            ImGui.SameLine(0f, axisValueGap);
+            changed |= DrawFloatInput(inputId, ref axisValue, speed, min, max, format, inputWidth, color, onActivated, axisIndex);
+        }
     }
 
-    private static void DrawAxisFloatInline(string id, string axis, Vector4 color, ref float value, float speed, float min, float max, string format, float inputWidth, float leadingGap, float valueGap, ref bool changed)
+    private static bool DrawFloatInput(string id, ref float value, float speed, float min, float max, string format,
+        float inputWidth, Vector4? borderColor, Action<int>? onActivated, int axis = -1)
     {
-        if (leadingGap > 0f)
-        {
-            ImGui.SameLine(0f, leadingGap);
-        }
-
-        ImGui.AlignTextToFramePadding();
-        using (ImRaii.PushColor(ImGuiCol.Text, color))
-        {
-            ImGui.TextUnformatted(axis);
-        }
-
-        ImGui.SameLine(0f, valueGap);
         ImGui.SetNextItemWidth(inputWidth);
-        using var border = ImRaii.PushColor(ImGuiCol.Border, color with { W = 0.90f });
-        using var borderSize = ImRaii.PushStyle(ImGuiStyleVar.FrameBorderSize, ImGuiHelpers.GlobalScale);
-        if (ImGui.DragFloat($"##{id}", ref value, speed, min, max, format))
+        using var border = ImRaii.PushColor(ImGuiCol.Border, (borderColor ?? ThemeColors.Border) with { W = 0.90f }, borderColor.HasValue);
+        using var borderSize = ImRaii.PushStyle(ImGuiStyleVar.FrameBorderSize, ImGuiHelpers.GlobalScale, borderColor.HasValue);
+        bool changed = ImGui.DragFloat($"##{id}", ref value, speed, min, max, format);
+
+        if (ImGui.IsItemActivated())
         {
-            changed = true;
+            onActivated?.Invoke(axis);
         }
+
+        return changed;
     }
 
-    public static bool EnumRow<T>(string id, string title, T current, Func<T, string> labelFunc, ref T target) where T : struct, Enum
+    public static bool EnumRow<T>(string id, string title, ref T current) where T : struct, Enum
     {
         NextRow(title);
-        using var combo = ImRaii.Combo($"##{id}", labelFunc(current));
+        using var combo = ImRaii.Combo($"##{id}", current.ToString());
         if (!combo)
         {
             return false;
@@ -161,10 +193,10 @@ internal static class EditorPropertyTable
         bool changed = false;
         foreach (T value in Enum.GetValues<T>())
         {
-            bool selected = EqualityComparer<T>.Default.Equals(target, value);
-            if (ImGui.Selectable(labelFunc(value), selected))
+            bool selected = EqualityComparer<T>.Default.Equals(current, value);
+            if (ImGui.Selectable(value.ToString(), selected))
             {
-                target = value;
+                current = value;
                 changed = true;
             }
 

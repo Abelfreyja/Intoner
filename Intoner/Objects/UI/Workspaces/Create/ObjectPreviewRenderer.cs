@@ -1,10 +1,10 @@
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
-using Intoner.Objects.Assets;
 using Intoner.Objects.Catalog;
 using Intoner.Objects.Preview;
 using Intoner.Objects.Preview.Rendering;
+using Intoner.Objects.Resources;
 using Intoner.Objects.UI.Components;
 using Intoner.UI;
 using System.Numerics;
@@ -204,22 +204,18 @@ internal sealed class ObjectPreviewRenderer
             new Vector2(firstButtonX, buttonY),
             swatchSize,
             imageRounding,
-            PreviewRender.BackgroundPalette.GetSwatchFill(PreviewRender.BackgroundStyle.White),
-            state.BackgroundStyle == PreviewRender.BackgroundStyle.White,
+            PreviewRender.BackgroundStyle.White,
             accent,
-            "light",
-            () => state.BackgroundStyle = PreviewRender.BackgroundStyle.White);
+            state);
 
         hoveredAny |= DrawPreviewBackgroundButton(
             $"{id}-dark",
             new Vector2(firstButtonX + swatchSize.X + spacing, buttonY),
             swatchSize,
             imageRounding,
-            PreviewRender.BackgroundPalette.GetSwatchFill(PreviewRender.BackgroundStyle.DarkBlue),
-            state.BackgroundStyle == PreviewRender.BackgroundStyle.DarkBlue,
+            PreviewRender.BackgroundStyle.DarkBlue,
             accent,
-            "dark",
-            () => state.BackgroundStyle = PreviewRender.BackgroundStyle.DarkBlue);
+            state);
 
         return hoveredAny;
     }
@@ -229,12 +225,12 @@ internal sealed class ObjectPreviewRenderer
         Vector2 screenPosition,
         Vector2 size,
         float imageRounding,
-        Vector4 fillColor,
-        bool selected,
+        PreviewRender.BackgroundStyle backgroundStyle,
         Vector4 accent,
-        string tooltip,
-        Action onClick)
+        PreviewState state)
     {
+        bool selected = state.BackgroundStyle == backgroundStyle;
+        Vector4 fillColor = PreviewRender.BackgroundPalette.GetSwatchFill(backgroundStyle);
         var drawList = ImGui.GetWindowDrawList();
         var framePadding = 2f * ImGuiHelpers.GlobalScale;
         var buttonRounding = MathF.Max(4f * ImGuiHelpers.GlobalScale, imageRounding * 0.35f);
@@ -249,12 +245,12 @@ internal sealed class ObjectPreviewRenderer
         if (hovered)
         {
             ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
-            IntonerTooltip.Attach(tooltip);
+            IntonerTooltip.Attach(backgroundStyle == PreviewRender.BackgroundStyle.White ? "light" : "dark");
         }
 
         if (ImGui.IsItemClicked(ImGuiMouseButton.Left))
         {
-            onClick();
+            state.BackgroundStyle = backgroundStyle;
         }
 
         Vector4 outlineColor;
@@ -321,7 +317,7 @@ internal sealed class ObjectPreviewRenderer
 
         public void SyncAsset(string assetPath)
         {
-            var normalizedPath = GameAssetPathRules.NormalizeGamePath(assetPath);
+            string normalizedPath = ObjectResolvedPath.FromGamePath(assetPath).Path;
             if (string.Equals(AssetPath, normalizedPath, StringComparison.OrdinalIgnoreCase))
             {
                 return;

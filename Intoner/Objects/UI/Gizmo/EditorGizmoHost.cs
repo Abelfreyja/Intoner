@@ -1,3 +1,4 @@
+using Intoner.Objects.Models;
 using Intoner.Objects.UI.Services;
 using Intoner.Scene;
 
@@ -28,26 +29,19 @@ internal sealed class EditorGizmoHost : IGizmoHost
         return unchecked(revisions.Active + revisions.Bounds);
     }
 
-    Guid[] IGizmoHost.CaptureCurrentSelectionIds()
-        => [.. _editorSelection.SelectedItemIds];
-
     void IGizmoHost.PrepareHistoryMutation()
-        => _historyCoordinator.PrepareForMutation();
+        => _historyCoordinator.CommitPendingInspectorEdits();
 
-    bool IGizmoHost.TryRecordCompletedHistoryAction(
+    bool IGizmoHost.TryCommitHistoryEdit(
+        SceneEditSession edit,
         SceneHistoryKind kind,
         string title,
         IReadOnlyList<SceneItemSnapshot> beforeSnapshots,
-        IReadOnlyList<SceneItemSnapshot> afterSnapshots,
-        IReadOnlyList<Guid>? selectionAfterApply,
-        IReadOnlyList<Guid>? selectionAfterRevert)
-        => _historyCoordinator.TryRecordCompletedAction(
-            kind,
-            title,
-            beforeSnapshots,
-            afterSnapshots,
-            selectionAfterApply,
-            selectionAfterRevert);
+        IReadOnlyList<SceneItemSnapshot> afterSnapshots)
+    {
+        Guid[] selectionIds = [.. _editorSelection.SelectedItemIds];
+        return _historyCoordinator.TryCommitSceneEdit(edit, kind, title, beforeSnapshots, afterSnapshots, selectionIds, selectionIds);
+    }
 
     bool IGizmoHost.TryDuplicateSelectedItems(IReadOnlyList<SceneItemSnapshot> selectedSnapshots)
         => _historyCoordinator.TryDuplicateSceneItems(selectedSnapshots);
@@ -58,6 +52,9 @@ internal sealed class EditorGizmoHost : IGizmoHost
     bool IGizmoHost.TryMoveItemToPlayerWithHistory(Guid itemId)
         => _historyCoordinator.TryMoveItemToPlayer(itemId);
 
+    bool IGizmoHost.TryCenterGroupPivot(SceneGroupSnapshot group)
+        => _historyCoordinator.TryCenterGroupPivot(group);
+
     bool IGizmoHost.TryApplySelectedSnapshotUpdateWithHistory(
         SceneHistoryKind kind,
         string title,
@@ -65,4 +62,3 @@ internal sealed class EditorGizmoHost : IGizmoHost
         Func<SceneItemSnapshot, SceneItemSnapshot> updateFactory)
         => _historyCoordinator.TryApplySceneItemUpdate(kind, title, selectedSnapshots, updateFactory);
 }
-

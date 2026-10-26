@@ -1,48 +1,105 @@
 using Dalamud.Plugin.Services;
 using Intoner.Objects.Assets;
 using Microsoft.Extensions.Logging;
-using Penumbra.GameData.Files.MaterialStructs;
+using Penumbra.GameData.Files.Materials;
+using System.Runtime.InteropServices;
+using PenumbraMtrlFile = Penumbra.GameData.Files.Materials.MtrlFile;
 using ShaderNames = Penumbra.GameData.Files.ShaderStructs.Names;
-using PenumbraMtrlFile = Penumbra.GameData.Files.MtrlFile;
 
 namespace Intoner.Objects.Preview.Assets;
 
 internal sealed class PreviewMaterialResolver(
     ILogger logger,
     IDataManager gameData,
-    PreviewTextureCache textureCache)
+    PreviewTextureCache textureCache) : IDisposable
 {
     private readonly Lock _materialPathCacheLock = new();
-    private readonly Dictionary<string, string?> _materialPathCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _materialPathCache = new(StringComparer.OrdinalIgnoreCase);
+    private bool _disposed;
 
-    public ModelPreviewGeometryReader.PreviewMaterial[] Resolve(
+    [StructLayout(LayoutKind.Auto)]
+    internal readonly record struct Resolution(
+        ModelPreviewGeometryReader.PreviewMaterial[] Materials,
+        IReadOnlyList<PreviewAssetState.MaterialRequest> MissingMaterials);
+
+    public Resolution Resolve(
         IReadOnlyList<ModelPreviewGeometryReader.PreviewMaterial> materials,
         string modelPath)
     {
+        Dictionary<string, PenumbraMtrlFile> parsedMaterials = new(StringComparer.OrdinalIgnoreCase);
         ModelPreviewGeometryReader.PreviewMaterial[] resolvedMaterials = new ModelPreviewGeometryReader.PreviewMaterial[materials.Count];
-        for (var i = 0; i < materials.Count; i++)
+        List<PreviewAssetState.MaterialRequest> missingMaterials = [];
+
+        for (int index = 0; index < materials.Count; ++index)
         {
-            string materialName = materials[i].Name;
-            if (!TryResolveMaterialPath(modelPath, materialName, out string materialPath)
-             || !TryLoadMaterial(materialPath, out PenumbraMtrlFile material)
-             || !TextureMapKindResolver.TryGetTexturePath(material, TextureMapKind.Diffuse, out string texturePath))
+            string materialName = materials[index].Name;
+
+            if (GameMaterialPathUtility.TryNormalizeMaterialRequest(modelPath, materialName, out string normalizedModelPath, out string normalizedMaterialName))
             {
-                resolvedMaterials[i] = new ModelPreviewGeometryReader.PreviewMaterial(materialName, null, null, false, false, 1f);
+                PreviewAssetState.MaterialRequest request = new(index, normalizedModelPath, normalizedMaterialName);
+
+                if (TryResolveMaterial(request, parsedMaterials, out ModelPreviewGeometryReader.PreviewMaterial material))
+                {
+                    resolvedMaterials[index] = material;
+                    continue;
+                }
+
+                missingMaterials.Add(request);
+            }
+
+            resolvedMaterials[index] = new(materialName, null, null, false, false, 1f);
+        }
+
+        return new Resolution(resolvedMaterials, missingMaterials);
+    }
+
+    public void RefreshMaterials(
+        ModelPreviewGeometryReader.PreviewGeometry geometry,
+        List<PreviewAssetState.MaterialRequest> missingMaterials)
+    {
+        Dictionary<string, PenumbraMtrlFile> parsedMaterials = new(StringComparer.OrdinalIgnoreCase);
+
+        for (int index = missingMaterials.Count - 1; index >= 0; --index)
+        {
+            PreviewAssetState.MaterialRequest request = missingMaterials[index];
+
+            if (!TryResolveMaterial(request, parsedMaterials, out ModelPreviewGeometryReader.PreviewMaterial material))
+            {
                 continue;
             }
 
-            string normalizedTexturePath = GameAssetPathRules.NormalizeGamePath(texturePath);
-            ModelPreviewGeometryReader.PreviewTexture? diffuseTexture = textureCache.GetOrLoad(normalizedTexturePath);
-            resolvedMaterials[i] = new ModelPreviewGeometryReader.PreviewMaterial(
-                materialPath,
-                string.IsNullOrWhiteSpace(normalizedTexturePath) ? null : normalizedTexturePath,
-                diffuseTexture,
-                ShouldApplyAlphaClip(material),
-                IsTransparent(material),
-                GetTransparency(material));
+            geometry.Materials[request.Index] = material;
+            missingMaterials.RemoveAt(index);
+        }
+    }
+
+    private bool TryResolveMaterial(
+        PreviewAssetState.MaterialRequest request,
+        Dictionary<string, PenumbraMtrlFile> parsedMaterials,
+        out ModelPreviewGeometryReader.PreviewMaterial material)
+    {
+        material = null!;
+
+        if (!TryResolveMaterialPath(request.ModelPath, request.Name, out string materialPath)
+         || !TryLoadMaterial(materialPath, parsedMaterials, out PenumbraMtrlFile parsedMaterial))
+        {
+            return false;
         }
 
-        return resolvedMaterials;
+        string normalizedTexturePath = TextureMapKindResolver.TryGetTexturePath(parsedMaterial, TextureMapKind.Diffuse, out string texturePath)
+            ? texturePath
+            : string.Empty;
+        ModelPreviewGeometryReader.PreviewTexture? diffuseTexture = normalizedTexturePath.Length > 0
+            ? textureCache.GetOrLoad(normalizedTexturePath)
+            : null;
+        material = new ModelPreviewGeometryReader.PreviewMaterial(
+            materialPath,
+            normalizedTexturePath.Length > 0 ? normalizedTexturePath : null,
+            diffuseTexture,
+            ShouldApplyAlphaClip(parsedMaterial),
+            IsTransparent(parsedMaterial),
+            GetTransparency(parsedMaterial));
+        return true;
     }
 
     public void EnsureTextures(ModelPreviewGeometryReader.PreviewGeometry geometry)
@@ -58,18 +115,46 @@ internal sealed class PreviewMaterialResolver(
         }
     }
 
-    public static void ReleaseTextures(ModelPreviewGeometryReader.PreviewGeometry geometry)
+    public long GetNextTextureRetryAtMs(ModelPreviewGeometryReader.PreviewGeometry geometry, long now)
     {
+        long nextRetryAtMs = 0;
+
         foreach (ModelPreviewGeometryReader.PreviewMaterial material in geometry.Materials)
         {
-            material.DiffuseTexture = null;
+            if (material.DiffuseTexture is not null || string.IsNullOrWhiteSpace(material.DiffuseTexturePath))
+            {
+                continue;
+            }
+
+            long retryAtMs = textureCache.GetNextRetryAtMs(material.DiffuseTexturePath, now);
+
+            if (retryAtMs > 0 && (nextRetryAtMs == 0 || retryAtMs < nextRetryAtMs))
+            {
+                nextRetryAtMs = retryAtMs;
+            }
         }
+
+        return nextRetryAtMs;
     }
 
-    public void Clear()
+    public static bool ReleaseTextures(ModelPreviewGeometryReader.PreviewGeometry geometry)
+    {
+        bool released = false;
+
+        foreach (ModelPreviewGeometryReader.PreviewMaterial material in geometry.Materials)
+        {
+            released |= material.DiffuseTexture is not null;
+            material.DiffuseTexture = null;
+        }
+
+        return released;
+    }
+
+    public void Dispose()
     {
         lock (_materialPathCacheLock)
         {
+            _disposed = true;
             _materialPathCache.Clear();
         }
     }
@@ -136,8 +221,16 @@ internal sealed class PreviewMaterialResolver(
         return DefaultTransparency;
     }
 
-    private bool TryLoadMaterial(string materialPath, out PenumbraMtrlFile material)
+    private bool TryLoadMaterial(
+        string materialPath,
+        Dictionary<string, PenumbraMtrlFile> parsedMaterials,
+        out PenumbraMtrlFile material)
     {
+        if (parsedMaterials.TryGetValue(materialPath, out material!))
+        {
+            return true;
+        }
+
         material = null!;
 
         try
@@ -149,7 +242,16 @@ internal sealed class PreviewMaterialResolver(
             }
 
             material = new PenumbraMtrlFile(gameFile.Data);
-            return material.Valid;
+            parsedMaterials.Add(materialPath, material);
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (ObjectDisposedException)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -162,41 +264,27 @@ internal sealed class PreviewMaterialResolver(
     {
         materialPath = string.Empty;
 
-        string normalizedMaterialName = GameAssetPathRules.NormalizeGamePath(materialName);
-        if (string.IsNullOrWhiteSpace(normalizedMaterialName))
-        {
-            return false;
-        }
-
-        if (!GameAssetPathRules.IsFileKind(normalizedMaterialName, GameAssetFileKind.Mtrl))
-        {
-            normalizedMaterialName += ".mtrl";
-        }
-
-        string cacheKey = $"{GameAssetPathRules.NormalizeGamePath(modelPath)}|{normalizedMaterialName}";
+        string cacheKey = $"{modelPath}|{materialName}";
         lock (_materialPathCacheLock)
         {
+            ObjectDisposedException.ThrowIf(_disposed, this);
             if (_materialPathCache.TryGetValue(cacheKey, out string? cachedPath))
             {
-                materialPath = cachedPath ?? string.Empty;
-                return cachedPath is not null;
+                materialPath = cachedPath;
+                return true;
             }
         }
 
-        if (GameMaterialPathUtility.TryResolveExistingMaterialPath(gameData.FileExists, modelPath, normalizedMaterialName, out string resolvedMaterialPath))
+        if (GameMaterialPathUtility.TryResolveMaterialPath(gameData.FileExists, modelPath, materialName, out string resolvedMaterialPath))
         {
             materialPath = resolvedMaterialPath;
             lock (_materialPathCacheLock)
             {
+                ObjectDisposedException.ThrowIf(_disposed, this);
                 _materialPathCache[cacheKey] = resolvedMaterialPath;
             }
 
             return true;
-        }
-
-        lock (_materialPathCacheLock)
-        {
-            _materialPathCache[cacheKey] = null;
         }
 
         return false;

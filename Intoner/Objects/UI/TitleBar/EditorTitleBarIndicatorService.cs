@@ -6,8 +6,8 @@ internal sealed class EditorTitleBarIndicatorService
     private readonly IReadOnlyList<IEditorTitleBarIndicatorProvider> _providers;
     private readonly List<TitleBarIndicator> _indicators = [];
 
-    public EditorTitleBarIndicatorService(params IEditorTitleBarIndicatorProvider[] providers)
-        => _providers = providers;
+    public EditorTitleBarIndicatorService(IEnumerable<IEditorTitleBarIndicatorProvider> providers)
+        => _providers = providers.ToArray();
 
     public IReadOnlyList<TitleBarIndicator> Build(TitleBarIndicatorContext context)
     {
@@ -33,4 +33,3 @@ internal interface IEditorTitleBarIndicatorProvider
     /// <returns>true when the indicator should be drawn</returns>
     bool TryCreate(TitleBarIndicatorContext context, out TitleBarIndicator indicator);
 }
-

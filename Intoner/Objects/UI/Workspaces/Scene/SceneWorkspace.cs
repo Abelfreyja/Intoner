@@ -1,6 +1,5 @@
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
-using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using Intoner.Displays;
 using Intoner.Objects.Catalog;
@@ -21,6 +20,8 @@ namespace Intoner.Objects.UI;
 internal sealed class SceneWorkspace
 {
     private readonly IObjectFolderService         _objectFolderService;
+    private readonly IObjectLayoutManager         _layoutManager;
+    private readonly IObjectRevisionTracker       _revisionTracker;
     private readonly IObjectSceneView             _sceneView;
     private readonly ISceneItemService            _sceneItemService;
     private readonly IHistoryCoordinator          _historyCoordinator;
@@ -29,21 +30,33 @@ internal sealed class SceneWorkspace
     private readonly WindowsCaptureTargetService  _captureTargetService;
     private readonly EditorInteraction            _interaction;
     private readonly SceneEditorCommands          _sceneCommands;
-    private readonly EditorOverlayLayer           _editorOverlayLayer;
     private readonly SceneListRow                 _sceneListRow;
     private readonly SceneItemControls            _sceneItems;
     private readonly EditorFilterBar              _filterBar;
     private readonly ObjectLibraryBrowser         _libraryBrowser;
+    private readonly EditorColumnPanel            _columnPanel;
     private readonly HashSet<string>              _collapsedPlacedFolders = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string>              _expandedPlacedGroups = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<Guid>                _collapsedLayouts = [];
+    private readonly EditorTabBar                 _layoutTabBar = new();
+    private Guid? _viewLayoutId;
+    private IReadOnlyList<EditorTabBar.Tab> _layoutTabs = [];
+    private IReadOnlyList<ObjectCatalogFilterCount> _allKindCounts = [];
+    private IReadOnlyList<EditorBadge> _headerCounts = [];
+    private IReadOnlyList<EditorBadge> _compactHeaderCounts = [];
     private string _objectFilter = string.Empty;
     private ObjectKind? _objectKindFilter;
     private const string SceneMenuPopupId = "##sceneMenu";
     private SceneListSource _sceneListSource;
-    private SceneListState? _sceneListState;
+    private IReadOnlyList<SceneListState>? _sceneListState;
     private IReadOnlyList<Guid>? _selectableSceneRowOrder;
+    private PlacedLayoutView _rowOrderView;
+    private IReadOnlyDictionary<Guid, SceneItemSnapshot> _activeItems = new Dictionary<Guid, SceneItemSnapshot>();
 
     public SceneWorkspace(
         IObjectFolderService objectFolderService,
+        IObjectLayoutManager layoutManager,
+        IObjectRevisionTracker revisionTracker,
         IObjectSceneView sceneView,
         ISceneItemService sceneItemService,
         IHistoryCoordinator historyCoordinator,
@@ -52,13 +65,15 @@ internal sealed class SceneWorkspace
         WindowsCaptureTargetService captureTargetService,
         EditorInteraction interaction,
         SceneEditorCommands sceneCommands,
-        EditorOverlayLayer editorOverlayLayer,
         SceneListRow sceneListRow,
         SceneItemControls sceneItems,
         EditorFilterBar filterBar,
-        ObjectLibraryBrowser libraryBrowser)
+        ObjectLibraryBrowser libraryBrowser,
+        EditorColumnPanel columnPanel)
     {
         _objectFolderService  = objectFolderService;
+        _layoutManager        = layoutManager;
+        _revisionTracker      = revisionTracker;
         _sceneView            = sceneView;
         _sceneItemService     = sceneItemService;
         _historyCoordinator   = historyCoordinator;
@@ -67,145 +82,175 @@ internal sealed class SceneWorkspace
         _captureTargetService = captureTargetService;
         _interaction          = interaction;
         _sceneCommands        = sceneCommands;
-        _editorOverlayLayer   = editorOverlayLayer;
         _sceneListRow         = sceneListRow;
         _sceneItems           = sceneItems;
         _filterBar            = filterBar;
         _libraryBrowser       = libraryBrowser;
+        _columnPanel          = columnPanel;
     }
 
-    private void OpenClearPlacedObjectsDialog()
+    private void OpenClearPlacedObjectsDialog(SceneListState? owner)
     {
         _interaction.CommitPendingHistory();
         long persistentRevision = _sceneItemService.GetRevisions().Persistent;
+        ObjectSceneItemSnapshot[] targets = _sceneItemService.GetPlacedItems()
+            .OfType<ObjectSceneItemSnapshot>()
+            .Where(item => owner is null || item.LayoutId == owner.LayoutId)
+            .ToArray();
+
         _interaction.OpenDialog(EditorDialog.Request.TryConfirmation(
             "placed-objects-clear",
             "Clear Placed Objects",
             "Clear Objects",
-            () => _historyCoordinator.TryClearPlacedObjects(persistentRevision)) with
+            () => _historyCoordinator.TryClearPlacedObjects(persistentRevision, targets)) with
         {
             Icon = FontAwesomeIcon.Ban,
             ConfirmIcon = FontAwesomeIcon.Trash,
             Accent = ThemeColors.DimRed,
-            Description = "This removes every placed object from the current workspace. You can undo the clear from History.",
+            Description = owner is null
+                ? "This removes every placed object from the current workspace. You can undo the clear from History."
+                : $"This removes every placed object from {owner.Name}. You can undo the clear from History.",
             FailureMessage = "The placed objects could not be cleared. The scene may have changed; close and reopen this dialog to try again.",
         });
     }
 
-    internal sealed record PlacedObjectFolderGroup(
+    internal sealed record PlacedTreeNode(
+        Guid? LayoutId,
         string FolderKey,
         string DisplayLabel,
         string ColorValue,
         IReadOnlyList<ObjectSnapshot> AllObjects,
         IReadOnlyList<ObjectSnapshot> VisibleObjects,
-        IReadOnlyList<PlacedObjectFolderGroup> Children);
+        IReadOnlyList<PlacedTreeNode> Children)
+    {
+        public string Id { get; init; } = $"{LayoutId?.ToString("N") ?? "standalone"}:folder:{FolderKey}";
+        public string RowId { get; } = $"placedFolderEntry:{FolderKey}";
+        public bool AllVisible { get; init; }
+        public bool AllLocked { get; init; }
+        public string Detail { get; init; } = string.Empty;
+        public SceneGroupSnapshot? SceneGroup { get; init; }
+        public Vector4 Accent => SceneGroup is null ? FolderColorPicker.ResolveAccent(ColorValue) : EditorColors.GroupAccent;
+        public IReadOnlyList<SceneItemSnapshot> AllItems { get; init; } = [];
+        public SceneListRow.FolderAction[] Actions { get; init; } = [];
+    }
 
     internal sealed record SceneListState(
+        Guid? LayoutId,
+        string Name,
         IReadOnlyList<SceneItemSnapshot> RootItems,
-        IReadOnlyList<PlacedObjectFolderGroup> RootFolders,
-        IReadOnlyList<string> Folders);
+        IReadOnlyList<PlacedTreeNode> RootNodes,
+        IReadOnlyList<string> Folders,
+        IReadOnlyList<ObjectSnapshot> AllObjects)
+    {
+        public int Count { get; init; }
+        public IReadOnlyList<ObjectCatalogFilterCount> KindCounts { get; init; } = [];
+        public IReadOnlyList<EditorBadge> Badges { get; init; } = [];
+        public IReadOnlyList<EditorBadge> ObjectCountBadges { get; init; } = [];
+    }
 
     internal readonly record struct SceneListSource(
         IReadOnlyList<ObjectSnapshot> Objects,
         IReadOnlyList<DisplaySnapshot> Displays,
         IReadOnlySet<Guid> ActiveObjectIds,
         long PersistentRevision,
+        long SavedLayoutsRevision,
         string Filter,
-        ObjectKind? KindFilter);
+        ObjectKind? KindFilter,
+        Vector4 Accent,
+        Vector4 DisabledText);
 
     internal void DrawObjectListPanel(
         IReadOnlyList<ObjectSnapshot> objects,
         IReadOnlyList<DisplaySnapshot> displays,
-        IReadOnlySet<Guid> activeObjectIds)
-    {
-        SceneListState listState = GetSceneListState(objects, displays, activeObjectIds);
-        DrawPlacedObjectsHero(objects, displays, activeObjectIds, listState.Folders.Count);
-        DrawPlacedObjectsListCard(objects, displays, activeObjectIds);
-    }
-
-    private void DrawPlacedObjectsHero(
-        IReadOnlyList<ObjectSnapshot> objects,
-        IReadOnlyList<DisplaySnapshot> displays,
         IReadOnlySet<Guid> activeObjectIds,
-        int folderCount)
+        IReadOnlyDictionary<Guid, SceneItemSnapshot> activeItems)
     {
-        var objectCount = objects.Count;
-        var activeCount = objects.Count(snapshot => activeObjectIds.Contains(snapshot.Id));
-        var lockedCount = objects.Count(static snapshot => snapshot.Locked);
-        var countsByKind = objects
-            .GroupBy(static snapshot => snapshot.Kind)
-            .ToDictionary(static group => group.Key, static group => group.Count());
-        var currentFilter = _objectFilter;
-        var currentKindFilter = _objectKindFilter;
-        IReadOnlyList<EditorBadge> badges = BuildPlacedObjectBadges(
-            objectCount,
-            activeCount,
-            lockedCount,
-            displays.Count,
-            folderCount);
-
-        var actionButtonEdge = EditorIconButton.MeasureMaxEdge(FontAwesomeIcon.EllipsisH, FontAwesomeIcon.Ban);
-        var actionWidth = EditorLayout.ResolveActionStripWidth(actionButtonEdge, 2);
-
-        EditorCard.DrawPanelCard(
-            "placed-objects-hero",
-            ThemeColors.ButtonDefault with { W = 0.30f },
-            ThemeColors.AccentPrimary with { W = 0.24f },
-            8f * ImGuiHelpers.GlobalScale,
-            new Vector2(10f * ImGuiHelpers.GlobalScale, 8f * ImGuiHelpers.GlobalScale),
-            () =>
+        _activeItems = activeItems;
+        IReadOnlyList<SceneListState> listState = GetSceneListState(objects, displays, activeObjectIds);
+        float width = EditorLayout.Positive(ImGui.GetContentRegionAvail().X);
+        float height = EditorLayout.ResolveRemainingRegionHeight();
+        _columnPanel.DrawPanel("placedObjects", FontAwesomeIcon.FolderOpen, "Placed Objects",
+            string.Empty,
+            ThemeColors.AccentPrimary, width, height,
+            header =>
             {
-                Components.EditorCard.DrawCardHeader(
-                    "placedObjectsHeroHeader",
-                    FontAwesomeIcon.FolderOpen,
-                    "Placed Objects",
-                    badges,
-                    ThemeColors.AccentPrimary,
-                    () => DrawSceneHeaderActions(_sceneView.HasPersistedObjects(), actionButtonEdge),
-                    actionWidth);
-                _ = EditorSearchField.Draw(
-                    "objectListFilter",
-                    ref currentFilter,
-                    new EditorSearchFieldOptions("Search placed objects", ThemeColors.AccentPrimary));
-                currentKindFilter = DrawPlacedObjectKindFilters(currentKindFilter, countsByKind);
-            });
-
-        _objectFilter = currentFilter;
-        _objectKindFilter = currentKindFilter;
+                float edge = EditorLayout.Scaled(30f);
+                float right = header.Max.X - (header.Height - edge) * 0.5f;
+                float left = right - edge;
+                float badgeLeft = EditorColumnPanel.DrawHeaderBadges(header, "Placed Objects", _headerCounts, left, _compactHeaderCounts);
+                ImGui.SetCursorScreenPos(new Vector2(left, header.Min.Y + (header.Height - edge) * 0.5f));
+                DrawSceneHeaderActions(listState, edge);
+                return badgeLeft;
+            },
+            contentHeight => DrawPlacedObjectsList(objects, displays, activeObjectIds, contentHeight),
+            navigationWidth => DrawPlacedNavigation(listState, navigationWidth),
+            contentHorizontalInset: EditorLayout.Scaled(4f));
     }
 
-    private void DrawSceneHeaderActions(bool hasPersistedObjects, float edge)
+    private float DrawPlacedNavigation(IReadOnlyList<SceneListState> owners, float width)
     {
-        bool open = EditorIconButton.DrawAccent(
-            "sceneMenu",
-            FontAwesomeIcon.EllipsisH,
-            "Scene Menu",
-            ThemeColors.AccentPrimary,
-            edge);
-        var menuAnchor = new Vector2(ImGui.GetItemRectMin().X, ImGui.GetItemRectMax().Y);
-
-        ImGui.SameLine();
-        using (ImRaii.Disabled(!hasPersistedObjects))
+        Vector2 start = ImGui.GetCursorScreenPos();
+        float inset = EditorLayout.Scaled(8f);
+        float gap = EditorLayout.Scaled(4f);
+        float innerWidth = MathF.Max(1f, width - inset * 2f);
+        float searchY = start.Y + inset;
+        PlacedLayoutView view = _configurationService.Current.Ui.PlacedLayoutView;
+        if (view == PlacedLayoutView.Tabs && owners.Count > 1)
         {
-            if (EditorIconButton.DrawAccent(
-                    "sceneClearObjects",
-                    FontAwesomeIcon.Ban,
-                    "Clear Placed Objects",
-                    ThemeColors.DimRed,
-                    edge,
-                    tooltipTitleColor: ThemeColors.DimRed))
+            ImGui.SetCursorScreenPos(new Vector2(start.X + inset, searchY));
+            string selected = _layoutTabBar.Draw("placedLayoutTabs", _layoutTabs,
+                _viewLayoutId?.ToString("N") ?? "standalone", innerWidth, ThemeColors.AccentPrimary, "Find layout");
+            Guid? next = string.Equals(selected, "standalone", StringComparison.Ordinal) ? null : Guid.ParseExact(selected, "N");
+            if (next != _viewLayoutId)
             {
-                OpenClearPlacedObjectsDialog();
+                _viewLayoutId = next;
+                _selectableSceneRowOrder = null;
             }
+            searchY += EditorTabBar.Height + gap;
         }
 
+        ImGui.SetCursorScreenPos(new Vector2(start.X + inset, searchY));
+        _ = EditorSearchField.Draw("objectListFilter", ref _objectFilter,
+            new EditorSearchFieldOptions("Search placed objects", ThemeColors.AccentPrimary, Width: innerWidth));
+        if (owners.Count == 1 && owners[0].Count == 0 && !_objectKindFilter.HasValue)
+            return searchY + EditorSearchField.Height + gap - start.Y;
+        ImGui.SetCursorScreenPos(new Vector2(start.X + inset, searchY + EditorSearchField.Height + gap));
+        IReadOnlyList<ObjectCatalogFilterCount> counts = view == PlacedLayoutView.Tabs
+            ? owners.First(owner => owner.LayoutId == _viewLayoutId).KindCounts
+            : _allKindCounts;
+        string nextFilter = _filterBar.DrawWrappedFilterButtons("placedKind", _objectKindFilter?.ToString() ?? string.Empty, counts, innerWidth);
+        _objectKindFilter = Enum.TryParse(nextFilter, out ObjectKind kind) ? kind : null;
+        return ImGui.GetCursorScreenPos().Y + gap - start.Y;
+    }
+
+    private void DrawSceneHeaderActions(IReadOnlyList<SceneListState> owners, float edge)
+    {
+        bool open = EditorIconButton.DrawToggle(
+            "sceneMenu",
+            FontAwesomeIcon.EllipsisH,
+            new Vector2(edge),
+            false,
+            ThemeColors.AccentPrimary,
+            ThemeColors.AccentPrimary,
+            "Scene Menu");
+        Vector2 menuAnchor = new(ImGui.GetItemRectMin().X, ImGui.GetItemRectMax().Y);
         using EditorContextMenu.PopupScope popup = EditorContextMenu.BeginDropdown(SceneMenuPopupId, open, menuAnchor);
         if (!popup)
         {
             return;
         }
 
-        EditorContextMenu.DrawFirstSectionLabel("Paste");
+        SceneListState? owner = _configurationService.Current.Ui.PlacedLayoutView == PlacedLayoutView.Tabs
+            ? owners.First(item => item.LayoutId == _viewLayoutId)
+            : null;
+        Guid? destination = owner is null ? _sceneView.GetCreationLayoutId() : owner.LayoutId;
+        IReadOnlyList<ObjectSnapshot> objects = owner?.AllObjects ?? _sceneListSource.Objects;
+        IEnumerable<SceneItemSnapshot> children = owner?.LayoutId is null
+            ? objects.Concat<SceneItemSnapshot>(_sceneListSource.Displays)
+            : objects;
+        SceneSelectionMenu.DrawChildren(_interaction, children);
+
+        EditorContextMenu.DrawSectionLabel("Paste");
         bool canPasteObjects = _objectClipboard.CanPasteObjects();
         if (EditorContextMenu.DrawItem(
                 FontAwesomeIcon.Paste,
@@ -213,173 +258,265 @@ internal sealed class SceneWorkspace
                 enabled: canPasteObjects,
                 tooltip: canPasteObjects ? null : "Clipboard does not contain Intoner objects."))
         {
-            _ = _sceneCommands.PasteObjectsFromClipboard(ObjectPasteDestination.KeepOrganization);
+            _ = _sceneCommands.PasteObjectsFromClipboard(destination, ObjectPasteDestination.KeepOrganization);
         }
 
         if (EditorContextMenu.DrawItem(
                 FontAwesomeIcon.LevelDownAlt,
-                "Paste Ungrouped",
+                "Paste Without Folders",
                 enabled: canPasteObjects,
                 tooltip: canPasteObjects ? null : "Clipboard does not contain Intoner objects."))
         {
-            _ = _sceneCommands.PasteObjectsFromClipboard(ObjectPasteDestination.Ungrouped);
+            _ = _sceneCommands.PasteObjectsFromClipboard(destination, ObjectPasteDestination.Ungrouped);
         }
 
         EditorContextMenu.DrawSectionLabel("Create");
         if (EditorContextMenu.DrawItem(FontAwesomeIcon.Folder, "Create Folder"))
         {
-            OpenCreateFolderDialog();
+            OpenCreateFolderDialog(destination);
         }
 
-        if (EditorContextMenu.DrawItem(FontAwesomeIcon.Desktop, "Create Display"))
+        if (EditorContextMenu.DrawItem(FontAwesomeIcon.ObjectGroup, "Create Group"))
+            _ = _sceneCommands.TryCreateEmptyGroup(destination);
+
+        bool displayToolsEnabled = owner?.LayoutId is null;
+        string? displayToolsTooltip = displayToolsEnabled ? null : "Displays belong to Unassigned.";
+
+        if (EditorContextMenu.DrawItem(FontAwesomeIcon.Desktop, "Create Display", enabled: displayToolsEnabled, tooltip: displayToolsTooltip))
         {
             _sceneCommands.AddDisplay();
         }
 
         EditorContextMenu.DrawSectionLabel("Scene Tools");
-        if (EditorContextMenu.DrawItem(FontAwesomeIcon.Sync, "Refresh Capture Sources"))
+        if (EditorContextMenu.DrawItem(FontAwesomeIcon.Sync, "Refresh Capture Sources", enabled: displayToolsEnabled, tooltip: displayToolsTooltip))
         {
             _captureTargetService.RefreshTargets();
         }
+
+        EditorContextMenu.DrawSectionLabel("Clear");
+        bool hasPlacedObjects = objects.Count > 0 || _sceneView.GetPlacedGroups().Any(group => owner is null || group.LayoutId == owner.LayoutId);
+
+        if (EditorContextMenu.DrawItem(FontAwesomeIcon.Trash, "Clear Placed Objects", enabled: hasPlacedObjects, color: ThemeColors.DimRed))
+            OpenClearPlacedObjectsDialog(owner);
     }
 
-    private ObjectKind? DrawPlacedObjectKindFilters(ObjectKind? currentFilter, IReadOnlyDictionary<ObjectKind, int> countsByKind)
-    {
-        var filterValue = currentFilter?.ToString() ?? string.Empty;
-        var filterCounts = Enum.GetValues<ObjectKind>()
-            .Select(kind => new ObjectCatalogFilterCount(kind.ToString(), countsByKind.GetValueOrDefault(kind)))
-            .ToList();
-        var nextFilterValue = _filterBar.DrawCatalogFilterButtons("placed_objects", filterValue, filterCounts);
-        return Enum.TryParse<ObjectKind>(nextFilterValue, out var nextFilter)
-            ? nextFilter
-            : null;
-    }
-
-    private SceneListState GetSceneListState(
+    private IReadOnlyList<SceneListState> GetSceneListState(
         IReadOnlyList<ObjectSnapshot> objects,
         IReadOnlyList<DisplaySnapshot> displays,
         IReadOnlySet<Guid> activeObjectIds)
     {
         SceneListSource source = new(objects, displays, activeObjectIds,
-            _sceneItemService.GetRevisions().Persistent, _objectFilter, _objectKindFilter);
+            _sceneItemService.GetRevisions().Persistent, _revisionTracker.GetSavedLayoutsRevision(), _objectFilter, _objectKindFilter,
+            ThemeColors.AccentPrimary, ThemeColors.TextDisabled);
         if (_sceneListState is not null && _sceneListSource == source)
         {
             return _sceneListState;
         }
 
-        IReadOnlyList<string> folders = _sceneView.GetPlacedFolders();
-        HashSet<string> knownFolderSet = new(folders, StringComparer.OrdinalIgnoreCase);
+        ILookup<Guid?, ObjectSnapshot> objectsByLayout = objects.ToLookup(static snapshot => snapshot.LayoutId);
+        ILookup<Guid?, SceneGroupSnapshot> groupsByLayout = _sceneView.GetPlacedGroups().ToLookup(static group => group.LayoutId);
+        List<SceneListState> owners = [];
+        AddOwner(null, ObjectDestinationMenu.UnassignedLabel, displays);
+        foreach (ObjectLayoutSnapshot layout in _layoutManager.GetEnabledLayouts())
+        {
+            AddOwner(layout.Id, layout.Name, []);
+        }
+
+        HashSet<string> knownFolderSet = new(StringComparer.OrdinalIgnoreCase);
+        foreach (SceneListState owner in owners)
+        {
+            foreach (string folder in owner.Folders)
+            {
+                knownFolderSet.Add($"{owner.LayoutId?.ToString("N") ?? "standalone"}:folder:{folder}");
+            }
+            foreach (SceneGroupSnapshot group in groupsByLayout[owner.LayoutId])
+                knownFolderSet.Add($"{owner.LayoutId?.ToString("N") ?? "standalone"}:group:{group.Id:N}");
+        }
+
         _collapsedPlacedFolders.RemoveWhere(folder => !knownFolderSet.Contains(folder));
-        _sceneListState = BuildSceneListState(objects, displays, folders,
-            _objectFolderService.GetSceneFolderColors(), activeObjectIds, _objectFilter, _objectKindFilter);
+        _expandedPlacedGroups.RemoveWhere(group => !knownFolderSet.Contains(group));
+        _collapsedLayouts.RemoveWhere(id => !owners.Any(owner => (owner.LayoutId ?? Guid.Empty) == id));
+        if (!owners.Any(owner => owner.LayoutId == _viewLayoutId))
+            _viewLayoutId = null;
+        _layoutTabs = owners.Select(owner => new EditorTabBar.Tab(
+            owner.LayoutId?.ToString("N") ?? "standalone", owner.LayoutId.HasValue ? FontAwesomeIcon.LayerGroup : FontAwesomeIcon.Cubes,
+            owner.Name, owner.Count.ToString(), Badges: owner.ObjectCountBadges,
+            Accent: owner.LayoutId.HasValue ? null : ThemeColors.AccentRose)).ToList();
+        _allKindCounts = BuildKindCounts(objects);
+        int itemCount = objects.Count + displays.Count;
+        EditorBadge itemCountBadge = EditorBadge.Count(null, itemCount, "item", "items", ThemeColors.TextDisabled);
+        _headerCounts = owners.Count > 1
+            ? [itemCountBadge,
+               EditorBadge.Count(null, owners.Count - 1, "layout", "layouts", ThemeColors.AccentPrimary) with { Tooltip = "Enabled layouts" }]
+            : [itemCountBadge];
+        _compactHeaderCounts = owners.Count > 1
+            ? [EditorBadge.Label(itemCount.ToString(), FontAwesomeIcon.Cubes, ThemeColors.TextDisabled, "Placed items"),
+               EditorBadge.Label((owners.Count - 1).ToString(), FontAwesomeIcon.LayerGroup, ThemeColors.AccentPrimary, "Enabled layouts")]
+            : [EditorBadge.Label(itemCount.ToString(), FontAwesomeIcon.Cubes, ThemeColors.TextDisabled, "Placed items")];
+        _sceneListState = owners;
         _sceneListSource = source;
         _selectableSceneRowOrder = null;
         return _sceneListState;
+
+        void AddOwner(Guid? id, string name, IReadOnlyList<DisplaySnapshot> ownerDisplays)
+        {
+            IReadOnlyList<string> folders = _sceneView.GetPlacedFolders(id);
+            List<ObjectSnapshot> ownerObjects = objectsByLayout[id].ToList();
+            int count = ownerObjects.Count + ownerDisplays.Count;
+            EditorBadge countBadge = EditorBadge.Count(null, count, "item", "items", ThemeColors.TextDisabled);
+            owners.Add(BuildSceneListState(id, name, ownerObjects,
+                ownerDisplays, folders, _objectFolderService.GetSceneFolderColors(id), activeObjectIds, _objectFilter, _objectKindFilter,
+                groupsByLayout[id].ToArray()) with
+            {
+                Count = count,
+                KindCounts = BuildKindCounts(ownerObjects),
+                Badges = id.HasValue
+                    ? [EditorBadge.Label("Layout", color: ThemeColors.AccentPrimary), countBadge]
+                    : [countBadge],
+                ObjectCountBadges = [EditorBadge.IconOnly(FontAwesomeIcon.Cubes, "Placed objects", string.Empty),
+                    EditorBadge.Label(ownerObjects.Count.ToString(), color: ThemeColors.TextDisabled)],
+            });
+        }
     }
 
-    private bool IsPlacedFolderCollapsed(string folderPath)
-        => _collapsedPlacedFolders.Contains(folderPath);
+    private static IReadOnlyList<ObjectCatalogFilterCount> BuildKindCounts(IReadOnlyList<ObjectSnapshot> objects)
+        => Enum.GetValues<ObjectKind>()
+            .Select(kind => new ObjectCatalogFilterCount(kind.ToString(), objects.Count(snapshot => snapshot.Kind == kind)))
+            .ToArray();
 
-    private void TogglePlacedFolderCollapsed(string folderPath)
+    private bool IsPlacedTreeNodeCollapsed(PlacedTreeNode node)
+        => node.SceneGroup is null
+            ? _collapsedPlacedFolders.Contains(node.Id)
+            : !_expandedPlacedGroups.Contains(node.Id);
+
+    private void TogglePlacedTreeNodeCollapsed(PlacedTreeNode node)
     {
-        if (!_collapsedPlacedFolders.Add(folderPath))
+        HashSet<string> states = node.SceneGroup is null ? _collapsedPlacedFolders : _expandedPlacedGroups;
+
+        if (!states.Add(node.Id))
         {
-            _collapsedPlacedFolders.Remove(folderPath);
+            states.Remove(node.Id);
         }
 
         _selectableSceneRowOrder = null;
     }
 
-    private void DrawPlacedObjectsListCard(
+    private void DrawPlacedObjectsList(
         IReadOnlyList<ObjectSnapshot> objects,
         IReadOnlyList<DisplaySnapshot> displays,
-        IReadOnlySet<Guid> activeObjectIds)
+        IReadOnlySet<Guid> activeObjectIds,
+        float height)
     {
-        var padding = new Vector2(10f * ImGuiHelpers.GlobalScale, 8f * ImGuiHelpers.GlobalScale);
-        var itemSpacingY = 2f * ImGuiHelpers.GlobalScale;
-        var availableHeight = MathF.Max(1f, ImGui.GetContentRegionAvail().Y - ImGui.GetStyle().ItemSpacing.Y);
-        var innerHeight = MathF.Max(1f, availableHeight - (padding.Y * 2f) - (itemSpacingY * 2f));
-        var background = ThemeColors.ButtonDefault with { W = 0.24f };
-        var rounding = 8f * ImGuiHelpers.GlobalScale;
+        IReadOnlyList<SceneListState> owners = GetSceneListState(objects, displays, activeObjectIds);
+        PlacedLayoutView view = _configurationService.Current.Ui.PlacedLayoutView;
+        bool sections = view == PlacedLayoutView.Sections && owners.Count > 1;
+        if (_rowOrderView != view)
+        {
+            _rowOrderView = view;
+            _selectableSceneRowOrder = null;
+        }
+        IReadOnlyList<Guid> selectableRowOrder = _selectableSceneRowOrder ??= owners
+            .Where(owner => sections ? !_collapsedLayouts.Contains(owner.LayoutId ?? Guid.Empty) : owner.LayoutId == _viewLayoutId)
+            .SelectMany(BuildSelectableSceneRowOrder).ToList();
+        SceneListRow.Metrics metrics = SceneListRow.ResolveMetrics(_configurationService.Current.Ui.PlacedListRowSize);
+        using var spacing = ImRaii.PushStyle(ImGuiStyleVar.ItemSpacing, new Vector2(ImGui.GetStyle().ItemSpacing.X, 0f));
+        bool first = true;
+        foreach (SceneListState owner in owners)
+        {
+            if (!sections && owner.LayoutId != _viewLayoutId)
+                continue;
 
-        EditorCard.DrawPanelCard(
-            "placed-objects-list",
-            background,
-            ThemeColors.AccentPrimary with { W = 0.18f },
-            rounding,
-            padding,
-            () =>
+            using var id = ImRaii.PushId(owner.LayoutId?.ToString("N") ?? "standalone");
+            if (!first)
+                ImGui.Dummy(new Vector2(0f, EditorLayout.Scaled(4f)));
+            first = false;
+            if (sections && (DrawLayoutSection(owner) || owner.RootItems.Count == 0 && owner.RootNodes.Count == 0))
+                continue;
+            if (sections)
+                ImGui.Dummy(new Vector2(0f, metrics.ItemSpacing));
+
+            Vector2 bodyStart = ImGui.GetCursorScreenPos();
+            using (ImRaii.PushIndent(sections ? EditorLayout.Scaled(16f) : 0f))
             {
-                SceneListState listState = GetSceneListState(objects, displays, activeObjectIds);
-                IReadOnlyList<string> placedFolders = listState.Folders;
-                IReadOnlyList<Guid> selectableRowOrder = _selectableSceneRowOrder ??= BuildSelectableSceneRowOrder(listState);
-                var hasAnyPlacedEntries = objects.Count > 0 || placedFolders.Count > 0 || displays.Count > 0;
-
-                if (listState.RootFolders.Count == 0
-                    && listState.RootItems.Count == 0)
+                if (owner.RootItems.Count == 0 && owner.RootNodes.Count == 0)
                 {
-                    EditorEmptyState.Draw(
-                        !hasAnyPlacedEntries
-                            ? "Create or import an object to utilize the list."
-                            : "No placed items or folders match the current filter.",
-                        innerHeight);
-                    return;
+                    EditorEmptyState.Draw(_objectFilter.Length > 0 || _objectKindFilter.HasValue
+                        ? "No matching items." : "No placed items.", height);
                 }
-
-                using var childBg = ImRaii.PushColor(ImGuiCol.ChildBg, Vector4.Zero);
-                using var child = EditorScrollList.Begin(
-                    "##placedObjectEntries",
-                    new Vector2(0f, innerHeight),
-                    _editorOverlayLayer.CreateScrollPanelOptions(background, rounding, ThemeColors.AccentPrimary));
-                if (child)
+                else
                 {
-                    var topInset = 2f * ImGuiHelpers.GlobalScale;
-                    ImGui.Dummy(new Vector2(0f, topInset));
-
-                    SceneListRowSize rowSize = _configurationService.Current.Ui.PlacedListRowSize;
-                    SceneListRow.Metrics rowMetrics = SceneListRow.ResolveMetrics(rowSize);
-                    using var zeroItemSpacing = ImRaii.PushStyle(ImGuiStyleVar.ItemSpacing, new Vector2(ImGui.GetStyle().ItemSpacing.X, 0f));
-                    UiVirtualList.Draw(
-                        listState.RootItems,
-                        UiVirtualListOptions.Rows(rowMetrics.ItemHeight, rowMetrics.ItemSpacing),
-                        (item, _) => DrawSceneRootItem(item, activeObjectIds, placedFolders, selectableRowOrder, rowMetrics));
-
-                    if (listState.RootItems.Count > 0 && listState.RootFolders.Count > 0)
+                    UiVirtualList.Draw(owner.RootItems, UiVirtualListOptions.Rows(metrics.ItemHeight, metrics.ItemSpacing),
+                        (item, _) => DrawSceneRootItem(item, activeObjectIds, selectableRowOrder, metrics));
+                    if (owner.RootItems.Count > 0 && owner.RootNodes.Count > 0)
+                        ImGui.Dummy(new Vector2(0f, metrics.ItemSpacing));
+                    for (int index = 0; index < owner.RootNodes.Count; ++index)
                     {
-                        ImGui.Dummy(new Vector2(0f, rowMetrics.GroupSpacing));
+                        DrawPlacedTree(owner.RootNodes[index], activeObjectIds,
+                            selectableRowOrder, metrics, depth: 0);
+                        if (index + 1 < owner.RootNodes.Count)
+                            ImGui.Dummy(new Vector2(0f, metrics.ItemSpacing));
                     }
-
-                    for (var groupIndex = 0; groupIndex < listState.RootFolders.Count; ++groupIndex)
-                    {
-                        DrawPlacedObjectFolderTree(
-                            listState.RootFolders[groupIndex],
-                            activeObjectIds,
-                            placedFolders,
-                            selectableRowOrder,
-                            rowMetrics,
-                            depth: 0);
-
-                        if (groupIndex + 1 < listState.RootFolders.Count)
-                        {
-                            ImGui.Dummy(new Vector2(0f, rowMetrics.GroupSpacing));
-                        }
-                    }
-
                 }
+            }
+            if (sections)
+            {
+                float x = bodyStart.X + EditorLayout.Scaled(9f);
+                Vector4 accent = owner.LayoutId.HasValue ? ThemeColors.AccentPrimary : ThemeColors.AccentRose;
+                ImGui.GetWindowDrawList().AddLine(new Vector2(x, bodyStart.Y),
+                    new Vector2(x, ImGui.GetCursorScreenPos().Y), ImGui.GetColorU32(accent with { W = 0.22f }), EditorLayout.Scaled(1f));
+            }
+        }
+    }
 
-            });
+    private bool DrawLayoutSection(SceneListState owner)
+    {
+        Guid id = owner.LayoutId ?? Guid.Empty;
+        bool collapsed = _collapsedLayouts.Contains(id);
+        Vector4 accent = owner.LayoutId.HasValue ? ThemeColors.AccentPrimary : ThemeColors.AccentRose;
+        EditorListCard.Interaction interaction = _sceneListRow.DrawSection("layoutSection", owner.Name,
+            owner.LayoutId.HasValue ? FontAwesomeIcon.LayerGroup : FontAwesomeIcon.Cubes, owner.Badges, collapsed, accent);
+        if (interaction.Clicked)
+        {
+            if (!_collapsedLayouts.Add(id))
+                _collapsedLayouts.Remove(id);
+            collapsed = !collapsed;
+            _selectableSceneRowOrder = null;
+        }
+        using EditorContextMenu.PopupScope popup = EditorContextMenu.BeginForLastItem("##layoutSectionMenu");
+        if (popup)
+        {
+            SceneSelectionMenu.DrawChildren(_interaction, owner.AllObjects);
+            EditorContextMenu.DrawSeparator();
+
+            if (EditorContextMenu.DrawItem(FontAwesomeIcon.Plus, "Create Folder"))
+                OpenCreateFolderDialog(owner.LayoutId);
+            if (EditorContextMenu.DrawItem(FontAwesomeIcon.ObjectGroup, "Create Group"))
+                _ = _sceneCommands.TryCreateEmptyGroup(owner.LayoutId);
+            if (EditorContextMenu.DrawItem(FontAwesomeIcon.Paste, "Paste Objects", enabled: _objectClipboard.CanPasteObjects()))
+                _ = _sceneCommands.PasteObjectsFromClipboard(owner.LayoutId, ObjectPasteDestination.KeepOrganization);
+        }
+        return collapsed;
     }
 
     private static SceneListState BuildSceneListState(
+        Guid? layoutId,
+        string name,
         IReadOnlyList<ObjectSnapshot> objects,
         IReadOnlyList<DisplaySnapshot> displays,
         IReadOnlyList<string> folders,
         IReadOnlyDictionary<string, string> folderColors,
         IReadOnlySet<Guid> activeObjectIds,
         string filter,
-        ObjectKind? kindFilter)
+        ObjectKind? kindFilter,
+        IReadOnlyList<SceneGroupSnapshot> sceneGroups)
     {
+        ILookup<Guid?, ObjectSnapshot> members = objects.ToLookup(static snapshot => snapshot.GroupId);
+        ILookup<string, PlacedTreeNode> groupRows = sceneGroups
+            .Select(group => BuildPlacedGroup(group, members[group.Id].ToArray(), activeObjectIds, filter, kindFilter))
+            .OfType<PlacedTreeNode>()
+            .ToLookup(static row => row.SceneGroup!.FolderPath, StringComparer.OrdinalIgnoreCase);
         List<SceneItemSnapshot> rootItems = objects
+            .Where(static snapshot => !snapshot.GroupId.HasValue)
             .Where(static snapshot => string.IsNullOrWhiteSpace(snapshot.FolderPath))
             .Where(snapshot => SceneItemPresentation.MatchesObjectFilter(snapshot, activeObjectIds.Contains(snapshot.Id), filter, kindFilter))
             .Cast<SceneItemSnapshot>()
@@ -396,7 +533,7 @@ internal sealed class SceneWorkspace
         var orderedFolders = ObjectFolderUtility.ExpandFolders(
             folders.Concat(objects
                 .Where(static snapshot => !string.IsNullOrWhiteSpace(snapshot.FolderPath))
-                .Select(static snapshot => snapshot.FolderPath)));
+                .Select(static snapshot => snapshot.FolderPath)).Concat(sceneGroups.Select(static group => group.FolderPath)));
 
         if (!HierarchyIndex<string, string>.TryCreate(
                 orderedFolders,
@@ -407,81 +544,134 @@ internal sealed class SceneWorkspace
                 out HierarchyIndex<string, string> hierarchy,
                 out _))
         {
-            return new SceneListState(rootItems, [], folders);
+            return new SceneListState(layoutId, name, rootItems, [], folders, objects);
         }
 
         IReadOnlyDictionary<string, IReadOnlyList<ObjectSnapshot>> subtreeObjects =
             hierarchy.CollectSubtreeValues(folder => groupedObjects.GetValueOrDefault(folder) ?? []);
-        IReadOnlyList<PlacedObjectFolderGroup> rootFolders = hierarchy.Roots
-            .Select(folder => BuildPlacedFolderGroup(
-                folder,
-                hierarchy,
-                groupedObjects,
-                subtreeObjects,
-                folderColors,
-                activeObjectIds,
-                filter,
-                kindFilter,
-                ancestorMatchesSearch: false))
+        ILookup<string, SceneGroupSnapshot> groupsByFolder = sceneGroups.ToLookup(static group => group.FolderPath, StringComparer.OrdinalIgnoreCase);
+        IReadOnlyDictionary<string, IReadOnlyList<SceneGroupSnapshot>> subtreeGroups =
+            hierarchy.CollectSubtreeValues(folder => groupsByFolder[folder].ToArray());
+        IReadOnlyList<PlacedTreeNode> rootFolders = hierarchy.Roots
+            .Select(folder => BuildFolder(folder, ancestorMatchesSearch: false))
             .Where(static group => group is not null)
-            .Cast<PlacedObjectFolderGroup>()
+            .Cast<PlacedTreeNode>()
+            .Concat(groupRows[string.Empty])
             .ToArray();
-        return new SceneListState(rootItems, rootFolders, folders);
+        return new SceneListState(layoutId, name, rootItems, rootFolders, folders, objects);
+
+        PlacedTreeNode? BuildFolder(string folder, bool ancestorMatchesSearch)
+        {
+            IReadOnlyList<ObjectSnapshot> directObjects = groupedObjects.GetValueOrDefault(folder) ?? [];
+            bool folderMatchesSearch = ancestorMatchesSearch
+                || string.IsNullOrWhiteSpace(filter)
+                || folder.Contains(filter, StringComparison.OrdinalIgnoreCase);
+            IReadOnlyList<ObjectSnapshot> visibleObjects = directObjects
+                .Where(static snapshot => !snapshot.GroupId.HasValue)
+                .Where(snapshot => SceneItemPresentation.MatchesObjectKindFilter(snapshot, kindFilter))
+                .Where(snapshot => folderMatchesSearch
+                    || SceneItemPresentation.MatchesObjectSearchFilter(snapshot, activeObjectIds.Contains(snapshot.Id), filter))
+                .ToArray();
+            IReadOnlyList<PlacedTreeNode> children = hierarchy.GetChildren(folder)
+                .Select(child => BuildFolder(child, folderMatchesSearch))
+                .Where(static child => child is not null)
+                .Cast<PlacedTreeNode>()
+                .Concat(groupRows[folder])
+                .ToArray();
+            bool includeEmptyFolder = !kindFilter.HasValue && folderMatchesSearch;
+            if (visibleObjects.Count == 0 && children.Count == 0 && !includeEmptyFolder)
+            {
+                return null;
+            }
+
+            IReadOnlyList<ObjectSnapshot> allObjects = subtreeObjects[folder];
+            int lockedCount = 0;
+            int activeCount = 0;
+            foreach (ObjectSnapshot snapshot in allObjects)
+            {
+                lockedCount += snapshot.Locked ? 1 : 0;
+                activeCount += activeObjectIds.Contains(snapshot.Id) ? 1 : 0;
+            }
+
+            IReadOnlyList<SceneItemSnapshot> allItems = [.. allObjects, .. subtreeGroups[folder]];
+            bool hasItems = allItems.Count > 0;
+            bool allVisible = hasItems && allItems.All(static item => item.Visible);
+            bool allLocked = hasItems && allItems.All(static item => item.Locked);
+            string visibilityTooltip = "Folder is empty";
+            Vector4 visibilityColor = ThemeColors.TextDisabled;
+
+            if (hasItems)
+            {
+                visibilityTooltip = allVisible ? "Hide folder objects" : "Show folder objects";
+                visibilityColor = allVisible ? ThemeColors.AccentGreen : ThemeColors.DimRed;
+            }
+
+            return new PlacedTreeNode(
+                layoutId,
+                folder,
+                ObjectFolderUtility.GetFolderName(folder),
+                ObjectFolderUtility.GetFolderColorValue(folderColors, folder),
+                allObjects,
+                visibleObjects,
+                children)
+            {
+                AllItems = allItems,
+                AllVisible = allVisible,
+                AllLocked = allLocked,
+                Detail = BuildPlacedObjectCountLabel(allObjects.Count, activeCount, lockedCount),
+                Actions =
+                [
+                    new($"placedFolderVisibility:{folder}",
+                        !hasItems || allVisible ? FontAwesomeIcon.Eye : FontAwesomeIcon.EyeSlash,
+                        visibilityTooltip, visibilityColor,
+                        hasItems && !allVisible, hasItems),
+                    new($"placedFolderLock:{folder}",
+                        allLocked ? FontAwesomeIcon.Lock : FontAwesomeIcon.Unlock,
+                        allLocked ? "Unlock folder objects" : "Lock folder objects",
+                        ThemeColors.AccentYellow, allLocked, hasItems),
+                ],
+            };
+        }
     }
 
-    private static PlacedObjectFolderGroup? BuildPlacedFolderGroup(
-        string folder,
-        HierarchyIndex<string, string> hierarchy,
-        IReadOnlyDictionary<string, List<ObjectSnapshot>> groupedObjects,
-        IReadOnlyDictionary<string, IReadOnlyList<ObjectSnapshot>> subtreeObjects,
-        IReadOnlyDictionary<string, string> folderColors,
+    private static PlacedTreeNode? BuildPlacedGroup(
+        SceneGroupSnapshot group,
+        ObjectSnapshot[] members,
         IReadOnlySet<Guid> activeObjectIds,
         string filter,
-        ObjectKind? kindFilter,
-        bool ancestorMatchesSearch)
+        ObjectKind? kindFilter)
     {
-        IReadOnlyList<ObjectSnapshot> directObjects = groupedObjects.GetValueOrDefault(folder) ?? [];
-        bool folderMatchesSearch = ancestorMatchesSearch
-            || string.IsNullOrWhiteSpace(filter)
-            || folder.Contains(filter, StringComparison.OrdinalIgnoreCase);
-        IReadOnlyList<ObjectSnapshot> visibleObjects = directObjects
-            .Where(snapshot => SceneItemPresentation.MatchesObjectKindFilter(snapshot, kindFilter))
-            .Where(snapshot => folderMatchesSearch
-                || SceneItemPresentation.MatchesObjectSearchFilter(snapshot, activeObjectIds.Contains(snapshot.Id), filter))
-            .ToArray();
-        IReadOnlyList<PlacedObjectFolderGroup> children = hierarchy.GetChildren(folder)
-            .Select(child => BuildPlacedFolderGroup(
-                child,
-                hierarchy,
-                groupedObjects,
-                subtreeObjects,
-                folderColors,
-                activeObjectIds,
-                filter,
-                kindFilter,
-                folderMatchesSearch))
-            .Where(static child => child is not null)
-            .Cast<PlacedObjectFolderGroup>()
-            .ToArray();
-        bool includeEmptyFolder = !kindFilter.HasValue && folderMatchesSearch;
-        if (visibleObjects.Count == 0 && children.Count == 0 && !includeEmptyFolder)
+        bool matches = string.IsNullOrWhiteSpace(filter) || group.Name.Contains(filter, StringComparison.OrdinalIgnoreCase)
+            || group.FolderPath.Contains(filter, StringComparison.OrdinalIgnoreCase);
+        List<ObjectSnapshot> visible = [];
+        int activeCount = 0;
+        int lockedCount = 0;
+        foreach (ObjectSnapshot member in members)
         {
-            return null;
+            bool active = activeObjectIds.Contains(member.Id);
+            activeCount += active ? 1 : 0;
+            lockedCount += member.Locked ? 1 : 0;
+            if (SceneItemPresentation.MatchesObjectFilter(member, active, matches ? string.Empty : filter, kindFilter))
+                visible.Add(member);
         }
 
-        return new PlacedObjectFolderGroup(
-            folder,
-            ObjectFolderUtility.GetFolderName(folder),
-            ObjectFolderUtility.GetFolderColorValue(folderColors, folder),
-            subtreeObjects[folder],
-            visibleObjects,
-            children);
+        if (visible.Count == 0 && (members.Length > 0 || kindFilter.HasValue || !matches))
+            return null;
+
+        return new PlacedTreeNode(group.LayoutId, group.Id.ToString("N"), group.Name, string.Empty, members, visible, [])
+        {
+            Id = $"{group.LayoutId?.ToString("N") ?? "standalone"}:group:{group.Id:N}",
+            SceneGroup = group,
+            AllItems = [.. members, group],
+            AllVisible = group.Visible,
+            AllLocked = group.Locked,
+            Detail = BuildPlacedObjectCountLabel(members.Length, activeCount, lockedCount),
+        };
     }
 
     private void DrawSceneRootItem(
         SceneItemSnapshot item,
         IReadOnlySet<Guid> activeObjectIds,
-        IReadOnlyList<string> placedFolders,
         IReadOnlyList<Guid> selectableRowOrder,
         SceneListRow.Metrics rowMetrics)
     {
@@ -496,7 +686,6 @@ internal sealed class SceneWorkspace
                     snapshot,
                     isActive,
                     _interaction.Selection.Contains(snapshot.Id),
-                    placedFolders,
                     selectableRowOrder,
                     rowMetrics);
                 return;
@@ -505,24 +694,24 @@ internal sealed class SceneWorkspace
         }
     }
 
-    private void OpenCreateFolderDialog(string? parentFolderPath = null)
+    private void OpenCreateFolderDialog(Guid? layoutId, string? parentFolderPath = null)
     {
         string parentPath = ObjectFolderUtility.SanitizeFolderPath(parentFolderPath);
         _interaction.OpenDialog(EditorDialog.Request.TextInput(
             "folder-libraryBrowser",
             "Create Folder",
             "Create Folder",
-            input => _sceneCommands.TryCreateFolderWithHistory(ObjectFolderUtility.CombineFolderPath(parentPath, input))) with
+            input => _sceneCommands.TryCreateFolderWithHistory(layoutId, ObjectFolderUtility.CombineFolderPath(parentPath, input))) with
         {
             Icon = FontAwesomeIcon.FolderPlus,
             Accent = ThemeColors.AccentPrimary,
             Placeholder = "folder name",
             Detail = parentPath.Length > 0 ? $"Inside: {parentPath}" : string.Empty,
-            Validate = input => ValidateFolderName(input, parentPath),
+            Validate = input => ValidateFolderName(layoutId, input, parentPath),
         });
     }
 
-    private void OpenRenameFolderDialog(string folderPath)
+    private void OpenRenameFolderDialog(Guid? layoutId, string folderPath)
     {
         string parentPath = ObjectFolderUtility.GetParentFolderPath(folderPath);
         _interaction.OpenDialog(EditorDialog.Request.TextInput(
@@ -530,6 +719,7 @@ internal sealed class SceneWorkspace
             "Rename Folder",
             "Rename Folder",
             input => _sceneCommands.TryRenameFolderWithHistory(
+                layoutId,
                 folderPath,
                 ObjectFolderUtility.CombineFolderPath(parentPath, input))) with
         {
@@ -538,11 +728,12 @@ internal sealed class SceneWorkspace
             InitialValue = ObjectFolderUtility.GetFolderName(folderPath),
             Placeholder = "folder name",
             Detail = $"Current: {folderPath}",
-            Validate = input => ValidateFolderName(input, parentPath, folderPath),
+            Validate = input => ValidateFolderName(layoutId, input, parentPath, folderPath),
         });
     }
 
     private string? ValidateFolderName(
+        Guid? layoutId,
         string input,
         string? parentFolderPath = null,
         string? currentFolderPath = null)
@@ -567,7 +758,7 @@ internal sealed class SceneWorkspace
             return "Choose a different folder name.";
         }
 
-        if (_sceneView.GetPlacedFolders().Any(folder => string.Equals(
+        if (_sceneView.GetPlacedFolders(layoutId).Any(folder => string.Equals(
                 folder,
                 folderPath,
                 StringComparison.OrdinalIgnoreCase)))
@@ -578,291 +769,164 @@ internal sealed class SceneWorkspace
         return null;
     }
 
-    private SceneListRow.FolderResult DrawPlacedObjectFolderRow(
-        PlacedObjectFolderGroup group,
-        IReadOnlySet<Guid> activeObjectIds,
+    private SceneListRow.FolderResult DrawPlacedTreeRow(
+        PlacedTreeNode group,
         SceneListRow.Metrics rowMetrics,
         bool collapsed,
         int depth)
     {
-        var allVisible = group.AllObjects.Count > 0 && group.AllObjects.All(static snapshot => snapshot.Visible);
-        var allLocked = group.AllObjects.Count > 0 && group.AllObjects.All(static snapshot => snapshot.Locked);
-        var accent = FolderColorPicker.ResolveAccent(group.ColorValue);
-        var folderDetail = rowMetrics.Size == SceneListRowSize.Large
-            ? BuildPlacedObjectCountLabel(
-                group.AllObjects.Count,
-                group.AllObjects.Count(snapshot => activeObjectIds.Contains(snapshot.Id)),
-                group.AllObjects.Count(static snapshot => snapshot.Locked))
-            : string.Empty;
+        if (group.SceneGroup is { } sceneGroup)
+        {
+            SceneListRow.FolderResult groupResult = _sceneItems.DrawGroupRow(sceneGroup, group.Detail, group.AllObjects.Count,
+                _activeItems.ContainsKey(sceneGroup.Id), rowMetrics, collapsed, _selectableSceneRowOrder ?? [], depth);
+            if (groupResult.Collapsed != collapsed)
+                TogglePlacedTreeNodeCollapsed(group);
+            return groupResult;
+        }
+        bool allVisible = group.AllVisible;
+        bool allLocked = group.AllLocked;
         SceneListRow.Folder folder = new()
         {
-            Id = $"placedFolderEntry:{group.FolderKey}",
+            Id = group.RowId,
             Name = group.DisplayLabel,
-            Detail = folderDetail,
-            Accent = accent,
+            Detail = rowMetrics.Size == SceneListRowSize.Large
+                ? group.Detail
+                : string.Empty,
+            Accent = group.Accent,
             ChildCount = group.AllObjects.Count,
             Collapsed = collapsed,
         };
-        EditorListCard.Interaction interaction = SceneListRow.DrawFolderInteraction(
-            folder,
-            rowMetrics,
-            depth == 0 ? null : rowMetrics.ChildInset * depth,
-            depth == 0 ? null : rowMetrics.ChildRightInset);
-
-        using (var folderPopup = EditorContextMenu.BeginForLastItem($"##placedFolderContext:{group.FolderKey}"))
+        SceneListRow.FolderResult result = _sceneListRow.DrawFolder(
+            folder, rowMetrics, (Workspace: this, Group: group),
+            static context => context.Workspace.DrawPlacedFolderContextMenu(context.Group),
+            group.Actions,
+            leftInset: depth == 0 ? null : rowMetrics.ChildInset * depth,
+            rightInset: depth == 0 ? null : rowMetrics.ChildRightInset);
+        if (result.Collapsed != collapsed)
         {
-            if (folderPopup)
-            {
-                bool hasSelectableChildren = group.AllObjects.Any(static snapshot => !snapshot.Locked);
-                if (EditorContextMenu.DrawItem(FontAwesomeIcon.Check, "Select All Children", enabled: hasSelectableChildren))
-                {
-                    _interaction.SelectionChanged(_interaction.Selection.TryReplaceSelection(
-                        group.AllObjects
-                            .Where(static snapshot => !snapshot.Locked)
-                            .Select(static snapshot => snapshot.Id)));
-                }
-
-                EditorContextMenu.DrawSeparator();
-                if (EditorContextMenu.DrawItem(FontAwesomeIcon.Copy, "Copy Folder"))
-                {
-                    _ = _objectClipboard.CopyFolder(group.FolderKey, group.AllObjects);
-                }
-
-                if (EditorContextMenu.DrawItem(FontAwesomeIcon.Cut, "Cut Folder"))
-                {
-                    _ = _sceneCommands.TryCutPlacedFolderToClipboard(group.FolderKey, group.AllObjects);
-                }
-
-                bool canPasteIntoFolder = _objectClipboard.CanPasteObjects();
-                if (EditorContextMenu.DrawItem(
-                        FontAwesomeIcon.Paste,
-                        "Paste into Folder",
-                        enabled: canPasteIntoFolder,
-                        tooltip: canPasteIntoFolder
-                            ? "Place clipboard objects in this folder."
-                            : "Clipboard does not contain Intoner objects."))
-                {
-                    _ = _sceneCommands.PasteObjectsFromClipboard(ObjectPasteDestination.Folder(group.FolderKey));
-                }
-
-                EditorContextMenu.DrawSeparator();
-
-                if (EditorContextMenu.DrawItem(
-                        FontAwesomeIcon.LayerGroup,
-                        "Save Folder to Library",
-                        enabled: _libraryBrowser.CanSavePlacedFolderAsPrefab(group.AllObjects.Count)))
-                {
-                    _libraryBrowser.OpenSaveLibraryPrefabDialog(group.FolderKey, group.DisplayLabel, group.AllObjects.Count);
-                }
-
-                DrawPlacedFolderMoveMenu(group);
-                if (EditorContextMenu.DrawItem(FontAwesomeIcon.FolderPlus, "New Folder Here..."))
-                {
-                    OpenCreateFolderDialog(group.FolderKey);
-                }
-
-                if (EditorContextMenu.DrawItem(FontAwesomeIcon.Edit, "Rename Folder"))
-                {
-                    OpenRenameFolderDialog(group.FolderKey);
-                }
-
-                EditorContextMenu.DrawSeparator();
-                if (EditorContextMenu.DrawItem(
-                        FontAwesomeIcon.Unlink,
-                        "Dissolve Folder",
-                        color: ThemeColors.DimRed))
-                {
-                    _ = _sceneCommands.TryDissolveFolderWithHistory(group.FolderKey);
-                }
-
-                EditorContextMenu.DrawSectionLabel("Folder Color");
-                if (FolderColorPicker.Draw($"placedFolderColor:{group.FolderKey}", group.ColorValue) is { } colorValue
-                 && _sceneCommands.TrySetFolderColorWithHistory(group.FolderKey, colorValue))
-                {
-                    ImGui.CloseCurrentPopup();
-                }
-            }
+            TogglePlacedTreeNodeCollapsed(group);
         }
 
-        var min = interaction.Min;
-        var max = interaction.Max;
-        var padX = 6f * ImGuiHelpers.GlobalScale;
-        var cursorAfterRow = ImGui.GetCursorPos();
-        var buttonSize = SceneListRow.ResolveActionButtonEdge();
-        var buttonGap = 2f * ImGuiHelpers.GlobalScale;
-        var rowHeight = max.Y - min.Y;
-        var buttonY = min.Y + ((rowHeight - buttonSize) * 0.5f);
-        var buttonRight = max.X - padX;
-        var lockButtonPos = new Vector2(buttonRight - buttonSize, buttonY);
-        var visibilityButtonPos = new Vector2(lockButtonPos.X - buttonGap - buttonSize, buttonY);
-        if (interaction.Clicked)
+        if (result.ClickedAction == 0)
         {
-            var buttonExtent = new Vector2(buttonSize);
-            var clickedVisibilityButton = EditorInputUtility.IsMouseInside(visibilityButtonPos, visibilityButtonPos + buttonExtent);
-            var clickedLockButton = EditorInputUtility.IsMouseInside(lockButtonPos, lockButtonPos + buttonExtent);
-            if (!clickedVisibilityButton && !clickedLockButton)
-            {
-                TogglePlacedFolderCollapsed(group.FolderKey);
-                collapsed = IsPlacedFolderCollapsed(group.FolderKey);
-                folder = folder with { Collapsed = collapsed };
-            }
+            _ = _sceneCommands.TrySetSceneItemsVisibleWithHistory(group.AllItems, !allVisible);
+        }
+        else if (result.ClickedAction == 1)
+        {
+            _ = _sceneCommands.TrySetSceneItemsLockedWithHistory(group.AllItems, !allLocked);
         }
 
-        _sceneListRow.DrawFolderChrome(folder, interaction);
-
-        ImGui.SetCursorScreenPos(visibilityButtonPos);
-        using (ImRaii.Disabled(group.AllObjects.Count == 0))
-        {
-            if (SceneListRow.DrawActionButton(
-                    $"placedFolderVisibility:{group.FolderKey}",
-                    allVisible ? FontAwesomeIcon.Eye : FontAwesomeIcon.EyeSlash,
-                    allVisible ? "Hide folder objects" : "Show folder objects",
-                    allVisible ? ThemeColors.AccentGreen : ThemeColors.DimRed,
-                    highlighted: !allVisible,
-                    edge: buttonSize))
-            {
-                var nextVisible = !allVisible;
-                var targetObjects = group.AllObjects
-                    .Where(snapshot => snapshot.Visible != nextVisible)
-                    .ToList();
-                if (targetObjects.Count > 0)
-                {
-                    _ = _historyCoordinator.TryApplySelectedSnapshotUpdate(
-                        SceneHistoryKind.Visibility,
-                        nextVisible ? "Show Objects" : "Hide Objects",
-                        targetObjects,
-                        snapshot => snapshot with { Visible = nextVisible });
-                }
-            }
-        }
-
-        ImGui.SetCursorScreenPos(lockButtonPos);
-        using (ImRaii.Disabled(group.AllObjects.Count == 0))
-        {
-            if (SceneListRow.DrawActionButton(
-                    $"placedFolderLock:{group.FolderKey}",
-                    allLocked ? FontAwesomeIcon.Lock : FontAwesomeIcon.Unlock,
-                    allLocked ? "Unlock folder objects" : "Lock folder objects",
-                    ThemeColors.AccentYellow,
-                    highlighted: allLocked,
-                    edge: buttonSize))
-            {
-                var nextLocked = !allLocked;
-                var targetObjects = group.AllObjects
-                    .Where(snapshot => snapshot.Locked != nextLocked)
-                    .ToList();
-                if (targetObjects.Count > 0)
-                {
-                    _ = _historyCoordinator.TryApplySelectedSnapshotUpdate(
-                        SceneHistoryKind.Organization,
-                        nextLocked ? "Lock Objects" : "Unlock Objects",
-                        targetObjects,
-                        snapshot => snapshot with { Locked = nextLocked });
-                }
-            }
-        }
-
-        ImGui.SetCursorPos(cursorAfterRow);
-        var contentRight = visibilityButtonPos.X - (8f * ImGuiHelpers.GlobalScale);
-        SceneListRow.DrawFolderContent(folder, rowMetrics, interaction, contentRight);
-        return new SceneListRow.FolderResult(
-            collapsed,
-            new SceneListRow.RowGeometry(interaction.Min, interaction.Max));
+        return result;
     }
 
-    private void DrawPlacedObjectFolderTree(
-        PlacedObjectFolderGroup group,
+    private void DrawPlacedFolderContextMenu(PlacedTreeNode group)
+    {
+        SceneSelectionMenu.DrawChildren(_interaction, group.AllObjects);
+
+        EditorContextMenu.DrawSeparator();
+        if (EditorContextMenu.DrawItem(FontAwesomeIcon.Copy, "Copy Folder"))
+        {
+            _ = _objectClipboard.CopyFolder(group.LayoutId, group.FolderKey, group.AllItems);
+        }
+
+        if (EditorContextMenu.DrawItem(FontAwesomeIcon.Cut, "Cut Folder"))
+        {
+            _ = _sceneCommands.TryCutPlacedFolderToClipboard(group.LayoutId, group.FolderKey, group.AllObjects);
+        }
+
+        bool canPasteIntoFolder = _objectClipboard.CanPasteObjects();
+        if (EditorContextMenu.DrawItem(
+                FontAwesomeIcon.Paste,
+                "Paste into Folder",
+                enabled: canPasteIntoFolder,
+                tooltip: canPasteIntoFolder
+                    ? "Place clipboard objects in this folder."
+                    : "Clipboard does not contain Intoner objects."))
+        {
+            _ = _sceneCommands.PasteObjectsFromClipboard(group.LayoutId, ObjectPasteDestination.Folder(group.FolderKey));
+        }
+
+        EditorContextMenu.DrawSeparator();
+
+        if (EditorContextMenu.DrawItem(
+                FontAwesomeIcon.LayerGroup,
+                "Save Folder to Library",
+                enabled: _libraryBrowser.CanSavePlacedObjectsAsPrefab(group.AllObjects.Count)))
+        {
+            _libraryBrowser.OpenSaveLibraryPrefabDialog(group.LayoutId, group.FolderKey, group.DisplayLabel, group.AllObjects.Count);
+        }
+
+        DrawPlacedFolderMoveMenu(group);
+        if (EditorContextMenu.DrawItem(FontAwesomeIcon.FolderPlus, "New Folder Here..."))
+        {
+            OpenCreateFolderDialog(group.LayoutId, group.FolderKey);
+        }
+        if (EditorContextMenu.DrawItem(FontAwesomeIcon.ObjectGroup, "New Group Here"))
+            _ = _sceneCommands.TryCreateEmptyGroup(group.LayoutId, group.FolderKey);
+
+        if (EditorContextMenu.DrawItem(FontAwesomeIcon.Edit, "Rename Folder"))
+        {
+            OpenRenameFolderDialog(group.LayoutId, group.FolderKey);
+        }
+
+        EditorContextMenu.DrawSeparator();
+        if (EditorContextMenu.DrawItem(
+                FontAwesomeIcon.Unlink,
+                "Dissolve Folder",
+                color: ThemeColors.DimRed))
+        {
+            _ = _sceneCommands.TryDissolveFolderWithHistory(group.LayoutId, group.FolderKey);
+        }
+
+        EditorContextMenu.DrawSectionLabel("Folder Color");
+        if (FolderColorPicker.Draw($"placedFolderColor:{group.FolderKey}", group.ColorValue) is { } colorValue
+         && _sceneCommands.TrySetFolderColorWithHistory(group.LayoutId, group.FolderKey, colorValue))
+        {
+            ImGui.CloseCurrentPopup();
+        }
+    }
+
+    private void DrawPlacedTree(
+        PlacedTreeNode group,
         IReadOnlySet<Guid> activeObjectIds,
-        IReadOnlyList<string> placedFolders,
         IReadOnlyList<Guid> selectableRowOrder,
         SceneListRow.Metrics rowMetrics,
         int depth)
     {
-        SceneListRow.FolderResult row = DrawPlacedObjectFolderRow(
+        SceneListRow.FolderResult row = DrawPlacedTreeRow(
             group,
-            activeObjectIds,
             rowMetrics,
-            IsPlacedFolderCollapsed(group.FolderKey),
+            IsPlacedTreeNodeCollapsed(group),
             depth);
         if (row.Collapsed || group.VisibleObjects.Count == 0 && group.Children.Count == 0)
         {
             return;
         }
 
-        DrawPlacedObjectFolderChildren(
+        DrawPlacedTreeChildren(
             group,
             activeObjectIds,
-            placedFolders,
             selectableRowOrder,
             rowMetrics,
             depth);
     }
 
-    private void DrawPlacedObjectFolderChildren(
-        PlacedObjectFolderGroup group,
+    private void DrawPlacedTreeChildren(
+        PlacedTreeNode group,
         IReadOnlySet<Guid> activeObjectIds,
-        IReadOnlyList<string> placedFolders,
         IReadOnlyList<Guid> selectableRowOrder,
         SceneListRow.Metrics rowMetrics,
         int depth)
-    {
-        int childDepth = depth + 1;
-        using SceneListRow.FolderChildrenScope children = SceneListRow.BeginFolderChildren(
-            rowMetrics,
-            FolderColorPicker.ResolveAccent(group.ColorValue),
-            childDepth);
-        int childCount = group.VisibleObjects.Count + group.Children.Count;
-        int childIndex = group.VisibleObjects.Count;
-        using UiVirtualList.Scope list = UiVirtualList.Begin(
-            group.VisibleObjects.Count,
-            UiVirtualListOptions.Rows(rowMetrics.ItemHeight, rowMetrics.ItemSpacing) with
-            {
-                DrawTrailingSpacing = group.Children.Count > 0,
-            });
-        while (list.Step())
-        {
-            for (int index = list.DisplayStart; index < list.DisplayEnd; ++index)
-            {
-                ObjectSnapshot snapshot = group.VisibleObjects[index];
-                SceneListRow.RowGeometry geometry = _sceneItems.DrawPlacedObjectCard(
-                    snapshot,
-                    activeObjectIds.Contains(snapshot.Id),
-                    _interaction.Selection.Contains(snapshot.Id),
-                    placedFolders,
-                    selectableRowOrder,
-                    rowMetrics,
-                    rowMetrics.ChildInset * childDepth,
-                    rowMetrics.ChildRightInset);
-                children.Add(geometry);
-                list.FinishItem(index);
-            }
-        }
-
-        foreach (PlacedObjectFolderGroup childGroup in group.Children)
-        {
-            SceneListRow.FolderResult childRow = DrawPlacedObjectFolderRow(
-                childGroup,
-                activeObjectIds,
-                rowMetrics,
-                IsPlacedFolderCollapsed(childGroup.FolderKey),
-                childDepth);
-            children.Add(childRow.Geometry);
-            bool hasNext = ++childIndex < childCount;
-            if (!childRow.Collapsed
-             && (childGroup.VisibleObjects.Count > 0 || childGroup.Children.Count > 0))
-            {
-                DrawPlacedObjectFolderChildren(
-                    childGroup,
-                    activeObjectIds,
-                    placedFolders,
-                    selectableRowOrder,
-                    rowMetrics,
-                    childDepth);
-            }
-
-            children.AddSpacing(hasNext);
-        }
-    }
+        => SceneListRow.DrawFolderChildren(
+            group.VisibleObjects, group.Children, rowMetrics,
+            group.Accent, depth, rowMetrics.ItemHeight,
+            (Workspace: this, Active: activeObjectIds, Order: selectableRowOrder, Metrics: rowMetrics),
+            static (snapshot, childDepth, context) => context.Workspace._sceneItems.DrawPlacedObjectCard(snapshot,
+                context.Active.Contains(snapshot.Id), context.Workspace._interaction.Selection.Contains(snapshot.Id),
+                context.Order, context.Metrics, context.Metrics.ChildInset * childDepth, context.Metrics.ChildRightInset),
+            static (child, childDepth, context) => context.Workspace.DrawPlacedTreeRow(child, context.Metrics,
+                context.Workspace.IsPlacedTreeNodeCollapsed(child), childDepth),
+            static (child, childDepth, context) => context.Workspace.DrawPlacedTreeChildren(child, context.Active, context.Order, context.Metrics, childDepth));
 
     private IReadOnlyList<Guid> BuildSelectableSceneRowOrder(SceneListState listState)
     {
@@ -875,17 +939,19 @@ internal sealed class SceneWorkspace
             }
         }
 
-        foreach (PlacedObjectFolderGroup group in listState.RootFolders)
+        foreach (PlacedTreeNode group in listState.RootNodes)
         {
-            AddSelectableFolderItems(group, itemIds);
+            AddSelectableTreeItems(group, itemIds);
         }
 
         return itemIds;
     }
 
-    private void AddSelectableFolderItems(PlacedObjectFolderGroup group, ICollection<Guid> itemIds)
+    private void AddSelectableTreeItems(PlacedTreeNode group, ICollection<Guid> itemIds)
     {
-        if (IsPlacedFolderCollapsed(group.FolderKey))
+        if (group.SceneGroup is { Locked: false } sceneGroup)
+            itemIds.Add(sceneGroup.Id);
+        if (IsPlacedTreeNodeCollapsed(group))
         {
             return;
         }
@@ -895,9 +961,9 @@ internal sealed class SceneWorkspace
             itemIds.Add(snapshot.Id);
         }
 
-        foreach (PlacedObjectFolderGroup child in group.Children)
+        foreach (PlacedTreeNode child in group.Children)
         {
-            AddSelectableFolderItems(child, itemIds);
+            AddSelectableTreeItems(child, itemIds);
         }
     }
 
@@ -914,38 +980,7 @@ internal sealed class SceneWorkspace
         return $"{placedLabel} | {activeLabel} | {lockedLabel}";
     }
 
-    private static IReadOnlyList<EditorBadge> BuildPlacedObjectBadges(
-        int objectCount,
-        int activeCount,
-        int lockedCount,
-        int displayCount,
-        int folderCount)
-    {
-        List<EditorBadge> badges = new(5)
-        {
-            EditorBadge.Count(FontAwesomeIcon.Cube, objectCount, "placed", "placed"),
-            EditorBadge.Count(FontAwesomeIcon.Running, activeCount, "active", "active"),
-        };
-
-        if (displayCount > 0)
-        {
-            badges.Add(EditorBadge.Count(FontAwesomeIcon.Desktop, displayCount, "display", "displays"));
-        }
-
-        if (folderCount > 0)
-        {
-            badges.Add(EditorBadge.Count(FontAwesomeIcon.Folder, folderCount, "folder", "folders"));
-        }
-
-        if (lockedCount > 0)
-        {
-            badges.Add(EditorBadge.Count(FontAwesomeIcon.Lock, lockedCount, "locked", "locked"));
-        }
-
-        return badges;
-    }
-
-    private void DrawPlacedFolderMoveMenu(PlacedObjectFolderGroup group)
+    private void DrawPlacedFolderMoveMenu(PlacedTreeNode group)
     {
         using EditorContextMenu.SubMenuScope moveMenu = EditorContextMenu.BeginSubMenu(
             $"placedFolderMove:{group.FolderKey}",
@@ -956,7 +991,7 @@ internal sealed class SceneWorkspace
             return;
         }
 
-        IReadOnlyList<string> folders = _sceneView.GetPlacedFolders()
+        IReadOnlyList<string> folders = _sceneView.GetPlacedFolders(group.LayoutId)
             .Where(folder => !ObjectFolderUtility.IsSameOrDescendant(folder, group.FolderKey))
             .ToArray();
         string currentParent = ObjectFolderUtility.GetParentFolderPath(group.FolderKey);
@@ -968,8 +1003,9 @@ internal sealed class SceneWorkspace
             static folder => folder,
             ObjectFolderUtility.GetParentFolderPath,
             ObjectFolderUtility.GetFolderName,
-            () => _ = _sceneCommands.TryRenameFolderWithHistory(group.FolderKey, folderName),
+            () => _ = _sceneCommands.TryRenameFolderWithHistory(group.LayoutId, group.FolderKey, folderName),
             folder => _ = _sceneCommands.TryRenameFolderWithHistory(
+                group.LayoutId,
                 group.FolderKey,
                 ObjectFolderUtility.CombineFolderPath(folder, folderName)));
     }

@@ -1,3 +1,4 @@
+using Intoner.Services.Input;
 using System.Runtime.InteropServices;
 
 namespace Intoner.Services.Configuration;
@@ -55,6 +56,12 @@ internal enum SceneListRowSize
     Compact,
 }
 
+internal enum PlacedLayoutView
+{
+    Sections,
+    Tabs,
+}
+
 internal enum ToolbarDockPosition
 {
     Top,
@@ -92,11 +99,13 @@ internal sealed class UiConfiguration
     public bool HideInGpose { get; set; } = false;
     public bool ShowSceneToolsWithoutEditor { get; set; }
     public bool EnableShortcutsWithoutEditor { get; set; }
+    public Dictionary<string, KeyboardGesture?> ShortcutOverrides { get; set; } = new(StringComparer.Ordinal);
     public bool ShowDependencyStatusInTitleBar { get; set; } = true;
     public bool ShowDebugTab { get; set; }
     public bool ShowDebugInformation { get; set; }
     public required UiThemeConfiguration Theme { get; set; }
     public SceneListRowSize PlacedListRowSize { get; set; } = SceneListRowSize.Large;
+    public PlacedLayoutView PlacedLayoutView { get; set; } = PlacedLayoutView.Sections;
     public ToolbarDockPosition ToolbarPosition { get; set; } = ToolbarDockPosition.Top;
     public SplitRatios WorkspaceSplits { get; set; } = SplitRatios.Default;
 
@@ -127,11 +136,13 @@ internal sealed class UiConfiguration
             HideInGpose = HideInGpose,
             ShowSceneToolsWithoutEditor = ShowSceneToolsWithoutEditor,
             EnableShortcutsWithoutEditor = EnableShortcutsWithoutEditor,
+            ShortcutOverrides = new Dictionary<string, KeyboardGesture?>(ShortcutOverrides, StringComparer.Ordinal),
             ShowDependencyStatusInTitleBar = ShowDependencyStatusInTitleBar,
             ShowDebugTab = ShowDebugTab,
             ShowDebugInformation = ShowDebugInformation,
             Theme = Theme.Copy(),
             PlacedListRowSize = PlacedListRowSize,
+            PlacedLayoutView = PlacedLayoutView,
             ToolbarPosition = ToolbarPosition,
             WorkspaceSplits = WorkspaceSplits,
         };

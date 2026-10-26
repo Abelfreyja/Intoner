@@ -1,11 +1,12 @@
 using Dalamud.Interface;
+using Intoner.Logging;
 using Intoner.Scene.Rendering;
 using Intoner.Services.Configuration;
 using Intoner.Services.Gpu;
 using Microsoft.Extensions.Logging;
 using SharpDX.Direct3D11;
 using System.Diagnostics;
-using RawViewportF = SharpDX.Mathematics.Interop.RawViewportF;
+using Vector2 = System.Numerics.Vector2;
 using Vector4 = System.Numerics.Vector4;
 
 namespace Intoner.Objects.Rendering.Primitives;
@@ -25,7 +26,7 @@ internal sealed unsafe class PrimitiveCallbackRenderer : IDisposable
     private readonly D3D11DrawStateSnapshot _drawState = new(
         pixelConstantBufferCount: 1,
         pixelShaderResourceViewCount: 1,
-        pixelSamplerCount: 0,
+        pixelSamplerCount: 1,
         vertexBufferCount: 2,
         renderTargetCount: 0);
 
@@ -46,10 +47,11 @@ internal sealed unsafe class PrimitiveCallbackRenderer : IDisposable
         ReadOnlySpan<LineCommand> lines,
         ReadOnlySpan<PointCommand> points,
         ReadOnlySpan<ScreenCommand> screens,
+        ReadOnlySpan<TextCommand> texts,
         PrimitiveDrawState state,
         in SceneRenderFrame frame)
     {
-        if (lines.IsEmpty && points.IsEmpty && screens.IsEmpty)
+        if (lines.IsEmpty && points.IsEmpty && screens.IsEmpty && texts.IsEmpty)
         {
             return false;
         }
@@ -66,16 +68,14 @@ internal sealed unsafe class PrimitiveCallbackRenderer : IDisposable
                 _logger.LogWarning("native primitive world draw skipped because the main render view projection was unavailable");
             }
 
-            if (screens.IsEmpty)
+            if (screens.IsEmpty && texts.IsEmpty)
             {
                 LogDrawDiagnostics(
                     "missing-projection",
                     state,
                     diagnostics,
-                    frame.Viewport,
-                    frame.TargetSize,
+                    frame,
                     SceneTextureSize.Empty,
-                    projectionFrame,
                     false,
                     PrimitiveGeometryBuildResult.Empty);
                 return false;
@@ -100,16 +100,14 @@ internal sealed unsafe class PrimitiveCallbackRenderer : IDisposable
                 _logger.LogWarning("native primitive scene depth draw skipped because scene depth was unavailable");
             }
 
-            if (screens.IsEmpty)
+            if (screens.IsEmpty && texts.IsEmpty)
             {
                 LogDrawDiagnostics(
                     "missing-depth",
                     state,
                     diagnostics,
-                    frame.Viewport,
-                    frame.TargetSize,
+                    frame,
                     sceneDepthSize,
-                    projectionFrame,
                     hasWorldProjection,
                     PrimitiveGeometryBuildResult.Empty);
                 return false;
@@ -126,19 +124,18 @@ internal sealed unsafe class PrimitiveCallbackRenderer : IDisposable
         }
 
         PrimitiveAntiAliasParameters antiAlias = PrimitiveAntiAlias.ResolveParameters(state.AntiAliasing);
+        SceneProjection? screenProjection = frame.HasProjection ? projectionFrame : null;
         var geometry = canDrawWorld
             ? _geometry.Build(lines, points, screens, projectionFrame, antiAlias, ref diagnostics)
-            : _geometry.BuildScreens(screens, antiAlias);
-        if (geometry.IsEmpty)
+            : _geometry.BuildScreens(screens, antiAlias, screenProjection);
+        if (geometry.IsEmpty && texts.IsEmpty)
         {
             LogDrawDiagnostics(
                 "empty",
                 state,
                 diagnostics,
-                frame.Viewport,
-                frame.TargetSize,
+                frame,
                 SceneTextureSize.Empty,
-                projectionFrame,
                 hasWorldProjection,
                 geometry);
             return false;
@@ -187,10 +184,8 @@ internal sealed unsafe class PrimitiveCallbackRenderer : IDisposable
             "draw",
             state,
             diagnostics,
-            frame.Viewport,
-            frame.TargetSize,
+            frame,
             sceneDepthSize,
-            projectionFrame,
             hasWorldProjection,
             geometry);
 
@@ -213,12 +208,37 @@ internal sealed unsafe class PrimitiveCallbackRenderer : IDisposable
                 _resources.DrawScreen(context, geometry.ScreenVertexCount);
             }
 
-            return true;
+            bool drewText = false;
+            foreach (TextCommand text in texts)
+            {
+                if (!_resources.IsTextureCompatible(text.Texture))
+                {
+                    continue;
+                }
+
+                Vector2 offset = default;
+                if (text.Anchor is { } anchor
+                    && (!frame.HasProjection || !anchor.TryResolveOffset(projectionFrame, out offset)))
+                {
+                    continue;
+                }
+
+                if (!drewText)
+                {
+                    _resources.ApplySharedPipeline(context, null, frame.Viewport, constants);
+                    _resources.ApplyTextPipeline(context);
+                }
+
+                _resources.DrawText(context, text, text.Position - text.Texture.Offset + offset, frame.Viewport);
+                drewText = true;
+            }
+
+            return !geometry.IsEmpty || drewText;
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "native primitive draw callback failed");
             _resources.RequestReset();
+            DiagnosticLog.Write(() => _logger.LogWarning(ex, "native primitive draw callback failed"));
             return false;
         }
     }
@@ -242,10 +262,8 @@ internal sealed unsafe class PrimitiveCallbackRenderer : IDisposable
         string reason,
         PrimitiveDrawState state,
         in PrimitiveDrawDiagnostics diagnostics,
-        RawViewportF viewport,
-        SceneTextureSize finalTargetSize,
+        in SceneRenderFrame frame,
         SceneTextureSize sceneDepthSize,
-        in SceneProjection projectionFrame,
         bool hasWorldProjection,
         PrimitiveGeometryBuildResult geometry)
     {
@@ -256,10 +274,10 @@ internal sealed unsafe class PrimitiveCallbackRenderer : IDisposable
 
         var summary = diagnostics.FormatSummary(
             state,
-            viewport,
-            finalTargetSize,
+            frame.Viewport,
+            frame.TargetSize,
             sceneDepthSize,
-            projectionFrame,
+            frame.Projection,
             hasWorldProjection,
             geometry,
             ViewDepthBias);

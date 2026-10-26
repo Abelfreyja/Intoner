@@ -19,7 +19,7 @@ internal static class ThumbnailTextureSampler
         out byte blue,
         out byte alpha)
     {
-        if (texture.Width <= 0 || texture.Height <= 0 || texture.RgbaPixels.Length < texture.Width * texture.Height * 4)
+        if (texture.Width <= 0 || texture.Height <= 0 || (long)texture.Width * texture.Height > texture.RgbaPixels.LongLength / 4)
         {
             red = ThumbnailPixels.ToByteColorComponentByteScale(255f * lighting);
             green = red;

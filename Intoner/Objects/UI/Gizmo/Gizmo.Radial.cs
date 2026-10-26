@@ -176,10 +176,14 @@ internal sealed partial class Gizmo
                 return CreateTransformWheelSegment(action, GizmoTransformMode.Rotation, FontAwesomeIcon.SyncAlt, "Rotate Gizmo");
             case GizmoWheelAction.Scale:
                 string scaleLabel = "Scale Gizmo";
-                if (!context.ScaleSupported)
+                if (context.PivotEditTargets is not null)
+                {
+                    scaleLabel = "Scale is unavailable while editing a group pivot";
+                }
+                else if (!context.ScaleSupported)
                 {
                     scaleLabel = context.SelectionCount > 1
-                        ? "Select one scalable item to use the scale gizmo"
+                        ? "Every selected item must support scaling"
                         : "This item does not support scaling";
                 }
                 return CreateTransformWheelSegment(action, GizmoTransformMode.Scale, FontAwesomeIcon.CompressArrowsAlt, scaleLabel, context.ScaleSupported);
@@ -195,9 +199,10 @@ internal sealed partial class Gizmo
                 return new(action, FontAwesomeIcon.Copy, singleSelection ? "Duplicate Selected Item" : "Duplicate Selected Items",
                     ThemeColors.Color(0.35f, 0.75f, 0.95f, 1f));
             case GizmoWheelAction.MoveToPlayer:
+                bool canMoveToPlayer = singleSelection || SceneGroupUtility.ResolveSelectedGroup(context.SelectedSnapshots) is not null;
                 return new(action, FontAwesomeIcon.Running,
-                    singleSelection ? "Move Selected Item To Player" : "Move to player is only available for one selected item",
-                    ThemeColors.Color(0.50f, 0.90f, 0.60f, 1f), IsEnabled: singleSelection);
+                    canMoveToPlayer ? "Move Selected Item To Player" : "Move to player is only available for one selected item",
+                    ThemeColors.Color(0.50f, 0.90f, 0.60f, 1f), IsEnabled: canMoveToPlayer);
             case GizmoWheelAction.Visibility:
                 bool anyVisible = false;
                 for (int index = 0; index < context.SelectedSnapshots.Count; ++index)
@@ -265,7 +270,8 @@ internal sealed partial class Gizmo
                 _host.TryDuplicateSelectedItems(context.SelectedSnapshots);
                 break;
             case GizmoWheelAction.MoveToPlayer:
-                _host.TryMoveItemToPlayerWithHistory(context.PrimarySnapshot.Id);
+                _host.TryMoveItemToPlayerWithHistory(SceneGroupUtility.ResolveSelectedGroup(context.SelectedSnapshots)?.Id
+                    ?? context.PrimarySnapshot.Id);
                 break;
             case GizmoWheelAction.Visibility:
                 bool visible = !segment.IsActive;
@@ -280,7 +286,7 @@ internal sealed partial class Gizmo
                         Transform = entry.Transform with
                         {
                             RotationDegrees = Vector3.Zero,
-                            Scale = CanUseScaleGizmo(entry) ? Vector3.One : entry.Transform.Scale,
+                            Scale = SupportsScale(entry) ? Vector3.One : entry.Transform.Scale,
                         },
                     });
                 break;
@@ -376,12 +382,6 @@ internal sealed partial class Gizmo
         IntonerTooltip.DrawOverlayText(
             ImGui.GetForegroundDrawList(),
             tooltip.MousePosition + new Vector2(GizmoConstants.TooltipOffsetX * scale, GizmoConstants.TooltipOffsetY * scale),
-            tooltip.Title,
-            new IntonerTooltipOptions
-            {
-                Padding = new Vector2(9f, 6f),
-                Rounding = 5f,
-            });
+            tooltip.Title);
     }
 }
-

@@ -118,13 +118,14 @@ internal interface IObjectScene
 
 internal sealed class ObjectScene : IObjectScene, IDisposable
 {
-    private readonly IFramework            _framework;
-    private readonly IObjectKindService    _objectKindService;
-    private readonly IObjectSceneSnapshotResolver _snapshotResolver;
-    private readonly IObjectSceneState     _sceneState;
-    private readonly IObjectSceneMutationService _sceneMutations;
-    private readonly ISceneLocationService _locationService;
+    private readonly IFramework                     _framework;
+    private readonly IObjectKindService             _objectKindService;
+    private readonly IObjectSceneSnapshotResolver   _snapshotResolver;
+    private readonly IObjectSceneState              _sceneState;
+    private readonly IObjectSceneMutationService    _sceneMutations;
+    private readonly ISceneLocationService          _locationService;
     private readonly IObjectResolvedCollectionStore _collectionStore;
+    private readonly ObjectFrameworkDiagnostics     _frameworkDiagnostics;
     private readonly List<ObjectBoundsSnapshot> _boundsBuffer = [];
 
     public event Action? SceneRefreshed;
@@ -136,7 +137,8 @@ internal sealed class ObjectScene : IObjectScene, IDisposable
         IObjectSceneState sceneState,
         IObjectSceneMutationService sceneMutations,
         ISceneLocationService locationService,
-        IObjectResolvedCollectionStore collectionStore)
+        IObjectResolvedCollectionStore collectionStore,
+        ObjectFrameworkDiagnostics frameworkDiagnostics)
     {
         _framework = framework;
         _objectKindService = objectKindService;
@@ -145,6 +147,7 @@ internal sealed class ObjectScene : IObjectScene, IDisposable
         _sceneMutations = sceneMutations;
         _locationService = locationService;
         _collectionStore = collectionStore;
+        _frameworkDiagnostics = frameworkDiagnostics;
 
         _locationService.LocationInvalidated += HandleLocationInvalidated;
     }
@@ -206,18 +209,37 @@ internal sealed class ObjectScene : IObjectScene, IDisposable
     }
 
     public void Dispose()
-        => _locationService.LocationInvalidated -= HandleLocationInvalidated;
+    {
+        _locationService.LocationInvalidated -= HandleLocationInvalidated;
+        FrameworkThreadUtility.RunDuringShutdown(_framework, () =>
+        {
+            if (!FrameworkUnloadUtility.IsGameFrameworkDestroying())
+            {
+                _sceneMutations.ClearAllActiveEntries(removePersistedState: false);
+            }
+        });
+    }
 
     public SceneReloadResult ReloadForCurrentLocation()
         => FrameworkThreadUtility.Run(_framework, ReloadForCurrentLocationInternal);
 
     public void FrameworkUpdate()
     {
-        RefreshObjectsForCurrentLocation();
+        using (_frameworkDiagnostics.Measure(ObjectFrameworkStage.SceneRefresh))
+        {
+            RefreshObjectsForCurrentLocation();
+        }
 
         IReadOnlyList<ObjectSceneEntry> entries = _sceneState.GetEntriesSnapshot();
-        ProcessFrameworkUpdates(entries);
-        PublishBounds(entries);
+        _frameworkDiagnostics.Count(ObjectFrameworkCounter.ActiveObjects, entries.Count);
+        using (_frameworkDiagnostics.Measure(ObjectFrameworkStage.RuntimeUpdates))
+        {
+            ProcessFrameworkUpdates(entries);
+        }
+        using (_frameworkDiagnostics.Measure(ObjectFrameworkStage.BoundsPublication))
+        {
+            PublishBounds(entries);
+        }
     }
 
     public void HandleZoneSwitchStart()
@@ -255,7 +277,9 @@ internal sealed class ObjectScene : IObjectScene, IDisposable
     private SceneReloadResult ReloadForCurrentLocationInternal()
     {
         long refreshRevision = _sceneState.GetRefreshState().Revision;
-        return ReloadForCurrentLocationInternal(_locationService.GetCurrentLocationScope(), refreshRevision);
+        SceneReloadResult result = ReloadForCurrentLocationInternal(_locationService.GetCurrentLocationScope(), refreshRevision);
+        PublishBounds(_sceneState.GetEntriesSnapshot());
+        return result;
     }
 
     private SceneReloadResult ReloadForCurrentLocationInternal(SceneLocationScope currentLocation, long refreshRevision)
@@ -289,9 +313,12 @@ internal sealed class ObjectScene : IObjectScene, IDisposable
     private void PublishBounds(IReadOnlyList<ObjectSceneEntry> entries)
     {
         _boundsBuffer.Clear();
-        foreach (ObjectSceneEntry entry in entries)
+        IReadOnlyList<ObjectBoundsSnapshot> previousBounds = _sceneState.GetBoundsSnapshots();
+        for (int index = 0; index < entries.Count; ++index)
         {
-            if (!TryCreateBoundsSnapshot(entry.Runtime, out ObjectBoundsSnapshot boundsSnapshot))
+            ObjectSceneEntry entry = entries[index];
+            ObjectBoundsSnapshot? previous = _boundsBuffer.Count < previousBounds.Count ? previousBounds[_boundsBuffer.Count] : null;
+            if (!TryCreateBoundsSnapshot(entry, previous, out ObjectBoundsSnapshot boundsSnapshot))
             {
                 continue;
             }
@@ -386,38 +413,41 @@ internal sealed class ObjectScene : IObjectScene, IDisposable
             return false;
         }
 
-        return _sceneMutations.TryCreateObject(
-            request.Snapshot,
-            out _,
-            applyDefaultLayout: false,
-            persistSnapshot: false,
-            sourceOverride: request.Source);
+        return _sceneMutations.TryCreateActiveObject(request.Snapshot, request.Source);
     }
 
     private ObjectRuntimeUpdateResult TryReuseActiveEntry(ObjectSceneEntry entry, ObjectSceneLoadRequest desiredRequest)
     {
-        if (entry.Source != desiredRequest.Source
-            || entry.Runtime.Kind != desiredRequest.Snapshot.Kind
-            || entry.Snapshot != desiredRequest.Snapshot)
+        if (entry.Runtime.Kind != desiredRequest.Snapshot.Kind)
         {
             return ObjectRuntimeUpdateResult.RequiresRecreate;
         }
 
-        long currentCollectionRevision = _collectionStore.GetCollectionRevision(
-            desiredRequest.Snapshot.CollectionId,
-            ObjectSnapshotUtility.GetRootResourcePath(desiredRequest.Snapshot));
+        if ((entry.Source != desiredRequest.Source || entry.Snapshot != desiredRequest.Snapshot)
+            && (!_sceneMutations.TryUpdateActiveObject(desiredRequest.Snapshot, desiredRequest.Source)
+                || !_sceneState.TryGetEntry(desiredRequest.Snapshot.Id, out entry)))
+        {
+            return ObjectRuntimeUpdateResult.Rejected;
+        }
+
+        ObjectResourceRoots roots = ObjectResourceRoots.FromModel(desiredRequest.Snapshot.Model);
+        ObjectResourceRevision? currentCollectionRevision = _collectionStore.GetCollectionRevision(
+            desiredRequest.Snapshot.CollectionId, roots);
         if (entry.ResourceCollection.MatchesCurrentRevision(currentCollectionRevision))
         {
             return ObjectRuntimeUpdateResult.Applied;
         }
 
-        ObjectRuntimeUpdateResult result = entry.ResourceCollection.IsPendingWithoutRuntimeRevision(currentCollectionRevision)
-            ? ObjectRuntimeUpdateResult.Applied
-            : entry.Runtime.TryRefreshResources(desiredRequest.Snapshot);
+        if (entry.ResourceCollection.Status == SceneResourceCollectionStatus.Pending && !currentCollectionRevision.HasValue)
+        {
+            return ObjectRuntimeUpdateResult.Applied;
+        }
+
+        ObjectRuntimeUpdateResult result = entry.Runtime.TryRefreshResources(desiredRequest.Snapshot);
         switch (result)
         {
             case ObjectRuntimeUpdateResult.Applied:
-                UpsertEntryResourceCollection(entry, SceneResourceCollectionState.Current(currentCollectionRevision));
+                UpsertEntryResourceCollection(entry, SceneResourceCollectionState.Current(entry.Runtime.ResourceRevision));
                 break;
             case ObjectRuntimeUpdateResult.Rejected:
                 _sceneState.SetRuntimeFailure(entry.Snapshot.Id, ObjectRuntimeFailureCodes.UpdateRejected);
@@ -467,13 +497,13 @@ internal sealed class ObjectScene : IObjectScene, IDisposable
             string.IsNullOrEmpty(failureCode) ? ObjectRuntimeStateKind.Active : ObjectRuntimeStateKind.LoadFailed,
             failureCode);
 
-    private static bool TryCreateBoundsSnapshot(IObjectRuntime runtime, out ObjectBoundsSnapshot boundsSnapshot)
+    private static bool TryCreateBoundsSnapshot(ObjectSceneEntry entry, ObjectBoundsSnapshot? previous, out ObjectBoundsSnapshot boundsSnapshot)
     {
+        IObjectRuntime runtime = entry.Runtime;
         var snapshot = runtime.Snapshot;
-        var hasWorldBounds = runtime.TryGetBounds(out var worldBounds);
-        var hasLocalBounds = runtime.TryGetOrientedBounds(out var localBounds);
+        (bool hasWorldBounds, bool hasLocalBounds) = runtime.GetBounds(out AxisAlignedBounds worldBounds, out OrientedBounds localBounds);
         var hasPlacementClearance = runtime.TryGetPlacementClearance(out ObjectPlacementClearance placementClearance);
-        var overlayShapes = CreateOverlayShapes(snapshot);
+        var overlayShapes = entry.GetOverlayShapes(snapshot);
 
         if (!hasWorldBounds && !hasLocalBounds && !hasPlacementClearance && overlayShapes is null)
         {
@@ -495,6 +525,15 @@ internal sealed class ObjectScene : IObjectScene, IDisposable
             max = axisBounds.Max;
         }
 
+        ObjectPlacementSurfaceSupport surfaceSupport = runtime.PlacementSurfaceSupport;
+        if (previous is not null && previous.HasSameContent(snapshot.Id, snapshot.Name, snapshot.Kind, min, max,
+                hasLocalBounds ? new SceneOrientedBounds(localBounds.Transform, localBounds.HalfExtents) : null,
+                hasPlacementClearance ? placementClearance : null, surfaceSupport, overlayShapes))
+        {
+            boundsSnapshot = previous;
+            return true;
+        }
+
         boundsSnapshot = new ObjectBoundsSnapshot(
             snapshot.Id,
             snapshot.Name,
@@ -503,12 +542,12 @@ internal sealed class ObjectScene : IObjectScene, IDisposable
             max,
             hasLocalBounds ? localBounds : null,
             hasPlacementClearance ? placementClearance : null,
-            runtime.PlacementSurfaceSupport,
+            surfaceSupport,
             overlayShapes);
         return true;
     }
 
-    private static ObjectRuntimeStateSnapshot CreateRuntimeStateSnapshot(
+    private ObjectRuntimeStateSnapshot CreateRuntimeStateSnapshot(
         ObjectSnapshot snapshot,
         bool isActive,
         string? failureCode,
@@ -519,7 +558,7 @@ internal sealed class ObjectScene : IObjectScene, IDisposable
             return CreateActiveRuntimeStateSnapshot(snapshot.Id, failureCode);
         }
 
-        if (currentLocation.IsValid && !ObjectSnapshotUtility.MatchesLocation(snapshot, currentLocation))
+        if (currentLocation.IsValid && !_locationService.MatchesLocation(snapshot.CreatedIn, currentLocation))
         {
             return new ObjectRuntimeStateSnapshot(
                 snapshot.Id,
@@ -541,7 +580,7 @@ internal sealed class ObjectScene : IObjectScene, IDisposable
             null);
     }
 
-    private static IReadOnlyList<ObjectOverlayShapeSnapshot>? CreateOverlayShapes(ObjectSnapshot snapshot)
+    internal static IReadOnlyList<ObjectOverlayShapeSnapshot>? CreateOverlayShapes(ObjectSnapshot snapshot)
     {
         if (snapshot.Kind != ObjectKind.Light || snapshot.Model is not LightModel lightModel)
         {
@@ -613,4 +652,3 @@ internal sealed class ObjectScene : IObjectScene, IDisposable
         return new AxisAlignedBounds(min, max);
     }
 }
-

@@ -1,5 +1,6 @@
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Utility.Raii;
+using Intoner.Objects.Catalog;
 using Intoner.Objects.Models;
 using System.Numerics;
 
@@ -12,6 +13,7 @@ internal static class ObjectModelEditor
     public static void DrawBgObjectRows(
         string id,
         ref BgObjectModel model,
+        ObjectCatalogBgObjectInfo? catalogInfo,
         Action<string, string, BgObjectModel, bool>? onChanged = null)
     {
         float transparency = model.Transparency;
@@ -19,13 +21,6 @@ internal static class ObjectModelEditor
         {
             model = model with { Transparency = transparency };
             onChanged?.Invoke("BgObjectTransparency", "Change BgObject Transparency", model, false);
-        }
-
-        bool coveredFromRain = model.IsCoveredFromRain;
-        if (EditorPropertyTable.Checkbox($"BgObjectCoveredFromRain_{id}", "Covered From Rain", ref coveredFromRain))
-        {
-            model = model with { IsCoveredFromRain = coveredFromRain };
-            onChanged?.Invoke("BgObjectCoveredFromRain", "Change Rain Coverage", model, true);
         }
 
         EditorPropertyTable.NextRow("Dye Color");
@@ -36,6 +31,78 @@ internal static class ObjectModelEditor
             model = model with { DyeColor = dyeColor };
             onChanged?.Invoke("BgObjectDyeColor", "Change BgObject Dye Color", model, false);
         }
+
+        bool coveredFromRain = model.IsCoveredFromRain;
+        if (EditorPropertyTable.Checkbox($"BgObjectCoveredFromRain_{id}", "Covered From Rain", ref coveredFromRain))
+        {
+            model = model with { IsCoveredFromRain = coveredFromRain };
+            onChanged?.Invoke("BgObjectCoveredFromRain", "Change Rain Coverage", model, true);
+        }
+
+        IReadOnlyList<BgColliderDefinition> definitions = catalogInfo?.ColliderDefinitions ?? [];
+        BgColliderDefinition? collider = model.ColliderDefinition is { Kind: not BgCollisionKind.None } ? model.ColliderDefinition : null;
+        BgColliderDefinition? defaultCollider = catalogInfo?.DefaultColliderDefinition;
+        bool cameraCollision = collider is not null && model.CameraCollision;
+        using (ImRaii.Disabled(collider is null && defaultCollider is null))
+        {
+            if (EditorPropertyTable.Checkbox($"BgCameraCollision_{id}", "Camera Collision", ref cameraCollision))
+            {
+                model = model with { ColliderDefinition = collider ?? defaultCollider, CameraCollision = cameraCollision };
+                onChanged?.Invoke("BgCameraCollision", "Change Camera Collision", model, true);
+            }
+        }
+
+        IntonerTooltip.Attach(model.ColliderDefinition switch
+        {
+            { Kind: not BgCollisionKind.None } => "Stops the camera at this object's set collision. Player collision is unchanged!",
+            _ when defaultCollider is not null => "Enable camera collision to use this object's set collision.",
+            _ when definitions.Count > 1 => "Select an set collider below to enable camera collision.",
+            _ when catalogInfo is { ColliderDefinitionsComplete: false } => "Collision discovery is incomplete.",
+            _ => "No authored collision is available for this model.",
+        });
+
+        if (definitions.Count > 1)
+        {
+            EditorPropertyTable.NextRow("Camera Collider");
+            using var combo = ImRaii.Combo($"##BgCollider_{id}", DefinitionLabel(model.ColliderDefinition));
+            if (combo)
+            {
+                BgColliderDefinition? selectedDefinition = model.ColliderDefinition;
+                for (int index = 0; index < definitions.Count; index++)
+                {
+                    BgColliderDefinition definition = definitions[index];
+                    bool selected = model.ColliderDefinition == definition;
+                    if (ImGui.Selectable($"{index + 1}. {DefinitionLabel(definition)}##{index}", selected))
+                    {
+                        selectedDefinition = definition;
+                    }
+
+                    IntonerTooltip.Attach(definition.SourcePath);
+
+                    if (selected)
+                    {
+                        ImGui.SetItemDefaultFocus();
+                    }
+                }
+
+                if (selectedDefinition != model.ColliderDefinition)
+                {
+                    model = model with { ColliderDefinition = selectedDefinition };
+                    onChanged?.Invoke("BgCollider", "Change Camera Collider", model, true);
+                }
+            }
+        }
+    }
+
+    private static string DefinitionLabel(BgColliderDefinition? definition)
+    {
+        if (definition is null)
+        {
+            return "Select collider";
+        }
+
+        string kind = definition.Kind == BgCollisionKind.None ? "No collision" : definition.Kind.ToString();
+        return definition.SourcePath.Length > 0 ? $"{kind} | {Path.GetFileName(definition.SourcePath)}" : kind;
     }
 
     public static void DrawFurnitureRows(
@@ -53,7 +120,7 @@ internal static class ObjectModelEditor
         }
 
         ObjectOutlineColor outlineColor = model.OutlineColor;
-        if (EditorPropertyTable.EnumRow($"FurnitureOutlineColor_{id}", "Outline Color", outlineColor, static value => value.ToString(), ref outlineColor))
+        if (EditorPropertyTable.EnumRow($"FurnitureOutlineColor_{id}", "Outline Color", ref outlineColor))
         {
             model = model with { OutlineColor = outlineColor };
             onChanged?.Invoke("FurnitureOutlineColor", "Change Furniture Outline Color", model, true);
@@ -87,6 +154,13 @@ internal static class ObjectModelEditor
                 onChanged?.Invoke("FurnitureStain", "Change Furniture Stain", model, true);
             }
         }
+
+        bool cameraCollision = model.CameraCollision;
+        if (EditorPropertyTable.Checkbox($"FurnitureCameraCollision_{id}", "Camera Collision", ref cameraCollision))
+        {
+            model = model with { CameraCollision = cameraCollision };
+            onChanged?.Invoke("FurnitureCameraCollision", "Change Camera Collision", model, true);
+        }
     }
 
     public static void DrawVfxRows(
@@ -96,9 +170,8 @@ internal static class ObjectModelEditor
         Action<string, string, VfxModel, bool>? onChanged = null)
     {
         string vfxPath = model.VfxPath;
-        EditorPropertyTable.NextRow("VFX Path");
-        ImGui.SetNextItemWidth(-1f);
-        if (ImGui.InputText($"##VfxPath_{id}", ref vfxPath, 512))
+
+        if (EditorPropertyTable.InputText($"VfxPath_{id}", "VFX Path", ref vfxPath, 512))
         {
             model = model with { VfxPath = vfxPath };
             onChanged?.Invoke("VfxPath", "Change VFX Path", model, false);
@@ -193,14 +266,30 @@ internal static class ObjectModelEditor
         LightShadow lightShadow = model.Shadow;
 
         LightType lightType = model.LightType;
-        if (includeLightType && EditorPropertyTable.EnumRow($"LightType_{id}", "Light Type", lightType, static value => value.ToString(), ref lightType))
+
+        if (includeLightType && EditorPropertyTable.EnumRow($"LightType_{id}", "Light Type", ref lightType))
         {
-            model = model with { LightType = lightType };
+            model = model with
+            {
+                LightType = lightType,
+                ProjectionTexturePath = LightModel.SupportsProjectionTexture(lightType) ? model.ProjectionTexturePath : string.Empty,
+            };
             onChanged?.Invoke("LightType", "Change Light Type", model, true);
         }
 
+        if (LightModel.SupportsProjectionTexture(lightType))
+        {
+            string projectionTexturePath = model.ProjectionTexturePath ?? string.Empty;
+
+            if (EditorPropertyTable.InputText($"ProjectionTexturePath_{id}", "Projection Texture Path", ref projectionTexturePath, 512))
+            {
+                model = model with { ProjectionTexturePath = projectionTexturePath };
+                onChanged?.Invoke("LightProjectionTexturePath", "Change Light Projection Texture", model, false);
+            }
+        }
+
         LightFalloffType falloffType = model.FalloffType;
-        if (EditorPropertyTable.EnumRow($"FalloffType_{id}", "Falloff Type", falloffType, static value => value.ToString(), ref falloffType))
+        if (EditorPropertyTable.EnumRow($"FalloffType_{id}", "Falloff Type", ref falloffType))
         {
             model = model with { FalloffType = falloffType };
             onChanged?.Invoke("LightFalloffType", "Change Light Falloff Type", model, true);

@@ -20,6 +20,7 @@ internal readonly record struct SceneRenderFrame(
     public static bool TryCapture(
         SceneDepthViewCache sceneDepth,
         SceneRenderFeatures features,
+        SceneProjection? submittedProjection,
         out SceneRenderFrame frame)
     {
         ArgumentNullException.ThrowIfNull(sceneDepth);
@@ -29,7 +30,8 @@ internal readonly record struct SceneRenderFrame(
             return false;
         }
 
-        bool hasProjection = SceneProjection.TryCapture(viewport, out SceneProjection projection);
+        bool hasProjection = submittedProjection.HasValue;
+        SceneProjection projection = submittedProjection.GetValueOrDefault() with { Viewport = viewport };
         ShaderResourceView? sceneDepthView = null;
         SceneTextureSize sceneDepthSize = SceneTextureSize.Empty;
         if ((features & SceneRenderFeatures.SceneDepth) != SceneRenderFeatures.None)
@@ -57,10 +59,11 @@ internal readonly record struct SceneProjection(
     bool ForwardPositive,
     RawViewportF Viewport)
 {
-    public static bool TryCapture(RawViewportF viewport, out SceneProjection projection)
+    public static bool TryCapture(out SceneProjection projection)
     {
         projection = default;
-        if (!SceneViewportProjection.TryGetMainRenderViewProjection(
+        if (!SceneRenderTarget.TryResolveViewport(out RawViewportF viewport, out _)
+            || !SceneViewportProjection.TryGetMainRenderViewProjection(
                 out Matrix4x4 viewProjection,
                 out Matrix4x4 viewMatrix,
                 out Matrix4x4 projectionMatrix,

@@ -18,6 +18,10 @@ internal static class JsonSerializerOptionsUtility
         JsonSerializerOptions options = new()
         {
             WriteIndented = true,
+            PropertyNameCaseInsensitive = true,
+            ReadCommentHandling = JsonCommentHandling.Skip,
+            AllowTrailingCommas = true,
+            AllowDuplicateProperties = false,
             PropertyNamingPolicy = propertyNamingPolicy,
             RespectNullableAnnotations = true,
             RespectRequiredConstructorParameters = true,

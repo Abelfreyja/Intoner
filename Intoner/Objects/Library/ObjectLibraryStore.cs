@@ -1,5 +1,6 @@
 using Intoner.Objects.Filesystem;
 using Intoner.Objects.Filesystem.Watching;
+using Intoner.Services.Serialization;
 using Intoner.Services.Storage;
 using Microsoft.Extensions.Logging;
 using System.Diagnostics.CodeAnalysis;
@@ -38,6 +39,7 @@ internal sealed class ObjectLibraryStore : IObjectLibraryStore
     private readonly Dictionary<string, ObjectLibraryPrefabDocument> _validPrefabs =
         new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _changedPaths = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _unreadableDocuments = new(StringComparer.OrdinalIgnoreCase);
 
     private ObjectLibraryStateDocument? _validState;
     private Action? _filesChanged;
@@ -131,6 +133,21 @@ internal sealed class ObjectLibraryStore : IObjectLibraryStore
                     _paths.ObjectLibraryStatePath,
                     _paths.ObjectLibraryPrefabsPath,
                     _files.FileExists(_paths.ObjectLibraryStatePath));
+                if (plan.Changes.Any(change => _unreadableDocuments.Contains(ObjectFilePathUtility.NormalizeFullPath(change.Path))
+                    && _files.FileExists(change.Path)))
+                {
+                    _logger.LogWarning("library changes would overwrite an unreadable document; repair or remove the file before saving");
+                    return false;
+                }
+
+                foreach (ObjectLibraryDocumentChange change in plan.Changes)
+                {
+                    if (change.Contents is { } contents)
+                    {
+                        JsonDocumentUtility.ValidateFileSize(contents);
+                    }
+                }
+
                 originalContents = CaptureContents(plan.Changes.Select(static change => change.Path));
 
                 foreach (ObjectLibraryDocumentChange change in plan.Changes)
@@ -160,6 +177,11 @@ internal sealed class ObjectLibraryStore : IObjectLibraryStore
                 }
 
                 UpdateValidDocuments(plan);
+                foreach (ObjectLibraryDocumentChange change in plan.Changes)
+                {
+                    _unreadableDocuments.Remove(ObjectFilePathUtility.NormalizeFullPath(change.Path));
+                }
+
                 return true;
             }
             catch (Exception ex)
@@ -191,6 +213,7 @@ internal sealed class ObjectLibraryStore : IObjectLibraryStore
     {
         if (!_files.FileExists(_paths.ObjectLibraryStatePath))
         {
+            _unreadableDocuments.Remove(ObjectFilePathUtility.NormalizeFullPath(_paths.ObjectLibraryStatePath));
             _validState = ObjectLibraryDocuments.EmptyState;
             return _validState;
         }
@@ -301,15 +324,21 @@ internal sealed class ObjectLibraryStore : IObjectLibraryStore
     {
         try
         {
-            document = deserialize(_files.ReadAllText(path));
-            return document is not null && validate(document);
+            document = deserialize(JsonDocumentUtility.ReadFile(_files, path));
+            if (document is not null && validate(document))
+            {
+                _unreadableDocuments.Remove(ObjectFilePathUtility.NormalizeFullPath(path));
+                return true;
+            }
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "failed to read object library document {Path}", path);
             document = null;
-            return false;
         }
+
+        _unreadableDocuments.Add(ObjectFilePathUtility.NormalizeFullPath(path));
+        return false;
     }
 
     private Dictionary<string, string?> CaptureContents(IEnumerable<string> paths)
@@ -317,7 +346,7 @@ internal sealed class ObjectLibraryStore : IObjectLibraryStore
         Dictionary<string, string?> contents = new(StringComparer.OrdinalIgnoreCase);
         foreach (string path in paths)
         {
-            contents[path] = _files.FileExists(path) ? _files.ReadAllText(path) : null;
+            contents[path] = _files.FileExists(path) ? JsonDocumentUtility.ReadFile(_files, path) : null;
         }
 
         return contents;

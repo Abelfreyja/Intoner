@@ -29,6 +29,15 @@ internal sealed class GpuTextureView(Texture2D texture, ShaderResourceView view)
 
     public static GpuTextureView CreateRgba(Device device, int width, int height, byte[] rgbaPixels)
     {
+        ArgumentNullException.ThrowIfNull(rgbaPixels);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(width);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(width, int.MaxValue / 4);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(height);
+        if ((long)width * height * 4 > rgbaPixels.LongLength)
+        {
+            throw new ArgumentException("RGBA pixels do not cover the texture dimensions", nameof(rgbaPixels));
+        }
+
         unsafe
         {
             fixed (byte* pixelData = rgbaPixels)

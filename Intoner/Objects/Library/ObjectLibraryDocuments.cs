@@ -1,3 +1,4 @@
+using Intoner.Objects.Api;
 using Intoner.Scene;
 using Intoner.Services.Serialization;
 using System.Text.Json;
@@ -8,8 +9,10 @@ namespace Intoner.Objects.Library;
 internal static class ObjectLibraryDocuments
 {
     private const int FileVersion = 1;
+    private const int PrefabFileVersion = 2;
 
     private static readonly JsonSerializerOptions JsonOptions = CreateJsonOptions();
+    private static readonly JsonSerializerOptions ReleasedJsonOptions = LegacyObjectLocation.CreateJsonOptions(JsonOptions);
 
     public static ObjectLibraryStateDocument EmptyState { get; } = new()
     {
@@ -26,8 +29,19 @@ internal static class ObjectLibraryDocuments
 
     public static ObjectLibraryPrefabDocument? DeserializePrefab(string json)
     {
-        ObjectLibraryPrefabDocument? document = JsonSerializer.Deserialize<ObjectLibraryPrefabDocument>(json, JsonOptions);
-        return document is { Version: FileVersion } ? document : null;
+        using JsonDocument root = JsonDocumentUtility.Parse(json);
+
+        if (root.RootElement.ValueKind != JsonValueKind.Object
+            || !root.RootElement.TryGetPropertyIgnoreCase("version", out JsonElement property)
+            || property.ValueKind != JsonValueKind.Number || !property.TryGetInt32(out int version)
+            || version is not (1 or PrefabFileVersion))
+        {
+            return null;
+        }
+
+        JsonSerializerOptions options = version == 1 ? ReleasedJsonOptions : JsonOptions;
+        ObjectLibraryPrefabDocument? document = root.RootElement.Deserialize<ObjectLibraryPrefabDocument>(options);
+        return document is null ? null : document with { Version = PrefabFileVersion };
     }
 
     public static string Serialize(ObjectLibraryStateDocument document)
@@ -55,7 +69,7 @@ internal static class ObjectLibraryDocuments
         IReadOnlyDictionary<Guid, ObjectLibraryEntry> entries)
         => new()
         {
-            Version = FileVersion,
+            Version = PrefabFileVersion,
             Id = prefab.Id,
             Name = prefab.Name,
             ParentFolderId = prefab.ParentFolderId,

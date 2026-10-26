@@ -2,13 +2,6 @@ using Intoner.Objects.Utils;
 
 namespace Intoner.Objects.Assets;
 
-internal sealed record ObservedBgAsset(
-    string Path,
-    string Source,
-    IReadOnlyList<uint> TerritoryIds,
-    IReadOnlyList<string> TerritoryNames,
-    IReadOnlyList<string> SearchTerms);
-
 internal sealed record RuntimeVfxAsset(
     string Path,
     string Source,
@@ -70,4 +63,33 @@ internal sealed record VfxStandaloneReport(
 {
     public bool IsSupportedStandalone
         => SupportClass == VfxStandaloneSupportClass.SupportedStandalone;
+
+    public static bool HasSameClassification(VfxStandaloneReport? left, VfxStandaloneReport? right)
+        => ReferenceEquals(left, right)
+        || (left is not null && right is not null
+            && left.PathContracts == right.PathContracts
+            && left.FamilyHint == right.FamilyHint
+            && left.SupportClass == right.SupportClass
+            && HasSameCatalogData(left, right));
+
+    public static bool HasSameProjection(VfxStandaloneReport? left, VfxStandaloneReport? right)
+    {
+        if (left is not { IsSupportedStandalone: true })
+        {
+            return right?.IsSupportedStandalone != true
+                && (left is null || right is null || HasSamePath(left, right));
+        }
+
+        return right is { IsSupportedStandalone: true }
+            && HasSameCatalogData(left, right)
+            && left.Analysis.LoopFacts == right.Analysis.LoopFacts;
+    }
+
+    private static bool HasSameCatalogData(VfxStandaloneReport left, VfxStandaloneReport right)
+        => HasSamePath(left, right)
+        && string.Equals(left.CatalogSource, right.CatalogSource, StringComparison.OrdinalIgnoreCase)
+        && left.SearchTerms.SequenceEqual(right.SearchTerms, StringComparer.OrdinalIgnoreCase);
+
+    private static bool HasSamePath(VfxStandaloneReport left, VfxStandaloneReport right)
+        => string.Equals(left.Path, right.Path, StringComparison.OrdinalIgnoreCase);
 }

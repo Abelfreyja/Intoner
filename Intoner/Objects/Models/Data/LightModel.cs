@@ -50,5 +50,7 @@ internal sealed record LightModel : ObjectData
     public float Intensity { get; init; } = 1f;
     public LightShape Shape { get; init; } = new();
     public LightShadow Shadow { get; init; } = new();
+    public string ProjectionTexturePath { get; init; } = string.Empty;
+    public static bool SupportsProjectionTexture(LightType lightType)
+        => lightType is LightType.AreaLight or LightType.SpotLight or LightType.FlatLight;
 }
-

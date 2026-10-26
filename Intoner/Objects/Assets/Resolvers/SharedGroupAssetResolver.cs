@@ -1,5 +1,5 @@
+using Intoner.Objects.Resources;
 using Intoner.Objects.Utils;
-using Intoner.Scene;
 using Lumina.Data.Files;
 using Lumina.Data.Parsing.Layer;
 using System.Numerics;
@@ -9,69 +9,99 @@ namespace Intoner.Objects.Assets;
 
 internal static class SharedGroupAssetResolver
 {
-    public static SharedGroupAssetInfo AnalyzeSharedGroup(IObjectAssetGameData gameData, string sharedGroupPath)
+    public static SharedGroupAssetInfo AnalyzeSharedGroup(IObjectAssetGameData gameData, string sharedGroupPath, CancellationToken cancellationToken = default)
     {
-        var normalizedPath = GameAssetPathRules.NormalizeGamePath(sharedGroupPath);
-        if (!ObjectAssetPathRules.IsCatalogSharedGroupPath(normalizedPath) || !gameData.FileExists(normalizedPath))
+        cancellationToken.ThrowIfCancellationRequested();
+        string normalizedPath = ObjectResolvedPath.FromGamePath(sharedGroupPath).Path;
+
+        if (!ObjectAssetPathRules.IsCatalogSharedGroupPath(normalizedPath))
         {
-            return new SharedGroupAssetInfo([], [], [], [], []);
+            return new SharedGroupAssetInfo([], [], [], [], [], AssetReferenceSources.Empty, isComplete: false, exists: false);
         }
 
-        return new SharedGroupAssetCollector(gameData, SharedGroupCollectionPolicy.Catalog).CollectGame(normalizedPath);
+        bool exists = gameData.FileExists(normalizedPath);
+        cancellationToken.ThrowIfCancellationRequested();
+        return exists
+            ? new SharedGroupAssetCollector(gameData, collectCatalogAssets: true, cancellationToken).CollectGame(normalizedPath)
+            : SharedGroupAssetInfo.Missing;
     }
 
-    public static SharedGroupDependencyInfo AnalyzeLocalSharedGroupDependencies(
+    public static AssetDependencyPaths AnalyzeSharedGroupDependencies(
         IObjectAssetGameData gameData,
         string requestedSharedGroupPath,
-        string localSharedGroupPath)
+        ObjectResolvedPath effectivePath,
+        CancellationToken cancellationToken = default)
     {
-        string normalizedRequestedPath = GameAssetPathRules.NormalizeGamePath(requestedSharedGroupPath);
-        string normalizedLocalPath = ObjectLocalFilePathUtility.NormalizeLocalFilePath(localSharedGroupPath);
+        cancellationToken.ThrowIfCancellationRequested();
+        string normalizedRequestedPath = ObjectResolvedPath.FromGamePath(requestedSharedGroupPath).Path;
+
         if (!GameAssetPathRules.IsFileKind(normalizedRequestedPath, GameAssetFileKind.Sgb)
-         || normalizedLocalPath.Length == 0)
+         || effectivePath.Kind is not (ObjectResolvedPathKind.GamePath or ObjectResolvedPathKind.LocalFile))
         {
-            return new SharedGroupDependencyInfo([], [], []);
+            return AssetDependencyPaths.Empty;
         }
 
-        return new SharedGroupAssetCollector(gameData, SharedGroupCollectionPolicy.CollectionDependencies)
-            .CollectLocal(normalizedRequestedPath, normalizedLocalPath);
+        return new SharedGroupAssetCollector(gameData, collectCatalogAssets: false, cancellationToken)
+            .CollectDependencies(normalizedRequestedPath, effectivePath);
     }
 
-    private sealed class SharedGroupAssetCollector(IObjectAssetGameData gameData, SharedGroupCollectionPolicy policy)
+    private sealed class SharedGroupAssetCollector(
+        IObjectAssetGameData gameData,
+        bool collectCatalogAssets,
+        CancellationToken cancellationToken = default)
     {
         private readonly IObjectAssetGameData _gameData = gameData;
-        private readonly SharedGroupCollectionPolicy _policy = policy;
+        private readonly bool _collectCatalogAssets = collectCatalogAssets;
+        private readonly CancellationToken _cancellationToken = cancellationToken;
         private readonly List<PreviewModelInfo> _previewModels = [];
+        private readonly BgColliderDefinitionSet _colliderDefinitions = new();
         private readonly List<string> _bgObjectModelPaths = [];
         private readonly List<string> _nestedSharedGroupPaths = [];
-        private readonly List<string> _standaloneVfxPaths = [];
+        private readonly List<string> _autoplayVfxPaths = [];
         private readonly List<string> _referencedVfxPaths = [];
+        private readonly List<string> _otherDependencyPaths = [];
         private readonly HashSet<string> _seenBgObjectModels = new(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> _seenNestedSharedGroupPaths = new(StringComparer.OrdinalIgnoreCase);
-        private readonly HashSet<string> _seenStandaloneVfxPaths = new(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> _seenAutoplayVfxPaths = new(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> _seenReferencedVfxPaths = new(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> _seenOtherDependencyPaths = new(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> _recursionStack = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, SgbFile?> _loadedSharedGroups = new(StringComparer.OrdinalIgnoreCase);
+        private readonly AssetReferenceSources.Builder _sources = new();
+        private bool _isComplete = true;
 
         public SharedGroupAssetInfo CollectGame(string sharedGroupPath)
         {
             CollectGameSharedGroupAssets(sharedGroupPath, Matrix4x4.Identity);
+            _cancellationToken.ThrowIfCancellationRequested();
             return new SharedGroupAssetInfo(
                 _previewModels,
                 _bgObjectModelPaths,
                 _nestedSharedGroupPaths,
-                _standaloneVfxPaths,
-                _referencedVfxPaths);
+                _autoplayVfxPaths,
+                _referencedVfxPaths,
+                _sources.Build(),
+                _isComplete) { ColliderDefinitions = _colliderDefinitions.Build() };
         }
 
-        public SharedGroupDependencyInfo CollectLocal(string requestedSharedGroupPath, string localSharedGroupPath)
+        public AssetDependencyPaths CollectDependencies(string requestedSharedGroupPath, ObjectResolvedPath effectivePath)
         {
+            if (effectivePath.Kind == ObjectResolvedPathKind.GamePath && !_gameData.FileExists(effectivePath.Path))
+            {
+                _cancellationToken.ThrowIfCancellationRequested();
+                return AssetDependencyPaths.Empty;
+            }
+
+            SgbFile? file = TryLoadSharedGroup(requestedSharedGroupPath, effectivePath);
             CollectLoadedSharedGroupAssets(
-                TryLoadLocalSharedGroup(requestedSharedGroupPath, localSharedGroupPath),
+                file,
                 Matrix4x4.Identity);
-            return new SharedGroupDependencyInfo(
+            _cancellationToken.ThrowIfCancellationRequested();
+            return new(GameAssetPathCollectionUtility.MergeGamePaths(
                 _bgObjectModelPaths,
                 _nestedSharedGroupPaths,
-                _referencedVfxPaths);
+                _referencedVfxPaths,
+                _otherDependencyPaths), _isComplete);
         }
 
         private void CollectGameSharedGroupAssets(string sharedGroupPath, Matrix4x4 parentTransform)
@@ -83,8 +113,15 @@ internal static class SharedGroupAssetResolver
 
             try
             {
+                if (!_loadedSharedGroups.TryGetValue(sharedGroupPath, out SgbFile? file))
+                {
+                    file = TryLoadSharedGroup(sharedGroupPath, ObjectResolvedPath.FromGamePath(sharedGroupPath));
+
+                    _loadedSharedGroups.Add(sharedGroupPath, file);
+                }
+
                 CollectLoadedSharedGroupAssets(
-                    TryLoadGameSharedGroup(sharedGroupPath),
+                    file,
                     parentTransform);
             }
             finally
@@ -97,18 +134,26 @@ internal static class SharedGroupAssetResolver
             SgbFile? file,
             Matrix4x4 parentTransform)
         {
-            if (file?.LayerGroups is null || file.LayerGroups.Length == 0)
+            _cancellationToken.ThrowIfCancellationRequested();
+
+            if (file?.LayerGroups is null)
             {
+                _isComplete = false;
                 return;
             }
 
             foreach (var layerGroup in file.LayerGroups)
             {
+                _cancellationToken.ThrowIfCancellationRequested();
                 foreach (var layer in layerGroup.Layers)
                 {
+                    _cancellationToken.ThrowIfCancellationRequested();
                     foreach (var instanceObject in layer.InstanceObjects)
                     {
-                        var worldTransform = BuildPreviewTransform(instanceObject.Transform) * parentTransform;
+                        _cancellationToken.ThrowIfCancellationRequested();
+                        Matrix4x4 worldTransform = _collectCatalogAssets
+                            ? BuildPreviewTransform(instanceObject.Transform) * parentTransform
+                            : Matrix4x4.Identity;
                         CollectInstanceObject(instanceObject.Object, worldTransform);
                     }
                 }
@@ -128,37 +173,70 @@ internal static class SharedGroupAssetResolver
                 case LayerCommon.SharedGroupInstanceObject sharedGroupInstance:
                     CollectNestedSharedGroup(sharedGroupInstance, worldTransform);
                     break;
+                case LayerCommon.SoundInstanceObject soundInstance when !_collectCatalogAssets:
+                    CollectOtherDependency(soundInstance.AssetPath, GameAssetFileKind.Scd);
+                    break;
+                case LayerCommon.LightInstanceObject lightInstance when !_collectCatalogAssets:
+                    CollectOtherDependency(lightInstance.TexturePath, GameAssetFileKind.Tex);
+                    break;
+            }
+        }
+
+        private void CollectOtherDependency(string path, GameAssetFileKind kind)
+        {
+            string normalizedPath = ObjectResolvedPath.FromGamePath(path).Path;
+
+            if (GameAssetPathRules.IsFileKind(normalizedPath, kind) && _seenOtherDependencyPaths.Add(normalizedPath))
+            {
+                _otherDependencyPaths.Add(normalizedPath);
             }
         }
 
         private void CollectBgObject(LayerCommon.BGInstanceObject bgInstance, Matrix4x4 worldTransform)
         {
-            var modelPath = GameAssetPathRules.NormalizeGamePath(bgInstance.AssetPath);
-            if (_policy.CollectPreviewModels && CanUsePreviewModelPath(modelPath))
+            string modelPath = ObjectResolvedPath.FromGamePath(bgInstance.AssetPath).Path;
+
+            if (!CanUseModelPath(modelPath))
+            {
+                return;
+            }
+
+            if (_collectCatalogAssets)
             {
                 _previewModels.Add(new PreviewModelInfo(modelPath, worldTransform));
             }
 
-            if (!CanUseModelDependencyPath(modelPath)
-             || !_seenBgObjectModels.Add(modelPath))
+            if (_collectCatalogAssets && !ObjectAssetPathRules.IsBgObjectModelPath(modelPath))
             {
                 return;
             }
 
-            _bgObjectModelPaths.Add(modelPath);
+            if (_collectCatalogAssets)
+            {
+                _sources.Add(modelPath, _recursionStack);
+            }
+
+            if (_seenBgObjectModels.Add(modelPath))
+            {
+                _bgObjectModelPaths.Add(modelPath);
+            }
         }
 
         private void CollectNestedSharedGroup(LayerCommon.SharedGroupInstanceObject sharedGroupInstance, Matrix4x4 worldTransform)
         {
-            var sharedGroupPath = GameAssetPathRules.NormalizeGamePath(sharedGroupInstance.AssetPath);
-            if (!CanUseSharedGroupPath(sharedGroupPath)
-             || !_seenNestedSharedGroupPaths.Add(sharedGroupPath))
+            string sharedGroupPath = ObjectResolvedPath.FromGamePath(sharedGroupInstance.AssetPath).Path;
+
+            if (!CanUseSharedGroupPath(sharedGroupPath))
             {
                 return;
             }
 
-            _nestedSharedGroupPaths.Add(sharedGroupPath);
-            if (_policy.RecurseNestedSharedGroups)
+            if (_seenNestedSharedGroupPaths.Add(sharedGroupPath))
+            {
+                _nestedSharedGroupPaths.Add(sharedGroupPath);
+            }
+
+            if (_collectCatalogAssets)
             {
                 CollectGameSharedGroupAssets(sharedGroupPath, worldTransform);
             }
@@ -166,7 +244,8 @@ internal static class SharedGroupAssetResolver
 
         private void CollectVfx(LayerCommon.VFXInstanceObject vfxInstance)
         {
-            var vfxPath = GameAssetPathRules.NormalizeGamePath(vfxInstance.AssetPath);
+            string vfxPath = ObjectResolvedPath.FromGamePath(vfxInstance.AssetPath).Path;
+
             if (!CanUseVfxPath(vfxPath))
             {
                 return;
@@ -177,15 +256,20 @@ internal static class SharedGroupAssetResolver
                 _referencedVfxPaths.Add(vfxPath);
             }
 
-            if (vfxInstance.IsAutoPlay != 0 && _seenStandaloneVfxPaths.Add(vfxPath))
+            if (_collectCatalogAssets)
             {
-                _standaloneVfxPaths.Add(vfxPath);
+                _sources.Add(vfxPath, _recursionStack);
+            }
+
+            if (vfxInstance.IsAutoPlay != 0 && _seenAutoplayVfxPaths.Add(vfxPath))
+            {
+                _autoplayVfxPaths.Add(vfxPath);
             }
         }
 
-        private bool CanUsePreviewModelPath(string modelPath)
+        private bool CanUseModelPath(string modelPath)
         {
-            if (!_policy.RequireExistingGamePaths)
+            if (!_collectCatalogAssets)
             {
                 return GameAssetPathRules.IsFileKind(modelPath, GameAssetFileKind.Mdl);
             }
@@ -193,29 +277,24 @@ internal static class SharedGroupAssetResolver
             return ObjectAssetPathRules.IsCatalogModelPath(modelPath) && _gameData.FileExists(modelPath);
         }
 
-        private bool CanUseModelDependencyPath(string modelPath)
-        {
-            if (!_policy.RequireExistingGamePaths)
-            {
-                return GameAssetPathRules.IsFileKind(modelPath, GameAssetFileKind.Mdl);
-            }
-
-            return ObjectAssetPathRules.IsBgObjectModelPath(modelPath) && _gameData.FileExists(modelPath);
-        }
-
         private bool CanUseSharedGroupPath(string sharedGroupPath)
         {
-            if (!_policy.RequireExistingGamePaths)
+            if (!_collectCatalogAssets)
             {
                 return GameAssetPathRules.IsFileKind(sharedGroupPath, GameAssetFileKind.Sgb);
             }
 
-            return ObjectAssetPathRules.IsCatalogSharedGroupPath(sharedGroupPath) && _gameData.FileExists(sharedGroupPath);
+            if (!ObjectAssetPathRules.IsCatalogSharedGroupPath(sharedGroupPath))
+            {
+                return false;
+            }
+
+            return _gameData.FileExists(sharedGroupPath);
         }
 
         private bool CanUseVfxPath(string vfxPath)
         {
-            if (!_policy.RequireExistingGamePaths)
+            if (!_collectCatalogAssets)
             {
                 return GameAssetPathRules.IsFileKind(vfxPath, GameAssetFileKind.Avfx);
             }
@@ -223,26 +302,41 @@ internal static class SharedGroupAssetResolver
             return GameAssetPathRules.IsFileKind(vfxPath, GameAssetFileKind.Avfx) && _gameData.FileExists(vfxPath);
         }
 
-        private SgbFile? TryLoadGameSharedGroup(string sharedGroupPath)
+        private SgbFile? TryLoadSharedGroup(string requestedSharedGroupPath, ObjectResolvedPath effectivePath)
         {
-            try
-            {
-                return _gameData.GetFile<SgbFile>(sharedGroupPath);
-            }
-            catch
-            {
-                return null;
-            }
-        }
+            _cancellationToken.ThrowIfCancellationRequested();
 
-        private SgbFile? TryLoadLocalSharedGroup(string requestedSharedGroupPath, string localSharedGroupPath)
-        {
             try
             {
-                return _gameData.GetFileFromDisk<SgbFile>(localSharedGroupPath, requestedSharedGroupPath);
+                SgbFile? file = effectivePath.IsLocalFile
+                    ? _gameData.GetFileFromDisk<SgbFile>(effectivePath.Path, requestedSharedGroupPath)
+                    : _gameData.GetFile<SgbFile>(effectivePath.Path);
+                _cancellationToken.ThrowIfCancellationRequested();
+
+                if (file is not null)
+                {
+                    try
+                    {
+                        _isComplete &= BgColliderDefinitionReader.CollectSharedGroup(file.Data, requestedSharedGroupPath,
+                            _collectCatalogAssets ? _colliderDefinitions : null,
+                            path => CollectOtherDependency(path, GameAssetFileKind.Pcb), _cancellationToken);
+                    }
+                    catch (InvalidDataException)
+                    {
+                        _isComplete = false;
+                    }
+                }
+
+                return file;
             }
-            catch
+            catch (OperationCanceledException)
             {
+                throw;
+            }
+            catch (Exception ex) when (ObjectAssetFileUtility.IsReadFailure(ex)
+                                   || ex is ArgumentException or IndexOutOfRangeException or OverflowException)
+            {
+                _cancellationToken.ThrowIfCancellationRequested();
                 return null;
             }
         }
@@ -252,6 +346,7 @@ internal static class SharedGroupAssetResolver
             var translation = ToNumericsVector3(transform.Translation);
             var rotation = ToNumericsVector3(transform.Rotation);
             var scale = ToNumericsVector3(transform.Scale);
+            rotation = NumericsUtility.IsFinite(rotation) ? rotation : Vector3.Zero;
 
             scale = new Vector3(
                 NormalizeScaleComponent(scale.X),
@@ -259,7 +354,9 @@ internal static class SharedGroupAssetResolver
                 NormalizeScaleComponent(scale.Z));
 
             return Matrix4x4.CreateScale(scale)
-                 * Matrix4x4.CreateFromQuaternion(SceneTransformMath.CreateRotationQuaternion(rotation))
+                 * Matrix4x4.CreateRotationX(rotation.X)
+                 * Matrix4x4.CreateRotationY(rotation.Y)
+                 * Matrix4x4.CreateRotationZ(rotation.Z)
                  * Matrix4x4.CreateTranslation(translation);
         }
 
@@ -271,21 +368,4 @@ internal static class SharedGroupAssetResolver
                 ? 1f
                 : value;
     }
-
-    private readonly record struct SharedGroupCollectionPolicy(
-        bool RequireExistingGamePaths,
-        bool CollectPreviewModels,
-        bool RecurseNestedSharedGroups)
-    {
-        public static SharedGroupCollectionPolicy Catalog { get; } = new(
-            RequireExistingGamePaths: true,
-            CollectPreviewModels: true,
-            RecurseNestedSharedGroups: true);
-
-        public static SharedGroupCollectionPolicy CollectionDependencies { get; } = new(
-            RequireExistingGamePaths: false,
-            CollectPreviewModels: false,
-            RecurseNestedSharedGroups: true);
-    }
 }
-

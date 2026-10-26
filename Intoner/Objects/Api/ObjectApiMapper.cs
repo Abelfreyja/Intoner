@@ -1,6 +1,6 @@
-using Intoner.Scene;
 using Intoner.Objects.Models;
 using Intoner.Objects.Utils;
+using Intoner.Scene;
 using System.Numerics;
 using ObjectOutlineColorApi = Intoner.Objects.Api.ObjectOutlineColor;
 using ObjectOutlineColorModel = Intoner.Objects.Models.ObjectOutlineColor;
@@ -11,6 +11,64 @@ namespace Intoner.Objects.Api;
 
 internal static class ObjectApiMapper
 {
+    public static PersistentSceneGroup ToPersistentGroup(SceneGroupSnapshot group)
+        => new(group.Id, group.Name, group.FolderPath, group.Locked, group.Visible,
+            ToWorldTransform(group.Transform), group.CreatedAtUtc, ToLocation(group.CreatedIn));
+
+    public static bool TryToGroup(PersistentSceneGroup? group, Guid? owner, out SceneGroupSnapshot snapshot)
+    {
+        snapshot = null!;
+
+        if (group?.Transform is null || group.CreatedIn is null || group.CreatedAtUtc == default)
+        {
+            return false;
+        }
+
+        SceneGroupSnapshot mapped = new()
+        {
+            Id = group.Id,
+            Name = group.Name,
+            LayoutId = owner,
+            FolderPath = ObjectFolderUtility.SanitizeFolderPath(group.FolderPath),
+            Locked = group.Locked,
+            Visible = group.Visible,
+            Transform = ToTransform(group.Transform),
+            CreatedAtUtc = group.CreatedAtUtc,
+            CreatedIn = ToCreationContext(group.CreatedIn),
+        };
+
+        if (!SceneGroupUtility.IsValid(mapped))
+        {
+            return false;
+        }
+
+        snapshot = mapped;
+        return true;
+    }
+
+    public static bool TryToGroups(IReadOnlyList<PersistentSceneGroup>? groups, Guid? owner, out List<SceneGroupSnapshot> snapshots)
+    {
+        snapshots = [];
+
+        if (groups is null)
+        {
+            return false;
+        }
+
+        snapshots = new List<SceneGroupSnapshot>(groups.Count);
+        foreach (PersistentSceneGroup? group in groups)
+        {
+            if (!TryToGroup(group, owner, out SceneGroupSnapshot snapshot))
+            {
+                return false;
+            }
+
+            snapshots.Add(snapshot);
+        }
+
+        return true;
+    }
+
     public static WorldObject ToWorldObject(ObjectSnapshot snapshot)
         => new(
             snapshot.Id,
@@ -27,7 +85,8 @@ internal static class ObjectApiMapper
         => new(
             ToWorldObject(snapshot),
             snapshot.FolderPath,
-            snapshot.Locked);
+            snapshot.Locked,
+            snapshot.GroupId);
 
     public static SavedObjectLayoutInfo ToSavedLayoutInfo(ObjectLayoutSnapshot layout)
         => new(
@@ -44,20 +103,24 @@ internal static class ObjectApiMapper
             layout.Revision,
             layout.CreatedAtUtc,
             layout.UpdatedAtUtc,
-            ToPersistentSet(layout.Objects, layout.Folders));
+            ToPersistentSet(layout.Objects, layout.Folders, layout.Groups));
 
     public static PersistentObjectSet ToPersistentSet(
         IReadOnlyList<ObjectSnapshot> objects,
-        IReadOnlyList<ObjectFolderSnapshot> folders)
+        IReadOnlyList<ObjectFolderSnapshot> folders,
+        IReadOnlyList<SceneGroupSnapshot>? groups = null)
         => new(
             objects.Select(ToPersistentObject).ToList(),
             folders.Select(static folder => folder.Path).ToList(),
-            ObjectFolderUtility.ToFolderColorMap(folders));
+            ObjectFolderUtility.ToFolderColorMap(folders))
+        {
+            Groups = groups?.Select(ToPersistentGroup).ToArray() ?? [],
+        };
 
     public static LoadedObjectLayout ToLoadedLayout(ObjectLoadedLayoutSnapshot layout)
         => new(
-            layout.Kind == ObjectLoadedLayoutKind.Default
-                ? LoadedObjectLayoutType.Default
+            layout.Kind == ObjectLoadedLayoutKind.Persistent
+                ? LoadedObjectLayoutType.Persistent
                 : LoadedObjectLayoutType.Temporary,
             layout.LayoutId,
             layout.SourceKey,
@@ -69,8 +132,7 @@ internal static class ObjectApiMapper
 
     public static ObjectLocationData ToLocation(SceneCreationContext context)
         => new(
-            context.WorldId,
-            context.WorldName,
+            context.Worlds,
             context.TerritoryId,
             context.TerritoryName,
             context.DivisionId,
@@ -172,7 +234,6 @@ internal static class ObjectApiMapper
         {
             Id = dto.Id,
             Name = dto.Name ?? string.Empty,
-            Kind = kind,
             Visible = dto.Visible,
             Transform = ToTransform(dto.Transform),
             CreatedAtUtc = dto.CreatedAtUtc,
@@ -196,6 +257,7 @@ internal static class ObjectApiMapper
         {
             FolderPath = ObjectFolderUtility.SanitizeFolderPath(dto.FolderPath),
             Locked = dto.Locked,
+            GroupId = dto.GroupId,
         };
         return true;
     }
@@ -206,33 +268,38 @@ internal static class ObjectApiMapper
     {
         if (dto is null
             || dto.ExpectedRevision <= 0
-            || !TryToPersistentSet(dto.Standalone, null, out List<ObjectSnapshot> standaloneObjects, out IReadOnlyList<ObjectFolderSnapshot> standaloneFolders))
+            || dto.Layouts is null
+            || !TryToPersistentSet(dto.Standalone, null, out List<ObjectSnapshot> standaloneObjects,
+                out IReadOnlyList<ObjectFolderSnapshot> standaloneFolders, out List<SceneGroupSnapshot> standaloneGroups)
+            || standaloneObjects.Any(static snapshot => snapshot.CreatedAtUtc == default))
         {
             update = null!;
             return false;
         }
 
-        Guid? defaultLayoutId = null;
-        List<ObjectSnapshot> defaultLayoutObjects = [];
-        IReadOnlyList<ObjectFolderSnapshot> defaultLayoutFolders = [];
-        if (dto.DefaultLayout is not null)
+        HashSet<Guid> layoutIds = [];
+        List<ObjectLayoutContentUpdate> layouts = [];
+        HashSet<Guid> objectIds = new(standaloneObjects.Select(static snapshot => snapshot.Id).Concat(standaloneGroups.Select(static group => group.Id)));
+        foreach (PersistentLayoutUpdate? layout in dto.Layouts)
         {
-            defaultLayoutId = dto.DefaultLayout.LayoutId;
-            if (defaultLayoutId == Guid.Empty
+            if (layout is null || layout.LayoutId == Guid.Empty || !layoutIds.Add(layout.LayoutId)
                 || !TryToPersistentSet(
-                    dto.DefaultLayout.Content,
-                    defaultLayoutId,
-                    out defaultLayoutObjects,
-                    out defaultLayoutFolders))
+                    layout.Content,
+                    layout.LayoutId,
+                    out List<ObjectSnapshot> objects,
+                    out IReadOnlyList<ObjectFolderSnapshot> folders,
+                    out List<SceneGroupSnapshot> groups)
+                || objects.Any(snapshot => snapshot.CreatedAtUtc == default || !objectIds.Add(snapshot.Id))
+                || groups.Any(group => !objectIds.Add(group.Id)))
             {
                 update = null!;
                 return false;
             }
+
+            layouts.Add(new ObjectLayoutContentUpdate(layout.LayoutId, objects, folders) { Groups = groups });
         }
 
-        HashSet<Guid> objectIds = new(standaloneObjects.Select(static snapshot => snapshot.Id));
-        if (objectIds.Count != standaloneObjects.Count
-            || defaultLayoutObjects.Any(snapshot => !objectIds.Add(snapshot.Id)))
+        if (dto.CreationLayoutId.HasValue && !layoutIds.Contains(dto.CreationLayoutId.Value))
         {
             update = null!;
             return false;
@@ -242,10 +309,10 @@ internal static class ObjectApiMapper
         {
             ExpectedRevision = dto.ExpectedRevision,
             StandaloneObjects = standaloneObjects,
+            StandaloneGroups = standaloneGroups,
             StandaloneFolders = standaloneFolders,
-            DefaultLayoutId = defaultLayoutId,
-            DefaultLayoutObjects = defaultLayoutObjects,
-            DefaultLayoutFolders = defaultLayoutFolders,
+            Layouts = layouts,
+            CreationLayoutId = dto.CreationLayoutId,
         };
         return true;
     }
@@ -260,7 +327,6 @@ internal static class ObjectApiMapper
             return false;
         }
 
-        snapshot = snapshot with { LayoutId = null };
         return true;
     }
 
@@ -424,12 +490,14 @@ internal static class ObjectApiMapper
         return true;
     }
 
-    private static bool TryToPersistentSet(
+    public static bool TryToPersistentSet(
         PersistentObjectSet? dto,
         Guid? layoutId,
         out List<ObjectSnapshot> objects,
-        out IReadOnlyList<ObjectFolderSnapshot> folders)
+        out IReadOnlyList<ObjectFolderSnapshot> folders,
+        out List<SceneGroupSnapshot> groups)
     {
+        groups = [];
         if (dto?.Objects is null || dto.Folders is null || dto.FolderColors is null)
         {
             objects = [];
@@ -440,20 +508,19 @@ internal static class ObjectApiMapper
         objects = new List<ObjectSnapshot>(dto.Objects.Count);
         foreach (PersistentObject? objectDto in dto.Objects)
         {
-            if (!TryToPersistentSnapshot(objectDto, out ObjectSnapshot snapshot)
-                || snapshot.Id == Guid.Empty
-                || snapshot.CreatedAtUtc == default)
+            if (!TryToPersistentSnapshot(objectDto, out ObjectSnapshot snapshot))
             {
                 objects = [];
                 folders = [];
                 return false;
             }
 
-            objects.Add(snapshot with { LayoutId = layoutId });
+            objects.Add(layoutId.HasValue ? snapshot with { LayoutId = layoutId } : snapshot);
         }
 
         folders = ObjectFolderUtility.FromFolderColorMap(dto.Folders, dto.FolderColors);
-        return true;
+        return TryToGroups(dto.Groups, layoutId, out groups)
+            && SceneGroupUtility.TryValidateOwner(layoutId, objects, groups, out _);
     }
 
     public static bool TryToPersistentPatch(
@@ -503,8 +570,7 @@ internal static class ObjectApiMapper
     public static SceneCreationContext ToCreationContext(ObjectLocationData context)
         => new()
         {
-            WorldId = context.WorldId,
-            WorldName = context.WorldName ?? string.Empty,
+            Worlds = context.Worlds,
             TerritoryId = context.TerritoryId,
             TerritoryName = context.TerritoryName ?? string.Empty,
             DivisionId = context.DivisionId,
@@ -667,12 +733,16 @@ internal static class ObjectApiMapper
             Transparency = model.Transparency,
             DyeColor = ToVector4(model.DyeColor),
             IsCoveredFromRain = model.IsCoveredFromRain,
+            CameraCollision = model.CameraCollision,
+            ColliderDefinition = ToColliderDefinition(model.ColliderDefinition),
+            ClearColliderDefinition = model.ClearColliderDefinition,
         };
 
     private static FurnitureModelPatch ToPatch(FurnitureModelPatchData model)
         => new()
         {
             SharedGroupPath = model.SharedGroupPath,
+            CameraCollision = model.CameraCollision,
             Color = ToPatch(model.Color),
             Transparency = model.Transparency,
             OutlineColor = ToOutlineColor(model.OutlineColor),
@@ -715,6 +785,7 @@ internal static class ObjectApiMapper
             Intensity = model.Intensity,
             Shape = ToPatch(model.Shape),
             Shadow = ToPatch(model.Shadow),
+            ProjectionTexturePath = model.ProjectionTexturePath,
         };
 
     private static LightFlagsPatch? ToPatch(LightFlagsPatchData? flags)
@@ -755,7 +826,9 @@ internal static class ObjectApiMapper
             model.ModelPath,
             model.Transparency,
             ToObjectVector4(model.DyeColor),
-            model.IsCoveredFromRain));
+            model.IsCoveredFromRain,
+            ToColliderDefinitionData(model.ColliderDefinition),
+            model.CameraCollision));
 
     private static WorldObjectModelData ToFurnitureData(FurnitureModel model)
         => new(Furniture: new FurnitureModelData(
@@ -766,7 +839,8 @@ internal static class ObjectApiMapper
             model.HousingRowId,
             model.ItemRowId,
             model.AttachmentParentId,
-            ToFurnitureMaterialItemDto(model.MaterialItem)));
+            ToFurnitureMaterialItemDto(model.MaterialItem),
+            model.CameraCollision));
 
     private static WorldObjectModelData ToVfxData(VfxModel model)
         => new(Vfx: new VfxModelData(
@@ -787,7 +861,8 @@ internal static class ObjectApiMapper
             ToLightFlagsData(model.Flags),
             model.Intensity,
             ToLightShapeData(model.Shape),
-            ToLightShadowData(model.Shadow)));
+            ToLightShadowData(model.Shadow),
+            model.ProjectionTexturePath));
 
     private static FurnitureColorData ToFurnitureColorData(FurnitureColorModel color)
         => new(
@@ -823,12 +898,15 @@ internal static class ObjectApiMapper
             Transparency = model.Transparency,
             DyeColor = ToVector4(model.DyeColor),
             IsCoveredFromRain = model.IsCoveredFromRain,
+            CameraCollision = model.CameraCollision ?? true,
+            ColliderDefinition = ToColliderDefinition(model.ColliderDefinition),
         };
 
     private static FurnitureModel ToFurnitureModel(FurnitureModelData model)
         => new()
         {
             SharedGroupPath = model.SharedGroupPath ?? string.Empty,
+            CameraCollision = model.CameraCollision ?? true,
             Color = ToFurnitureColorModel(model.Color),
             Transparency = model.Transparency,
             OutlineColor = ToOutlineColor(model.OutlineColor),
@@ -837,6 +915,34 @@ internal static class ObjectApiMapper
             AttachmentParentId = model.AttachmentParentId,
             MaterialItem = ToFurnitureMaterialItemModel(model.MaterialItem),
         };
+
+    private static BgColliderDefinition? ToColliderDefinition(BgColliderDefinitionData? definition)
+    {
+        if (definition is null)
+        {
+            return null;
+        }
+
+        BgAnalyticShape? shape = definition.Shape is not { } source ? null : new(
+            ToVector3(source.Translation), ToVector3(source.Rotation), ToVector3(source.Scale),
+            ToVector3(source.BoundsMin), ToVector3(source.BoundsMax), source.MaterialId, source.MaterialMask);
+        return new(definition.ModelPath ?? string.Empty, definition.SourcePath ?? string.Empty,
+            (BgCollisionKind)definition.Kind, definition.PcbPath ?? string.Empty, definition.MaterialId, definition.MaterialMask, shape);
+    }
+
+    private static BgColliderDefinitionData? ToColliderDefinitionData(BgColliderDefinition? definition)
+    {
+        if (definition is null)
+        {
+            return null;
+        }
+
+        BgAnalyticShapeData? shape = definition.Shape is not { } source ? null : new(
+            ToObjectVector3(source.Translation), ToObjectVector3(source.Rotation), ToObjectVector3(source.Scale),
+            ToObjectVector3(source.BoundsMin), ToObjectVector3(source.BoundsMax), source.MaterialId, source.MaterialMask);
+        return new(definition.ModelPath, definition.SourcePath, (BgCollisionShape)definition.Kind, definition.PcbPath,
+            definition.MaterialId, definition.MaterialMask, shape);
+    }
 
     private static FurnitureColorModel ToFurnitureColorModel(FurnitureColorData color)
         => new()
@@ -883,6 +989,7 @@ internal static class ObjectApiMapper
             Intensity = model.Intensity,
             Shape = ToLightShapeModel(model.Shape),
             Shadow = ToLightShadowModel(model.Shadow),
+            ProjectionTexturePath = model.ProjectionTexturePath ?? string.Empty,
         };
 
     private static LightFlags ToLightFlagsModel(LightFlagsData flags)

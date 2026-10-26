@@ -1,4 +1,3 @@
-using Intoner.Objects.Assets;
 using Intoner.Objects.Models;
 using Intoner.Objects.Resources;
 using Intoner.Objects.Utils;
@@ -81,39 +80,45 @@ internal sealed class TemporaryCollectionService : ITemporaryCollectionService
         List<ObjectTemporaryCollectionData> runtimeCollections = [];
         Dictionary<string, IReadOnlyList<ObjectPathRedirection>> redirectsByCollection = new(StringComparer.OrdinalIgnoreCase);
         bool retainedMemory = false;
+        bool preparedSuccessfully = false;
 
-        foreach (ObjectTemporaryCollectionData? collection in collections)
+        try
         {
-            if (!TryPrepareCollection(
-                    normalizedSourceKey,
-                    memoryOwnerId,
-                    collection,
-                    ref retainedMemory,
-                    out ObjectTemporaryCollectionData sourceCollection,
-                    out ObjectTemporaryCollectionData runtimeCollection,
-                    out IReadOnlyList<ObjectPathRedirection> redirects)
-                || !redirectsByCollection.TryAdd(runtimeCollection.CollectionId, redirects))
+            foreach (ObjectTemporaryCollectionData? collection in collections)
             {
-                _memoryResourceService.ReleaseOwner(memoryOwnerId);
-                return new ObjectTemporaryMutationResult(ObjectTemporaryMutationStatus.InvalidCollection, 0);
+                if (!TryPrepareCollection(
+                        normalizedSourceKey,
+                        memoryOwnerId,
+                        collection,
+                        ref retainedMemory,
+                        out ObjectTemporaryCollectionData sourceCollection,
+                        out ObjectTemporaryCollectionData runtimeCollection,
+                        out IReadOnlyList<ObjectPathRedirection> redirects)
+                    || !redirectsByCollection.TryAdd(runtimeCollection.CollectionId, redirects))
+                {
+                    return new ObjectTemporaryMutationResult(ObjectTemporaryMutationStatus.InvalidCollection, 0);
+                }
+
+                sourceCollections.Add(sourceCollection);
+                runtimeCollections.Add(runtimeCollection);
             }
 
-            sourceCollections.Add(sourceCollection);
-            runtimeCollections.Add(runtimeCollection);
+            prepared = new PreparedTemporaryCollections(
+                OrderCollections(sourceCollections),
+                OrderCollections(runtimeCollections),
+                redirectsByCollection,
+                retainedMemory ? memoryOwnerId : string.Empty,
+                retainedMemory);
+            preparedSuccessfully = true;
+            return new ObjectTemporaryMutationResult(ObjectTemporaryMutationStatus.Success, revision);
         }
-
-        if (!retainedMemory)
+        finally
         {
-            _memoryResourceService.ReleaseOwner(memoryOwnerId);
+            if (!preparedSuccessfully || !retainedMemory)
+            {
+                _memoryResourceService.ReleaseOwner(memoryOwnerId);
+            }
         }
-
-        prepared = new PreparedTemporaryCollections(
-            OrderCollections(sourceCollections),
-            OrderCollections(runtimeCollections),
-            redirectsByCollection,
-            retainedMemory ? memoryOwnerId : string.Empty,
-            retainedMemory);
-        return new ObjectTemporaryMutationResult(ObjectTemporaryMutationStatus.Success, revision);
     }
 
     public ObjectTemporaryMutationResult TryPrepareCommitted(
@@ -254,7 +259,9 @@ internal sealed class TemporaryCollectionService : ITemporaryCollectionService
     {
         normalizedRedirect = default!;
         redirectRule = default;
-        if (!GameAssetPathRules.TryNormalizeGamePath(redirect?.RequestedPath ?? string.Empty, out string requestedPath)
+        string requestedPath = ObjectResolvedPath.FromGamePath(redirect?.RequestedPath ?? string.Empty).Path;
+
+        if (requestedPath.Length == 0
             || !requestedPaths.Add(requestedPath)
             || !TryPrepareReplacement(
                 memoryOwnerId,
@@ -292,13 +299,14 @@ internal sealed class TemporaryCollectionService : ITemporaryCollectionService
         switch (replacement.Kind)
         {
             case ObjectTemporaryCollectionReplacementKind.GamePath:
-                if (!GameAssetPathRules.TryNormalizeGamePath(replacement.Path, out string gamePath))
+                resolvedPath = ObjectResolvedPath.FromGamePath(replacement.Path);
+
+                if (resolvedPath.Path.Length == 0)
                 {
                     return false;
                 }
 
-                normalizedReplacement = replacement with { Path = gamePath, Data = [] };
-                resolvedPath = ObjectResolvedPath.FromGamePath(gamePath);
+                normalizedReplacement = replacement with { Path = resolvedPath.Path, Data = [] };
                 return true;
             case ObjectTemporaryCollectionReplacementKind.LocalFile:
                 if (!ObjectLocalFilePathUtility.TryNormalizeLocalFilePath(replacement.Path, out string localPath))
@@ -332,12 +340,15 @@ internal sealed class TemporaryCollectionService : ITemporaryCollectionService
         resolvedPath = default;
         if (replacement.Data.Length > 0)
         {
-            if (!ObjectAssetPathRules.TryNormalizeSupportedResourcePath(replacement.Path, out string gamePath))
+            try
+            {
+                resolvedPath = _memoryResourceService.RegisterResource(memoryOwnerId, replacement.Path, replacement.Data);
+            }
+            catch (ArgumentException)
             {
                 return false;
             }
 
-            resolvedPath = _memoryResourceService.RegisterResource(memoryOwnerId, gamePath, replacement.Data);
             retainedMemory = true;
         }
         else if (ObjectMemoryResourcePathUtility.TryParse(replacement.Path, out ObjectMemoryResourcePath memoryPath)
@@ -370,7 +381,9 @@ internal sealed class TemporaryCollectionService : ITemporaryCollectionService
         List<ObjectPathRedirection> result = [];
         foreach (ObjectTemporaryCollectionRedirectData redirect in collection.Redirects)
         {
-            if (!GameAssetPathRules.TryNormalizeGamePath(redirect.RequestedPath, out string requestedPath)
+            string requestedPath = ObjectResolvedPath.FromGamePath(redirect.RequestedPath).Path;
+
+            if (requestedPath.Length == 0
                 || !requestedPaths.Add(requestedPath)
                 || !TryResolveCommittedReplacement(redirect.Replacement, out ObjectResolvedPath resolvedPath)
                 || !ObjectPathRedirectionUtility.TryCreate(requestedPath, resolvedPath, out ObjectPathRedirection rule))
@@ -392,10 +405,9 @@ internal sealed class TemporaryCollectionService : ITemporaryCollectionService
     {
         switch (replacement.Kind)
         {
-            case ObjectTemporaryCollectionReplacementKind.GamePath
-                when GameAssetPathRules.TryNormalizeGamePath(replacement.Path, out string gamePath):
-                resolvedPath = ObjectResolvedPath.FromGamePath(gamePath);
-                return true;
+            case ObjectTemporaryCollectionReplacementKind.GamePath:
+                resolvedPath = ObjectResolvedPath.FromGamePath(replacement.Path);
+                return resolvedPath.Path.Length > 0;
             case ObjectTemporaryCollectionReplacementKind.LocalFile
                 when ObjectLocalFilePathUtility.TryNormalizeLocalFilePath(replacement.Path, out string localPath):
                 resolvedPath = ObjectResolvedPath.FromLocalFile(localPath);

@@ -279,7 +279,6 @@ internal sealed class BoundsAnnotationRenderer
             () =>
             {
                 IntonerTooltipContent.Header(annotation.Icon, title, accentOverride: annotation.Accent);
-                IntonerTooltipContent.Separator();
                 IntonerTooltipContent.Notice(FontAwesomeIcon.InfoCircle, text, annotation.Accent);
                 DrawFixes(annotation);
             },

@@ -6,14 +6,11 @@ using Intoner.Objects.Models;
 using Intoner.Objects.Utils;
 using Intoner.Scene;
 using System.Numerics;
-using System.Runtime.InteropServices;
 using AxisAlignedBounds = FFXIVClientStructs.FFXIV.Common.Math.AxisAlignedBounds;
 using OrientedBounds = FFXIVClientStructs.FFXIV.Common.Math.OrientedBounds;
 using SceneObject = FFXIVClientStructs.FFXIV.Client.Graphics.Scene.Object;
 
 namespace Intoner.Objects.Interop;
-
-internal readonly record struct SharedGroupChildState(nint First, nint Last);
 
 /// <summary>
 /// Provides native layout instance helpers shared by the object runtime.
@@ -28,32 +25,18 @@ internal static unsafe class ObjectLayoutInterop
         InstanceType.SphereCastRange,
         InstanceType.IndoorObject,
         InstanceType.OutdoorObject,
-        InstanceType.ColliderLayer7,
-        InstanceType.ColliderLayer8,
-        InstanceType.ColliderLayer9,
-        InstanceType.ColliderLayer10,
+        InstanceType.WaterRange,
+        InstanceType.ShowHideRange,
+        InstanceType.GameContentsRange,
+        InstanceType.EventEffectRange,
     ];
 
-    private const int SharedGroupReadyVtableSlot = 22;
-    private const int LayoutGetWorldBoundsVtableSlot = 73;
-    private const int LayoutGetTransformExtentsVtableSlot = 74;
     private const int SharedGroupPlacementCategoryOffset = 0x00;
     private const int SharedGroupPlacementFlagsOffset = 0xC4;
     private const byte SharedGroupTabletopCategory = 0x0E;
     private const byte SharedGroupWallCategory = 0x0F;
     private const ushort SharedGroupTabletopPlacementFlag = 0x0400;
     private const ushort SharedGroupWallPlacementFlag = 0x0800;
-
-    [StructLayout(LayoutKind.Explicit, Size = 0x50)]
-    private struct LayoutTransformExtents
-    {
-        [FieldOffset(0x30)] public float CenterX;
-        [FieldOffset(0x34)] public float CenterY;
-        [FieldOffset(0x38)] public float CenterZ;
-        [FieldOffset(0x40)] public float ExtentX;
-        [FieldOffset(0x44)] public float ExtentY;
-        [FieldOffset(0x48)] public float ExtentZ;
-    }
 
     /// <summary>
     /// Creates a native layout transform from one object transform snapshot.
@@ -64,7 +47,7 @@ internal static unsafe class ObjectLayoutInterop
         => new()
         {
             Translation = transform.Position,
-            Rotation = CreateRotation(transform.RotationDegrees),
+            Rotation = SceneTransformMath.CreateRotationQuaternion(transform.RotationDegrees),
             Scale = transform.Scale,
         };
 
@@ -80,79 +63,33 @@ internal static unsafe class ObjectLayoutInterop
     }
 
     /// <summary>
-    /// Applies one object transform to a shared group layout instance and refreshes child transforms.
+    /// Checks whether the sgb's primary resource has loaded.
     /// </summary>
-    /// <param name="instance">The shared group layout instance to update.</param>
-    /// <param name="transform">The object transform to apply.</param>
-    public static void ApplyTransform(SharedGroupLayoutInstance* instance, SceneTransform transform)
+    /// <remarks>Child graphics can still be loading after the primary resource becomes available.</remarks>
+    /// <param name="instance">The sgb layout instance to inspect.</param>
+    /// <returns><see langword="false"/> when the instance, vfunc or primary resource is unavailable.</returns>
+    public static bool IsPrimaryLoaded(SharedGroupLayoutInstance* instance)
     {
-        var layoutTransform = CreateTransform(transform);
-        instance->SetTransformImpl(&layoutTransform);
-        instance->Instances.ApplyTransforms();
+        ILayoutInstance* layout = (ILayoutInstance*)instance;
+        return layout != null && layout->VirtualTable != null
+            && layout->VirtualTable->IsPrimaryLoaded != null && layout->IsPrimaryLoaded();
     }
 
     /// <summary>
-    /// Checks whether a sgb has finished native child setup.
+    /// Refreshes visual children after the sgb's primary resource loads.
     /// </summary>
-    /// <param name="instance">the sgb layout instance to inspect.</param>
-    /// <returns>true when the native sgb reports ready.</returns>
-    public static bool IsSharedGroupReady(SharedGroupLayoutInstance* instance)
+    /// <param name="instance">The sgb layout instance to refresh.</param>
+    /// <returns><see langword="true"/> when the instance was refreshed.</returns>
+    public static bool TryRefreshSharedGroupTransforms(SharedGroupLayoutInstance* instance)
     {
-        if (instance == null)
+        if (!IsPrimaryLoaded(instance))
         {
             return false;
         }
 
-        var vtable = *(nint**)instance;
-        if (vtable == null)
-        {
-            return false;
-        }
-
-        var readyFunction = (delegate* unmanaged<SharedGroupLayoutInstance*, byte>)vtable[SharedGroupReadyVtableSlot];
-        return readyFunction != null && readyFunction(instance) != 0;
-    }
-
-    /// <summary>
-    /// Refreshes visual sgb children after native child setup is ready.
-    /// </summary>
-    /// <param name="instance">the sgb layout instance to update.</param>
-    /// <returns>true when refresh was applied.</returns>
-    public static bool TryRefreshVisualSharedGroupState(SharedGroupLayoutInstance* instance)
-    {
-        if (!IsSharedGroupReady(instance))
-        {
-            return false;
-        }
-
-        instance->Instances.ApplyTransforms();
-        ((ILayoutInstance*)instance)->SetColliderActive(false);
-        instance->Instances.SetCollidersActive(false);
-        RefreshNestedVisualSharedGroupState(&instance->Instances);
+        RefreshSharedGroupTransforms(instance);
         return true;
     }
-
-    /// <summary>
-    /// Gets the current visible child vector state for a sgb.
-    /// </summary>
-    /// <param name="instance">the sgb layout instance to inspect.</param>
-    /// <returns>the current child vector bounds.</returns>
-    public static SharedGroupChildState GetSharedGroupChildState(SharedGroupLayoutInstance* instance)
-        => instance == null
-            ? default
-            : new SharedGroupChildState(
-                (nint)instance->Instances.Instances.First,
-                (nint)instance->Instances.Instances.Last);
-
-    /// <summary>
-    /// Checks whether a visual sgb root or child collider is currently active.
-    /// </summary>
-    /// <param name="instance">the sgb layout instance to inspect.</param>
-    /// <returns>true when any root or child collider is active.</returns>
-    public static bool HasActiveVisualSharedGroupColliders(SharedGroupLayoutInstance* instance)
-        => instance != null
-            && (((ILayoutInstance*)instance)->IsColliderActive()
-                || HasActiveChildColliders(&instance->Instances));
 
     /// <summary>
     /// Checks whether one collider belongs to a shared group or any of its children.
@@ -172,18 +109,6 @@ internal static unsafe class ObjectLayoutInterop
         return InstanceTreeContainsCollider(root, collider)
             || (TryResolveColliderLayoutInstance(collider, out ILayoutInstance* owner)
                 && InstanceTreeContainsInstance(root, owner));
-    }
-
-    /// <summary>
-    /// Applies the active and collider state to one layout instance.
-    /// </summary>
-    /// <param name="instance">The layout instance to update.</param>
-    /// <param name="visible">Whether the instance should be active.</param>
-    /// <param name="collidersActive">Whether layout colliders should stay active.</param>
-    public static void ApplyVisibilityState(ILayoutInstance* instance, bool visible, bool collidersActive = false)
-    {
-        instance->SetActive(visible);
-        instance->SetColliderActive(collidersActive);
     }
 
     /// <summary>
@@ -214,32 +139,27 @@ internal static unsafe class ObjectLayoutInterop
     /// Tries to resolve world bounds for one layout instance.
     /// </summary>
     /// <param name="instance">The layout instance to inspect.</param>
-    /// <param name="bounds">The resolved bounds when available.</param>
-    /// <returns>true when the layout instance reported bounds.</returns>
+    /// <param name="bounds">The resolved bounds when available, or default when the query fails.</param>
+    /// <returns>true when the layout instance reported usable world bounds.</returns>
     public static bool TryGetBounds(ILayoutInstance* instance, out AxisAlignedBounds bounds)
     {
         bounds = default;
-        if (instance == null)
+
+        if (instance == null || instance->VirtualTable == null
+            || instance->VirtualTable->GetAxisAlignedBoundsImpl == null)
         {
             return false;
         }
 
-        var vtable = *(nint**)instance;
-        if (vtable == null)
+        AxisAlignedBounds result = default;
+
+        if (instance->GetAxisAlignedBoundsImpl(&result) == null || !ObjectShapeMath.IsValidBounds(result))
         {
             return false;
         }
 
-        var function = (delegate* unmanaged<ILayoutInstance*, AxisAlignedBounds*, AxisAlignedBounds*>)vtable[LayoutGetWorldBoundsVtableSlot];
-        if (function == null)
-        {
-            return false;
-        }
-
-        fixed (AxisAlignedBounds* boundsPtr = &bounds)
-        {
-            return function(instance, boundsPtr) != null;
-        }
+        bounds = result;
+        return true;
     }
 
     /// <summary>
@@ -272,11 +192,18 @@ internal static unsafe class ObjectLayoutInterop
         }
 
         var localCenter = (localMin + localMax) * 0.5f;
-        bounds = new OrientedBounds
+        OrientedBounds result = new()
         {
             Transform = ObjectShapeMath.CreateRigidTransform(Vector3.Transform(localCenter, rootTransform), instance->Transform.Rotation),
             HalfExtents = (localMax - localMin) * 0.5f,
         };
+
+        if (!ObjectShapeMath.IsValidBounds(result))
+        {
+            return false;
+        }
+
+        bounds = result;
         return true;
     }
 
@@ -330,12 +257,68 @@ internal static unsafe class ObjectLayoutInterop
         return support;
     }
 
-    private static Quaternion CreateRotation(Vector3 rotationDegrees)
-        => SceneTransformMath.CreateRotationQuaternion(rotationDegrees);
-
-    private static void RefreshNestedVisualSharedGroupState(ChildNodeContainer* container)
+    public static void ApplySharedGroupVisibility(SharedGroupLayoutInstance* instance, bool visible)
     {
-        foreach (var child in container->Instances)
+        if (instance != null)
+        {
+            ApplyInstanceVisibility((ILayoutInstance*)instance, visible);
+        }
+    }
+
+    public static void ApplyInstanceGraphicsVisibility(ILayoutInstance* instance, bool visible)
+    {
+        SceneObject* primary = instance->GetGraphics();
+        ApplyGraphicsVisibility(primary, visible);
+        SceneObject* secondary = instance->GetGraphics2();
+
+        if (secondary != primary)
+        {
+            ApplyGraphicsVisibility(secondary, visible);
+        }
+    }
+
+    private static void ApplyInstanceVisibility(ILayoutInstance* instance, bool visible)
+    {
+        visible &= instance->IsActive;
+        ApplyInstanceGraphicsVisibility(instance, visible);
+
+        if (instance->Id.Type is InstanceType.IndoorObject or InstanceType.OutdoorObject)
+        {
+            ILayoutInstance* group = *(ILayoutInstance**)((byte*)instance + 0x90);
+            if (group != null)
+            {
+                ApplyInstanceVisibility(group, visible);
+            }
+
+            return;
+        }
+
+        if (instance->Id.Type is not (InstanceType.SharedGroup or InstanceType.HelperObject))
+        {
+            return;
+        }
+
+        foreach (var child in ((SharedGroupLayoutInstance*)instance)->Instances.Instances.AsSpan())
+        {
+            if (child.Value != null && child.Value->Instance != null)
+            {
+                ApplyInstanceVisibility(child.Value->Instance, visible);
+            }
+        }
+    }
+
+    private static void ApplyGraphicsVisibility(SceneObject* graphics, bool visible)
+    {
+        if (ObjectSceneInterop.TryGetDrawObject(graphics, out var drawObject))
+        {
+            drawObject->Flags = (byte)(visible ? drawObject->Flags | 1 : drawObject->Flags & ~1);
+        }
+    }
+
+    private static void RefreshSharedGroupTransforms(SharedGroupLayoutInstance* instance)
+    {
+        instance->Instances.ApplyTransforms();
+        foreach (var child in instance->Instances.Instances.AsSpan())
         {
             var node = child.Value;
             if (node == null || node->Instance == null || node->Instance->Id.Type != InstanceType.SharedGroup)
@@ -343,7 +326,11 @@ internal static unsafe class ObjectLayoutInterop
                 continue;
             }
 
-            _ = TryRefreshVisualSharedGroupState((SharedGroupLayoutInstance*)node->Instance);
+            SharedGroupLayoutInstance* group = (SharedGroupLayoutInstance*)node->Instance;
+            if (IsPrimaryLoaded(group))
+            {
+                RefreshSharedGroupTransforms(group);
+            }
         }
     }
 
@@ -382,68 +369,21 @@ internal static unsafe class ObjectLayoutInterop
     private static bool TryGetPlacementClearance(ILayoutInstance* instance, out ObjectPlacementClearance clearance)
     {
         clearance = default;
-        if (!TryGetLayoutTransformExtents(instance, out LayoutTransformExtents extents))
+
+        if (instance == null || instance->VirtualTable == null
+            || instance->VirtualTable->GetOrientedBoundsImpl == null)
         {
             return false;
         }
 
-        return ObjectPlacementClearance.TryCreate(MathF.Min(extents.ExtentX, extents.ExtentZ), out clearance);
-    }
+        OrientedBounds bounds = default;
 
-    private static bool TryGetLayoutTransformExtents(ILayoutInstance* instance, out LayoutTransformExtents extents)
-    {
-        extents = default;
-        if (instance == null)
+        if (instance->GetOrientedBoundsImpl(&bounds) == null)
         {
             return false;
         }
 
-        var vtable = *(nint**)instance;
-        if (vtable == null)
-        {
-            return false;
-        }
-
-        var function = (delegate* unmanaged<ILayoutInstance*, LayoutTransformExtents*, LayoutTransformExtents*>)vtable[LayoutGetTransformExtentsVtableSlot];
-        if (function == null)
-        {
-            return false;
-        }
-
-        LayoutTransformExtents result = default;
-        if (function(instance, &result) == null)
-        {
-            return false;
-        }
-
-        extents = result;
-        return true;
-    }
-
-    private static bool HasActiveChildColliders(ChildNodeContainer* container)
-    {
-        foreach (var child in container->Instances)
-        {
-            var node = child.Value;
-            if (node == null || node->Instance == null)
-            {
-                continue;
-            }
-
-            var instance = node->Instance;
-            if (instance->IsColliderActive())
-            {
-                return true;
-            }
-
-            if (instance->Id.Type == InstanceType.SharedGroup
-                && HasActiveChildColliders(&((SharedGroupLayoutInstance*)instance)->Instances))
-            {
-                return true;
-            }
-        }
-
-        return false;
+        return ObjectPlacementClearance.TryCreate(MathF.Min(bounds.HalfExtents.X, bounds.HalfExtents.Z), out clearance);
     }
 
     private static bool InstanceTreeContainsCollider(ILayoutInstance* instance, Collider* collider)
@@ -643,5 +583,3 @@ internal static unsafe class ObjectLayoutInterop
             or InstanceType.ChairMarker
             or InstanceType.SphereCastRange;
 }
-
-

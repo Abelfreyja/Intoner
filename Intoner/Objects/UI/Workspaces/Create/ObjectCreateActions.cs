@@ -62,9 +62,11 @@ internal sealed class ObjectCreateActions
                 => vfx with { Loop = false },
             _ => resolved.Model,
         };
-        string folderPath = _draft.ResolveCreatePlacementFolderPath(_sceneView.GetPlacedFolders());
+        Guid? layoutId = _sceneView.GetCreationLayoutId();
+        string folderPath = _draft.ResolveCreatePlacementFolderPath(layoutId, _sceneView.GetPlacedFolders(layoutId));
         ObjectPlacementOverrides overrides = new()
         {
+            Name = _catalogInfo.ResolveObjectName(model),
             Visible = resolved.Visible,
             FolderPath = folderPath,
             Scale = resolved.Scale,

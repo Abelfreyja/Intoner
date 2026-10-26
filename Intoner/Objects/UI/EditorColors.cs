@@ -1,5 +1,6 @@
 using Intoner.Objects.Catalog;
 using Intoner.Objects.Models;
+using Intoner.Objects.UI.Services;
 using Intoner.Scene;
 using System.Numerics;
 
@@ -7,6 +8,7 @@ namespace Intoner.Objects.UI;
 
 internal static class EditorColors
 {
+    public static Vector4 GroupAccent => ThemeColors.FromBytes(133, 200, 242);
     public static Vector4 BoundsOverlayAccent => ThemeColors.AccentPrimary;
     public static Vector4 HousingPlacementInvalid => ThemeColors.Color(1f, 0.16f, 0.14f, 0.82f);
     public static Vector4 GizmoDragActive => ThemeColors.Color(1f, 0.65f, 0.2f, 1f);
@@ -46,9 +48,9 @@ internal static class EditorColors
             _ => ThemeColors.WithAlpha(ThemeColors.Text, 0.90f),
         };
 
-    public static Vector4 BoundsOverlay(SceneBoundsCategory category, float opacity)
+    public static Vector4 BoundsOverlay(SceneBoundsCategory category, float opacity, EditorSelectionRole selectionRole)
     {
-        Vector4 color = category switch
+        Vector4 color = selectionRole == EditorSelectionRole.Primary ? BoundsOverlayAccent : category switch
         {
             SceneBoundsCategory.BgObject => BoundsOverlay(ObjectKind.BgObject),
             SceneBoundsCategory.Furniture => BoundsOverlay(ObjectKind.Furniture),

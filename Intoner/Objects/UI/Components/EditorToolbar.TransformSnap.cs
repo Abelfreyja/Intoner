@@ -28,7 +28,6 @@ internal sealed partial class EditorToolbar
             IsTransformSnapPopupOpen(),
             ToggleAllTransformSnapModes,
             AreAnyTransformSnapModesEnabled() ? accent : null,
-            useAccentFill: false,
             useNeutralHoverFill: true,
             hoverBorderColor: accent,
             drawBackground: DrawTransformSnapToolbarButtonBackground,
@@ -47,87 +46,18 @@ internal sealed partial class EditorToolbar
 
     private void DrawTransformSnapToolbarButtonBackground(ImDrawListPtr drawList, Vector2 min, Vector2 max, bool hovered, bool active)
     {
-        var scale = ImGuiHelpers.GlobalScale;
-        var innerInset = 3f * scale;
-        var bandGap = MathF.Max(1f * scale, 1f);
-        var innerMin = min + new Vector2(innerInset, innerInset);
-        var innerMax = max - new Vector2(innerInset, innerInset);
-        var availableWidth = innerMax.X - innerMin.X;
-        if (availableWidth <= 0f)
-        {
-            return;
-        }
-
-        var bandWidth = (availableWidth - (bandGap * 2f)) / 3f;
-        if (bandWidth <= 0f)
-        {
-            return;
-        }
-
-        float peakAlpha = 0.31f;
+        SceneTransformSnapSettings settings = _gizmo.Settings.TransformSnapSettings;
+        float peakAlpha = hovered ? 0.38f : 0.31f;
         if (active)
         {
             peakAlpha = 0.44f;
         }
-        else if (hovered)
-        {
-            peakAlpha = 0.38f;
-        }
-
-        DrawTransformSnapToolbarBand(
-            drawList,
-            new Vector2(innerMin.X, innerMin.Y),
-            new Vector2(innerMin.X + bandWidth, innerMax.Y),
-            GetGizmoModeAccentColor(GizmoTransformMode.Translation),
-            _gizmo.Settings.TransformSnapSettings.PositionEnabled,
-            peakAlpha);
-
-        var centerMinX = innerMin.X + bandWidth + bandGap;
-        DrawTransformSnapToolbarBand(
-            drawList,
-            new Vector2(centerMinX, innerMin.Y),
-            new Vector2(centerMinX + bandWidth, innerMax.Y),
-            GetGizmoModeAccentColor(GizmoTransformMode.Rotation),
-            _gizmo.Settings.TransformSnapSettings.RotationEnabled,
-            peakAlpha);
-
-        var rightMinX = centerMinX + bandWidth + bandGap;
-        DrawTransformSnapToolbarBand(
-            drawList,
-            new Vector2(rightMinX, innerMin.Y),
-            new Vector2(innerMax.X, innerMax.Y),
-            GetGizmoModeAccentColor(GizmoTransformMode.Scale),
-            _gizmo.Settings.TransformSnapSettings.ScaleEnabled,
-            peakAlpha);
-    }
-
-    private static void DrawTransformSnapToolbarBand(ImDrawListPtr drawList, Vector2 min, Vector2 max, Vector4 accent, bool enabled, float peakAlpha)
-    {
-        if (!enabled || !EditorInputUtility.HasArea(min, max))
-        {
-            return;
-        }
-
-        var midY = min.Y + ((max.Y - min.Y) * 0.56f);
-        var middleAlpha = ThemeColors.WithAlpha(accent, peakAlpha);
-        var topAlpha = ThemeColors.WithAlpha(accent, peakAlpha * 0.22f);
-        var fadeAlpha = ThemeColors.WithAlpha(accent, peakAlpha * 0.18f);
-
-        drawList.AddRectFilledMultiColor(
-            min,
-            new Vector2(max.X, midY),
-            ImGui.GetColorU32(topAlpha),
-            ImGui.GetColorU32(topAlpha),
-            ImGui.GetColorU32(middleAlpha),
-            ImGui.GetColorU32(middleAlpha));
-
-        drawList.AddRectFilledMultiColor(
-            new Vector2(min.X, midY),
-            max,
-            ImGui.GetColorU32(middleAlpha),
-            ImGui.GetColorU32(middleAlpha),
-            ImGui.GetColorU32(fadeAlpha),
-            ImGui.GetColorU32(fadeAlpha));
+        DrawToolbarStateBands(drawList, min, max,
+            [
+                (EditorColors.TransformModeAccent(GizmoTransformMode.Translation), settings.PositionEnabled),
+                (EditorColors.TransformModeAccent(GizmoTransformMode.Rotation), settings.RotationEnabled),
+                (EditorColors.TransformModeAccent(GizmoTransformMode.Scale), settings.ScaleEnabled),
+            ], peakAlpha);
     }
 
     private void DrawTransformSnapToolbarTooltip()
@@ -164,10 +94,15 @@ internal sealed partial class EditorToolbar
                     _gizmo.Settings.TransformSnapSettings.PositionDragEnabled,
                     Accent: EditorColors.TransformModeAccent(GizmoTransformMode.Translation)),
             ],
-            new EditorToolbarTooltipKeyHint(GizmoInputUtility.PrecisionSnapModifier, "to invert snapping while dragging"));
+            [new IntonerTooltipKeyHint(GizmoInputUtility.PrecisionSnapModifier, "to invert snapping while dragging")]);
 
     private void DrawTransformSnapPopup(Vector2 anchorMin, Vector2 anchorMax)
     {
+        if (!IsTransformSnapPopupOpen())
+        {
+            return;
+        }
+
         var scale = ImGuiHelpers.GlobalScale;
         var accent = ThemeColors.AccentPrimary;
         var defaults = DefaultTransformSnapSettings;
@@ -176,7 +111,7 @@ internal sealed partial class EditorToolbar
         ImGui.SetNextWindowSize(new Vector2(popupWidth, 0f), ImGuiCond.Appearing);
         ImGui.SetNextWindowSizeConstraints(new Vector2(popupWidth, 0f), new Vector2(popupWidth, float.MaxValue));
 
-        using var windowPadding = ImRaii.PushStyle(ImGuiStyleVar.WindowPadding, new Vector2(9f * scale, 9f * scale));
+        using var popupStyle = EditorContextMenu.PushStyle();
         using var windowRounding = ImRaii.PushStyle(ImGuiStyleVar.WindowRounding, 12f * scale);
         using var popupBg = ImRaii.PushColor(ImGuiCol.PopupBg, ThemeColors.WithAlpha(_editorOverlayLayer.BackgroundColor, 0.98f));
         using var popupBorder = ImRaii.PushColor(ImGuiCol.Border, ThemeColors.WithAlpha(accent, 0.42f));
@@ -201,7 +136,7 @@ internal sealed partial class EditorToolbar
             "transformSnapPosition",
             FontAwesomeIcon.ArrowsAlt,
             "Position",
-            GetGizmoModeAccentColor(GizmoTransformMode.Translation),
+            EditorColors.TransformModeAccent(GizmoTransformMode.Translation),
             _gizmo.Settings.TransformSnapSettings.PositionEnabled,
             _gizmo.Settings.TransformSnapSettings.PositionStep,
             defaults.PositionStep,
@@ -216,7 +151,7 @@ internal sealed partial class EditorToolbar
             "transformSnapRotation",
             FontAwesomeIcon.SyncAlt,
             "Rotation",
-            GetGizmoModeAccentColor(GizmoTransformMode.Rotation),
+            EditorColors.TransformModeAccent(GizmoTransformMode.Rotation),
             _gizmo.Settings.TransformSnapSettings.RotationEnabled,
             _gizmo.Settings.TransformSnapSettings.RotationStepDegrees,
             defaults.RotationStepDegrees,
@@ -231,7 +166,7 @@ internal sealed partial class EditorToolbar
             "transformSnapScale",
             FontAwesomeIcon.CompressArrowsAlt,
             "Scale",
-            GetGizmoModeAccentColor(GizmoTransformMode.Scale),
+            EditorColors.TransformModeAccent(GizmoTransformMode.Scale),
             _gizmo.Settings.TransformSnapSettings.ScaleEnabled,
             _gizmo.Settings.TransformSnapSettings.ScaleStep,
             defaults.ScaleStep,
@@ -270,7 +205,7 @@ internal sealed partial class EditorToolbar
         if (!DrawTransformSnapActionButton(
                 "transformSnapDraggingToggle",
                 FontAwesomeIcon.LocationArrow,
-                GetGizmoModeAccentColor(GizmoTransformMode.Translation),
+                EditorColors.TransformModeAccent(GizmoTransformMode.Translation),
                 _gizmo.Settings.TransformSnapSettings.PositionDragEnabled,
                 "Toggle snapping for object dragging (based on position snap value)"))
         {
@@ -285,7 +220,7 @@ internal sealed partial class EditorToolbar
 
     private void DrawTransformSnapModeToggleButton(string id, FontAwesomeIcon icon, GizmoTransformMode mode, bool enabled, string tooltip)
     {
-        if (!DrawTransformSnapActionButton(id, icon, GetGizmoModeAccentColor(mode), enabled, tooltip))
+        if (!DrawTransformSnapActionButton(id, icon, EditorColors.TransformModeAccent(mode), enabled, tooltip))
         {
             return;
         }
@@ -396,79 +331,10 @@ internal sealed partial class EditorToolbar
 
     private static bool DrawTransformSnapActionButton(string id, FontAwesomeIcon icon, Vector4 accent, bool selected, string tooltip, bool useAccentWhenInactive = false)
     {
-        var scale = ImGuiHelpers.GlobalScale;
-        EditorIcon.Metrics iconMetrics = EditorIcon.Measure(icon);
-        var edge = MathF.Max(30f * scale, EditorIconButton.MeasureEdge(icon));
-        var size = new Vector2(edge, edge);
-        var inactiveAccent = ThemeColors.AccentGrey;
-        var currentAccent = selected || useAccentWhenInactive
-            ? accent
-            : inactiveAccent;
-        var fill = selected
-            ? ThemeColors.WithAlpha(currentAccent, 0.20f)
-            : ThemeColors.WithAlpha(ThemeColors.ButtonDefault, 0.80f);
-        float inactiveHoverAlpha = useAccentWhenInactive ? 0.12f : 0.08f;
-        float inactiveActiveAlpha = useAccentWhenInactive ? 0.18f : 0.12f;
-        var hoverFill = ThemeColors.WithAlpha(currentAccent, selected ? 0.30f : inactiveHoverAlpha);
-        var activeFill = ThemeColors.WithAlpha(currentAccent, selected ? 0.36f : inactiveActiveAlpha);
-        var rounding = 7f * scale;
-
-        using var button = ImRaii.PushColor(ImGuiCol.Button, fill);
-        using var hovered = ImRaii.PushColor(ImGuiCol.ButtonHovered, hoverFill);
-        using var active = ImRaii.PushColor(ImGuiCol.ButtonActive, activeFill);
-        using var border = ImRaii.PushColor(ImGuiCol.Border, Vector4.Zero);
-        using var borderSize = ImRaii.PushStyle(ImGuiStyleVar.FrameBorderSize, MathF.Max(1f * scale, 1f));
-        using var frameRounding = ImRaii.PushStyle(ImGuiStyleVar.FrameRounding, rounding);
-
-        var clicked = ImGui.Button($"##{id}", size);
-        var min = ImGui.GetItemRectMin();
-        var max = ImGui.GetItemRectMax();
-        var drawList = ImGui.GetWindowDrawList();
-
-        float borderAlpha;
-        if (selected)
-        {
-            borderAlpha = 0.88f;
-        }
-        else
-        {
-            borderAlpha = useAccentWhenInactive ? 0.42f : 0.28f;
-        }
-
-        drawList.AddRect(
-            min,
-            max,
-            ImGui.GetColorU32(ThemeColors.WithAlpha(currentAccent, borderAlpha)),
-            rounding,
-            ImDrawFlags.None,
-            MathF.Max(1f * scale, 1f));
-
-        float iconAlpha;
-        if (selected)
-        {
-            iconAlpha = 1f;
-        }
-        else
-        {
-            iconAlpha = useAccentWhenInactive ? 0.88f : 0.72f;
-        }
-
-        EditorIcon.Draw(
-            drawList,
-            icon,
-            iconMetrics,
-            min + ((size - iconMetrics.Size) * 0.5f),
-            ThemeColors.WithAlpha(currentAccent, iconAlpha));
-
-        if (ImGui.IsItemHovered())
-        {
-            IntonerTooltip.DrawDescription(
-                icon,
-                tooltip,
-                options: new IntonerTooltipOptions { Accent = currentAccent });
-        }
-
-        return clicked;
+        float edge = MathF.Max(30f * ImGuiHelpers.GlobalScale, EditorIconButton.MeasureEdge(icon));
+        return EditorIconButton.DrawToggle(id, icon, new Vector2(edge), selected, accent,
+            useAccentWhenInactive ? accent : ThemeColors.AccentGrey, tooltip,
+            style: useAccentWhenInactive ? EditorToggleIconButtonStyle.Outlined : EditorToggleIconButtonStyle.MutedOutline);
     }
 
     private bool AreAnyTransformSnapModesEnabled()

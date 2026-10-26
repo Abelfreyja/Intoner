@@ -1,3 +1,5 @@
+using Penumbra.GameData.Files;
+using Intoner.Objects.Resources;
 using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 
@@ -21,11 +23,25 @@ internal static class AvfxChunkReader
         public const uint BinderBindTargetPoint = 0x42505450;
         public const uint BinderBindPointId = 0x42504944;
         public const uint TimelineItem = 0x4974656D;
+        public const uint TimelineItemEnabled = 0x62456E61;
         public const uint TimelineBinderNumber = 0x426E4E6F;
         public const uint TimelineBindPoint = 0x42644E6F;
         public const uint LoopStart = 0x4C705374;
         public const uint LoopEnd = 0x4C704564;
+        public const uint EmitterSound = 0x53644E6D;
     }
+
+    public static bool TryReadRoot(ReadOnlySpan<byte> data, out Chunk root)
+    {
+        ChunkCursor cursor = EnumerateChunks(data);
+        return cursor.TryReadNext(out root) && root.Tag == AvfxMagic.AvfxBase && cursor.IsComplete;
+    }
+
+    public static bool IsBinderPropertyTag(uint tag)
+        => tag is Tags.BinderStartProperty
+               or Tags.BinderPrimaryProperty
+               or Tags.BinderSecondaryProperty
+               or Tags.BinderGoalProperty;
 
     public static ChunkCursor EnumerateChunks(ReadOnlySpan<byte> data)
         => new(data, 0, data.Length);
@@ -33,28 +49,89 @@ internal static class AvfxChunkReader
     public static ChunkCursor EnumerateChildren(ReadOnlySpan<byte> data, in Chunk container)
         => new(data, container.PayloadStart, container.PayloadLength);
 
-    private static ChunkCursor EnumerateChildren(ReadOnlySpan<byte> data, int containerStart, int containerLength)
-        => new(data, containerStart, containerLength);
-
-    public static bool TryFindRootChunk(ReadOnlySpan<byte> data, uint tag, out Chunk chunk)
-        => TryFindChunk(data, 0, data.Length, tag, out chunk);
-
-    public static bool TryFindChunk(ReadOnlySpan<byte> data, int containerStart, int containerLength, uint tag, out Chunk chunk)
+    public static bool TryReadBinderProperty(ReadOnlySpan<byte> data, in Chunk container, out BinderProperty property)
     {
-        chunk = default;
-        ChunkCursor cursor = EnumerateChildren(data, containerStart, containerLength);
+        property = default;
+        SignedField? bindPoint = null;
+        SignedField? bindTargetPoint = null;
+        SignedField? bindPointId = null;
+        ChunkCursor cursor = EnumerateChildren(data, container);
         while (cursor.TryReadNext(out Chunk child))
         {
-            if (child.Tag != tag)
+            switch (child.Tag)
             {
-                continue;
-            }
+                case Tags.BinderBindPoint:
+                    if (!TryReadSingleSignedField(data, child, ref bindPoint))
+                    {
+                        return false;
+                    }
 
-            chunk = child;
-            return true;
+                    break;
+                case Tags.BinderBindTargetPoint:
+                    if (!TryReadSingleSignedField(data, child, ref bindTargetPoint))
+                    {
+                        return false;
+                    }
+
+                    break;
+                case Tags.BinderBindPointId:
+                    if (!TryReadSingleSignedField(data, child, ref bindPointId))
+                    {
+                        return false;
+                    }
+
+                    break;
+            }
         }
 
-        return false;
+        property = new(bindPoint, bindTargetPoint, bindPointId);
+        return cursor.IsComplete;
+    }
+
+    private static bool TryReadSingleSignedField(ReadOnlySpan<byte> data, in Chunk chunk, ref SignedField? field)
+    {
+        if (field.HasValue || !TryReadSignedPayload(data, chunk, out int value))
+        {
+            return false;
+        }
+
+        field = new(chunk, value);
+        return true;
+    }
+
+    public static bool TryReadTimelineItemBindPoints(ReadOnlySpan<byte> data, in Chunk container, out int boundItemCount)
+    {
+        boundItemCount = 0;
+        bool hasBindPoint = false;
+        ChunkCursor cursor = EnumerateChildren(data, container);
+        while (cursor.TryReadNext(out Chunk child))
+        {
+            if (child.Tag == Tags.TimelineItemEnabled)
+            {
+                if (!TryReadSignedPayload(data, child, out _))
+                {
+                    return false;
+                }
+
+                hasBindPoint = false;
+            }
+            else if (child.Tag == Tags.TimelineBindPoint)
+            {
+                if (hasBindPoint || !TryReadSignedPayload(data, child, out int bindPoint))
+                {
+                    return false;
+                }
+
+                hasBindPoint = true;
+
+                if (bindPoint != -1)
+                {
+                    boundItemCount++;
+                }
+            }
+        }
+
+        return cursor.IsComplete;
     }
 
     public static bool TryReadSignedPayload(ReadOnlySpan<byte> data, in Chunk chunk, out int value)
@@ -84,6 +161,27 @@ internal static class AvfxChunkReader
         return false;
     }
 
+    public static bool TryReadPathPayload(ReadOnlySpan<byte> data, in Chunk chunk, out string value)
+    {
+        value = string.Empty;
+
+        if (chunk.PayloadStart < 0 || chunk.PayloadStart > data.Length
+         || chunk.PayloadLength < 0 || chunk.PayloadLength > data.Length - chunk.PayloadStart)
+        {
+            return false;
+        }
+
+        ReadOnlySpan<byte> payload = data.Slice(chunk.PayloadStart, chunk.PayloadLength);
+        int terminator = payload.IndexOf((byte)0);
+
+        if (terminator <= 0)
+        {
+            return false;
+        }
+
+        return ObjectResourcePathEncoding.TryDecodeGamePath(payload[..terminator], out value);
+    }
+
     public static void WriteIntegerPayload(Span<byte> data, in Chunk chunk, uint value)
     {
         if (chunk.PayloadLength >= sizeof(uint)
@@ -108,6 +206,12 @@ internal static class AvfxChunkReader
     }
 
     [StructLayout(LayoutKind.Auto)]
+    public readonly record struct SignedField(Chunk Chunk, int Value);
+
+    [StructLayout(LayoutKind.Auto)]
+    public readonly record struct BinderProperty(SignedField? BindPoint, SignedField? BindTargetPoint, SignedField? BindPointId);
+
+    [StructLayout(LayoutKind.Auto)]
     public readonly record struct Chunk(
         uint Tag,
         int PayloadStart,
@@ -119,8 +223,11 @@ internal static class AvfxChunkReader
         private readonly ReadOnlySpan<byte> _data;
         private readonly int _containerStart;
         private readonly int _containerLength;
-        private readonly bool _valid;
+        private bool _valid;
         private int _consumed;
+
+        public readonly bool IsComplete
+            => _valid && _consumed == _containerLength;
 
         private static int Align4(int value)
             => (int)(((uint)value + 3u) & ~3u);
@@ -146,24 +253,24 @@ internal static class AvfxChunkReader
         {
             chunk = default;
             if (chunkStart < containerStart
-             || chunkStart + HeaderSize > data.Length
-             || chunkStart + HeaderSize > containerStart + containerLength)
+             || chunkStart > data.Length - HeaderSize
+             || chunkStart - containerStart > containerLength - HeaderSize)
             {
                 return false;
             }
 
             uint chunkTag = BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(chunkStart, sizeof(uint)));
             uint payloadLength = BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(chunkStart + sizeof(uint), sizeof(uint)));
-            if (payloadLength > int.MaxValue - 3)
+            int remainingPayloadLength = containerLength - (chunkStart - containerStart) - HeaderSize;
+
+            if (payloadLength > remainingPayloadLength)
             {
                 return false;
             }
 
             int alignedPayloadLength = Align4((int)payloadLength);
-            int totalLength = HeaderSize + alignedPayloadLength;
-            if (totalLength < HeaderSize
-             || totalLength > containerStart + containerLength - chunkStart
-             || chunkStart + HeaderSize + (int)payloadLength > data.Length)
+
+            if (alignedPayloadLength > remainingPayloadLength)
             {
                 return false;
             }
@@ -172,14 +279,15 @@ internal static class AvfxChunkReader
                 chunkTag,
                 chunkStart + HeaderSize,
                 (int)payloadLength,
-                totalLength);
+                HeaderSize + alignedPayloadLength);
             return true;
         }
 
         public bool TryReadNext(out Chunk chunk)
         {
             chunk = default;
-            if (!_valid || _consumed + HeaderSize > _containerLength)
+
+            if (!_valid || _containerLength - _consumed < HeaderSize)
             {
                 return false;
             }
@@ -187,7 +295,7 @@ internal static class AvfxChunkReader
             int childStart = _containerStart + _consumed;
             if (!TryReadChunk(_data, childStart, _containerStart, _containerLength, out chunk))
             {
-                _consumed = _containerLength;
+                _valid = false;
                 return false;
             }
 

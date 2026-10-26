@@ -13,7 +13,7 @@ using SharpDXUtilities = SharpDX.Utilities;
 
 namespace Intoner.Objects.Rendering.Primitives;
 
-internal sealed class PrimitiveRenderResources : GpuUiDeviceResourceHost
+internal sealed partial class PrimitiveRenderResources : GpuUiDeviceResourceHost
 {
     private const string ShaderResourceName = "Objects.Rendering.Primitives.Shaders.ScenePrimitives.hlsl";
 
@@ -112,7 +112,8 @@ internal sealed class PrimitiveRenderResources : GpuUiDeviceResourceHost
             DepthComparison = Comparison.Always,
             IsStencilEnabled = false,
         });
-        _blendState = CreateBlendState(device);
+        _blendState = GpuRenderStateUtility.CreateAlphaBlendState(device);
+        CreateTextResources(device);
     }
 
     public bool TryUploadLineInstances(DeviceContext context, PrimitiveLineInstance[] instances, int instanceCount)
@@ -213,20 +214,6 @@ internal sealed class PrimitiveRenderResources : GpuUiDeviceResourceHost
                 new InputElement("TEXCOORD", 5, Format.R32_Float, InputElement.AppendAligned, 0),
             ]);
 
-    private static BlendState CreateBlendState(Device device)
-    {
-        var description = BlendStateDescription.Default();
-        description.RenderTarget[0].IsBlendEnabled = true;
-        description.RenderTarget[0].SourceBlend = BlendOption.SourceAlpha;
-        description.RenderTarget[0].DestinationBlend = BlendOption.InverseSourceAlpha;
-        description.RenderTarget[0].BlendOperation = BlendOperation.Add;
-        description.RenderTarget[0].SourceAlphaBlend = BlendOption.One;
-        description.RenderTarget[0].DestinationAlphaBlend = BlendOption.InverseSourceAlpha;
-        description.RenderTarget[0].AlphaBlendOperation = BlendOperation.Add;
-        description.RenderTarget[0].RenderTargetWriteMask = ColorWriteMaskFlags.All;
-        return new BlendState(device, description);
-    }
-
     private bool TryUploadDynamicBuffer<T>(
         DeviceContext context,
         T[] values,
@@ -276,22 +263,25 @@ internal sealed class PrimitiveRenderResources : GpuUiDeviceResourceHost
             return true;
         }
 
-        buffer?.Dispose();
-        capacity = Math.Max(valueCount, Math.Max(capacity * 2, 256));
-        buffer = new Buffer(
+        int nextCapacity = Math.Max(valueCount, Math.Max(capacity * 2, 256));
+        Buffer replacement = new(
             device,
             new BufferDescription(
-                valueStride * capacity,
+                valueStride * nextCapacity,
                 ResourceUsage.Dynamic,
                 BindFlags.VertexBuffer,
                 CpuAccessFlags.Write,
                 ResourceOptionFlags.None,
                 0));
+        buffer?.Dispose();
+        buffer = replacement;
+        capacity = nextCapacity;
         return true;
     }
 
     protected override void DisposeDeviceResources()
     {
+        DisposeTextResources();
         _blendState?.Dispose();
         _blendState = null;
         _depthStencilState?.Dispose();

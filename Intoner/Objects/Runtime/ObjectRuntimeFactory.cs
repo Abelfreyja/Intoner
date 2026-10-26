@@ -2,6 +2,7 @@ using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Graphics.Scene;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine.Group;
+using Intoner.Logging;
 using Intoner.Objects.Assets;
 using Intoner.Objects.Interop;
 using Intoner.Objects.Models;
@@ -10,7 +11,6 @@ using Intoner.Objects.Utils;
 using Intoner.Utils;
 using Microsoft.Extensions.Logging;
 using System.Text;
-using LayoutTransform = FFXIVClientStructs.FFXIV.Client.LayoutEngine.Transform;
 using SceneLight = FFXIVClientStructs.FFXIV.Client.Graphics.Scene.Light;
 
 namespace Intoner.Objects.Runtime;
@@ -32,18 +32,15 @@ internal interface IObjectRuntimeFactory
 
 internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
 {
-    private readonly record struct ObjectRuntimeCreateResult(IObjectRuntime? Runtime, string FailureCode)
+    private readonly record struct ObjectRuntimeCreateResult(ObjectRuntime? Runtime, string FailureCode)
     {
-        public static ObjectRuntimeCreateResult Created(IObjectRuntime runtime)
+        public static ObjectRuntimeCreateResult Created(ObjectRuntime runtime)
             => new(runtime, string.Empty);
 
         public static ObjectRuntimeCreateResult Failed(string failureCode)
             => new(null, string.IsNullOrWhiteSpace(failureCode) ? ObjectRuntimeFailureCodes.CreateFailed : failureCode);
     }
 
-    private const short FurnitureVisualLayerId = -1;
-    private const uint FurnitureVisualInstanceKey = uint.MaxValue;
-    private const int FurnitureHelperSubtype = 0x0C;
     private static ReadOnlySpan<byte> VfxPoolName => "Client.System.Scheduler.Instance.VfxObject\0"u8;
 
     private readonly ILogger _bgObjectLogger;
@@ -55,10 +52,12 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
     private readonly IDataManager _gameData;
     private readonly ObjectNativeBindings _nativeBindings;
     private readonly FurnitureEmoteGuard _emoteGuard;
+    private readonly CameraCollisionService _cameraCollision;
     private readonly ObjectResourceTracker _resourceTracker;
     private readonly IObjectResourceLoader _resourceLoader;
     private readonly IVfxResourceRewriteService _vfxResourceRewriteService;
     private readonly ObjectPathResolver _pathResolver;
+    private readonly ObjectFrameworkDiagnostics _frameworkDiagnostics;
 
     public ObjectRuntimeFactory(
         ILoggerFactory loggerFactory,
@@ -66,19 +65,23 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
         IDataManager gameData,
         ObjectNativeBindings nativeBindings,
         FurnitureEmoteGuard emoteGuard,
+        CameraCollisionService cameraCollision,
         ObjectResourceTracker resourceTracker,
         IObjectResourceLoader resourceLoader,
         IVfxResourceRewriteService vfxResourceRewriteService,
-        ObjectPathResolver pathResolver)
+        ObjectPathResolver pathResolver,
+        ObjectFrameworkDiagnostics frameworkDiagnostics)
     {
         _framework = framework;
         _gameData = gameData;
         _nativeBindings = nativeBindings;
         _emoteGuard = emoteGuard;
+        _cameraCollision = cameraCollision;
         _resourceTracker = resourceTracker;
         _resourceLoader = resourceLoader;
         _vfxResourceRewriteService = vfxResourceRewriteService;
         _pathResolver = pathResolver;
+        _frameworkDiagnostics = frameworkDiagnostics;
         _bgObjectLogger = loggerFactory.CreateLogger<BgObjectRuntime>();
         _furnitureLogger = loggerFactory.CreateLogger<FurnitureObjectRuntime>();
         _vfxLogger = loggerFactory.CreateLogger<VfxObjectRuntime>();
@@ -88,21 +91,7 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
 
     public bool TryCreate(ObjectSnapshot snapshot, out IObjectRuntime runtime, out string failureCode)
     {
-        ObjectRuntimeCreateResult result = FrameworkThreadUtility.Run(_framework, () =>
-        {
-            using IDisposable? scope = _logger.BeginScope("object={ObjectId}; kind={ObjectKind}; collection={CollectionId}; thread={ManagedThreadId}",
-                snapshot.Id, snapshot.Kind, snapshot.CollectionId, Environment.CurrentManagedThreadId);
-            _logger.LogDebug("object root create started; object={ObjectId}; collection={CollectionId}; requested={RequestedPath}",
-                snapshot.Id, snapshot.CollectionId, ObjectSnapshotUtility.GetRootResourcePath(snapshot));
-            return snapshot.Kind switch
-            {
-                ObjectKind.BgObject => TryCreateBgObjectUnsafe(snapshot),
-                ObjectKind.Furniture => TryCreateFurnitureUnsafe(snapshot),
-                ObjectKind.Vfx => TryCreateVfxUnsafe(snapshot),
-                ObjectKind.Light => TryCreateLightUnsafe(snapshot),
-                _ => ObjectRuntimeCreateResult.Failed(ObjectRuntimeFailureCodes.ServiceMissing),
-            };
-        });
+        ObjectRuntimeCreateResult result = FrameworkThreadUtility.Run(_framework, () => TryCreateUnsafe(snapshot));
 
         runtime = result.Runtime!;
         failureCode = result.FailureCode;
@@ -115,9 +104,50 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
         return result.Runtime is not null;
     }
 
-    private ObjectRuntimeCreateResult TryCreateBgObjectUnsafe(ObjectSnapshot snapshot)
+    private ObjectRuntimeCreateResult TryCreateUnsafe(ObjectSnapshot snapshot)
+    {
+        ObjectRuntimeCreateResult result = default;
+        try
+        {
+            using IDisposable? scope = DiagnosticLog.BeginScope(_logger, "object={ObjectId}; kind={ObjectKind}; collection={CollectionId}; thread={ManagedThreadId}",
+                snapshot.Id, snapshot.Kind, snapshot.CollectionId, Environment.CurrentManagedThreadId);
+            _logger.LogDebug("object root create started; object={ObjectId}; collection={CollectionId}; requested={RequestedPath}",
+                snapshot.Id, snapshot.CollectionId, ObjectSnapshotUtility.GetRootResourcePath(snapshot));
+            using ObjectResourceLoadScopeToken resourceLoadScope = _resourceLoader.EnterRootLoadScope(snapshot.CollectionId);
+            result = snapshot.Kind switch
+            {
+                ObjectKind.BgObject => TryCreateBgObjectUnsafe(snapshot, resourceLoadScope.Collection),
+                ObjectKind.Furniture => TryCreateFurnitureUnsafe(snapshot, resourceLoadScope.Collection),
+                ObjectKind.Vfx => TryCreateVfxUnsafe(snapshot, resourceLoadScope.Collection),
+                ObjectKind.Light => TryCreateLightUnsafe(snapshot, resourceLoadScope.Collection),
+                _ => ObjectRuntimeCreateResult.Failed(ObjectRuntimeFailureCodes.ServiceMissing),
+            };
+            if (result.Runtime is not null)
+            {
+                ObjectResourceRoots roots = ObjectResourceRoots.FromModel(snapshot.Model);
+                result.Runtime.ResourceRevision = snapshot.CollectionId.Length == 0
+                    || roots.Primary.Length == 0 && roots.Collision.Length == 0
+                        ? default(ObjectResourceRevision)
+                        : resourceLoadScope.Collection?.GetResourceRevision(roots);
+            }
+        }
+        catch
+        {
+            result.Runtime?.Dispose();
+            throw;
+        }
+
+        return result;
+    }
+
+    private ObjectRuntimeCreateResult TryCreateBgObjectUnsafe(ObjectSnapshot snapshot, ObjectCollectionResolveData? collection)
     {
         var bgObjectModel = (BgObjectModel)snapshot.Model;
+        if (bgObjectModel.ColliderDefinition is { Kind: not BgCollisionKind.None } && !_cameraCollision.IsBgAvailable)
+        {
+            return ObjectRuntimeCreateResult.Failed(ObjectRuntimeFailureCodes.ServiceMissing);
+        }
+
         if (string.IsNullOrWhiteSpace(bgObjectModel.ModelPath))
         {
             _bgObjectLogger.LogDebug("skipping bgobject create because model path is empty");
@@ -126,11 +156,9 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
 
         if (!TryResolveRootResource(
                 _bgObjectLogger,
-                snapshot,
+                collection,
                 ObjectRootPathKind.BgModel,
                 bgObjectModel.ModelPath,
-                "bgobject",
-                "model",
                 out ObjectResolvedRootPath resolvedResource,
                 out ObjectRuntimeCreateResult failure))
         {
@@ -138,7 +166,6 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
         }
 
         BgObject* bgObject;
-        using var resourceLoadScope = EnterRootLoadScope(resolvedResource);
         bgObject = BgObjectSceneInterop.Create(resolvedResource.CreatePath);
 
         if (bgObject == null)
@@ -151,10 +178,18 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
             () => new BgObjectRuntime(
                 _framework,
                 _bgObjectLogger,
-                snapshot with { Model = new BgObjectModel { ModelPath = bgObjectModel.ModelPath } },
+                snapshot with { Model = new BgObjectModel
+                {
+                    ModelPath = bgObjectModel.ModelPath,
+                    ColliderDefinition = bgObjectModel.ColliderDefinition,
+                    CameraCollision = bgObjectModel.CameraCollision,
+                } },
                 bgObject,
                 _resourceTracker,
-                resolvedResource.ResolvedPath),
+                resolvedResource,
+                _resourceLoader,
+                _cameraCollision,
+                collection),
             () => BgObjectSceneInterop.Destroy(bgObject),
             snapshot,
             createdObject => LogCreatedRootResource(
@@ -164,8 +199,13 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
                 resolvedResource));
     }
 
-    private ObjectRuntimeCreateResult TryCreateFurnitureUnsafe(ObjectSnapshot snapshot)
+    private ObjectRuntimeCreateResult TryCreateFurnitureUnsafe(ObjectSnapshot snapshot, ObjectCollectionResolveData? collection)
     {
+        if (!_cameraCollision.IsFurnitureAvailable || !_emoteGuard.IsAvailable)
+        {
+            return ObjectRuntimeCreateResult.Failed(ObjectRuntimeFailureCodes.ServiceMissing);
+        }
+
         var furnitureModel = (FurnitureModel)snapshot.Model;
         if (string.IsNullOrWhiteSpace(furnitureModel.SharedGroupPath))
         {
@@ -181,11 +221,9 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
 
         if (!TryResolveRootResource(
                 _furnitureLogger,
-                snapshot,
+                collection,
                 ObjectRootPathKind.FurnitureSharedGroup,
                 furnitureModel.SharedGroupPath,
-                "furniture",
-                "shared group",
                 out ObjectResolvedRootPath resolvedResource,
                 out ObjectRuntimeCreateResult failure))
         {
@@ -194,71 +232,76 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
 
         var layoutTransform = ObjectLayoutInterop.CreateTransform(snapshot.Transform);
         var pathBytes = Encoding.UTF8.GetBytes(resolvedResource.CreatePath + '\0');
-        var createSharedGroup = (delegate* unmanaged<short, uint, LayoutTransform*, byte*, byte*, byte, uint, int, nint, nint, SharedGroupLayoutInstance*>)_nativeBindings.Furniture.CreateAddress;
-        var destroySharedGroup = (delegate* unmanaged<SharedGroupLayoutInstance**, nint, void>)_nativeBindings.Furniture.DestroyAddress;
-        var applySharedGroupState = (delegate* unmanaged<SharedGroupLayoutInstance*, byte, void>)_nativeBindings.Furniture.ApplyStateAddress;
-        SharedGroupLayoutInstance* instance;
-        using var resourceLoadScope = EnterRootLoadScope(resolvedResource);
-        fixed (byte* pathPtr = pathBytes)
+        FurnitureNativeInstance native = _cameraCollision.CreateRoot(snapshot.Visible, furnitureModel.CameraCollision);
+        try
         {
-            instance = createSharedGroup(
-                FurnitureVisualLayerId,
-                FurnitureVisualInstanceKey,
-                &layoutTransform,
-                pathPtr,
-                null,
-                1,
-                0,
-                FurnitureHelperSubtype,
-                0,
-                0);
-        }
+            using ObjectCollisionOwnership.Scope collisionScope = _cameraCollision.EnterCreation(native);
+            SharedGroupLayoutInstance* instance;
+            fixed (byte* pathPtr = pathBytes)
+            {
+                instance = _nativeBindings.Furniture.Create(&layoutTransform, pathPtr);
+            }
 
-        if (instance == null)
-        {
-            _furnitureLogger.LogDebug("furniture shared group create failed for path {SharedGroupPath}", furnitureModel.SharedGroupPath);
-            return ObjectRuntimeCreateResult.Failed(ObjectRuntimeFailureCodes.CreateFailed);
-        }
+            if (instance == null)
+            {
+                _furnitureLogger.LogDebug("furniture shared group create failed for path {SharedGroupPath}", furnitureModel.SharedGroupPath);
+                return ObjectRuntimeCreateResult.Failed(ObjectRuntimeFailureCodes.CreateFailed);
+            }
 
-        if (!IsVisualSharedGroup(instance, out InstanceType instanceType))
-        {
+            if (!IsVisualSharedGroup(instance, out InstanceType instanceType))
+            {
+                try
+                {
+                    _furnitureLogger.LogDebug(
+                        "furniture create returned native layout type {InstanceType} for path {SharedGroupPath}, destroying rejected instance",
+                        instanceType,
+                        furnitureModel.SharedGroupPath);
+                }
+                finally
+                {
+                    _nativeBindings.Furniture.Destroy(instance);
+                }
+
+                return ObjectRuntimeCreateResult.Failed(ObjectRuntimeFailureCodes.NativeLayoutRejected);
+            }
+
             try
             {
-                _furnitureLogger.LogDebug(
-                    "furniture create returned native layout type {InstanceType} for path {SharedGroupPath}, destroying rejected instance",
-                    instanceType,
-                    furnitureModel.SharedGroupPath);
+                _cameraCollision.AttachRoot(native, instance);
             }
-            finally
+            catch
             {
-                DestroyCreatedSharedGroup(destroySharedGroup, instance);
+                _nativeBindings.Furniture.Destroy(instance);
+                throw;
             }
 
-            return ObjectRuntimeCreateResult.Failed(ObjectRuntimeFailureCodes.NativeLayoutRejected);
+            return FinalizeRuntimeCreate(
+                () => new FurnitureObjectRuntime(
+                    _framework,
+                    _furnitureLogger,
+                    snapshot with { Model = new FurnitureModel { SharedGroupPath = furnitureModel.SharedGroupPath, CameraCollision = furnitureModel.CameraCollision } },
+                    native,
+                    resolvedResource.ResolvedPath,
+                    _resourceTracker,
+                    _emoteGuard,
+                    _frameworkDiagnostics,
+                    resolvedResource.ResourceCollectionId),
+                native.Dispose,
+                snapshot,
+                createdObject => LogCreatedRootResource(
+                    _furnitureLogger,
+                    "furniture shared group",
+                    createdObject.Address,
+                    resolvedResource),
+                createdObject => createdObject.RefreshCreatedVisualState());
         }
-
-        return FinalizeRuntimeCreate(
-            () => new FurnitureObjectRuntime(
-                _framework,
-                _furnitureLogger,
-                snapshot with { Model = new FurnitureModel { SharedGroupPath = furnitureModel.SharedGroupPath } },
-                instance,
-                resolvedResource.ResolvedPath,
-                _resourceTracker,
-                _emoteGuard,
-                destroySharedGroup),
-            () => DestroyCreatedSharedGroup(destroySharedGroup, instance),
-            snapshot,
-            createdObject => LogCreatedRootResource(
-                _furnitureLogger,
-                "furniture shared group",
-                createdObject.Address,
-                resolvedResource),
-            createdObject =>
+        finally
+        {
+            if (native.Instance == null)
             {
-                applySharedGroupState(instance, 0);
-                createdObject.RefreshCreatedVisualState();
-            });
+                native.Dispose();
+            }
+        }
     }
 
     private static bool IsVisualSharedGroup(SharedGroupLayoutInstance* instance, out InstanceType instanceType)
@@ -269,17 +312,29 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
         return instanceType == InstanceType.SharedGroup;
     }
 
-    private static void DestroyCreatedSharedGroup(
-        delegate* unmanaged<SharedGroupLayoutInstance**, nint, void> destroySharedGroup,
-        SharedGroupLayoutInstance* instance)
-    {
-        var mutableInstance = instance;
-        destroySharedGroup(&mutableInstance, 0);
-    }
-
-    private ObjectRuntimeCreateResult TryCreateLightUnsafe(ObjectSnapshot snapshot)
+    private ObjectRuntimeCreateResult TryCreateLightUnsafe(ObjectSnapshot snapshot, ObjectCollectionResolveData? collection)
     {
         var lightModel = (LightModel)snapshot.Model;
+        ObjectResolvedRootPath projectionResource = default;
+
+        if (lightModel.ProjectionTexturePath.Length > 0
+         && (!LightModel.SupportsProjectionTexture(lightModel.LightType)
+             || !GameAssetPathRules.IsFileKind(lightModel.ProjectionTexturePath, GameAssetFileKind.Tex)))
+        {
+            return ObjectRuntimeCreateResult.Failed(ObjectRuntimeFailureCodes.InvalidAssetPath);
+        }
+
+        if (lightModel.ProjectionTexturePath.Length > 0
+         && !TryResolveRootResource(
+                _lightLogger,
+                collection,
+                ObjectRootPathKind.LightProjection,
+                lightModel.ProjectionTexturePath,
+                out projectionResource,
+                out ObjectRuntimeCreateResult failure))
+        {
+            return failure;
+        }
 
         SceneLight* light;
         fixed (byte* poolPtr = "Intoner.Light\0"u8)
@@ -298,13 +353,14 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
                 _framework,
                 _lightLogger,
                 snapshot,
-                light),
+                light,
+                projectionResource),
             () => DrawObjectRuntime.DestroyNative((DrawObject*)light),
             snapshot,
             createdObject => _lightLogger.LogInformation("created light 0x{Address:X}", (ulong)createdObject.Address));
     }
 
-    private ObjectRuntimeCreateResult TryCreateVfxUnsafe(ObjectSnapshot snapshot)
+    private ObjectRuntimeCreateResult TryCreateVfxUnsafe(ObjectSnapshot snapshot, ObjectCollectionResolveData? collection)
     {
         var vfxModel = (VfxModel)snapshot.Model;
         if (string.IsNullOrWhiteSpace(vfxModel.VfxPath))
@@ -321,11 +377,9 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
 
         if (!TryResolveRootResource(
                 _vfxLogger,
-                snapshot,
+                collection,
                 ObjectRootPathKind.Vfx,
                 vfxModel.VfxPath,
-                "vfx",
-                "path",
                 out ObjectResolvedRootPath resolvedResource,
                 out ObjectRuntimeCreateResult failure))
         {
@@ -338,9 +392,8 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
         pathBytes[^1] = 0;
 
         VfxObject* vfxObject;
-        using var resourceLoadScope = EnterRootLoadScope(resolvedResource);
         using var cacheIsolationScope = EnterVfxCacheIsolationScope(resolvedResource);
-        using var vfxRewriteScope = _vfxResourceRewriteService.EnterRewriteScope(resolvedResource);
+        using var vfxRewriteScope = _vfxResourceRewriteService.EnterRewriteScope(resolvedResource, cacheIsolationScope.ResourceHash);
         fixed (byte* pathPtr = pathBytes)
         fixed (byte* poolPtr = VfxPoolName)
         {
@@ -361,7 +414,8 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
                 vfxObject,
                 resolvedResource.ResolvedPath,
                 _nativeBindings.Vfx,
-                _resourceTracker),
+                _resourceTracker,
+                resolvedResource.ResourceCollectionId),
             () => DrawObjectRuntime.DestroyNative((DrawObject*)vfxObject),
             snapshot,
             createdObject => LogCreatedRootResource(
@@ -436,12 +490,40 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
             resolvedResource.ResourceCollectionId);
     }
 
-    private static void LogRejectedRootResource(
+    private ObjectRootCacheIsolationScope EnterVfxCacheIsolationScope(ObjectResolvedRootPath resolvedResource)
+        => resolvedResource.ResourceCollectionId.Length == 0
+            && resolvedResource.ResolvedPathKind == ObjectResolvedPathKind.GamePath
+            && GameAssetPathRules.IsFileKind(resolvedResource.CreatePath, GameAssetFileKind.Avfx)
+            ? _resourceLoader.EnterRootCacheIsolation(resolvedResource.CreatePath)
+            : default;
+
+    private bool TryResolveRootResource(
         ILogger logger,
-        string objectType,
-        string pathLabel,
-        ObjectResolvedRootPath resolvedResource)
+        ObjectCollectionResolveData? collection,
+        ObjectRootPathKind kind,
+        string requestedPath,
+        out ObjectResolvedRootPath resolvedResource,
+        out ObjectRuntimeCreateResult failure)
     {
+        resolvedResource = _pathResolver.ResolveRootPath(kind, requestedPath, collection);
+        logger.LogDebug("object root path resolved; collection={CollectionId}; requested={RequestedPath}; resolved={ResolvedPath}; resolvedKind={ResolvedKind}; status={Status}",
+            resolvedResource.ResourceCollectionId, resolvedResource.RequestedPath,
+            resolvedResource.ResolvedPath, resolvedResource.ResolvedPathKind, resolvedResource.Status);
+        if (ObjectResourcePathUtility.Exists(_gameData, resolvedResource))
+        {
+            failure = default;
+            return true;
+        }
+
+        (string objectType, string pathLabel) = kind switch
+        {
+            ObjectRootPathKind.BgModel => ("bgobject", "model"),
+            ObjectRootPathKind.FurnitureSharedGroup => ("furniture", "shared group"),
+            ObjectRootPathKind.LightProjection => ("light", "projection texture"),
+            ObjectRootPathKind.Vfx => ("vfx", "path"),
+            _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null),
+        };
+
         if (!resolvedResource.IsReady)
         {
             logger.LogDebug(
@@ -450,52 +532,16 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
                 pathLabel,
                 resolvedResource.ResolvedPath,
                 resolvedResource.Status);
-            return;
         }
-
-        logger.LogDebug(
-            "{ObjectType} create rejected missing {PathLabel} {Path}",
-            objectType,
-            pathLabel,
-            resolvedResource.ResolvedPath);
-    }
-
-    private bool RootResourceExists(ObjectResolvedRootPath resolvedResource)
-        => ObjectResourcePathUtility.Exists(_gameData, resolvedResource);
-
-    private IDisposable EnterRootLoadScope(ObjectResolvedRootPath resolvedResource)
-        => resolvedResource.ResourceCollectionId.Length == 0
-            ? default(ObjectResourceLoadScopeToken)
-            : _resourceLoader.EnterRootLoadScope(resolvedResource.ResourceCollectionId);
-
-    private IDisposable EnterVfxCacheIsolationScope(ObjectResolvedRootPath resolvedResource)
-        => resolvedResource.ResourceCollectionId.Length == 0
-            && resolvedResource.ResolvedPathKind == ObjectResolvedPathKind.GamePath
-            && GameAssetPathRules.IsFileKind(resolvedResource.CreatePath, GameAssetFileKind.Avfx)
-            ? _resourceLoader.EnterRootCacheIsolation(resolvedResource.CreatePath)
-            : default(ObjectResourceLoadScopeToken);
-
-    private bool TryResolveRootResource(
-        ILogger logger,
-        ObjectSnapshot snapshot,
-        ObjectRootPathKind kind,
-        string requestedPath,
-        string objectType,
-        string pathLabel,
-        out ObjectResolvedRootPath resolvedResource,
-        out ObjectRuntimeCreateResult failure)
-    {
-        resolvedResource = _pathResolver.ResolveRootPath(snapshot, kind, requestedPath);
-        logger.LogDebug("object root path resolved; object={ObjectId}; collection={CollectionId}; requested={RequestedPath}; resolved={ResolvedPath}; resolvedKind={ResolvedKind}; status={Status}",
-            snapshot.Id, resolvedResource.ResourceCollectionId, resolvedResource.RequestedPath,
-            resolvedResource.ResolvedPath, resolvedResource.ResolvedPathKind, resolvedResource.Status);
-        if (RootResourceExists(resolvedResource))
+        else
         {
-            failure = default;
-            return true;
+            logger.LogDebug(
+                "{ObjectType} create rejected missing {PathLabel} {Path}",
+                objectType,
+                pathLabel,
+                resolvedResource.ResolvedPath);
         }
 
-        LogRejectedRootResource(logger, objectType, pathLabel, resolvedResource);
         failure = ObjectRuntimeCreateResult.Failed(ResolveRootResourceFailureCode(resolvedResource));
         return false;
     }

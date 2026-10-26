@@ -37,23 +37,82 @@ internal sealed class PreviewAssetService : IDisposable
             return false;
         }
 
+        error = null;
+        long now = Environment.TickCount64;
         string cacheKey = asset.ModelSignature;
-        if (_geometryCache.TryGet(cacheKey, out entry))
+
+        if (!_geometryCache.TryGet(cacheKey, out entry) || entry is null || entry.NeedsModelRetry(now))
         {
-            error = null;
-            return true;
+            if (entry is not null)
+            {
+                lock (entry.SyncRoot)
+                {
+                    entry.NextModelRetryAtMs = now + (long)ObjectAssetFileUtility.AssetReadRetryDelay.TotalMilliseconds;
+                }
+            }
+
+            try
+            {
+                ModelPreviewGeometryReader.PreviewGeometry? geometry = _geometryBuilder.BuildMergedGeometry(asset.Models,
+                    out IReadOnlyList<PreviewAssetState.MaterialRequest> missingMaterials,
+                    out IReadOnlySet<int> loadedModelIndices, out error);
+
+                if (geometry is not null)
+                {
+                    entry = _geometryCache.GetOrCreate(cacheKey, geometry, missingMaterials, asset.Models.Count, loadedModelIndices);
+                }
+            }
+            catch (Exception ex) when (entry is not null && ObjectAssetFileUtility.IsReadFailure(ex))
+            {
+                error = null;
+            }
         }
 
-        ModelPreviewGeometryReader.PreviewGeometry? geometry = _geometryBuilder.BuildMergedGeometry(asset.Models, out error);
-        if (geometry is null)
+        if (entry is null)
         {
-            entry = null;
             return false;
         }
 
-        entry = _geometryCache.GetOrCreate(cacheKey, geometry);
+        if (NeedsAssetRetry(entry, now))
+        {
+            entry = _geometryCache.RefreshResources(entry, now);
+        }
+
         error = null;
         return true;
+    }
+
+    public bool NeedsAssetRetry(PreviewAssetState.GeometryEntry entry, long now)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        if (_geometryCache.TryGet(entry.CacheKey, out PreviewAssetState.GeometryEntry? current) && !ReferenceEquals(current, entry))
+        {
+            return true;
+        }
+
+        lock (entry.SyncRoot)
+        {
+            long retryAtMs = GetNextAssetRetryAtMs(entry);
+            return retryAtMs > 0 && now >= retryAtMs;
+        }
+    }
+
+    private static long GetNextAssetRetryAtMs(PreviewAssetState.GeometryEntry entry)
+    {
+        long retryAtMs = entry.HasMissingModels ? entry.NextModelRetryAtMs : 0;
+
+        if (entry.NextMaterialRetryAtMs > 0 && (retryAtMs == 0 || entry.NextMaterialRetryAtMs < retryAtMs))
+        {
+            retryAtMs = entry.NextMaterialRetryAtMs;
+        }
+
+        if (entry.NextTextureRetryAtMs > 0 && (retryAtMs == 0 || entry.NextTextureRetryAtMs < retryAtMs))
+        {
+            retryAtMs = entry.NextTextureRetryAtMs;
+        }
+
+        return retryAtMs;
     }
 
     public static void MarkGeometryAccess(PreviewAssetState.GeometryEntry entry, PreviewRender.Mode mode, long now)
@@ -64,6 +123,21 @@ internal sealed class PreviewAssetService : IDisposable
 
     public void BeginGeometryUse(PreviewAssetState.GeometryEntry entry, PreviewRender.Mode mode, long now)
         => _geometryCache.BeginUse(entry, mode, now);
+
+    public ModelPreviewGeometryReader.PreviewGeometry CaptureRenderGeometry(
+        PreviewAssetState.GeometryEntry entry,
+        out long nextAssetRetryAtMs)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        lock (entry.SyncRoot)
+        {
+            ModelPreviewGeometryReader.PreviewGeometry snapshot = entry.Geometry.CreateRenderSnapshot();
+            nextAssetRetryAtMs = GetNextAssetRetryAtMs(entry);
+
+            return snapshot;
+        }
+    }
 
     public static void EndGeometryUse(PreviewAssetState.GeometryEntry entry)
         => PreviewGeometryCache.EndUse(entry);
@@ -97,7 +171,7 @@ internal sealed class PreviewAssetService : IDisposable
 
         _disposed = true;
         _geometryCache.Dispose();
-        _textureCache.Clear();
-        _materialResolver.Clear();
+        _textureCache.Dispose();
+        _materialResolver.Dispose();
     }
 }

@@ -230,20 +230,41 @@ internal sealed class SqpackIndexStore
 
     public SqpackIndexSnapshot Load(CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        string sqpackRoot;
         lock (_loadLock)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+
             if (_snapshot is not null)
             {
                 return _snapshot;
             }
 
-            if (!SqpackIndexFileSystem.TryResolveSqpackRoot(out string sqpackRoot))
+            if (!SqpackIndexFileSystem.TryResolveSqpackRoot(out sqpackRoot))
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 _snapshot = new SqpackIndexSnapshot(
                     string.Empty,
                     new HashSet<SqpackIndex1EntryKey>(),
                     new HashSet<SqpackIndex2EntryKey>(),
                     []);
+                return _snapshot;
+            }
+        }
+
+        return LoadFromRoot(sqpackRoot, cancellationToken);
+    }
+
+    internal SqpackIndexSnapshot LoadFromRoot(string sqpackRoot, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_loadLock)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (_snapshot is not null)
+            {
                 return _snapshot;
             }
 
@@ -280,7 +301,7 @@ internal sealed class SqpackIndexStore
         }
     }
 
-    private void TryLoadIndexFile(
+    private static void TryLoadIndexFile(
         string indexFilePath,
         ISet<SqpackIndex1EntryKey> index1Entries,
         ISet<SqpackIndex2EntryKey> index2Entries,
@@ -314,8 +335,7 @@ internal sealed class SqpackIndexStore
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogDebug(ex, "failed to read sqpack index file {IndexFilePath}", indexFilePath);
+            throw new IOException($"could not read sqpack index file {indexFilePath}", ex);
         }
     }
 }
-

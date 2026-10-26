@@ -1,3 +1,4 @@
+using Intoner.Objects.Assets;
 using Intoner.Objects.Preview.Assets;
 using Intoner.Services.Gpu;
 using Microsoft.Extensions.Logging;
@@ -24,30 +25,44 @@ internal sealed class ViewportMeshCache(ILogger logger) : IDisposable
     {
         lease = null;
         error = null;
-        string meshKey = BuildMeshKey(geometryEntry, asset);
-        if (_entries.TryGetValue(meshKey, out Entry? cachedEntry))
-        {
-            cachedEntry.LastAccessAtMs = Environment.TickCount64;
-            lease = cachedEntry.Mesh.Acquire();
-            return true;
-        }
 
-        try
+        lock (geometryEntry.SyncRoot)
         {
-            ViewportMesh mesh = ViewportMeshUploader.Upload(
-                device,
-                geometryEntry.Geometry,
-                asset.UntexturedDiffuseColor,
-                whiteTexture);
-            _entries[meshKey] = new Entry(mesh, Environment.TickCount64);
-            lease = mesh.Acquire();
+            string meshKey = BuildMeshKey(geometryEntry, asset);
+            ModelPreviewGeometryReader.PreviewGeometry geometry = geometryEntry.Geometry;
+
+            if (_entries.TryGetValue(meshKey, out Entry? cachedEntry) && cachedEntry.Matches(geometry))
+            {
+                cachedEntry.LastAccessAtMs = Environment.TickCount64;
+                lease = cachedEntry.Mesh.Acquire();
+                return true;
+            }
+
+            ViewportMesh? mesh = null;
+
+            try
+            {
+                mesh = ViewportMeshUploader.Upload(
+                    device,
+                    geometry,
+                    asset.UntexturedDiffuseColor,
+                    whiteTexture);
+                Entry replacement = new(mesh, geometry, Environment.TickCount64);
+                lease = mesh.Acquire();
+                _entries[meshKey] = replacement;
+            }
+            catch (Exception ex)
+            {
+                lease?.Dispose();
+                lease = null;
+                mesh?.Dispose();
+                logger.LogWarning(ex, "preview mesh upload failed");
+                error = "Failed to upload preview mesh.";
+                return false;
+            }
+
+            cachedEntry?.Mesh.Dispose();
             return true;
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "preview mesh upload failed");
-            error = "Failed to upload preview mesh.";
-            return false;
         }
     }
 
@@ -87,9 +102,67 @@ internal sealed class ViewportMeshCache(ILogger logger) : IDisposable
     private static string BuildMeshKey(PreviewAssetState.GeometryEntry geometryEntry, PreviewAsset asset)
         => $"{geometryEntry.CacheKey}:{asset.MaterialSignature}";
 
-    private sealed class Entry(ViewportMesh mesh, long lastAccessAtMs)
+    private sealed class Entry
     {
-        public ViewportMesh Mesh { get; } = mesh;
-        public long LastAccessAtMs { get; set; } = lastAccessAtMs;
+        private readonly WeakReference<ModelPreviewGeometryReader.PreviewGeometry> _geometry;
+        private readonly WeakReference<ModelPreviewGeometryReader.PreviewMaterial>[] _materials;
+        private readonly WeakReference<ModelPreviewGeometryReader.PreviewTexture>?[] _textures;
+
+        public Entry(ViewportMesh mesh, ModelPreviewGeometryReader.PreviewGeometry geometry, long lastAccessAtMs)
+        {
+            Mesh = mesh;
+            LastAccessAtMs = lastAccessAtMs;
+            _geometry = new(geometry);
+            _materials = new WeakReference<ModelPreviewGeometryReader.PreviewMaterial>[geometry.Materials.Length];
+            _textures = new WeakReference<ModelPreviewGeometryReader.PreviewTexture>?[geometry.Materials.Length];
+
+            for (int index = 0; index < geometry.Materials.Length; ++index)
+            {
+                ModelPreviewGeometryReader.PreviewMaterial material = geometry.Materials[index];
+                _materials[index] = new(material);
+                _textures[index] = material.DiffuseTexture is { } texture ? new(texture) : null;
+            }
+        }
+
+        public ViewportMesh Mesh { get; }
+        public long LastAccessAtMs { get; set; }
+
+        public bool Matches(ModelPreviewGeometryReader.PreviewGeometry geometry)
+        {
+            if (!_geometry.TryGetTarget(out ModelPreviewGeometryReader.PreviewGeometry? sourceGeometry)
+             || !ReferenceEquals(sourceGeometry, geometry)
+             || _materials.Length != geometry.Materials.Length)
+            {
+                return false;
+            }
+
+            for (int index = 0; index < _materials.Length; ++index)
+            {
+                ModelPreviewGeometryReader.PreviewMaterial material = geometry.Materials[index];
+
+                if (!_materials[index].TryGetTarget(out ModelPreviewGeometryReader.PreviewMaterial? sourceMaterial)
+                 || !ReferenceEquals(sourceMaterial, material))
+                {
+                    return false;
+                }
+
+                WeakReference<ModelPreviewGeometryReader.PreviewTexture>? source = _textures[index];
+
+                if (source is null)
+                {
+                    if (material.DiffuseTexture is not null)
+                    {
+                        return false;
+                    }
+                }
+                else if (!source.TryGetTarget(out ModelPreviewGeometryReader.PreviewTexture? texture)
+                      || !ReferenceEquals(texture, material.DiffuseTexture))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
     }
 }

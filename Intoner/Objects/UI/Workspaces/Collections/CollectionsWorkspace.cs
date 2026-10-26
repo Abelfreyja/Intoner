@@ -18,7 +18,6 @@ namespace Intoner.Objects.UI;
 internal sealed partial class CollectionsWorkspace
 {
     private readonly IObjectOrganizationService _objectOrganizationService;
-    private readonly IObjectSceneView _sceneView;
     private readonly IObjectCollectionManager _objectCollectionManager;
     private readonly IObjectModDataSource _objectModDataSource;
     private readonly IPenumbraDependency _penumbra;
@@ -28,7 +27,10 @@ internal sealed partial class CollectionsWorkspace
     private readonly EditorListCard _listCard;
     private readonly SceneItemControls _sceneItems;
     private readonly CollectionModSettingsEditor _modSettings;
-    private readonly CollectionPanel _collectionPanel;
+    private readonly EditorColumnPanel _columnPanel;
+    private readonly EditorTabBar _viewTabs = new();
+    private (bool HasCollection, int ObjectCount, int ModCount)? _viewTabSource;
+    private EditorTabBar.Tab[] _viewTabItems = [];
     private readonly HashSet<string> _expandedCollectionModRows = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<EditorBadge> _collectionModBadgeBuffer = new(2);
     private bool _openObjectCollectionAddModPopupNextFrame;
@@ -43,9 +45,30 @@ internal sealed partial class CollectionsWorkspace
     private const int ObjectCollectionNameMaxLength = 128;
     private ObjectCollectionView _objectCollectionView = ObjectCollectionView.Mods;
 
+    private static class WorkspaceStyle
+    {
+        public const float HeaderHeight = 62f;
+        public const float HeaderPadding = 8f;
+        public const float HeaderGap = 10f;
+        public const float PickerMinWidth = 250f;
+        public const float PickerMaxWidth = 310f;
+        public const float HeaderActionHeight = 32f;
+        public const float HeaderMenuGap = 7f;
+        public const float TabsHeight = 39f;
+        public const float TabsHorizontalInset = 7f;
+        public const float TabsTopInset = 5f;
+        public const float PanelTopGap = 2f;
+        public const float PanelHorizontalInset = 7f;
+        public const float PanelBottomInset = 7f;
+        public const float SurfaceRounding = 7f;
+
+        public static Vector4 Surface => ThemeColors.ButtonDefault with { W = 0.14f };
+        public static Vector4 Header => ThemeColors.ButtonDefault with { W = 0.24f };
+        public static Vector4 Tabs => ThemeColors.ButtonDefault with { W = 0.10f };
+    }
+
     public CollectionsWorkspace(
         IObjectOrganizationService objectOrganizationService,
-        IObjectSceneView sceneView,
         IObjectCollectionManager objectCollectionManager,
         IObjectModDataSource objectModDataSource,
         IPenumbraDependency penumbra,
@@ -55,10 +78,9 @@ internal sealed partial class CollectionsWorkspace
         EditorListCard listCard,
         SceneItemControls sceneItems,
         CollectionModSettingsEditor modSettings,
-        CollectionPanel collectionPanel)
+        EditorColumnPanel columnPanel)
     {
         _objectOrganizationService = objectOrganizationService;
-        _sceneView                 = sceneView;
         _objectCollectionManager   = objectCollectionManager;
         _objectModDataSource       = objectModDataSource;
         _penumbra                  = penumbra;
@@ -68,7 +90,7 @@ internal sealed partial class CollectionsWorkspace
         _listCard                  = listCard;
         _sceneItems                = sceneItems;
         _modSettings               = modSettings;
-        _collectionPanel           = collectionPanel;
+        _columnPanel               = columnPanel;
     }
 
     private void DrawObjectCollectionHeader(
@@ -86,11 +108,11 @@ internal sealed partial class CollectionsWorkspace
         float unassignWidth = EditorButton.MeasureWidth(FontAwesomeIcon.Unlink, "Unassign");
         float actionsWidth = assignWidth
                            + unassignWidth
-                           + EditorLayout.Scaled(CollectionPanel.ObjectCollectionWorkspaceStyle.HeaderMenuGap)
+                           + EditorLayout.Scaled(WorkspaceStyle.HeaderMenuGap)
                            + menuButtonEdge;
-        float height = EditorLayout.Scaled(CollectionPanel.ObjectCollectionWorkspaceStyle.HeaderHeight);
-        float padding = EditorLayout.Scaled(CollectionPanel.ObjectCollectionWorkspaceStyle.HeaderPadding);
-        float gap = EditorLayout.Scaled(CollectionPanel.ObjectCollectionWorkspaceStyle.HeaderGap);
+        float height = EditorLayout.Scaled(WorkspaceStyle.HeaderHeight);
+        float padding = EditorLayout.Scaled(WorkspaceStyle.HeaderPadding);
+        float gap = EditorLayout.Scaled(WorkspaceStyle.HeaderGap);
         Vector2 startCursor = ImGui.GetCursorPos();
         Vector2 min = ImGui.GetCursorScreenPos();
         Vector2 max = min + new Vector2(width, height);
@@ -100,20 +122,20 @@ internal sealed partial class CollectionsWorkspace
         drawList.AddRectFilled(
             min,
             max,
-            ImGui.GetColorU32(CollectionPanel.ObjectCollectionWorkspaceStyle.Header),
-            EditorLayout.Scaled(CollectionPanel.ObjectCollectionWorkspaceStyle.SurfaceRounding),
+            ImGui.GetColorU32(WorkspaceStyle.Header),
+            EditorLayout.Scaled(WorkspaceStyle.SurfaceRounding),
             ImDrawFlags.RoundCornersTop);
         drawList.AddLine(
             new Vector2(min.X, max.Y),
             max,
-            ImGui.GetColorU32(CollectionPanel.ObjectCollectionWorkspaceStyle.Divider),
+            ImGui.GetColorU32(EditorColumnPanel.PanelStyle.Divider),
             EditorLayout.Scaled(1f));
 
         float innerWidth = MathF.Max(1f, width - (padding * 2f));
         float pickerWidth = Math.Clamp(
             innerWidth * 0.32f,
-            EditorLayout.Scaled(CollectionPanel.ObjectCollectionWorkspaceStyle.PickerMinWidth),
-            EditorLayout.Scaled(CollectionPanel.ObjectCollectionWorkspaceStyle.PickerMaxWidth));
+            EditorLayout.Scaled(WorkspaceStyle.PickerMinWidth),
+            EditorLayout.Scaled(WorkspaceStyle.PickerMaxWidth));
         float actionsX = max.X - padding - actionsWidth;
         float summaryX = min.X + padding + pickerWidth + gap;
         float summaryWidth = actionsX - gap - summaryX;
@@ -144,7 +166,7 @@ internal sealed partial class CollectionsWorkspace
 
         ImGui.SetCursorScreenPos(new Vector2(
             actionsX,
-            min.Y + ((height - EditorLayout.Scaled(CollectionPanel.ObjectCollectionWorkspaceStyle.HeaderActionHeight)) * 0.5f)));
+            min.Y + ((height - EditorLayout.Scaled(WorkspaceStyle.HeaderActionHeight)) * 0.5f)));
         DrawObjectCollectionHeaderActions(
             collection,
             selectedSnapshots,
@@ -161,18 +183,10 @@ internal sealed partial class CollectionsWorkspace
         float width,
         Vector4 accent)
     {
-        string label = selectedCollection?.Record.Name ?? "Choose Collection";
-        string pickerDetail;
-        if (selectedCollection is null)
-        {
-            pickerDetail = collections.Count == 0
-                ? "Create the first collection"
-                : "Choose a collection to manage";
-        }
-        else
-        {
-            pickerDetail = $"{ResolveObjectCollectionStateLabel(selectedCollection.ResolveState)} collection";
-        }
+        string label = selectedCollection?.Record.Name ?? "No Collections";
+        string pickerDetail = selectedCollection is null
+            ? "Create the first collection"
+            : $"{ResolveObjectCollectionStateLabel(selectedCollection.ResolveState)} collection";
         ObjectCollectionHeaderStatus? status = selectedCollection is null
             ? null
             : BuildObjectCollectionHeaderStatus(selectedCollection, assignedObjectCount);
@@ -203,7 +217,7 @@ internal sealed partial class CollectionsWorkspace
             "##objectCollectionPickerPopup",
             open,
             popupAnchor,
-            width / ImGuiHelpers.GlobalScale);
+            width);
         if (!popup)
         {
             return;
@@ -254,7 +268,7 @@ internal sealed partial class CollectionsWorkspace
         float menuButtonEdge)
     {
         const int actionCount = 2;
-        float height = EditorLayout.Scaled(CollectionPanel.ObjectCollectionWorkspaceStyle.HeaderActionHeight);
+        float height = EditorLayout.Scaled(WorkspaceStyle.HeaderActionHeight);
         bool canAssign = collection is not null
             && SceneEditorCommands.HasObjectCollectionAssignmentChange(selectedSnapshots, collection.Record.CollectionId);
         if (EditorSegmentedControl.DrawActionSegment(
@@ -288,7 +302,7 @@ internal sealed partial class CollectionsWorkspace
             _sceneCommands.UnassignObjectCollections(selectedSnapshots);
         }
 
-        ImGui.SameLine(0f, EditorLayout.Scaled(CollectionPanel.ObjectCollectionWorkspaceStyle.HeaderMenuGap));
+        ImGui.SameLine(0f, EditorLayout.Scaled(WorkspaceStyle.HeaderMenuGap));
         bool openMenu;
         using (ImRaii.Disabled(collection is null))
         {
@@ -444,7 +458,7 @@ internal sealed partial class CollectionsWorkspace
             ConfirmIcon = FontAwesomeIcon.Trash,
             Accent = ThemeColors.DimRed,
             Detail = collection.Record.Name,
-            Description = "This permanently deletes the collection and unassigns it from placed objects. Installed Penumbra mods are NOT deleted.",
+            Description = "This permanently deletes the collection and unassigns it from all saved objects. Installed Penumbra mods are NOT deleted.",
             FailureMessage = "The collection could not be deleted.",
         });
     }
@@ -533,7 +547,7 @@ internal sealed partial class CollectionsWorkspace
         Mods,
     }
 
-    internal void DrawCollectionsWorkspace(IReadOnlySet<Guid> activeObjectIds)
+    internal void DrawCollectionsWorkspace(IReadOnlyList<ObjectSnapshot> placedSnapshots, IReadOnlySet<Guid> activeObjectIds)
     {
         IReadOnlyList<ObjectCollectionSnapshot> collections = _objectCollectionManager.GetCollections();
         SyncSelectedObjectCollection(collections);
@@ -543,7 +557,7 @@ internal sealed partial class CollectionsWorkspace
             Vector2.Zero,
             false,
             ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse,
-            () => DrawObjectCollectionWorkspace(collections, activeObjectIds),
+            () => DrawObjectCollectionWorkspace(collections, placedSnapshots, activeObjectIds),
             transparentBackground: false);
 
         DrawObjectCollectionAddModPopup(collections);
@@ -551,6 +565,7 @@ internal sealed partial class CollectionsWorkspace
 
     private void DrawObjectCollectionWorkspace(
         IReadOnlyList<ObjectCollectionSnapshot> collections,
+        IReadOnlyList<ObjectSnapshot> placedSnapshots,
         IReadOnlySet<Guid> activeObjectIds)
     {
         ObjectCollectionSnapshot? selectedCollection = TryResolveSelectedObjectCollection(
@@ -558,9 +573,8 @@ internal sealed partial class CollectionsWorkspace
             out ObjectCollectionSnapshot resolvedCollection)
                 ? resolvedCollection
                 : null;
-        IReadOnlyList<ObjectSnapshot> placedSnapshots = _sceneView.GetPlacedObjectSnapshots();
         IReadOnlyList<ObjectSnapshot> selectedSnapshots = placedSnapshots
-            .Where(snapshot => _interaction.Selection.SelectedItemIds.Contains(snapshot.Id))
+            .Where(snapshot => _interaction.Selection.Contains(snapshot.Id))
             .ToList();
         IReadOnlyList<ObjectSnapshot> assignedSnapshots = selectedCollection is null
             ? []
@@ -573,12 +587,12 @@ internal sealed partial class CollectionsWorkspace
 
         float surfaceWidth = EditorLayout.Positive(ImGui.GetContentRegionAvail().X);
         float availableHeight = EditorLayout.ResolveRemainingRegionHeight();
-        float panelWidth = EditorLayout.Positive(surfaceWidth - EditorLayout.Scaled(CollectionPanel.ObjectCollectionWorkspaceStyle.PanelHorizontalInset * 2f));
+        float panelWidth = EditorLayout.Positive(surfaceWidth - EditorLayout.Scaled(WorkspaceStyle.PanelHorizontalInset * 2f));
+        float tabsHeight = EditorLayout.Scaled(WorkspaceStyle.TabsHeight);
         float fixedHeight = EditorLayout.Scaled(
-            CollectionPanel.ObjectCollectionWorkspaceStyle.HeaderHeight
-          + CollectionPanel.ObjectCollectionWorkspaceStyle.TabsHeight
-          + CollectionPanel.ObjectCollectionWorkspaceStyle.PanelTopGap
-          + CollectionPanel.ObjectCollectionWorkspaceStyle.PanelBottomInset);
+            WorkspaceStyle.HeaderHeight
+          + WorkspaceStyle.PanelTopGap
+          + WorkspaceStyle.PanelBottomInset) + tabsHeight;
         float panelHeight = EditorLayout.Positive(availableHeight - fixedHeight);
         float surfaceHeight = fixedHeight + panelHeight;
 
@@ -591,8 +605,8 @@ internal sealed partial class CollectionsWorkspace
         drawList.AddRectFilled(
             surfaceMin,
             surfaceMax,
-            ImGui.GetColorU32(CollectionPanel.ObjectCollectionWorkspaceStyle.Surface),
-            EditorLayout.Scaled(CollectionPanel.ObjectCollectionWorkspaceStyle.SurfaceRounding));
+            ImGui.GetColorU32(WorkspaceStyle.Surface),
+            EditorLayout.Scaled(WorkspaceStyle.SurfaceRounding));
 
         ImGui.SetCursorPos(surfaceCursor);
         DrawObjectCollectionHeader(
@@ -604,11 +618,10 @@ internal sealed partial class CollectionsWorkspace
         DrawObjectCollectionViewSelector(selectedCollection, assignedSnapshots.Count, surfaceWidth);
 
         Vector2 panelMin = new(
-            surfaceMin.X + EditorLayout.Scaled(CollectionPanel.ObjectCollectionWorkspaceStyle.PanelHorizontalInset),
+            surfaceMin.X + EditorLayout.Scaled(WorkspaceStyle.PanelHorizontalInset),
             surfaceMin.Y + EditorLayout.Scaled(
-                CollectionPanel.ObjectCollectionWorkspaceStyle.HeaderHeight
-              + CollectionPanel.ObjectCollectionWorkspaceStyle.TabsHeight
-              + CollectionPanel.ObjectCollectionWorkspaceStyle.PanelTopGap));
+                WorkspaceStyle.HeaderHeight
+              + WorkspaceStyle.PanelTopGap) + tabsHeight);
         ImGui.SetCursorScreenPos(panelMin);
         DrawObjectCollectionContent(
             selectedCollection,
@@ -620,8 +633,8 @@ internal sealed partial class CollectionsWorkspace
         drawList.AddRect(
             surfaceMin,
             surfaceMax,
-            ImGui.GetColorU32(CollectionPanel.ObjectCollectionWorkspaceStyle.Border),
-            EditorLayout.Scaled(CollectionPanel.ObjectCollectionWorkspaceStyle.SurfaceRounding),
+            ImGui.GetColorU32(EditorColumnPanel.PanelStyle.Border),
+            EditorLayout.Scaled(WorkspaceStyle.SurfaceRounding),
             ImDrawFlags.None,
             EditorLayout.Scaled(1f));
         ImGui.SetCursorPos(surfaceEndCursor);
@@ -667,65 +680,25 @@ internal sealed partial class CollectionsWorkspace
         int assignedObjectCount,
         float width)
     {
-        const int segmentCount = 2;
-        Vector2 startCursor = ImGui.GetCursorPos();
-        Vector2 min = ImGui.GetCursorScreenPos();
-        float height = EditorLayout.Scaled(CollectionPanel.ObjectCollectionWorkspaceStyle.TabsHeight);
-        ImGui.Dummy(new Vector2(width, height));
-        Vector2 endCursor = ImGui.GetCursorPos();
-        ImDrawListPtr drawList = ImGui.GetWindowDrawList();
-        drawList.AddRectFilled(
-            min,
-            min + new Vector2(width, height),
-            ImGui.GetColorU32(CollectionPanel.ObjectCollectionWorkspaceStyle.Tabs));
-
-        float inset = EditorLayout.Scaled(CollectionPanel.ObjectCollectionWorkspaceStyle.TabsHorizontalInset);
-        float gap = EditorLayout.Scaled(CollectionPanel.ObjectCollectionWorkspaceStyle.TabGap);
-        float buttonWidth = MathF.Max(1f, (width - (inset * 2f) - gap) / segmentCount);
-        float buttonHeight = EditorLayout.Scaled(CollectionPanel.ObjectCollectionWorkspaceStyle.TabHeight);
-        ImGui.SetCursorScreenPos(new Vector2(
-            min.X + inset,
-            min.Y + EditorLayout.Scaled(CollectionPanel.ObjectCollectionWorkspaceStyle.TabsTopInset)));
         bool hasCollection = collection is not null;
-
-        if (EditorSegmentedControl.DrawSegment(
-                "##objectCollectionObjectsView",
-                FontAwesomeIcon.Cube,
-                "Assigned Objects",
-                assignedObjectCount.ToString(),
-                _objectCollectionView == ObjectCollectionView.Objects,
-                hasCollection,
-                "Show the placed objects assigned to this collection",
-                ThemeColors.AccentPrimary,
-                new Vector2(buttonWidth, buttonHeight),
-                0,
-                segmentCount,
-                rounding: 4f,
-                showSelectionIndicator: false))
-        {
-            _objectCollectionView = ObjectCollectionView.Objects;
-        }
-
-        ImGui.SameLine(0f, gap);
         int modCount = collection?.Record.Entries.Count ?? 0;
-        if (EditorSegmentedControl.DrawSegment(
-                "##objectCollectionModsView",
-                FontAwesomeIcon.Cubes,
-                "Penumbra Mods",
-                modCount.ToString(),
-                _objectCollectionView == ObjectCollectionView.Mods,
-                hasCollection,
-                "Show and configure this collection's Penumbra mods",
-                ThemeColors.AccentPrimary,
-                new Vector2(buttonWidth, buttonHeight),
-                1,
-                segmentCount,
-                rounding: 4f,
-                showSelectionIndicator: false))
+        if (_viewTabSource != (hasCollection, assignedObjectCount, modCount))
         {
-            _objectCollectionView = ObjectCollectionView.Mods;
+            _viewTabItems =
+            [
+                new("objects", FontAwesomeIcon.Cube, "Assigned Objects", assignedObjectCount.ToString(), hasCollection),
+                new("mods", FontAwesomeIcon.Cubes, "Penumbra Mods", modCount.ToString(), hasCollection),
+            ];
+            _viewTabSource = (hasCollection, assignedObjectCount, modCount);
         }
-
-        ImGui.SetCursorPos(new Vector2(startCursor.X, endCursor.Y));
+        Vector2 start = ImGui.GetCursorScreenPos();
+        float height = EditorLayout.Scaled(WorkspaceStyle.TabsHeight);
+        float inset = EditorLayout.Scaled(WorkspaceStyle.TabsHorizontalInset);
+        ImGui.GetWindowDrawList().AddRectFilled(start, start + new Vector2(width, height), ImGui.GetColorU32(WorkspaceStyle.Tabs));
+        ImGui.SetCursorScreenPos(start + new Vector2(inset, EditorLayout.Scaled(WorkspaceStyle.TabsTopInset)));
+        string selected = _viewTabs.Draw("collectionViews", _viewTabItems,
+            _objectCollectionView == ObjectCollectionView.Objects ? "objects" : "mods", MathF.Max(1f, width - inset * 2f), ThemeColors.AccentPrimary);
+        ImGui.SetCursorScreenPos(start + new Vector2(0f, height));
+        _objectCollectionView = string.Equals(selected, "objects", StringComparison.Ordinal) ? ObjectCollectionView.Objects : ObjectCollectionView.Mods;
     }
 }

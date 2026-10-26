@@ -17,6 +17,7 @@ internal sealed class GizmoAppearanceConfiguration
     public RgbColor XAxis { get; set; } = new(242, 77, 77);
     public RgbColor YAxis { get; set; } = new(102, 217, 115);
     public RgbColor ZAxis { get; set; } = new(89, 153, 255);
+    public RgbColor AxisLabelText { get; set; } = new(13, 13, 13);
     public RgbColor Highlight { get; set; } = new(255, 166, 51);
     public RgbColor Center { get; set; } = new(255, 255, 255);
     public RgbColor Inactive { get; set; } = new(140, 140, 148);
@@ -29,6 +30,7 @@ internal sealed class GizmoAppearanceConfiguration
             XAxis = XAxis,
             YAxis = YAxis,
             ZAxis = ZAxis,
+            AxisLabelText = AxisLabelText,
             Highlight = Highlight,
             Center = Center,
             Inactive = Inactive,

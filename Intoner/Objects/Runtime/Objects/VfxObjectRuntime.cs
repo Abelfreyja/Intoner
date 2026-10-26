@@ -20,6 +20,7 @@ internal sealed unsafe class VfxObjectRuntime : DrawObjectRuntime
     private string _vfxPath;
     private readonly ObjectNativeBindings.VfxBinding _nativeBinding;
     private readonly ObjectResourceTracker _resourceTracker;
+    private readonly string _resourceCollectionId;
     private bool _needsPlaybackApply;
     private bool _needsVisualReplay = true;
     private long _nextLoopReplayMilliseconds;
@@ -32,7 +33,7 @@ internal sealed unsafe class VfxObjectRuntime : DrawObjectRuntime
         => _needsPlaybackApply
         || _needsVisualReplay
         || HasActiveLoopReplay
-        || (Snapshot.CollectionId.Length > 0 && !_rootHandleRegistration.IsRegistered);
+        || (_resourceCollectionId.Length > 0 && !_rootHandleRegistration.IsRegistered);
 
     public override nint Address
         => (nint)_vfxObject;
@@ -47,17 +48,19 @@ internal sealed unsafe class VfxObjectRuntime : DrawObjectRuntime
         SceneVfxObject* vfxObject,
         string vfxPath,
         ObjectNativeBindings.VfxBinding nativeBinding,
-        ObjectResourceTracker resourceTracker)
+        ObjectResourceTracker resourceTracker,
+        string resourceCollectionId)
         : base(framework, logger, snapshot)
     {
         _vfxObject = vfxObject;
         _vfxPath = vfxPath;
         _nativeBinding = nativeBinding;
         _resourceTracker = resourceTracker;
+        _resourceCollectionId = resourceCollectionId;
     }
 
     internal override void Initialize()
-        => UpdateRegisteredRootHandle(Snapshot);
+        => UpdateRegisteredRootHandle();
 
     private bool HasActiveLoopReplay
         => Snapshot.Model is VfxModel model && IsLoopReplayActive(model);
@@ -84,7 +87,7 @@ internal sealed unsafe class VfxObjectRuntime : DrawObjectRuntime
         }
 
         ReplayLoopIfNeededUnsafe((VfxModel)Snapshot.Model);
-        UpdateRegisteredRootHandle(Snapshot);
+        UpdateRegisteredRootHandle();
     }
 
     protected override ObjectRuntimeUpdateResult ValidateSnapshotUpdate(ObjectSnapshot snapshot)
@@ -141,7 +144,7 @@ internal sealed unsafe class VfxObjectRuntime : DrawObjectRuntime
         {
             _needsVisualReplay = !TryApplyVisualStateUnsafe(vfxModel);
             _needsPlaybackApply = false;
-            UpdateRegisteredRootHandle(snapshot);
+            UpdateRegisteredRootHandle();
             return ObjectRuntimeUpdateResult.Applied;
         }
 
@@ -191,10 +194,12 @@ internal sealed unsafe class VfxObjectRuntime : DrawObjectRuntime
             return;
         }
 
-        Logger.LogInformation(
+        nint address = (nint)_vfxObject;
+        string vfxPath = _vfxPath;
+        ObjectResourceLog.Write(() => Logger.LogInformation(
             "destroying vfx 0x{Address:X} using path {VfxPath}",
-            (ulong)(nint)_vfxObject,
-            _vfxPath);
+            (ulong)address,
+            vfxPath));
 
         _rootHandleRegistration.Clear(_resourceTracker);
         DestroyNative((DrawObject*)_vfxObject);
@@ -322,9 +327,9 @@ internal sealed unsafe class VfxObjectRuntime : DrawObjectRuntime
             VfxModel.ClampSpeed(model.Speed),
             model.Paused);
 
-    private void UpdateRegisteredRootHandle(ObjectSnapshot snapshot)
+    private void UpdateRegisteredRootHandle()
     {
-        if (_vfxObject == null || snapshot.CollectionId.Length == 0)
+        if (_vfxObject == null || _resourceCollectionId.Length == 0)
         {
             _rootHandleRegistration.Clear(_resourceTracker);
             return;
@@ -334,7 +339,7 @@ internal sealed unsafe class VfxObjectRuntime : DrawObjectRuntime
         _rootHandleRegistration.UpdateRootHandle(
             _resourceTracker,
             currentRootHandle,
-            new ObjectResourceScope(snapshot.CollectionId, _vfxPath));
+            new ObjectResourceScope(_resourceCollectionId, _vfxPath));
     }
 
     private static nint ResolveRootHandleAddress(SceneVfxObject* vfxObject)
@@ -348,4 +353,3 @@ internal sealed unsafe class VfxObjectRuntime : DrawObjectRuntime
         return (nint)vfxObject->VfxResourceInstance->VfxResourceObject->ApricotResourceHandle;
     }
 }
-

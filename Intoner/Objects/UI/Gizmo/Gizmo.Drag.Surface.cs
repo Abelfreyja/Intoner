@@ -10,7 +10,7 @@ internal sealed partial class Gizmo
     {
         _host.PrepareHistoryMutation();
         ResetGizmoSurfaceDrag();
-        _surfaceEdit = _sceneItemService.BeginEdit(context.SelectedSnapshots);
+        _surfaceEdit = _sceneItemService.BeginEdit(context.EditSnapshots);
         if (_surfaceEdit is null)
         {
             return;
@@ -18,12 +18,12 @@ internal sealed partial class Gizmo
 
         bool itemTargetsEnabled = Settings.SurfaceItemTargetsEnabled;
         SceneSurfaceTargetShape targetShape = Settings.SurfaceTargetShape;
-        HashSet<Guid> selectedItemIds = context.SelectedSnapshots
+        HashSet<Guid> selectedItemIds = context.EditSnapshots
             .Select(static snapshot => snapshot.Id)
             .ToHashSet();
         SceneSurfaceTargetSnapshot surfaceTargets = CaptureSurfaceTargets(selectedItemIds, itemTargetsEnabled, targetShape);
         State.BeginSurfaceDrag(
-            context.SelectedSnapshots,
+            context.EditSnapshots,
             context.BoundsLookup,
             context.PrimarySnapshot,
             context.PivotPosition,
@@ -60,17 +60,6 @@ internal sealed partial class Gizmo
     private void UpdateMultiGizmoSurfaceDrag(in GizmoContext context, SceneSurfaceHit hit)
     {
         if (!TryResolveMultiGizmoSurfaceDragResult(context, hit, out var result))
-        {
-            return;
-        }
-
-        var resolvedGroupRotationDegrees = ResolveSurfaceDragSelectionRotationDegrees(result);
-
-        if (!HasSurfaceDragTransformChanged(
-                result.PivotPosition,
-                SurfaceDragState.LastResolvedPosition,
-                resolvedGroupRotationDegrees,
-                SurfaceDragState.LastResolvedRotationDegrees))
         {
             return;
         }
@@ -192,21 +181,6 @@ internal sealed partial class Gizmo
         SceneTransform transform,
         SceneSurfaceHit? hit)
     {
-        if (!TryApplySurfaceDragSingleTransform(context, transform, hit, out var appliedSnapshot))
-        {
-            return false;
-        }
-
-        SurfaceDragState.RecordSingleApply(appliedSnapshot.Transform.Position, appliedSnapshot.Transform.RotationDegrees, appliedSnapshot);
-        return true;
-    }
-
-    private bool TryApplySurfaceDragSingleTransform(
-        in GizmoContext context,
-        SceneTransform transform,
-        SceneSurfaceHit? hit,
-        out SceneItemSnapshot appliedSnapshot)
-    {
         var entry = SurfaceDragState.PrimaryEntry;
         var rotation = SceneTransformMath.CreateRotationQuaternion(transform.RotationDegrees);
         var pivotOffset = entry.ResolvePivotOffset(rotation);
@@ -225,11 +199,10 @@ internal sealed partial class Gizmo
             || _surfaceEdit is null
             || !_surfaceEdit.Update([nextSnapshot], out IReadOnlyList<SceneItemSnapshot> appliedSnapshots).IsApplied())
         {
-            appliedSnapshot = null!;
             return false;
         }
 
-        appliedSnapshot = appliedSnapshots[0];
+        SurfaceDragState.RecordSingleApply(appliedSnapshots[0]);
         return true;
     }
 
@@ -238,8 +211,16 @@ internal sealed partial class Gizmo
         SceneSurfaceHit hit)
     {
         var snappedPivotPosition = ResolveSurfaceDragSnapPolicy(result.PivotPosition).SnapPosition(result.PivotPosition);
-        var groupDelta = GizmoSelectionTransformUtility.ResolveRotationDelta(SurfaceDragState.StartRotationQuaternion, result.GroupRotation);
         var resolvedGroupRotationDegrees = ResolveSurfaceDragSelectionRotationDegrees(result);
+
+        if (!HasSurfaceDragTransformChanged(snappedPivotPosition, SurfaceDragState.LastResolvedPosition,
+                resolvedGroupRotationDegrees, SurfaceDragState.LastResolvedRotationDegrees)
+            && SurfaceDragState.LastAppliedHit == hit)
+        {
+            return false;
+        }
+
+        var groupDelta = SceneTransformMath.ResolveRotationDelta(SurfaceDragState.StartRotationQuaternion, result.GroupRotation);
         var selectionEntries = SurfaceDragState.SelectionEntries;
         var snapshots = new SceneItemSnapshot[selectionEntries.Count];
         for (var index = 0; index < selectionEntries.Count; ++index)
@@ -266,7 +247,7 @@ internal sealed partial class Gizmo
             return false;
         }
 
-        SurfaceDragState.RecordSelectionApply(result.PivotPosition, resolvedGroupRotationDegrees, appliedSnapshots);
+        SurfaceDragState.RecordSelectionApply(snappedPivotPosition, resolvedGroupRotationDegrees, hit, appliedSnapshots);
         return true;
     }
 
@@ -350,4 +331,3 @@ internal sealed partial class Gizmo
         return _surfaceService.CaptureGeometryTargets(selectedItemIds);
     }
 }
-

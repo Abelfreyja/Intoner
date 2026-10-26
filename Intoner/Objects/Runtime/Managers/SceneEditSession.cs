@@ -1,3 +1,4 @@
+using Intoner.Logging;
 using Microsoft.Extensions.Logging;
 
 namespace Intoner.Scene
@@ -161,7 +162,7 @@ namespace Intoner.Scene
 
             if (_recoveryRequired)
             {
-                _logger.LogError("scene edit ended after a preview recovery failure");
+                DiagnosticLog.Write(() => _logger.LogError("scene edit ended after a preview recovery failure"));
             }
 
             return !_recoveryRequired;
@@ -181,7 +182,7 @@ namespace Intoner.Scene
             }
             catch (Exception exception)
             {
-                _logger.LogError(exception, "scene edit preview failed for item {ItemId}", after.Id);
+                DiagnosticLog.Write(_logger, LogLevel.Error, exception, "scene edit preview failed for item {ItemId}", after.Id);
                 status = SceneMutationStatus.RecoveryRequired;
             }
 

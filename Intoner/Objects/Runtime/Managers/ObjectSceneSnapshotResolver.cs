@@ -1,6 +1,5 @@
 using Intoner.Scene;
 using Intoner.Objects.Models;
-using Intoner.Objects.Utils;
 
 namespace Intoner.Objects.Runtime;
 
@@ -45,13 +44,16 @@ internal readonly record struct ObjectSceneLoadRequest(
 internal sealed class ObjectSceneSnapshotResolver : IObjectSceneSnapshotResolver
 {
     private readonly IObjectPersistenceState _persistenceState;
+    private readonly ISceneLocationService _locationService;
     private readonly IObjectLayoutManager    _layoutManager;
 
     public ObjectSceneSnapshotResolver(
         IObjectPersistenceState persistenceState,
-        IObjectLayoutManager layoutManager)
+        IObjectLayoutManager layoutManager,
+        ISceneLocationService locationService)
     {
         _persistenceState = persistenceState;
+        _locationService = locationService;
         _layoutManager = layoutManager;
     }
 
@@ -68,96 +70,34 @@ internal sealed class ObjectSceneSnapshotResolver : IObjectSceneSnapshotResolver
     public IReadOnlyList<ObjectSceneLoadRequest> GetLoadRequests(SceneLocationScope currentLocation)
     {
         List<ObjectSceneLoadRequest> requests = [];
-        AppendStandaloneRequests(requests, currentLocation);
-        AppendDefaultLayoutRequests(requests, currentLocation);
-        AppendTemporaryLayoutRequests(requests, currentLocation);
-        return CollapseLoadRequests(requests);
-    }
+        AppendLoadRequests(_persistenceState.GetStandaloneSnapshots(), ObjectSceneSource.CreateStandalone());
 
-    private void AppendStandaloneRequests(List<ObjectSceneLoadRequest> requests, SceneLocationScope currentLocation)
-        => AppendLoadRequests(
-            requests,
-            _persistenceState.GetStandaloneSnapshots(),
-            currentLocation,
-            snapshot => _persistenceState.ResolveSceneSource(snapshot));
-
-    private void AppendDefaultLayoutRequests(List<ObjectSceneLoadRequest> requests, SceneLocationScope currentLocation)
-    {
-        if (!_persistenceState.TryGetDefaultLayout(out var defaultLayout))
+        foreach (ObjectLayoutSnapshot layout in _layoutManager.GetEnabledLayouts())
         {
-            return;
+            AppendLoadRequests(layout.Objects, ObjectSceneSource.CreatePersistentLayout(layout.Id));
         }
 
-        var source = ObjectSceneSource.CreateDefaultLayout(defaultLayout.Id);
-
-        AppendLoadRequests(
-            requests,
-            defaultLayout.Objects,
-            currentLocation,
-            _ => source);
-    }
-
-    private void AppendTemporaryLayoutRequests(List<ObjectSceneLoadRequest> requests, SceneLocationScope currentLocation)
-    {
-        foreach (var temporaryLayout in _layoutManager.GetTemporaryLayouts())
+        foreach (ObjectTemporaryLayoutSnapshot layout in _layoutManager.GetTemporaryLayouts())
         {
-            var source = ObjectSceneSource.CreateTemporaryLayout(temporaryLayout.SourceKey);
-
-            AppendLoadRequests(
-                requests,
-                temporaryLayout.Objects,
-                currentLocation,
-                _ => source);
+            AppendLoadRequests(layout.Objects, ObjectSceneSource.CreateTemporaryLayout(layout.SourceKey));
         }
-    }
 
-    private static void AppendLoadRequests(
-        List<ObjectSceneLoadRequest> requests,
-        IEnumerable<ObjectSnapshot> snapshots,
-        SceneLocationScope currentLocation,
-        Func<ObjectSnapshot, ObjectSceneSource> resolveSource)
-    {
-        foreach (var snapshot in snapshots)
+        return requests
+            .DistinctBy(static request => request.Snapshot.Id)
+            .OrderBy(static request => request.Snapshot.CreatedAtUtc)
+            .ToList();
+
+        void AppendLoadRequests(IEnumerable<ObjectSnapshot> snapshots, ObjectSceneSource source)
         {
-            if (!ObjectSnapshotUtility.MatchesLocation(snapshot, currentLocation))
+            foreach (ObjectSnapshot snapshot in snapshots)
             {
-                continue;
+                if (!_locationService.MatchesLocation(snapshot.CreatedIn, currentLocation))
+                {
+                    continue;
+                }
+
+                requests.Add(new ObjectSceneLoadRequest(snapshot, source));
             }
-
-            requests.Add(new ObjectSceneLoadRequest(snapshot, resolveSource(snapshot)));
         }
-    }
-
-    private static List<ObjectSceneLoadRequest> CollapseLoadRequests(IReadOnlyList<ObjectSceneLoadRequest> orderedRequests)
-    {
-        Dictionary<Guid, (int FirstIndex, ObjectSceneLoadRequest Request)> requestsById = [];
-        for (var index = 0; index < orderedRequests.Count; ++index)
-        {
-            var request = orderedRequests[index];
-            if (requestsById.ContainsKey(request.Snapshot.Id))
-            {
-                continue;
-            }
-
-            requestsById.Add(request.Snapshot.Id, (index, request));
-        }
-
-        var collapsedRequests = requestsById.Values.ToList();
-        collapsedRequests.Sort(static (left, right) =>
-        {
-            var createdAtComparison = left.Request.Snapshot.CreatedAtUtc.CompareTo(right.Request.Snapshot.CreatedAtUtc);
-            return createdAtComparison != 0
-                ? createdAtComparison
-                : left.FirstIndex.CompareTo(right.FirstIndex);
-        });
-
-        List<ObjectSceneLoadRequest> result = new(collapsedRequests.Count);
-        foreach (var request in collapsedRequests)
-        {
-            result.Add(request.Request);
-        }
-
-        return result;
     }
 }
-

@@ -58,18 +58,7 @@ internal static class EditorInputUtility
         => max.X > min.X && max.Y > min.Y;
 
     public static bool IsMouseInside(Vector2 min, Vector2 max)
-    {
-        if (!HasArea(min, max))
-        {
-            return false;
-        }
-
-        Vector2 mouse = ImGui.GetMousePos();
-        return mouse.X >= min.X
-            && mouse.Y >= min.Y
-            && mouse.X <= max.X
-            && mouse.Y <= max.Y;
-    }
+        => new EditorScreenArea(min, max).Contains(ImGui.GetMousePos());
 
     public static bool IsMouseClickedInside(Vector2 min, Vector2 max, ImGuiMouseButton button = ImGuiMouseButton.Left)
         => ImGui.IsMouseClicked(button) && IsMouseInside(min, max);
@@ -80,4 +69,3 @@ internal static class EditorInputUtility
                || ImGui.IsMouseClicked(ImGuiMouseButton.Right)
                || ImGui.IsMouseClicked(ImGuiMouseButton.Middle));
 }
-

@@ -1,5 +1,6 @@
 using Dalamud.Interface.Textures;
 using Dalamud.Plugin.Services;
+using Intoner.Logging;
 using Microsoft.Extensions.Logging;
 
 namespace Intoner.Objects.Preview;
@@ -41,7 +42,7 @@ internal sealed class ThumbnailTextureUploader(
         {
             PreviewCacheState.PendingThumbnailTexture pendingTexture = renderState.PendingTexture;
             var nextTexture = textureProvider.CreateFromRaw(
-                RawImageSpecification.Rgba32(pendingTexture.Width, pendingTexture.Height),
+                RawImageSpecification.Rgba32(pendingTexture.Request.Width, pendingTexture.Request.Height),
                 pendingTexture.Pixels,
                 pendingTexture.TextureName);
             renderState.ReleaseTexture();
@@ -52,20 +53,13 @@ internal sealed class ThumbnailTextureUploader(
             renderState.LastRenderSucceeded = true;
             renderState.RenderFailureCount = 0;
             renderState.NextRenderRetryAtMs = 0;
+            renderState.NextAssetRetryAtMs = pendingTexture.NextAssetRetryAtMs;
             renderState.Error = null;
         }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "Failed to create thumbnail preview texture");
-            if (renderState.Texture is null)
-            {
-                renderState.LastRenderedRequest = request;
-                renderState.HasRenderedRequest = true;
-                renderState.LastRenderSucceeded = false;
-                renderState.RenderFailureCount++;
-                renderState.NextRenderRetryAtMs = now + PreviewCachePolicy.GetRenderRetryDelayMilliseconds(renderState.RenderFailureCount);
-                renderState.Error = "Failed to create preview texture.";
-            }
+            DiagnosticLog.Write(logger, LogLevel.Warning, ex, "Failed to create thumbnail preview texture");
+            PreviewCachePolicy.RecordRenderFailure(renderState, request, now, "Failed to create preview texture.");
         }
         finally
         {

@@ -1,12 +1,17 @@
+using Dalamud.Game;
 using Dalamud.Plugin.Services;
 using Lumina.Data;
 using Lumina.Excel;
+using Lumina.Excel.Exceptions;
 
 namespace Intoner.Objects.Assets;
 
 /// <summary> provides the game data surface used by asset discovery and vfx analysis </summary>
 internal interface IObjectAssetGameData
 {
+    /// <summary> gets the client language used for asset names and search terms </summary>
+    ClientLanguage Language { get; }
+
     /// <summary> gets a language specific excel sheet using the current client language </summary>
     /// <typeparam name="T">the excel row type</typeparam>
     /// <returns>the current language sheet when available</returns>
@@ -54,13 +59,30 @@ internal sealed class DalamudObjectAssetGameData : IObjectAssetGameData
         _gameData = gameData;
     }
 
+    public ClientLanguage Language
+        => _gameData.Language;
+
     public ExcelSheet<T>? GetCurrentLanguageExcelSheet<T>()
         where T : struct, IExcelRow<T>
-        => _gameData.GetExcelSheet<T>(_gameData.Language);
+        => GetExcelSheet<T>(_gameData.Language);
 
     public ExcelSheet<T>? GetExcelSheet<T>()
         where T : struct, IExcelRow<T>
-        => _gameData.GetExcelSheet<T>();
+        => GetExcelSheet<T>(null);
+
+    private ExcelSheet<T>? GetExcelSheet<T>(ClientLanguage? language)
+        where T : struct, IExcelRow<T>
+    {
+        try
+        {
+            return _gameData.GetExcelSheet<T>(language);
+        }
+        catch (Exception ex) when (ex is SheetNotFoundException or UnsupportedLanguageException
+                                      or MismatchedColumnHashException || ObjectAssetFileUtility.IsReadFailure(ex))
+        {
+            return null;
+        }
+    }
 
     public bool FileExists(string path)
         => _gameData.FileExists(path);
@@ -76,4 +98,3 @@ internal sealed class DalamudObjectAssetGameData : IObjectAssetGameData
         where T : FileResource
         => _gameData.GameData.GetFileFromDisk<T>(localPath, originalPath);
 }
-

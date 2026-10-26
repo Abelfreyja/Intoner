@@ -52,7 +52,7 @@ internal sealed class ObjectEditorCatalog
         {
             ObjectCatalogKind.BgObject => CreateLibraryPreset(
                 ObjectKind.BgObject,
-                new BgObjectModel { ModelPath = entry.PlacementPath }),
+                new BgObjectModel { ModelPath = entry.PlacementPath, ColliderDefinition = entry.BgObjectInfo?.DefaultColliderDefinition }),
             ObjectCatalogKind.Vfx => CreateLibraryPreset(
                 ObjectKind.Vfx,
                 new VfxModel { VfxPath = entry.PlacementPath }),
@@ -198,6 +198,30 @@ internal sealed class ObjectEditorCatalog
         && entry.VfxInfo is { } vfxInfo
             ? vfxInfo
             : null;
+
+    internal ObjectCatalogBgObjectInfo? ResolveBgObjectCatalogInfo(string modelPath)
+        => _objectCatalog.TryResolveEntry(ObjectCatalogKind.BgObject, modelPath, out ObjectCatalogEntry? entry)
+            ? entry.BgObjectInfo : null;
+
+    internal BgObjectModel ApplyBgObjectDefaults(BgObjectModel model)
+    {
+        if (model.ColliderDefinition is null && ResolveBgObjectCatalogInfo(model.ModelPath)?.DefaultColliderDefinition is { } definition)
+        {
+            return model with { ColliderDefinition = definition };
+        }
+
+        return model;
+    }
+
+    internal string ResolveObjectName(ObjectData model)
+        => model switch
+        {
+            BgObjectModel bgObject => ResolveCatalogName(ObjectCatalogKind.BgObject, bgObject.ModelPath, "Background Object"),
+            FurnitureModel furniture => ResolveFurnitureCatalogName(furniture.SharedGroupPath, furniture.HousingRowId, furniture.ItemRowId),
+            VfxModel vfx => ResolveCatalogName(ObjectCatalogKind.Vfx, vfx.VfxPath, "VFX"),
+            LightModel light => ResolveLightTypeName(light.LightType),
+            _ => throw new ArgumentOutOfRangeException(nameof(model)),
+        };
 
     internal string ResolveCatalogName(ObjectCatalogKind kind, string path, string fallback)
     {

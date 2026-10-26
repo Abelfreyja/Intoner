@@ -21,6 +21,7 @@ internal static class ThemeColors
     public static Vector4 AccentYellow { get; } = FromBytes(255, 233, 122);
     public static Vector4 AccentGreen { get; } = FromBytes(124, 214, 138);
     public static Vector4 AccentOrange { get; } = FromBytes(255, 179, 102);
+    public static Vector4 AccentRose { get; } = FromBytes(208, 110, 136);
     public static Vector4 AccentGrey { get; } = FromBytes(143, 143, 143);
     public static Vector4 DimRed { get; } = FromBytes(212, 68, 68);
 
@@ -66,6 +67,9 @@ internal static class ThemeColors
 
     public static Vector4 FromBytes(byte red, byte green, byte blue, byte alpha = 255)
         => new(red / 255f, green / 255f, blue / 255f, alpha / 255f);
+
+    public static Vector4 PrimaryButtonInteraction(Vector4 accent, bool active)
+        => Vector4.Lerp(ButtonDefault, accent, active ? 0.30f : 0.23f) with { W = active ? 0.96f : 0.92f };
 
     public static Vector4 WithAlpha(Vector4 color, float alpha)
         => color with { W = alpha };

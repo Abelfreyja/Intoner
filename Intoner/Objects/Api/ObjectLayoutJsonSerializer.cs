@@ -2,6 +2,7 @@ using Intoner.Objects.Models;
 using Intoner.Objects.Utils;
 using Intoner.Scene;
 using Intoner.Services.Serialization;
+using System.Collections.Immutable;
 using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -10,47 +11,9 @@ namespace Intoner.Objects.Api;
 
 internal static class ObjectLayoutJsonSerializer
 {
-    public static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerOptionsUtility.CreateStrictIndented())
-    {
-        AllowDuplicateProperties = false,
-    };
+    public static readonly JsonSerializerOptions JsonOptions = JsonSerializerOptionsUtility.CreateStrictIndented();
 
-    private enum RequiredJsonValueKind
-    {
-        String,
-        Guid,
-        NullableGuid,
-        DateTime,
-        Int64,
-        Array,
-    }
-
-    private readonly record struct RequiredJsonProperty(string Name, RequiredJsonValueKind Kind, string ErrorMessage);
-
-    private static readonly RequiredJsonProperty[] LayoutDocumentRootProperties =
-    [
-        new(nameof(ObjectLayoutFileDocument.DocumentKind), RequiredJsonValueKind.String, "The selected layout file is missing a valid document kind."),
-        new(nameof(ObjectLayoutFileDocument.Id), RequiredJsonValueKind.Guid, "The selected layout file is missing a layout id."),
-        new(nameof(ObjectLayoutFileDocument.Name), RequiredJsonValueKind.String, "The selected layout file is missing a valid layout name."),
-        new(nameof(ObjectLayoutFileDocument.Revision), RequiredJsonValueKind.Int64, "The selected layout file is missing a valid layout revision."),
-        new(nameof(ObjectLayoutFileDocument.ExportedAtUtc), RequiredJsonValueKind.DateTime, "The selected layout file is missing valid layout timestamps."),
-        new(nameof(ObjectLayoutFileDocument.CreatedAtUtc), RequiredJsonValueKind.DateTime, "The selected layout file is missing valid layout timestamps."),
-        new(nameof(ObjectLayoutFileDocument.UpdatedAtUtc), RequiredJsonValueKind.DateTime, "The selected layout file is missing valid layout timestamps."),
-        new(nameof(ObjectLayoutFileDocument.Objects), RequiredJsonValueKind.Array, "The selected layout file is missing a valid object list."),
-        new(nameof(ObjectLayoutFileDocument.Folders), RequiredJsonValueKind.Array, "The selected layout file is missing a valid folder list."),
-    ];
-
-    private static readonly RequiredJsonProperty[] AutosaveDocumentRootProperties =
-    [
-        new(nameof(ObjectLayoutAutosaveDocument.DocumentKind), RequiredJsonValueKind.String, "The autosave file is missing a valid document kind."),
-        new(nameof(ObjectLayoutAutosaveDocument.Name), RequiredJsonValueKind.String, "The autosave file is missing a valid workspace name."),
-        new(nameof(ObjectLayoutAutosaveDocument.SavedAtUtc), RequiredJsonValueKind.DateTime, "The autosave file is missing a valid saved timestamp."),
-        new(nameof(ObjectLayoutAutosaveDocument.PersistentRevision), RequiredJsonValueKind.Int64, "The autosave file is missing a valid persistent revision."),
-        new(nameof(ObjectLayoutAutosaveDocument.DefaultLayoutId), RequiredJsonValueKind.NullableGuid, "The autosave file is missing a valid default layout id."),
-        new(nameof(ObjectLayoutAutosaveDocument.Objects), RequiredJsonValueKind.Array, "The autosave file is missing a valid object list."),
-        new(nameof(ObjectLayoutAutosaveDocument.StandaloneFolders), RequiredJsonValueKind.Array, "The autosave file is missing a valid standalone folder list."),
-        new(nameof(ObjectLayoutAutosaveDocument.DefaultLayoutFolders), RequiredJsonValueKind.Array, "The autosave file is missing a valid default layout folder list."),
-    ];
+    internal static readonly JsonSerializerOptions ReleasedJsonOptions = LegacyObjectLocation.CreateJsonOptions(JsonOptions);
 
     public static string SerializeLayout(ObjectLayoutSnapshot layout)
         => JsonSerializer.Serialize(BuildLayoutDocument(layout), JsonOptions);
@@ -75,6 +38,97 @@ internal static class ObjectLayoutJsonSerializer
         }
     }
 
+    public static bool TryDeserializeLayout(
+        JsonElement root,
+        out ObjectLayoutSnapshot layout,
+        out string errorMessage)
+    {
+        try
+        {
+            layout = null!;
+
+            if (!ObjectLayoutFileUtility.LooksLikeObjectLayout(root))
+            {
+                errorMessage = "The selected file is not a supported object layout json file.";
+                return false;
+            }
+
+            if (!TryReadFormatVersion(root, out int formatVersion))
+            {
+                errorMessage = "The selected layout file is missing a valid format version.";
+                return false;
+            }
+
+            if (formatVersion is not (1 or 2) && formatVersion != ObjectLayoutFileDocument.CurrentFormatVersion)
+            {
+                errorMessage = $"Unsupported layout file version: {formatVersion}.";
+                return false;
+            }
+
+            if ((formatVersion < 3 && !TryUpgradeLayout(root, formatVersion, out root, out errorMessage))
+                || !TryDeserialize(root, "selected layout file", out ObjectLayoutFileDocument? document, out errorMessage, formatVersion < 3 ? ReleasedJsonOptions : JsonOptions))
+            {
+                return false;
+            }
+
+            if (document.Id == Guid.Empty || string.IsNullOrWhiteSpace(document.Name))
+            {
+                errorMessage = "The selected layout file is missing a valid layout id or name.";
+                return false;
+            }
+
+            if (document.ExportedAtUtc == default || document.CreatedAtUtc == default || document.UpdatedAtUtc == default)
+            {
+                errorMessage = "The selected layout file is missing valid layout timestamps.";
+                return false;
+            }
+
+            if (document.Revision <= 0)
+            {
+                errorMessage = "The selected layout file is missing a valid layout revision.";
+                return false;
+            }
+
+            if (document.Folders.Any(static folder => folder is null))
+            {
+                errorMessage = "Folders cannot contain null entries.";
+                return false;
+            }
+
+            if (!ObjectApiMapper.TryToGroups(document.Groups, document.Id, out List<SceneGroupSnapshot> groups))
+            {
+                errorMessage = $"Groups[{groups.Count}]: invalid group transform, creation time, or location.";
+                return false;
+            }
+
+            if (!TryToSnapshots(document.Objects, document.Id, out List<ObjectSnapshot> snapshots, out errorMessage)
+                || !SceneGroupUtility.TryValidateOwner(document.Id, snapshots, groups, out errorMessage))
+            {
+                return false;
+            }
+
+            layout = new ObjectLayoutSnapshot
+            {
+                Id = document.Id,
+                Name = document.Name,
+                Revision = document.Revision,
+                CreatedAtUtc = document.CreatedAtUtc,
+                UpdatedAtUtc = document.UpdatedAtUtc,
+                Objects = snapshots.OrderBy(static snapshot => snapshot.CreatedAtUtc).ToImmutableArray(),
+                Groups = groups.OrderBy(static group => group.CreatedAtUtc).ToImmutableArray(),
+                Folders = ObjectFolderUtility.ExpandFolderEntries(document.Folders, snapshots, groups),
+            };
+            errorMessage = string.Empty;
+            return true;
+        }
+        catch (Exception ex) when (ex is JsonException or ArgumentException)
+        {
+            layout = null!;
+            errorMessage = ex.Message;
+            return false;
+        }
+    }
+
     public static bool TryDeserializeAutosave(
         string json,
         out ObjectPersistentWorkspaceSnapshot workspace,
@@ -92,134 +146,138 @@ internal static class ObjectLayoutJsonSerializer
         }
     }
 
-    private static bool TryParseJson(string json, string sourceLabel, out JsonDocument document, out string errorMessage)
-    {
-        try
-        {
-            document = JsonDocument.Parse(json);
-            errorMessage = string.Empty;
-            return true;
-        }
-        catch (JsonException)
-        {
-            document = null!;
-            errorMessage = $"The {sourceLabel} is not valid json.";
-            return false;
-        }
-    }
-
-    public static bool TryDeserializeLayout(
-        JsonElement root,
-        out ObjectLayoutSnapshot layout,
-        out string errorMessage)
-    {
-        layout = null!;
-
-        if (!ObjectLayoutFileUtility.LooksLikeObjectLayout(root))
-        {
-            errorMessage = "The selected file is not a supported object layout json file.";
-            return false;
-        }
-
-        if (!TryReadFormatVersion(root, out int formatVersion))
-        {
-            errorMessage = "The selected layout file is missing a valid format version.";
-            return false;
-        }
-
-        if (formatVersion != 1 && formatVersion != ObjectLayoutFileDocument.CurrentFormatVersion)
-        {
-            errorMessage = $"Unsupported layout file version: {formatVersion}.";
-            return false;
-        }
-
-        if (!TryValidateRequiredProperties(root, LayoutDocumentRootProperties, out errorMessage)
-            || (formatVersion == 1 && !TryUpgradeLayoutFolders(root, out root, out errorMessage))
-            || !TryDeserialize(root, "selected layout file", out ObjectLayoutFileDocument? document, out errorMessage))
-        {
-            return false;
-        }
-
-        if (document.Revision <= 0)
-        {
-            errorMessage = "The selected layout file is missing a valid layout revision.";
-            return false;
-        }
-
-        if (document.Folders.Any(static folder => folder is null)
-            || !TryToSnapshots(document.Objects, document.Id, out List<ObjectSnapshot> snapshots))
-        {
-            errorMessage = "The selected layout file contains invalid object data.";
-            return false;
-        }
-
-        layout = new ObjectLayoutSnapshot
-        {
-            Id = document.Id,
-            Name = document.Name,
-            Revision = document.Revision,
-            CreatedAtUtc = document.CreatedAtUtc,
-            UpdatedAtUtc = document.UpdatedAtUtc,
-            Objects = snapshots.OrderBy(static snapshot => snapshot.CreatedAtUtc).ToList(),
-            Folders = ObjectFolderUtility.OrderFolderEntries(
-                document.Folders.Concat(snapshots.Select(static snapshot => new ObjectFolderSnapshot(snapshot.FolderPath)))),
-        };
-        errorMessage = string.Empty;
-        return true;
-    }
-
     public static bool TryDeserializeAutosave(
         JsonElement root,
         out ObjectPersistentWorkspaceSnapshot workspace,
         out string errorMessage)
     {
-        workspace = null!;
-
-        if (!LooksLikeAutosave(root))
+        try
         {
-            errorMessage = "The autosave file is not a supported object autosave json file.";
+            workspace = null!;
+
+            if (!LooksLikeAutosave(root))
+            {
+                errorMessage = "The autosave file is not a supported object autosave json file.";
+                return false;
+            }
+
+            if (!TryReadFormatVersion(root, out int formatVersion))
+            {
+                errorMessage = "The autosave file is missing a valid format version.";
+                return false;
+            }
+
+            if (formatVersion == 2)
+            {
+                if (!TryUpgradeAutosave(root, out root, out errorMessage))
+                {
+                    return false;
+                }
+            }
+            else if (formatVersion != ObjectLayoutAutosaveDocument.CurrentFormatVersion)
+            {
+                errorMessage = $"Unsupported autosave file version: {formatVersion}.";
+                return false;
+            }
+
+            if (!TryDeserialize(root, "autosave file", out ObjectLayoutAutosaveDocument? document, out errorMessage, formatVersion == 2 ? ReleasedJsonOptions : JsonOptions))
+            {
+                return false;
+            }
+
+            if (document.SavedAtUtc == default)
+            {
+                errorMessage = "The autosave file is missing a valid saved timestamp.";
+                return false;
+            }
+
+            if (document.StandaloneFolders.Any(static folder => folder is null)
+                || document.Layouts.Any(static layout => layout is null || layout.Id == Guid.Empty
+                    || string.IsNullOrWhiteSpace(layout.Name) || layout.Folders is null || layout.Folders.Any(static folder => folder is null)))
+            {
+                errorMessage = "The autosave file contains invalid object data.";
+                return false;
+            }
+
+            if (!TryToAutosaveSnapshots(document.Objects, out List<ObjectSnapshot> snapshots, out errorMessage))
+            {
+                return false;
+            }
+
+            HashSet<Guid> layoutIds = document.Layouts.Select(static layout => layout.Id).ToHashSet();
+            if (layoutIds.Count != document.Layouts.Count
+                || document.CreationLayoutId.HasValue && !layoutIds.Contains(document.CreationLayoutId.Value)
+                || snapshots.Any(snapshot => snapshot.LayoutId.HasValue && !layoutIds.Contains(snapshot.LayoutId.Value)))
+            {
+                errorMessage = "The autosave file contains invalid layout ownership.";
+                return false;
+            }
+
+            ILookup<Guid?, ObjectSnapshot> objectsByOwner = snapshots.ToLookup(static snapshot => snapshot.LayoutId);
+            errorMessage = "The autosave contains invalid group metadata.";
+            if (!ObjectApiMapper.TryToGroups(document.StandaloneGroups, null, out List<SceneGroupSnapshot> standaloneGroups)
+                || !SceneGroupUtility.TryValidateOwner(null, objectsByOwner[null].ToArray(), standaloneGroups, out errorMessage))
+                return false;
+            Dictionary<Guid, IReadOnlyList<SceneGroupSnapshot>> groupsByOwner = [];
+            foreach (ObjectLayoutAutosaveOwner owner in document.Layouts)
+            {
+                errorMessage = "The autosave contains invalid group metadata.";
+                if (!ObjectApiMapper.TryToGroups(owner.Groups, owner.Id, out List<SceneGroupSnapshot> groups)
+                    || !SceneGroupUtility.TryValidateOwner(owner.Id, objectsByOwner[owner.Id].ToArray(), groups, out errorMessage))
+                    return false;
+                groupsByOwner.Add(owner.Id, groups);
+            }
+            IEnumerable<Guid> groupIds = document.StandaloneGroups.Select(static group => group.Id)
+                .Concat(document.Layouts.SelectMany(static owner => owner.Groups).Select(static group => group.Id));
+            if (!SceneIdentityValidation.TryValidate([snapshots.Select(static snapshot => snapshot.Id), groupIds], out _))
+            {
+                errorMessage = "The autosave contains duplicate scene item identities.";
+                return false;
+            }
+            workspace = NormalizeAutosaveFolders(new ObjectPersistentWorkspaceSnapshot
+            {
+                StandaloneObjects = objectsByOwner[null].OrderBy(static snapshot => snapshot.CreatedAtUtc).ToImmutableArray(),
+                StandaloneFolders = document.StandaloneFolders,
+                StandaloneGroups = standaloneGroups,
+                CreationLayoutId = document.CreationLayoutId,
+                Layouts = document.Layouts.Select(layout => new ObjectLayoutSnapshot
+                {
+                    Id = layout.Id,
+                    Name = layout.Name,
+                    Folders = layout.Folders,
+                    Groups = groupsByOwner[layout.Id],
+                    Objects = objectsByOwner[layout.Id].OrderBy(static snapshot => snapshot.CreatedAtUtc).ToImmutableArray(),
+                    CreatedAtUtc = document.SavedAtUtc,
+                    UpdatedAtUtc = document.SavedAtUtc,
+                }).ToImmutableArray(),
+                Revision = document.PersistentRevision,
+                CapturedAtUtc = document.SavedAtUtc,
+            });
+            errorMessage = string.Empty;
+            return true;
+        }
+        catch (Exception ex) when (ex is JsonException or ArgumentException)
+        {
+            workspace = null!;
+            errorMessage = ex.Message;
             return false;
         }
+    }
 
-        if (!TryReadFormatVersion(root, out int formatVersion))
+    private static bool TryParseJson(string json, string sourceLabel, out JsonDocument document, out string errorMessage)
+    {
+        try
         {
-            errorMessage = "The autosave file is missing a valid format version.";
+            document = JsonDocumentUtility.Parse(json);
+            errorMessage = string.Empty;
+            return true;
+        }
+        catch (JsonException ex)
+        {
+            document = null!;
+            errorMessage = $"The {sourceLabel} is not valid JSON: {ex.Message}";
             return false;
         }
-
-        if (formatVersion != ObjectLayoutAutosaveDocument.CurrentFormatVersion)
-        {
-            errorMessage = $"Unsupported autosave file version: {formatVersion}.";
-            return false;
-        }
-
-        if (!TryValidateRequiredProperties(root, AutosaveDocumentRootProperties, out errorMessage)
-            || !TryDeserialize(root, "autosave file", out ObjectLayoutAutosaveDocument? document, out errorMessage))
-        {
-            return false;
-        }
-
-        if (document.StandaloneFolders.Any(static folder => folder is null)
-            || document.DefaultLayoutFolders.Any(static folder => folder is null)
-            || !TryToAutosaveSnapshots(document.Objects, out List<ObjectSnapshot> snapshots)
-            || !SceneIdentityValidation.TryValidate([snapshots.Select(static snapshot => snapshot.Id)], out _))
-        {
-            errorMessage = "The autosave file contains invalid object data.";
-            return false;
-        }
-
-        workspace = NormalizeAutosaveFolders(new ObjectPersistentWorkspaceSnapshot
-        {
-            Objects = snapshots.OrderBy(static snapshot => snapshot.CreatedAtUtc).ToList(),
-            StandaloneFolders = document.StandaloneFolders,
-            DefaultLayoutFolders = document.DefaultLayoutFolders,
-            DefaultLayoutId = document.DefaultLayoutId,
-            Name = TextUtility.TrimOrFallback(document.Name, "Recovered object workspace"),
-            Revision = document.PersistentRevision,
-            CapturedAtUtc = document.SavedAtUtc,
-        });
-        errorMessage = string.Empty;
-        return true;
     }
 
     public static ObjectLayoutAutosaveDocument BuildAutosaveDocument(ObjectPersistentWorkspaceSnapshot workspace)
@@ -232,37 +290,107 @@ internal static class ObjectLayoutJsonSerializer
             FormatVersion = ObjectLayoutAutosaveDocument.CurrentFormatVersion,
             SavedAtUtc = workspace.CapturedAtUtc,
             PersistentRevision = workspace.Revision,
-            DefaultLayoutId = workspace.DefaultLayoutId,
-            Name = TextUtility.TrimOrFallback(workspace.Name, "Current object workspace"),
-            Objects = workspace.Objects.Select(BuildAutosaveObject).ToList(),
+            CreationLayoutId = workspace.CreationLayoutId,
+            Layouts = workspace.Layouts.Select(static layout => new ObjectLayoutAutosaveOwner
+            {
+                Id = layout.Id,
+                Name = layout.Name,
+                Folders = [.. layout.Folders],
+                Groups = layout.Groups.Select(ObjectApiMapper.ToPersistentGroup).ToList(),
+            }).ToList(),
+            Objects = workspace.EnumerateObjects()
+                .Select(BuildAutosaveObject).ToList(),
             StandaloneFolders = [.. workspace.StandaloneFolders],
-            DefaultLayoutFolders = [.. workspace.DefaultLayoutFolders],
+            StandaloneGroups = workspace.StandaloneGroups.Select(ObjectApiMapper.ToPersistentGroup).ToList(),
         };
     }
 
     private static ObjectPersistentWorkspaceSnapshot NormalizeAutosaveFolders(ObjectPersistentWorkspaceSnapshot workspace)
     {
-        List<ObjectFolderSnapshot> standaloneFolders = [.. workspace.StandaloneFolders];
-        List<ObjectFolderSnapshot> defaultLayoutFolders = [.. workspace.DefaultLayoutFolders];
-        foreach (ObjectSnapshot snapshot in workspace.Objects)
-        {
-            List<ObjectFolderSnapshot> folders = workspace.DefaultLayoutId.HasValue && snapshot.LayoutId == workspace.DefaultLayoutId
-                ? defaultLayoutFolders
-                : standaloneFolders;
-            folders.Add(new ObjectFolderSnapshot(snapshot.FolderPath));
-        }
-
         return workspace with
         {
-            StandaloneFolders = ObjectFolderUtility.ExpandFolderEntries(standaloneFolders),
-            DefaultLayoutFolders = ObjectFolderUtility.ExpandFolderEntries(defaultLayoutFolders),
+            StandaloneFolders = ObjectFolderUtility.ExpandFolderEntries(workspace.StandaloneFolders, workspace.StandaloneObjects, workspace.StandaloneGroups),
+            Layouts = workspace.Layouts.Select(static layout => layout with
+            {
+                Folders = ObjectFolderUtility.ExpandFolderEntries(layout.Folders, layout.Objects, layout.Groups),
+            }).ToImmutableArray(),
         };
+    }
+
+    // version 2
+    private static bool TryUpgradeAutosave(JsonElement root, out JsonElement upgradedRoot, out string errorMessage)
+    {
+        upgradedRoot = default;
+        if (!root.TryGetPropertyIgnoreCase("DefaultLayoutId", out JsonElement defaultId)
+            || defaultId.ValueKind != JsonValueKind.Null && (defaultId.ValueKind != JsonValueKind.String
+                || !defaultId.TryGetGuid(out Guid layoutId) || layoutId == Guid.Empty))
+        {
+            errorMessage = "The autosave has no valid default layout id.";
+            return false;
+        }
+
+        if (!root.TryGetPropertyIgnoreCase("Name", out JsonElement name)
+            || name.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(name.GetString()))
+        {
+            errorMessage = "The autosave has no valid workspace name.";
+            return false;
+        }
+
+        if (!root.TryGetPropertyIgnoreCase("DefaultLayoutFolders", out JsonElement folders)
+            || folders.ValueKind != JsonValueKind.Array)
+        {
+            errorMessage = "The autosave has no valid layout folders.";
+            return false;
+        }
+
+        if (!TryDeserialize(root, "autosave file", out JsonObject? upgraded, out errorMessage))
+        {
+            return false;
+        }
+
+        if (upgraded[nameof(ObjectLayoutAutosaveDocument.StandaloneGroups)] is JsonNode standaloneGroups
+                && (standaloneGroups is not JsonArray groupArray || groupArray.Count != 0)
+            || upgraded[nameof(ObjectLayoutAutosaveDocument.Layouts)] is JsonNode layouts
+                && (layouts is not JsonArray layoutArray || layoutArray.Count != 0)
+            || upgraded[nameof(ObjectLayoutAutosaveDocument.CreationLayoutId)] is not null)
+        {
+            errorMessage = "Legacy autosaves cannot contain group or workspace owner metadata.";
+            return false;
+        }
+
+        JsonArray owners = [];
+        JsonNode? id = upgraded["DefaultLayoutId"];
+        if (id is null && upgraded["DefaultLayoutFolders"]!.AsArray().Count != 0)
+        {
+            errorMessage = "The autosave contains layout folders without a layout owner.";
+            return false;
+        }
+
+        if (id is not null)
+        {
+            owners.Add(new JsonObject
+            {
+                ["Id"] = id.DeepClone(),
+                ["Name"] = upgraded["Name"]!.DeepClone(),
+                ["Folders"] = upgraded["DefaultLayoutFolders"]!.DeepClone(),
+                ["Groups"] = new JsonArray(),
+            });
+        }
+
+        upgraded["FormatVersion"] = ObjectLayoutAutosaveDocument.CurrentFormatVersion;
+        upgraded["CreationLayoutId"] = id?.DeepClone();
+        upgraded["Layouts"] = owners;
+        upgraded["StandaloneGroups"] = new JsonArray();
+        upgraded.Remove("DefaultLayoutId");
+        upgraded.Remove("DefaultLayoutFolders");
+        upgraded.Remove("Name");
+        upgradedRoot = JsonSerializer.SerializeToElement(upgraded, JsonOptions);
+        return true;
     }
 
     private static ObjectLayoutFileDocument BuildLayoutDocument(ObjectLayoutSnapshot layout)
     {
-        IReadOnlyList<ObjectFolderSnapshot> folders = ObjectFolderUtility.OrderFolderEntries(
-            layout.Folders.Concat(layout.Objects.Select(static snapshot => new ObjectFolderSnapshot(snapshot.FolderPath))));
+        IReadOnlyList<ObjectFolderSnapshot> folders = ObjectFolderUtility.ExpandFolderEntries(layout.Folders, layout.Objects, layout.Groups);
 
         return new ObjectLayoutFileDocument
         {
@@ -276,12 +404,14 @@ internal static class ObjectLayoutJsonSerializer
             UpdatedAtUtc = layout.UpdatedAtUtc,
             Objects = layout.Objects.Select(BuildLayoutFileObject).ToList(),
             Folders = [.. folders],
+            Groups = layout.Groups.Select(ObjectApiMapper.ToPersistentGroup).ToList(),
         };
     }
 
     private static ObjectLayoutFileObject BuildLayoutFileObject(ObjectSnapshot snapshot)
         => new()
         {
+            GroupId = snapshot.GroupId,
             FolderPath = ObjectFolderUtility.SanitizeFolderPath(snapshot.FolderPath),
             Locked = snapshot.Locked,
             Object = ObjectApiMapper.ToWorldObject(snapshot),
@@ -290,6 +420,7 @@ internal static class ObjectLayoutJsonSerializer
     private static ObjectLayoutAutosaveObject BuildAutosaveObject(ObjectSnapshot snapshot)
         => new()
         {
+            GroupId = snapshot.GroupId,
             LayoutId = snapshot.LayoutId,
             FolderPath = ObjectFolderUtility.SanitizeFolderPath(snapshot.FolderPath),
             Locked = snapshot.Locked,
@@ -297,119 +428,127 @@ internal static class ObjectLayoutJsonSerializer
         };
 
     // version 1 layouts use seperate folder metadata so we need to upgrade it to version 2
-    private static bool TryUpgradeLayoutFolders(JsonElement root, out JsonElement upgradedRoot, out string errorMessage)
+    internal static bool TryUpgradeLayoutFolders(JsonElement root, JsonObject upgraded, out string errorMessage)
     {
-        upgradedRoot = default;
-        if (!root.TryGetProperty("FolderColors", out JsonElement colors)
+        if (!root.TryGetPropertyIgnoreCase("FolderColors", out JsonElement colors)
             || colors.ValueKind != JsonValueKind.Object)
         {
             errorMessage = "The selected layout file is missing valid folder data.";
             return false;
         }
 
-        if (!TryDeserialize(root.GetProperty(nameof(ObjectLayoutFileDocument.Folders)), "layout folder list", out List<string>? paths, out errorMessage)
-            || !TryDeserialize(colors, "layout folder colors", out Dictionary<string, string>? colorMap, out errorMessage)
-            || !TryDeserialize(root, "selected layout file", out JsonObject? upgraded, out errorMessage))
+        if (!TryDeserialize(root.TryGetPropertyIgnoreCase(nameof(ObjectLayoutFileDocument.Folders), out JsonElement folderList) ? folderList : JsonSerializer.SerializeToElement(Array.Empty<string>()), "layout folder list", out List<string>? paths, out errorMessage)
+            || !TryDeserialize(colors, "layout folder colors", out Dictionary<string, string>? colorMap, out errorMessage))
         {
             return false;
         }
 
-        JsonElement objects = root.GetProperty(nameof(ObjectLayoutFileDocument.Objects));
+        if (!root.TryGetPropertyIgnoreCase(nameof(ObjectLayoutFileDocument.Objects), out JsonElement objects)
+            || objects.ValueKind != JsonValueKind.Array)
+        {
+            errorMessage = "The selected layout file is missing a valid object list.";
+            return false;
+        }
+
         foreach (JsonElement entry in objects.EnumerateArray())
         {
             if (entry.ValueKind == JsonValueKind.Object
-                && entry.TryGetProperty(nameof(ObjectLayoutFileObject.FolderPath), out JsonElement path)
+                && entry.TryGetPropertyIgnoreCase(nameof(ObjectLayoutFileObject.FolderPath), out JsonElement path)
                 && path.ValueKind == JsonValueKind.String)
             {
                 paths.Add(path.GetString()!);
             }
         }
 
-        upgraded[nameof(ObjectLayoutFileDocument.FormatVersion)] = ObjectLayoutFileDocument.CurrentFormatVersion;
         upgraded[nameof(ObjectLayoutFileDocument.Folders)] = JsonSerializer.SerializeToNode(
             ObjectFolderUtility.FromFolderColorMap(paths, colorMap), JsonOptions);
         upgraded.Remove("FolderColors");
-        upgradedRoot = JsonSerializer.SerializeToElement(upgraded, JsonOptions);
         errorMessage = string.Empty;
+        return true;
+    }
+
+    internal static bool TryToSnapshot(ObjectLayoutFileObject entry, Guid? layoutId, out ObjectSnapshot snapshot)
+    {
+        if (!ObjectApiMapper.TryToDetachedSnapshot(entry.Object, out snapshot))
+        {
+            return false;
+        }
+
+        snapshot = snapshot with
+        {
+            LayoutId = layoutId == Guid.Empty ? null : layoutId,
+            GroupId = entry.GroupId,
+            FolderPath = ObjectFolderUtility.SanitizeFolderPath(entry.FolderPath),
+            Locked = entry.Locked,
+        };
         return true;
     }
 
     private static bool TryToSnapshots(
         IReadOnlyList<ObjectLayoutFileObject>? objects,
         Guid layoutId,
-        out List<ObjectSnapshot> snapshots)
-        => TryToSnapshots(
-            objects,
-            static entry => entry.Object,
-            (entry, snapshot) => snapshot with
-            {
-                LayoutId = layoutId,
-                FolderPath = ObjectFolderUtility.SanitizeFolderPath(entry.FolderPath),
-                Locked = entry.Locked,
-            },
-            out snapshots);
+        out List<ObjectSnapshot> snapshots, out string errorMessage)
+        => TryMapObjectEntries(objects, _ => layoutId, out snapshots, out errorMessage);
 
     private static bool TryToAutosaveSnapshots(
         IReadOnlyList<ObjectLayoutAutosaveObject>? objects,
-        out List<ObjectSnapshot> snapshots)
-        => TryToSnapshots(
-            objects,
-            static entry => entry.Object,
-            static (entry, snapshot) => snapshot with
-            {
-                LayoutId = entry.LayoutId == Guid.Empty ? null : entry.LayoutId,
-                FolderPath = ObjectFolderUtility.SanitizeFolderPath(entry.FolderPath),
-                Locked = entry.Locked,
-            },
-            out snapshots);
+        out List<ObjectSnapshot> snapshots, out string errorMessage)
+        => TryMapObjectEntries(objects, static entry => entry.LayoutId, out snapshots, out errorMessage);
 
-    private static bool TryToSnapshots<TEntry>(
-        IReadOnlyList<TEntry>? objects,
-        Func<TEntry, WorldObject?> getObject,
-        Func<TEntry, ObjectSnapshot, ObjectSnapshot> buildSnapshot,
-        out List<ObjectSnapshot> snapshots)
-        where TEntry : class
+    private static bool TryUpgradeLayout(JsonElement root, int formatVersion, out JsonElement upgradedRoot, out string errorMessage)
     {
+        upgradedRoot = default;
+        if (!TryDeserialize(root, "selected layout file", out JsonObject? upgraded, out errorMessage)
+            || formatVersion == 1 && !TryUpgradeLayoutFolders(root, upgraded, out errorMessage))
+            return false;
+        if (root.TryGetPropertyIgnoreCase(nameof(ObjectLayoutFileDocument.Groups), out JsonElement legacyGroups)
+            && (legacyGroups.ValueKind != JsonValueKind.Array || legacyGroups.GetArrayLength() != 0))
+        {
+            errorMessage = "Legacy layouts cannot contain group metadata.";
+            return false;
+        }
+        upgraded[nameof(ObjectLayoutFileDocument.FormatVersion)] = ObjectLayoutFileDocument.CurrentFormatVersion;
+        upgraded[nameof(ObjectLayoutFileDocument.Groups)] = new JsonArray();
+
+        upgradedRoot = JsonSerializer.SerializeToElement(upgraded, JsonOptions);
+        return true;
+    }
+
+    private static bool TryMapObjectEntries<TEntry>(
+        IReadOnlyList<TEntry>? objects,
+        Func<TEntry, Guid?> getLayoutId,
+        out List<ObjectSnapshot> snapshots, out string errorMessage)
+        where TEntry : ObjectLayoutFileObject
+    {
+        errorMessage = string.Empty;
         if (objects is null)
         {
+            errorMessage = "The object list is missing.";
             snapshots = [];
             return false;
         }
 
         snapshots = new List<ObjectSnapshot>(objects.Count);
-        foreach (TEntry? entry in objects)
+        for (int index = 0; index < objects.Count; ++index)
         {
-            if (entry is null || !TryToDetachedSnapshot(getObject(entry), out ObjectSnapshot snapshot))
+            TEntry? entry = objects[index];
+            if (entry is null || !TryToSnapshot(entry, getLayoutId(entry), out ObjectSnapshot snapshot))
             {
+                WorldObject? item = entry?.Object;
+                errorMessage = $"Objects[{index}] ('{item?.Name}', {item?.Id}): invalid object identity, timestamp, type, or model data.";
                 snapshots = [];
                 return false;
             }
 
-            snapshots.Add(buildSnapshot(entry, snapshot));
+            snapshots.Add(snapshot);
         }
 
         return true;
     }
 
-    private static bool TryToDetachedSnapshot(WorldObject? dto, out ObjectSnapshot snapshot)
-    {
-        if (dto is not null
-            && IsPersistedLayoutObject(dto)
-            && ObjectApiMapper.TryToDetachedSnapshot(dto, out snapshot))
-        {
-            return true;
-        }
-
-        snapshot = default!;
-        return false;
-    }
-
-    private static bool IsPersistedLayoutObject(WorldObject dto)
-        => dto.Id != Guid.Empty && dto.CreatedAtUtc != default;
-
     private static bool TryReadFormatVersion(JsonElement root, out int formatVersion)
     {
-        if (root.TryGetProperty(nameof(ObjectLayoutFileDocument.FormatVersion), out JsonElement value)
+        if (root.TryGetPropertyIgnoreCase(nameof(ObjectLayoutFileDocument.FormatVersion), out JsonElement value)
             && value.ValueKind == JsonValueKind.Number
             && value.TryGetInt32(out formatVersion))
         {
@@ -420,62 +559,22 @@ internal static class ObjectLayoutJsonSerializer
         return false;
     }
 
-    private static bool TryValidateRequiredProperties(
-        JsonElement root,
-        ReadOnlySpan<RequiredJsonProperty> properties,
-        out string errorMessage)
-    {
-        foreach (RequiredJsonProperty property in properties)
-        {
-            if (TryReadRequiredProperty(root, property))
-            {
-                continue;
-            }
-
-            errorMessage = property.ErrorMessage;
-            return false;
-        }
-
-        errorMessage = string.Empty;
-        return true;
-    }
-
-    private static bool TryReadRequiredProperty(JsonElement root, RequiredJsonProperty property)
-    {
-        if (!root.TryGetProperty(property.Name, out JsonElement element))
-        {
-            return false;
-        }
-
-        return property.Kind switch
-        {
-            RequiredJsonValueKind.String => element.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(element.GetString()),
-            RequiredJsonValueKind.Guid => element.ValueKind == JsonValueKind.String && element.TryGetGuid(out Guid guid) && guid != Guid.Empty,
-            RequiredJsonValueKind.NullableGuid => element.ValueKind == JsonValueKind.Null
-                || (element.ValueKind == JsonValueKind.String && element.TryGetGuid(out Guid guid) && guid != Guid.Empty),
-            RequiredJsonValueKind.DateTime => element.ValueKind == JsonValueKind.String && element.TryGetDateTime(out DateTime dateTime) && dateTime != default,
-            RequiredJsonValueKind.Int64 => element.ValueKind == JsonValueKind.Number && element.TryGetInt64(out _),
-            RequiredJsonValueKind.Array => element.ValueKind == JsonValueKind.Array,
-            _ => false,
-        };
-    }
-
     private static bool TryDeserialize<TDocument>(
         JsonElement root,
         string sourceLabel,
         [NotNullWhen(true)] out TDocument? document,
-        out string errorMessage)
+        out string errorMessage,
+        JsonSerializerOptions? options = null)
         where TDocument : class
     {
         try
         {
-            document = root.Deserialize<TDocument>(JsonOptions);
+            document = root.Deserialize<TDocument>(options ?? JsonOptions);
         }
         catch (Exception ex) when (ex is JsonException or ArgumentException)
         {
-            // json object decoding reports duplicate properties as argument exceptions
             document = default;
-            errorMessage = $"The {sourceLabel} contains invalid object data.";
+            errorMessage = $"The {sourceLabel} contains invalid data: {ex.Message}";
             return false;
         }
 
@@ -491,10 +590,9 @@ internal static class ObjectLayoutJsonSerializer
 
     private static bool LooksLikeAutosave(JsonElement root)
         => root.ValueKind == JsonValueKind.Object
-           && root.TryGetProperty(nameof(ObjectLayoutAutosaveDocument.DocumentKind), out JsonElement documentKind)
+           && root.TryGetPropertyIgnoreCase(nameof(ObjectLayoutAutosaveDocument.DocumentKind), out JsonElement documentKind)
            && documentKind.ValueKind == JsonValueKind.String
            && string.Equals(documentKind.GetString(), ObjectLayoutAutosaveDocument.DocumentKindValue, StringComparison.Ordinal)
-           && root.TryGetProperty(nameof(ObjectLayoutAutosaveDocument.FormatVersion), out _)
-           && root.TryGetProperty(nameof(ObjectLayoutAutosaveDocument.Objects), out _);
+           && root.TryGetPropertyIgnoreCase(nameof(ObjectLayoutAutosaveDocument.FormatVersion), out _)
+           && root.TryGetPropertyIgnoreCase(nameof(ObjectLayoutAutosaveDocument.Objects), out _);
 }
-

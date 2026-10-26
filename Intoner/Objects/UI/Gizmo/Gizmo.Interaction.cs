@@ -1,4 +1,5 @@
 using Dalamud.Interface.Utility;
+using Dalamud.Bindings.ImGui;
 using Intoner.Objects.Models;
 using Intoner.Objects.Utils;
 using System.Numerics;
@@ -11,7 +12,7 @@ internal sealed partial class Gizmo
 {
     private GizmoFrame BuildGizmoFrame(in GizmoContext context, Vector2 mousePos, float scale, bool pointerAvailable)
     {
-        GizmoTransformMode modes = Settings.GetAvailableModes(context.ScaleSupported);
+        GizmoTransformMode modes = context.CanTransform ? Settings.GetAvailableModes(context.ScaleSupported) : GizmoTransformMode.None;
         bool combined = modes.IsCombined();
         int translationAxisCount = (modes & GizmoTransformMode.Translation) != GizmoTransformMode.None
             ? BuildLinearGizmoAxisVisualStates(context, context.UseWorldSpace, State.TranslationAxes)
@@ -27,6 +28,29 @@ internal sealed partial class Gizmo
             else
             {
                 scaleAxisCount = BuildLinearGizmoAxisVisualStates(context, false, State.ScaleAxes);
+            }
+
+            if (ScaleDragState.IsDragging)
+            {
+                for (int index = 0; index < scaleAxisCount; ++index)
+                {
+                    GizmoAxisVisualState axis = State.ScaleAxes[index];
+
+                    if (axis.Matches(ScaleDragState.ActiveAxis, -ScaleDragState.AxisWorldDirection))
+                    {
+                        State.ScaleAxes[index] = axis.Opposite;
+                    }
+                }
+            }
+
+            if (Scaling.Anchored)
+            {
+                int count = scaleAxisCount;
+                for (int index = 0; index < count; ++index)
+                {
+                    GizmoAxisVisualState axis = State.ScaleAxes[index];
+                    State.ScaleAxes[scaleAxisCount++] = axis.Opposite;
+                }
             }
 
             if (combined)
@@ -60,9 +84,6 @@ internal sealed partial class Gizmo
         return ResolveGizmoInteraction(context, modes, translationAxisCount, scaleAxisCount, projection, mousePos, scale, pointerAvailable);
     }
 
-    private static float ResolveCenterInteractionRadius(float scale)
-        => GizmoConstants.CenterInteractionRadius * scale;
-
     private int BuildLinearGizmoAxisVisualStates(in GizmoContext context, bool useWorldSpace, Span<GizmoAxisVisualState> axes)
     {
         int count = 0;
@@ -95,6 +116,13 @@ internal sealed partial class Gizmo
         GetGizmoInteractionBounds(scaleAxes, context.ScreenPos, scale, out Vector2 scaleMin, out Vector2 scaleMax);
         min = Vector2.Min(min, scaleMin);
         max = Vector2.Max(max, scaleMax);
+        if (SceneGroupUtility.ResolveSelectedGroup(context.SelectedSnapshots) is not null)
+        {
+            Vector2 padding = new(ResolvePivotRingRadius(scale)
+                + (GizmoConstants.PivotRingThickness * 0.5f + GizmoConstants.PivotRingHitPadding) * scale);
+            min = Vector2.Min(min, context.ScreenPos - padding);
+            max = Vector2.Max(max, context.ScreenPos + padding);
+        }
         if ((modes & GizmoTransformMode.Rotation) != GizmoTransformMode.None)
         {
             Vector2 padding = new(ResolveRotationInteractionRadius(projection, scale));
@@ -106,17 +134,18 @@ internal sealed partial class Gizmo
             && mousePos.X <= max.X && mousePos.Y <= max.Y;
         bool dragging = TryGetActiveTransformDragState(out GizmoTransformDragSession? drag);
         GizmoInteractionAvailability availability = new(pointerInRegion, dragging,
-            IsGizmoSurfaceDragActive(context.PrimarySnapshot.Id), IsGizmoWheelOpen());
-        float centerRadius = ResolveCenterInteractionRadius(scale);
-        bool centerHovered = availability.CanResolveHover && context.SurfaceDragSupported
+            IsGizmoSurfaceDragActive(context.PrimarySnapshot.Id), IsGizmoWheelOpen() || ImGui.IsPopupOpen(PivotMenuId));
+        bool pivotHovered = availability.CanResolveHover && IsPivotRingHovered(context, mousePos, scale);
+        float centerRadius = GizmoLinearHandles.ResolveCenterInteractionRadius(scale);
+        bool centerHovered = availability.CanResolveHover && context.CanTransform && context.SurfaceDragSupported
             && Vector2.DistanceSquared(mousePos, context.ScreenPos) <= centerRadius * centerRadius;
         GizmoHandleHit hit = default;
-        if (availability.CanResolveHover && !centerHovered)
+        if (availability.CanResolveHover && !centerHovered && !pivotHovered)
         {
-            FindLinearHandle(translationAxes, GizmoTransformMode.Translation, modes, context.UseWorldSpace, mousePos, scale, ref hit);
+            GizmoLinearHandles.FindLinearHandle(translationAxes, GizmoTransformMode.Translation, modes, [], mousePos, scale, ref hit);
             if (!hit.IsValid)
             {
-                FindLinearHandle(scaleAxes, GizmoTransformMode.Scale, modes, context.UseWorldSpace, mousePos, scale, ref hit);
+                GizmoLinearHandles.FindLinearHandle(scaleAxes, GizmoTransformMode.Scale, modes, translationAxes, mousePos, scale, ref hit);
             }
             if ((modes & GizmoTransformMode.Rotation) != GizmoTransformMode.None)
             {
@@ -129,48 +158,11 @@ internal sealed partial class Gizmo
             }
         }
 
-        GizmoInteractionState interaction = new(availability.ResolvePhase(centerHovered, hit.IsValid),
+        GizmoInteractionState interaction = new(pivotHovered ? GizmoInteractionPhase.HoverPivot : availability.ResolvePhase(centerHovered, hit.IsValid),
             pointerInRegion, centerHovered, drag?.ActiveAxis ?? GizmoAxis.None);
         return new(context, modes, translationAxisCount, scaleAxisCount, projection, interaction, hit,
             drag?.Mode ?? GizmoTransformMode.None);
     }
-
-    private static void FindLinearHandle(
-        ReadOnlySpan<GizmoAxisVisualState> axes,
-        GizmoTransformMode operation,
-        GizmoTransformMode modes,
-        bool useWorldSpace,
-        Vector2 mousePos,
-        float scale,
-        ref GizmoHandleHit hit)
-    {
-        foreach (GizmoAxisVisualState axis in axes)
-        {
-            bool endpoint = operation == GizmoTransformMode.Scale
-                ? TryGetScaleHandleHitDistance(mousePos, axis.ScreenEnd, axis.VisualScale, out float distance)
-                : TryGetTranslationArrowHitDistance(mousePos, axis, axis.VisualScale, out distance);
-            Vector2 start = operation == GizmoTransformMode.Scale && modes.IsCombined()
-                ? axis.ScreenStart + axis.ScreenDirection * GetCombinedScaleStemStart(axis, modes, useWorldSpace, scale)
-                : GetLinearGizmoInteractionStart(axis, scale);
-            if (!endpoint && !TryGetSegmentHitDistance(mousePos, start,
-                    GetLinearGizmoInteractionEnd(axis, operation, axis.VisualScale),
-                    ResolveLinearGizmoAxisLineHitRadius(operation, axis.VisualScale), out distance))
-            {
-                continue;
-            }
-
-            GizmoHandleHit candidate = new(operation, axis, default, distance, endpoint);
-            if (candidate.IsCloserThan(hit))
-            {
-                hit = candidate;
-            }
-        }
-    }
-
-    private static float GetCombinedScaleStemStart(GizmoAxisVisualState axis, GizmoTransformMode modes, bool useWorldSpace, float scale)
-        => (modes & GizmoTransformMode.Translation) != GizmoTransformMode.None && !useWorldSpace
-            ? axis.ScreenLength / GizmoConstants.CombinedScaleReach + 5f * axis.VisualScale
-            : ResolveCenterInteractionRadius(scale) + 5f * axis.VisualScale;
 
     private static RotationHoverState FindRotationHoverState(
         in RotationProjectionContext projection,
@@ -313,7 +305,8 @@ internal sealed partial class Gizmo
             targetLength,
             drawScreenDirection,
             drawScreenLength,
-            visualScale);
+            visualScale,
+            directionSign);
         cached = new(directionSign, drawScreenDirection);
         return true;
     }
@@ -344,7 +337,7 @@ internal sealed partial class Gizmo
         angle = 0f;
 
         var axisDirection = ResolveAxisWorldDirection(axis, projection.Rotation, projection.UseWorldSpace);
-        var rotationMathProjection = CreateRotationMathProjection(projection);
+        var rotationMathProjection = projection.MathProjection;
         Vector2? previousPos = null;
         var previousVisible = false;
 
@@ -494,154 +487,8 @@ internal sealed partial class Gizmo
             : normalizedRotated;
     }
 
-    private static Vector2 GetLinearGizmoInteractionStart(GizmoAxisVisualState state, float scale)
-    {
-        if (!NumericsUtility.TryNormalize(state.ScreenDirection, out var screenDirection))
-        {
-            return state.ScreenStart;
-        }
-
-        var inset = MathF.Min(
-            ResolveCenterInteractionRadius(scale) + (5f * scale),
-            MathF.Max(0f, state.ScreenLength - 1f));
-        return inset <= 0f
-            ? state.ScreenStart
-            : state.ScreenStart + (screenDirection * inset);
-    }
-
-    private static Vector2 GetLinearGizmoInteractionEnd(GizmoAxisVisualState state, GizmoTransformMode mode, float scale)
-    {
-        if (!NumericsUtility.TryNormalize(state.ScreenDirection, out var screenDirection))
-        {
-            return state.ScreenEnd;
-        }
-
-        if (mode == GizmoTransformMode.Translation)
-        {
-            return GetTrimmedGizmoEndpoint(state, scale);
-        }
-
-        var trimAmount = GetScaleHandleVisualHalfExtent(scale) + (1.5f * scale);
-        trimAmount = MathF.Min(trimAmount, MathF.Max(0f, state.ScreenLength - 1f));
-        return trimAmount <= 0f
-            ? state.ScreenEnd
-            : state.ScreenEnd - (screenDirection * trimAmount);
-    }
-
-    private static float ResolveLinearGizmoAxisLineHitRadius(GizmoTransformMode mode, float scale)
-        => mode == GizmoTransformMode.Scale
-            ? MathF.Max(7f * scale, GizmoConstants.AxisLineThickness * scale * 2.35f)
-            : MathF.Max(6f * scale, GizmoConstants.AxisLineThickness * scale * 2.1f);
-
-    private static bool TryGetSegmentHitDistance(
-        Vector2 point,
-        Vector2 start,
-        Vector2 end,
-        float hitRadius,
-        out float distance)
-    {
-        distance = float.MaxValue;
-        if (hitRadius <= 0f)
-        {
-            return false;
-        }
-
-        distance = DistanceToSegment(point, start, end);
-        return distance <= hitRadius;
-    }
-
-    private static bool TryGetTranslationArrowHitDistance(Vector2 point, in GizmoAxisVisualState state, float scale, out float distance)
-    {
-        distance = float.MaxValue;
-        if (!NumericsUtility.TryNormalize(state.ScreenDirection, out var direction))
-        {
-            return false;
-        }
-
-        var normal = new Vector2(-direction.Y, direction.X);
-        var arrowLength = GizmoConstants.AxisArrowLength * scale;
-        var arrowWidth = GizmoConstants.AxisArrowWidth * scale;
-        var tip = state.ScreenEnd;
-        var basePoint = tip - (direction * arrowLength);
-        var left = basePoint + (normal * arrowWidth);
-        var right = basePoint - (normal * arrowWidth);
-        var edgePadding = MathF.Max(3.5f * scale, 2f);
-
-        if (IsPointWithinTriangle(point, tip, left, right))
-        {
-            distance = 0f;
-            return true;
-        }
-
-        var tipDistance = DistanceToSegment(point, tip, left);
-        var leftDistance = DistanceToSegment(point, left, right);
-        var rightDistance = DistanceToSegment(point, right, tip);
-        distance = MathF.Min(tipDistance, MathF.Min(leftDistance, rightDistance));
-        return distance <= edgePadding;
-    }
-
-    private static bool TryGetScaleHandleHitDistance(
-        Vector2 point,
-        Vector2 center,
-        float scale,
-        out float distance)
-    {
-        var halfExtent = GetScaleHandleVisualHalfExtent(scale) + MathF.Max(3.5f * scale, 2f);
-        var min = center - new Vector2(halfExtent);
-        var max = center + new Vector2(halfExtent);
-        var clamped = Vector2.Clamp(point, min, max);
-        distance = Vector2.Distance(point, clamped);
-        return NumericsUtility.IsNearlyZero(distance);
-    }
-
-    private static float GetScaleHandleVisualHalfExtent(float scale)
-        => GizmoConstants.ScaleHandleSize * scale * 0.5f;
-
-    private static bool IsPointWithinTriangle(Vector2 point, Vector2 a, Vector2 b, Vector2 c)
-    {
-        var denominator = ((b.Y - c.Y) * (a.X - c.X)) + ((c.X - b.X) * (a.Y - c.Y));
-        if (NumericsUtility.IsNearlyZero(denominator))
-        {
-            return false;
-        }
-
-        var alpha = (((b.Y - c.Y) * (point.X - c.X)) + ((c.X - b.X) * (point.Y - c.Y))) / denominator;
-        var beta = (((c.Y - a.Y) * (point.X - c.X)) + ((a.X - c.X) * (point.Y - c.Y))) / denominator;
-        var gamma = 1f - alpha - beta;
-        return alpha >= 0f && beta >= 0f && gamma >= 0f;
-    }
-
-    private static float DistanceToSegment(Vector2 point, Vector2 start, Vector2 end)
-    {
-        var segment = end - start;
-        var lengthSq = segment.LengthSquared();
-        if (!NumericsUtility.HasLength(lengthSq))
-        {
-            return (point - start).Length();
-        }
-
-        var t = Vector2.Dot(point - start, segment) / lengthSq;
-        t = Math.Clamp(t, 0f, 1f);
-        var projection = start + (segment * t);
-        return (point - projection).Length();
-    }
-
-    private static Vector2 GetTrimmedGizmoEndpoint(GizmoAxisVisualState state, float scale)
-    {
-        if (!NumericsUtility.TryNormalize(state.ScreenDirection, out var screenDirection))
-        {
-            return state.ScreenEnd;
-        }
-
-        var trimAmount = MathF.Min(GizmoConstants.AxisArrowLength * scale, MathF.Max(0f, state.ScreenLength - 1f));
-        return trimAmount <= 0f
-            ? state.ScreenEnd
-            : state.ScreenEnd - (screenDirection * trimAmount);
-    }
-
     private static Vector2 ResolveFallbackZScreenDirection()
         => NumericsUtility.TryNormalize(new Vector2(0.85f, -0.65f), out var direction)
             ? direction
             : Vector2.UnitX;
 }
-

@@ -21,20 +21,16 @@ internal interface IGizmoHost
     /// <summary> gets the current scene revision </summary>
     long GetSceneRevision();
 
-    /// <summary> captures current editor selection ids for history entries </summary>
-    Guid[] CaptureCurrentSelectionIds();
-
     /// <summary> commits pending edits and validates history before a gizmo mutation starts </summary>
     void PrepareHistoryMutation();
 
-    /// <summary> records a completed history action after a gizmo drag finishes </summary>
-    bool TryRecordCompletedHistoryAction(
+    /// <summary> commits and records a completed gizmo drag </summary>
+    bool TryCommitHistoryEdit(
+        SceneEditSession edit,
         SceneHistoryKind kind,
         string title,
         IReadOnlyList<SceneItemSnapshot> beforeSnapshots,
-        IReadOnlyList<SceneItemSnapshot> afterSnapshots,
-        IReadOnlyList<Guid>? selectionAfterApply,
-        IReadOnlyList<Guid>? selectionAfterRevert);
+        IReadOnlyList<SceneItemSnapshot> afterSnapshots);
 
     /// <summary> duplicates the provided selected items through the normal history path </summary>
     bool TryDuplicateSelectedItems(IReadOnlyList<SceneItemSnapshot> selectedSnapshots);
@@ -44,6 +40,9 @@ internal interface IGizmoHost
 
     /// <summary> moves one selected item to the player through the normal history path </summary>
     bool TryMoveItemToPlayerWithHistory(Guid itemId);
+
+    /// <summary> centers a group pivot without moving its members through the normal history path </summary>
+    bool TryCenterGroupPivot(SceneGroupSnapshot group);
 
     /// <summary> applies a selected item update through the normal history path </summary>
     bool TryApplySelectedSnapshotUpdateWithHistory(
@@ -57,6 +56,7 @@ internal sealed partial class Gizmo : IDisposable
 {
     private readonly IGizmoHost _host;
     private readonly IKeyboardInputService _keyboardInput;
+    private readonly IShortcutService _shortcuts;
     private readonly ISceneItemService _sceneItemService;
     private readonly ISceneSurfaceService _surfaceService;
     private readonly DrawManager _drawManager;
@@ -68,6 +68,8 @@ internal sealed partial class Gizmo : IDisposable
     private SceneEditSession? _surfaceEdit;
 
     public GizmoSettings Settings { get; } = new();
+
+    internal GizmoScaling Scaling { get; }
 
     private GizmoState State { get; } = new();
 
@@ -85,6 +87,31 @@ internal sealed partial class Gizmo : IDisposable
 
     private bool HasActiveTransformDrag
         => TryGetActiveTransformDragState(out _);
+
+    public bool CanToggleTransformSpace
+        => !HasActiveTransformDrag && !SurfaceDragState.IsDragging;
+
+    internal bool CanToggleUniformScaling => !ScaleDragState.IsDragging;
+
+    internal void ToggleUniformScaling()
+    {
+        if (CanToggleUniformScaling)
+        {
+            Settings.UniformScaling = !Settings.UniformScaling;
+        }
+    }
+
+    public void ToggleTransformSpace()
+    {
+        if (!CanToggleTransformSpace)
+        {
+            return;
+        }
+
+        CurrentBoundsOverlaySpace = CurrentBoundsOverlaySpace == BoundsOverlaySpace.World
+            ? BoundsOverlaySpace.Local
+            : BoundsOverlaySpace.World;
+    }
 
     private IKeyboardInputLease? SurfaceDragKeyboardInputLease
     {
@@ -173,14 +200,17 @@ internal sealed partial class Gizmo : IDisposable
         IKeyboardInputService keyboardInput,
         ISceneItemService sceneItemService,
         ISceneSurfaceService surfaceService,
-        IIntonerConfigurationService configuration)
+        IIntonerConfigurationService configuration,
+        IShortcutService shortcuts)
     {
         _host = host;
         _drawManager = drawManager;
         _keyboardInput = keyboardInput;
+        _shortcuts = shortcuts;
         _sceneItemService = sceneItemService;
         _surfaceService = surfaceService;
         _configuration = configuration;
+        Scaling = new GizmoScaling(Settings, shortcuts, sceneItemService, SupportsScale);
         _appearance = configuration.Current.Rendering.GizmoAppearance;
         _configuration.ConfigurationChanged += OnGizmoConfigurationChanged;
     }
@@ -197,7 +227,8 @@ internal sealed partial class Gizmo : IDisposable
 
     public void NormalizeMode(IReadOnlyList<SceneItemSnapshot> selectedItems)
     {
-        if (!CanUseScaleGizmo(selectedItems) && Mode == GizmoTransformMode.Scale)
+        NormalizePivotSelection(selectedItems);
+        if (selectedItems.Count > 0 && !CanUseScaleGizmo(selectedItems) && Mode == GizmoTransformMode.Scale)
         {
             Mode = GizmoTransformMode.Rotation;
         }
@@ -213,18 +244,51 @@ internal sealed partial class Gizmo : IDisposable
         }
     }
 
+    public void CancelPreviewInteractions()
+    {
+        _transformEdit?.Cancel();
+        _surfaceEdit?.Cancel();
+        ResetGizmoDrag();
+        ResetGizmoSurfaceDrag();
+    }
+
     public void CancelInteractions()
     {
         CompleteGizmoDrag();
         CompleteGizmoSurfaceDrag();
     }
 
+    private bool SupportsScale(SceneItemSnapshot snapshot)
+        => TryGetManipulation(snapshot, out _, out SceneItemManipulation manipulation) && manipulation.SupportsScale;
+
     internal bool CanUseScaleGizmo(SceneItemSnapshot snapshot)
-        => TryGetManipulation(snapshot, out _, out SceneItemManipulation manipulation)
-           && manipulation.SupportsScale;
+        => !IsEditingGroupPivot(snapshot.Id) && SupportsScale(snapshot);
 
     internal bool CanUseScaleGizmo(IReadOnlyList<SceneItemSnapshot> selectedItems)
-        => selectedItems.Count == 1 && CanUseScaleGizmo(selectedItems[0]);
+    {
+        HashSet<Guid>? selectedGroups = null;
+        for (int index = 0; index < selectedItems.Count; ++index)
+        {
+            if (!CanUseScaleGizmo(selectedItems[index]) && !IsSelectedGroupMember(selectedItems[index], selectedItems, ref selectedGroups))
+            {
+                return false;
+            }
+        }
+
+        return selectedItems.Count > 0;
+    }
+
+    private static bool IsSelectedGroupMember(
+        SceneItemSnapshot item,
+        IReadOnlyList<SceneItemSnapshot> selectedItems,
+        ref HashSet<Guid>? selectedGroups)
+    {
+        if (item is not ObjectSnapshot { GroupId: { } groupId })
+            return false;
+
+        selectedGroups ??= selectedItems.OfType<SceneGroupSnapshot>().Select(static group => group.Id).ToHashSet();
+        return selectedGroups.Contains(groupId);
+    }
 
     public void Draw(
         IReadOnlyList<SceneItemSnapshot> selectedItems,
@@ -258,6 +322,7 @@ internal sealed partial class Gizmo : IDisposable
         in GizmoDrawOptions options,
         out GizmoFrame frame)
     {
+        NormalizePivotSelection(selectedItems);
         bool pointerAvailable = options.CanUsePointer(mousePos);
         var request = CreateFrameRequest(mousePos, pointerAvailable);
         if (State.TryGetCachedFrame(request, out frame))
@@ -285,7 +350,8 @@ internal sealed partial class Gizmo : IDisposable
             _host.GetSelectionRevision(),
             _host.GetSceneRevision(),
             mousePos,
-            pointerAvailable);
+            pointerAvailable,
+            Scaling.Anchored);
 
     private bool TryPrepareGizmoContext(
         IReadOnlyList<SceneItemSnapshot> selectedItems,
@@ -306,13 +372,15 @@ internal sealed partial class Gizmo : IDisposable
     private void ValidateActiveDragTargets(in GizmoContext context)
     {
         if (TryGetActiveTransformDragState(out var activeTransformDrag)
-            && (activeTransformDrag.ItemId != context.PrimarySnapshot.Id
+            && (!context.CanTransform
+                || !activeTransformDrag.MatchesSelection(context.EditSnapshots)
                 || (Settings.GetAvailableModes(context.ScaleSupported) & activeTransformDrag.Mode) == GizmoTransformMode.None))
         {
             CompleteGizmoDrag();
         }
 
-        if (SurfaceDragState.IsDragging && SurfaceDragState.ItemId != context.PrimarySnapshot.Id)
+        if (SurfaceDragState.IsDragging
+            && (!context.CanTransform || !context.SurfaceDragSupported || !SurfaceDragState.MatchesSelection(context.EditSnapshots)))
         {
             CompleteGizmoSurfaceDrag();
         }
@@ -362,11 +430,19 @@ internal sealed partial class Gizmo : IDisposable
             boundsLookup,
             manipulationOptions,
             out float axisWorldLength,
+            out bool scaleSupported,
             out bool surfaceDragSupported);
 
         var boundsSnapshot = selectedItems.Count == 1
             ? SceneSelectionTransformMath.FindManipulationBoundsSnapshot(primarySnapshot, boundsLookup)
             : null;
+        if (IsEditingGroupPivot(primarySnapshot.Id) && primarySnapshot is SceneGroupSnapshot)
+        {
+            if (_pivotSelection.Count == 0 || !ReferenceEquals(_pivotSelection[0], primarySnapshot))
+                _pivotSelection = [primarySnapshot];
+            scaleSupported = false;
+            surfaceDragSupported = manipulationOptions.SupportsSurfaceDrag;
+        }
         context = new GizmoContext(
             selectedItems,
             primarySnapshot,
@@ -386,8 +462,10 @@ internal sealed partial class Gizmo : IDisposable
             cameraUp,
             axisWorldLength,
             CurrentBoundsOverlaySpace == BoundsOverlaySpace.World,
-            selectedItems.Count == 1 && manipulationOptions.SupportsScale,
+            scaleSupported,
             surfaceDragSupported);
+        if (IsEditingGroupPivot(primarySnapshot.Id))
+            context = context with { PivotEditTargets = _pivotSelection };
         return true;
     }
 
@@ -413,8 +491,10 @@ internal sealed partial class Gizmo : IDisposable
         SceneItemBoundsLookup boundsLookup,
         SceneItemManipulation primaryManipulation,
         out float axisLength,
+        out bool scaleSupported,
         out bool surfaceDragSupported)
     {
+        scaleSupported = primaryManipulation.SupportsScale;
         if (selectedItems.Count == 1)
         {
             axisLength = SceneSelectionTransformMath.ResolveItemGizmoAxisLength(
@@ -428,20 +508,27 @@ internal sealed partial class Gizmo : IDisposable
         axisLength = SceneSelectionTransformMath.ResolveSelectionGizmoAxisLength(selectedItems, boundsLookup);
         surfaceDragSupported = primaryManipulation.SupportsSurfaceDrag;
         IncludePreferredAxisLength(primaryManipulation, ref axisLength);
+        HashSet<Guid>? selectedGroups = null;
         for (int index = 0; index < selectedItems.Count - 1; ++index)
         {
             if (!TryGetManipulation(selectedItems[index], out _, out SceneItemManipulation manipulation))
             {
                 surfaceDragSupported = false;
+                scaleSupported = false;
                 continue;
             }
 
             surfaceDragSupported &= manipulation.SupportsSurfaceDrag;
+            scaleSupported = scaleSupported
+                && (manipulation.SupportsScale || IsSelectedGroupMember(selectedItems[index], selectedItems, ref selectedGroups));
             IncludePreferredAxisLength(manipulation, ref axisLength);
         }
 
         axisLength = Math.Clamp(axisLength, 0.25f, 4f);
     }
+
+    internal SceneItemBoundsLookup GetBoundsLookup()
+        => GetBoundsLookup(_sceneItemService.GetBoundsSnapshots());
 
     private SceneItemBoundsLookup GetBoundsLookup(IReadOnlyList<SceneItemBoundsSnapshot> boundsSnapshots)
     {
@@ -505,8 +592,8 @@ internal sealed partial class Gizmo : IDisposable
         GizmoContext context = frame.Context;
         GizmoInteractionState common = frame.Interaction;
         GizmoHandleHit hit = frame.HoveredHandle;
-        ImDrawListPtr drawList = ImGui.GetForegroundDrawList();
         DrawBatch batch = _drawManager.BeginPass(DrawPassKind.Gizmo, "Gizmo", DrawLayer.Foreground);
+        batch.ScreenAnchor = new ScreenAnchor(context.PivotPosition, context.ScreenPos);
         float scale = ImGuiHelpers.GlobalScale;
         if (common.ShouldCaptureMouse)
         {
@@ -548,24 +635,25 @@ internal sealed partial class Gizmo : IDisposable
                 ThemeColors.Color(0f, 0f, 0f, GizmoConstants.CenterGlowOpacity * ResolveGizmoHoverOpacity(common, common.CenterHovered)), 64);
             bool scaleHovered = common.Phase == GizmoInteractionPhase.HoverAxis && hit.Operation == GizmoTransformMode.Scale;
             DrawLinearGizmo(frame, scaleHovered ? GizmoTransformMode.Translation : GizmoTransformMode.Scale,
-                scaleHovered ? moveAxes : scaleAxes, batch, drawList, options);
+                scaleHovered ? moveAxes : scaleAxes, batch, options);
             DrawLinearGizmo(frame, scaleHovered ? GizmoTransformMode.Scale : GizmoTransformMode.Translation,
-                scaleHovered ? scaleAxes : moveAxes, batch, drawList, options);
+                scaleHovered ? scaleAxes : moveAxes, batch, options);
         }
 
         DrawCircularCenterHandle(batch, context.ScreenPos, scale, common.CenterHovered, common.SurfaceDragActive, SurfaceAlignToNormal,
             ResolveGizmoHoverOpacity(common, common.CenterHovered));
-        if (common.CenterHovered)
+        bool pivotHandled = DrawGroupPivotHandle(frame, batch, scale);
+        if (!pivotHandled && common.CenterHovered)
         {
             IntonerTooltip.DrawText(GizmoConstants.SurfaceDragTooltip);
         }
-        else if (hit.IsValid)
+        else if (!pivotHandled && hit.IsValid)
         {
-            DrawGizmoHandleLabel(drawList, frame, scale, options);
+            DrawGizmoHandleLabel(batch, frame, scale, options);
         }
-        else if (!common.DragActive)
+        else if (!pivotHandled && !common.DragActive)
         {
-            DrawGizmoLabel(drawList, context, scale, options);
+            DrawGizmoLabel(batch, context, scale, options);
         }
 
         if (hit.IsValid || common.CanStartSurfaceDrag)
@@ -589,8 +677,8 @@ internal sealed partial class Gizmo : IDisposable
             }
         }
 
-        HandleGizmoDragLifecycle(context);
-        HandleGizmoRadialInput(common.PointerInRegion || hit.IsValid || common.CenterHovered || common.SurfaceDragActive);
+        HandleGizmoDragLifecycle(context, batch);
+        HandleGizmoRadialInput(!pivotHandled && (common.PointerInRegion || hit.IsValid || common.CenterHovered || common.SurfaceDragActive));
         _drawManager.DrawLayer(context.ViewportPos, context.ViewportSize, DrawLayer.Foreground, ImGui.GetStyle().Alpha);
     }
 
@@ -632,11 +720,6 @@ internal sealed partial class Gizmo : IDisposable
         => SurfaceDragState.IsDragging
            && SurfaceDragState.ItemId == itemId;
 
-    private static bool ResolveTransformSnapActive(bool alwaysEnabled)
-        => alwaysEnabled
-            ? !GizmoInputUtility.IsPrecisionSnapModifierActive()
-            : GizmoInputUtility.IsPrecisionSnapModifierActive();
-
     private GizmoTransformSnapPolicy ResolveActiveTransformSnapPolicy(in GizmoContext context)
     {
         if (TranslationDragState.Matches(context.PrimarySnapshot.Id, GizmoTransformMode.Translation))
@@ -661,12 +744,12 @@ internal sealed partial class Gizmo : IDisposable
     private GizmoTransformSnapPolicy CreateTransformSnapPolicy(Vector3 referencePosition, in SceneSnapBasis positionBasis)
     {
         var snapSettings = Settings.TransformSnapSettings;
-        var positionEnabled = snapSettings.PositionDragEnabled && ResolveTransformSnapActive(snapSettings.PositionEnabled);
+        var positionEnabled = snapSettings.PositionDragEnabled && GizmoInputUtility.IsTransformSnapActive(snapSettings.PositionEnabled);
         return new(
             new GizmoPositionSnapPolicy(positionEnabled, snapSettings.PositionStep, positionBasis, referencePosition),
-            ResolveTransformSnapActive(snapSettings.RotationEnabled),
+            GizmoInputUtility.IsTransformSnapActive(snapSettings.RotationEnabled),
             snapSettings.RotationStepDegrees,
-            ResolveTransformSnapActive(snapSettings.ScaleEnabled),
+            GizmoInputUtility.IsTransformSnapActive(snapSettings.ScaleEnabled),
             snapSettings.ScaleStep);
     }
 
@@ -708,5 +791,4 @@ internal sealed partial class Gizmo : IDisposable
             ? WorldTransformSnapBasis
             : CreateLocalTransformSnapBasis(SurfaceDragState.StartRotationQuaternion);
     }
-
 }

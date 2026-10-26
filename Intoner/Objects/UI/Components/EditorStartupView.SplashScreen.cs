@@ -215,25 +215,19 @@ internal sealed partial class EditorStartupView
             contentMax.Y - hintHeight - (10f * scale) - statusHeight);
 
         SplashScreenActions actions = BuildSplashScreenActions();
-        SplashScreenActionRequest? request = SplashScreenActionList.Draw(
-            drawList,
-            contentMin,
-            listMax,
-            actions.Sections,
-            scale,
-            out bool actionsHovered);
-        blockDismiss = actionsHovered;
-
+        SplashScreenActionRequest? request;
         if (_splashScreenLayoutPickerOpen)
         {
-            SplashScreenActionRequest? pickerRequest = DrawSplashScreenLayoutPicker(drawList, cardMin, bodyMin, cardMax, actions.LayoutPickerItems, scale, out bool pickerHovered);
-            request ??= pickerRequest;
-            blockDismiss |= pickerHovered;
+            request = DrawSplashScreenLayoutPicker(drawList, cardMin, bodyMin, cardMax, actions.LayoutPickerItems, scale, out blockDismiss);
             if (EditorInputUtility.IsMouseClickedInside(cardMin, cardMax) && !blockDismiss)
             {
                 CloseSplashScreenLayoutPicker();
                 blockDismiss = true;
             }
+        }
+        else
+        {
+            request = SplashScreenActionList.Draw(drawList, contentMin, listMax, actions.Sections, scale, out blockDismiss);
         }
 
         DrawSplashScreenStatus(drawList, contentMin, contentMax, statusHeight, hintHeight);
@@ -300,11 +294,10 @@ internal sealed partial class EditorStartupView
             .OrderByDescending(static layout => layout.UpdatedAtUtc)
             .ThenBy(static layout => layout.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
-        Guid? defaultLayoutId = _layoutManager.GetDefaultLayoutId();
         bool hasRecovery = _objectLayoutRecoveryService.HasCurrentRecovery();
         List<SplashScreenActionItem> recentLayoutItems = layouts
             .Take(SplashScreenRecentLayoutCount)
-            .Select(layout => CreateLayoutActionItem(layout, defaultLayoutId, SplashScreenLayoutDetail.ObjectCount))
+            .Select(layout => CreateLayoutActionItem(layout, SplashScreenLayoutDetail.ObjectCount))
             .ToList();
         if (recentLayoutItems.Count == 0)
         {
@@ -322,7 +315,7 @@ internal sealed partial class EditorStartupView
             new SplashScreenActionSection("Recent Layouts", recentLayoutItems),
             new SplashScreenActionSection("Other", BuildSplashScreenUtilityActions(layouts.Count, hasRecovery)),
         ],
-        layouts.Select(layout => CreateLayoutActionItem(layout, defaultLayoutId, SplashScreenLayoutDetail.ModifiedAt)).ToList());
+        layouts.Select(layout => CreateLayoutActionItem(layout, SplashScreenLayoutDetail.ModifiedAt)).ToList());
     }
 
     private static IReadOnlyList<SplashScreenActionItem> BuildSplashScreenUtilityActions(int layoutCount, bool hasRecovery)
@@ -352,17 +345,11 @@ internal sealed partial class EditorStartupView
                 Tooltip: SplashScreenRedirectUrl),
         ];
 
-    private static SplashScreenActionItem CreateLayoutActionItem(ObjectLayoutSnapshot layout, Guid? defaultLayoutId, SplashScreenLayoutDetail detailKind)
+    private static SplashScreenActionItem CreateLayoutActionItem(ObjectLayoutSnapshot layout, SplashScreenLayoutDetail detailKind)
     {
         string detail = detailKind == SplashScreenLayoutDetail.ModifiedAt
             ? EditorTimestampFormatter.FormatToMinute(layout.UpdatedAtUtc)
             : $"{layout.Objects.Count} objects";
-        if (defaultLayoutId == layout.Id)
-        {
-            detail = string.IsNullOrWhiteSpace(detail)
-                ? "default"
-                : $"{detail} | default";
-        }
 
         return new SplashScreenActionItem(
             SplashScreenActionKind.Layout,
@@ -405,18 +392,28 @@ internal sealed partial class EditorStartupView
             return;
         }
 
-        Guid? defaultLayoutId = _layoutManager.GetDefaultLayoutId();
-        if (defaultLayoutId.HasValue
-            && defaultLayoutId.Value != layoutId.Value
-            && !_objectManager.SelectLayout(null).IsAccepted)
+        bool destinationSet = false;
+        PersistentMutationResult enabled = _workspaceHistory.Execute("Open Layout", () =>
         {
-            SetSplashScreenStatus("Failed to unload the current layout.", isError: true);
+            PersistentMutationResult result = _objectManager.SetLayoutEnabled(layoutId.Value, true);
+
+            if (result.IsAccepted)
+            {
+                destinationSet = _objectManager.SetCreationLayout(layoutId.Value).IsAccepted;
+            }
+
+            return result;
+        }, static result => result.IsAccepted);
+
+        if (!enabled.IsAccepted)
+        {
+            SetSplashScreenStatus("Failed to load layout. Check housing policy validity.", isError: true);
             return;
         }
 
-        if (!_objectManager.SelectLayout(layoutId.Value).IsAccepted)
+        if (!destinationSet)
         {
-            SetSplashScreenStatus("Failed to load layout. Check housing policy validity.", isError: true);
+            SetSplashScreenStatus("The layout is enabled, but the placement destination could not be stored.", isError: true);
             return;
         }
 
@@ -428,13 +425,13 @@ internal sealed partial class EditorStartupView
     private void TryRecoverSplashScreenSession()
     {
         if (!_objectLayoutRecoveryService.TryLoadCurrentRecovery(out ObjectPersistentWorkspaceSnapshot workspace, out string message)
-            || !_objectManager.TryRecoverWorkspace(workspace, out message))
+            || !_workspaceHistory.Execute("Recover Workspace", () => _objectManager.TryRecoverWorkspace(workspace, out message), static result => result))
         {
             SetSplashScreenStatus(message, isError: true);
             return;
         }
 
-        _layouts.SelectedLayoutId = _layoutManager.GetDefaultLayoutId();
+        _layouts.SelectedLayoutId = _layoutManager.GetCreationLayoutId();
         _interaction.SelectionChanged(_interaction.Selection.TryClear());
         DismissSplashScreen();
     }

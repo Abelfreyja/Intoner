@@ -17,14 +17,14 @@ internal sealed record ObjectLibraryPasteResult(
 /// <summary> reads and writes typed intoner object transfers through the system clipboard </summary>
 internal interface IObjectClipboardService
 {
-    /// <summary> copies one or more persistent objects </summary>
-    bool CopyObjects(IReadOnlyList<ObjectSnapshot> snapshots);
+    /// <summary> copies persistent objects and groups </summary>
+    bool CopyObjects(IReadOnlyList<SceneItemSnapshot> snapshots);
 
     /// <summary> copies one complete placed folder </summary>
-    bool CopyFolder(string folderPath, IReadOnlyList<ObjectSnapshot> snapshots);
+    bool CopyFolder(Guid? layoutId, string folderPath, IReadOnlyList<SceneItemSnapshot> snapshots);
 
-    /// <summary> checks whether the clipboard contains scene objects </summary>
-    bool CanPasteObjects();
+    /// <summary> checks whether the clipboard contains scene objects, optionally excluding only empty containers </summary>
+    bool CanPasteObjects(bool requireObjects = false);
 
     /// <summary> reads and prepares persistent objects for the current scene and destination </summary>
     bool TryPasteObjects(
@@ -70,29 +70,47 @@ internal sealed class ObjectClipboardService : IObjectClipboardService
         _library = library;
     }
 
-    public bool CopyObjects(IReadOnlyList<ObjectSnapshot> snapshots)
+    public bool CopyObjects(IReadOnlyList<SceneItemSnapshot> snapshots)
     {
-        HashSet<string> paths = snapshots
-            .Select(static snapshot => ObjectFolderUtility.SanitizeFolderPath(snapshot.FolderPath))
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        List<ObjectFolderSnapshot> folders = _folders.BuildLayoutExport(snapshots)
-            .Where(folder => paths.Contains(folder.Path)).ToList();
+        if (snapshots.Count == 0 || snapshots.Any(static snapshot => snapshot is not ObjectSceneItemSnapshot))
+            return false;
+
+        ObjectFolderSceneState state = _folders.CaptureSceneState();
+        List<ObjectFolderSnapshot> folders = [];
+        foreach (IGrouping<Guid?, SceneItemSnapshot> layout in snapshots.GroupBy(ObjectFolderUtility.GetItemLayoutId))
+        {
+            HashSet<string> paths = layout.SelectMany(static snapshot => ObjectFolderUtility.EnumerateFolderAncestors(
+                    ObjectFolderUtility.GetItemFolderPath(snapshot), includeSelf: true))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            folders.AddRange(ObjectFolderSceneStateUtility.GetFolders(state, layout.Key)
+                .Where(folder => paths.Contains(folder.Path)));
+        }
+
         return ObjectTransferMapper.TryCreateDocument(snapshots, folders, out ObjectTransferDocument document)
             && Write(document);
     }
 
-    public bool CopyFolder(string folderPath, IReadOnlyList<ObjectSnapshot> snapshots)
+    public bool CopyFolder(Guid? layoutId, string folderPath, IReadOnlyList<SceneItemSnapshot> snapshots)
     {
+        if (snapshots.Any(snapshot => snapshot is not ObjectSceneItemSnapshot item || item.LayoutId != layoutId))
+        {
+            return false;
+        }
+
         return ObjectTransferMapper.TryCreateFolderDocument(
                 snapshots,
                 folderPath,
-                ObjectFolderUtility.ExpandFolderEntries(_folders.BuildLayoutExport(snapshots)),
+                ObjectFolderUtility.OrderFolderEntries(
+                    ObjectFolderSceneStateUtility.GetFolders(_folders.CaptureSceneState(), layoutId)
+                        .Concat(snapshots.Select(static snapshot => new ObjectFolderSnapshot(ObjectFolderUtility.GetItemFolderPath(snapshot))))),
                 out ObjectTransferDocument document)
             && Write(document);
     }
 
-    public bool CanPasteObjects()
-        => Read().Document is { Kind: ObjectTransferKind.SceneObjects };
+    public bool CanPasteObjects(bool requireObjects = false)
+        => Read().Document is { Kind: ObjectTransferKind.SceneObjects, SceneObjects: { } transfer }
+            && (!requireObjects || transfer.Content.Objects.Count > 0);
+
 
     public bool TryPasteObjects(
         SceneCreationContext createdIn,

@@ -34,7 +34,7 @@ internal sealed partial class ObjectLibraryBrowser
 
         if (view.RootEntries.Count > 0 && view.RootGroups.Count > 0)
         {
-            ImGui.Dummy(new Vector2(0f, folderMetrics.GroupSpacing));
+            ImGui.Dummy(new Vector2(0f, folderMetrics.ItemSpacing));
         }
 
         for (int groupIndex = 0; groupIndex < view.RootGroups.Count; ++groupIndex)
@@ -48,7 +48,7 @@ internal sealed partial class ObjectLibraryBrowser
 
             if (groupIndex + 1 < view.RootGroups.Count)
             {
-                ImGui.Dummy(new Vector2(0f, folderMetrics.GroupSpacing));
+                ImGui.Dummy(new Vector2(0f, folderMetrics.ItemSpacing));
             }
         }
     }
@@ -112,33 +112,20 @@ internal sealed partial class ObjectLibraryBrowser
             ChildCount = group.AllEntries.Count,
             Collapsed = collapsed,
         };
-        EditorListCard.Interaction interaction = SceneListRow.DrawFolderInteraction(
+        SceneListRow.FolderResult result = _sceneListRow.DrawFolder(
             row,
             metrics,
+            (Browser: this, Group: group),
+            static context => context.Browser.DrawLibraryGroupContextMenu(context.Group),
+            allowCollapse: string.IsNullOrWhiteSpace(_libraryFilter),
             leftInset: depth == 0 ? 0f : metrics.ChildInset * depth,
             rightInset: depth == 0 ? 0f : metrics.ChildRightInset);
-        using (EditorContextMenu.PopupScope contextMenu = EditorContextMenu.BeginForLastItem($"##{row.Id}:context"))
-        {
-            if (contextMenu)
-            {
-                DrawLibraryGroupContextMenu(group);
-            }
-        }
-
-        if (interaction.Clicked && string.IsNullOrWhiteSpace(_libraryFilter))
+        if (result.Collapsed != collapsed)
         {
             ToggleLibraryGroupCollapsed(group.Source.Id);
-            collapsed = IsLibraryGroupCollapsed(group.Source.Id);
-            row = row with { Collapsed = collapsed };
         }
 
-        _sceneListRow.DrawFolderChrome(row, interaction);
-        SceneListRow.DrawFolderContent(
-            row,
-            metrics,
-            interaction,
-            interaction.Max.X - EditorLayout.Scaled(10f));
-        return new SceneListRow.FolderResult(collapsed, new SceneListRow.RowGeometry(interaction.Min, interaction.Max));
+        return result;
     }
 
     private void DrawLibraryGroupTree(
@@ -162,59 +149,15 @@ internal sealed partial class ObjectLibraryBrowser
         SceneListRow.Metrics metrics,
         float itemHeight,
         int depth)
-    {
-        int childDepth = depth + 1;
-        using SceneListRow.FolderChildrenScope children = SceneListRow.BeginFolderChildren(
-            metrics,
-            FolderColorPicker.ResolveAccent(group.Source.Color),
-            childDepth);
-        int childCount = group.VisibleEntries.Count + group.Children.Count;
-        int childIndex = group.VisibleEntries.Count;
-        using UiVirtualList.Scope list = UiVirtualList.Begin(
-            group.VisibleEntries.Count,
-            UiVirtualListOptions.Rows(itemHeight, metrics.ItemSpacing) with
-            {
-                DrawTrailingSpacing = group.Children.Count > 0,
-            });
-        while (list.Step())
-        {
-            for (int index = list.DisplayStart; index < list.DisplayEnd; ++index)
-            {
-                SceneListRow.RowGeometry geometry = DrawLibraryEntry(
-                    group.VisibleEntries[index],
-                    selectableOrder,
-                    itemHeight,
-                    metrics.ChildInset * childDepth,
-                    metrics.ChildRightInset);
-                children.Add(geometry);
-                list.FinishItem(index);
-            }
-        }
-
-        foreach (LibraryBrowserView.Group childGroup in group.Children)
-        {
-            bool collapsed = IsLibraryGroupCollapsed(childGroup.Source.Id)
-                && string.IsNullOrWhiteSpace(_libraryFilter);
-            SceneListRow.FolderResult row = DrawLibraryGroup(
-                childGroup,
-                metrics,
-                collapsed,
-                childDepth);
-            children.Add(row.Geometry);
-            bool hasNext = ++childIndex < childCount;
-            if (!row.Collapsed && (childGroup.VisibleEntries.Count > 0 || childGroup.Children.Count > 0))
-            {
-                DrawLibraryGroupChildren(
-                    childGroup,
-                    selectableOrder,
-                    metrics,
-                    itemHeight,
-                    childDepth);
-            }
-
-            children.AddSpacing(hasNext);
-        }
-    }
+        => SceneListRow.DrawFolderChildren(
+            group.VisibleEntries, group.Children, metrics,
+            FolderColorPicker.ResolveAccent(group.Source.Color), depth, itemHeight,
+            (Browser: this, Order: selectableOrder, Metrics: metrics, Height: itemHeight),
+            static (entry, childDepth, context) => context.Browser.DrawLibraryEntry(entry, context.Order, context.Height,
+                context.Metrics.ChildInset * childDepth, context.Metrics.ChildRightInset),
+            static (child, childDepth, context) => context.Browser.DrawLibraryGroup(child, context.Metrics,
+                context.Browser.IsLibraryGroupCollapsed(child.Source.Id) && string.IsNullOrWhiteSpace(context.Browser._libraryFilter), childDepth),
+            static (child, childDepth, context) => context.Browser.DrawLibraryGroupChildren(child, context.Order, context.Metrics, context.Height, childDepth));
 
     private void HandleLibrarySelection(ObjectLibraryEntry entry, IReadOnlyList<Guid> selectableOrder)
     {

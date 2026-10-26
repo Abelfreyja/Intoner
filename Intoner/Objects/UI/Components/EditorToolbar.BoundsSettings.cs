@@ -43,7 +43,6 @@ internal sealed partial class EditorToolbar
             IsBoundsOptionsPopupOpen(),
             ToggleBoundsOverlayEnabled,
             accent,
-            useAccentFill: false,
             useNeutralHoverFill: true,
             hoverBorderColor: EditorColors.BoundsOverlayAccent,
             drawBackground: DrawBoundsToolbarButtonBackground,
@@ -61,45 +60,14 @@ internal sealed partial class EditorToolbar
     private void DrawBoundsToolbarButtonBackground(ImDrawListPtr drawList, Vector2 min, Vector2 max, bool hovered, bool active)
     {
         SceneBoundsInteractionSettings settings = _gizmo.Settings.BoundsInteractionSettings;
-        var scale = ImGuiHelpers.GlobalScale;
-        var inset = 3f * scale;
-        var innerMin = min + new Vector2(inset, inset);
-        var innerMax = max - new Vector2(inset, inset);
-        if (innerMax.X <= innerMin.X || innerMax.Y <= innerMin.Y)
+        float peakAlpha = hovered ? 0.40f : 0.32f;
+        if (active)
         {
-            return;
+            peakAlpha = 0.46f;
         }
-
-        var bandGap = MathF.Max(1f * scale, 1f);
-        var availableWidth = innerMax.X - innerMin.X;
-        var bandWidth = (availableWidth - bandGap) * 0.5f;
-        if (bandWidth <= 0f)
-        {
-            return;
-        }
-
-        float alpha = active ? 0.46f : 0.32f;
-        if (hovered && !active)
-        {
-            alpha = 0.40f;
-        }
-
-        DrawTransformSnapToolbarBand(
-            drawList,
-            new Vector2(innerMin.X, innerMin.Y),
-            new Vector2(innerMin.X + bandWidth, innerMax.Y),
-            ThemeColors.AccentBlue,
-            settings.SelectionEnabled,
-            alpha);
-
-        var rightMinX = innerMin.X + bandWidth + bandGap;
-        DrawTransformSnapToolbarBand(
-            drawList,
-            new Vector2(rightMinX, innerMin.Y),
-            new Vector2(innerMax.X, innerMax.Y),
-            EditorColors.BoundsOverlayAccent,
-            settings.BoundsEnabled,
-            alpha);
+        DrawToolbarStateBands(drawList, min, max,
+            [(ThemeColors.AccentBlue, settings.SelectionEnabled), (EditorColors.BoundsOverlayAccent, settings.BoundsEnabled)],
+            peakAlpha);
     }
 
     private void DrawBoundsToolbarTooltip()
@@ -119,11 +87,17 @@ internal sealed partial class EditorToolbar
                 new(FontAwesomeIcon.BorderAll, "Bounds", settings.BoundsEnabled),
                 new(FontAwesomeIcon.SlidersH, "Filter", null, BuildBoundsFilterSummary(settings.BoundsFilter)),
                 new(FontAwesomeIcon.Bullseye, "Selected only", settings.ShowSelectedOnly),
-            ]);
+            ],
+            []);
     }
 
     private void DrawBoundsOptionsPopup()
     {
+        if (!IsBoundsOptionsPopupOpen())
+        {
+            return;
+        }
+
         var scale = ImGuiHelpers.GlobalScale;
         var accent = EditorColors.BoundsOverlayAccent;
         ImGuiViewportPtr viewport = ImGui.GetMainViewport();

@@ -1,4 +1,6 @@
+using Dalamud.Game;
 using System.Diagnostics.CodeAnalysis;
+using System.Text.Json.Serialization;
 
 namespace Intoner.Objects.Assets.Cache;
 
@@ -10,10 +12,10 @@ internal enum ObjectAssetCacheSectionSet
     StaticBgObjects        = 1 << 1,
     StaticResolvedVfx      = 1 << 2,
     BgModels               = 1 << 3,
-    StandaloneVfx          = 1 << 4,
+    RuntimeVfx             = 1 << 4,
     TimelineReferencedVfx  = 1 << 5,
     AllStatic              = StaticCollisionPaths | StaticBgObjects | StaticResolvedVfx,
-    RuntimeOverlay         = BgModels | StandaloneVfx | TimelineReferencedVfx,
+    RuntimeOverlay         = BgModels | RuntimeVfx | TimelineReferencedVfx,
     All                    = AllStatic | RuntimeOverlay,
 }
 
@@ -25,7 +27,7 @@ internal static class ObjectAssetCacheSectionSetExtensions
         new(ObjectAssetCacheSectionKind.StaticBgObjects,       "staticBgObjects",       ObjectAssetCacheSectionSet.StaticBgObjects),
         new(ObjectAssetCacheSectionKind.StaticResolvedVfx,     "staticResolvedVfx",     ObjectAssetCacheSectionSet.StaticResolvedVfx),
         new(ObjectAssetCacheSectionKind.BgModels,              "bgModels",              ObjectAssetCacheSectionSet.BgModels),
-        new(ObjectAssetCacheSectionKind.StandaloneVfx,         "standaloneVfx",         ObjectAssetCacheSectionSet.StandaloneVfx),
+        new(ObjectAssetCacheSectionKind.RuntimeVfx,            "runtimeVfx",            ObjectAssetCacheSectionSet.RuntimeVfx),
         new(ObjectAssetCacheSectionKind.TimelineReferencedVfx, "timelineReferencedVfx", ObjectAssetCacheSectionSet.TimelineReferencedVfx),
     ];
 
@@ -82,6 +84,13 @@ internal static class ObjectAssetCacheSectionSetExtensions
         [NotNullWhen(true)] out IReadOnlyDictionary<ObjectAssetCacheSectionKind, ObjectAssetCacheManifestSection>? sectionMap,
         [NotNullWhen(false)] out string? error)
     {
+        if (!Enum.IsDefined(manifest.Language))
+        {
+            error = "invalid cache client language";
+            sectionMap = null;
+            return false;
+        }
+
         if (manifest.PayloadLength < 0 || manifest.Sections is null)
         {
             error = "invalid cache payload metadata";
@@ -99,7 +108,7 @@ internal static class ObjectAssetCacheSectionSetExtensions
         Dictionary<ObjectAssetCacheSectionKind, ObjectAssetCacheManifestSection> map = [];
         foreach (ObjectAssetCacheManifestSection section in manifest.Sections)
         {
-            if (string.IsNullOrWhiteSpace(section.Kind))
+            if (section is null || string.IsNullOrWhiteSpace(section.Kind))
             {
                 error = "missing cache section kind";
                 sectionMap = null;
@@ -162,11 +171,27 @@ internal static class ObjectAssetCacheSectionSetExtensions
     public static bool MatchesBuildIdentity(
         this ObjectAssetCacheManifest manifest,
         string? gameVersion,
-        string? sqpackIndexFingerprint)
-        => !string.IsNullOrWhiteSpace(gameVersion)
+        string? sqpackIndexFingerprint,
+        ClientLanguage language)
+        => Enum.IsDefined(language)
+        && manifest.Language == language
+        && !string.IsNullOrWhiteSpace(gameVersion)
         && !string.IsNullOrWhiteSpace(sqpackIndexFingerprint)
         && string.Equals(manifest.GameVersion, gameVersion, StringComparison.OrdinalIgnoreCase)
         && string.Equals(manifest.SqpackIndexFingerprint, sqpackIndexFingerprint, StringComparison.Ordinal);
+
+    public static bool MatchesSaveIdentity(
+        this ObjectAssetCacheManifest manifest,
+        string? gameVersion,
+        string? sqpackIndexFingerprint,
+        ClientLanguage language)
+        => Enum.IsDefined(language)
+        && manifest.Language == language
+        && string.Equals(NormalizeIdentityValue(manifest.GameVersion), NormalizeIdentityValue(gameVersion), StringComparison.OrdinalIgnoreCase)
+        && string.Equals(NormalizeIdentityValue(manifest.SqpackIndexFingerprint), NormalizeIdentityValue(sqpackIndexFingerprint), StringComparison.Ordinal);
+
+    private static string? NormalizeIdentityValue(string? value)
+        => string.IsNullOrWhiteSpace(value) ? null : value;
 
     public static ObjectAssetCacheSectionSet GetReusableSections(
         this ObjectAssetCacheManifest manifest,
@@ -203,10 +228,10 @@ internal readonly record struct ObjectAssetCacheSectionDescriptor(
 internal sealed record ObjectAssetCacheSnapshot(
     string? GameVersion,
     IReadOnlyList<string> StaticCollisionPaths,
-    IReadOnlyList<ObjectAssetCacheStaticBgObject> StaticGameDataBgObjects,
-    IReadOnlyList<ObjectAssetCacheResolvedVfxEntry> StaticResolvedVfxEntries,
+    IReadOnlyList<BgObjectAsset> StaticGameDataBgObjects,
+    IReadOnlyList<ResolvedVfxPath> StaticResolvedVfxEntries,
     IReadOnlyList<ObjectAssetCacheBgModel> BgModels,
-    IReadOnlyList<ObjectAssetCacheStandaloneVfx> StandaloneVfxAssets,
+    IReadOnlyList<ObjectAssetCacheRuntimeVfx> RuntimeVfxAssets,
     IReadOnlyList<ObjectAssetCacheTimelineReferencedVfxEntry> TimelineReferencedVfxEntries)
 {
     public static ObjectAssetCacheSnapshot Empty { get; } = new(
@@ -228,42 +253,38 @@ internal sealed record ObjectAssetCacheLoadResult(
         ObjectAssetCacheSectionSet.None);
 }
 
+internal readonly record struct ObjectAssetCacheLoadRequest(
+    string? GameVersion,
+    string? SqpackIndexFingerprint,
+    ClientLanguage Language,
+    ObjectAssetCacheSectionSet Sections)
+{
+    public ObjectAssetCacheSectionSet GetReusableSections(ObjectAssetCacheManifest? manifest)
+        => manifest is not null && manifest.MatchesBuildIdentity(GameVersion, SqpackIndexFingerprint, Language)
+            ? manifest.GetReusableSections(Sections)
+            : ObjectAssetCacheSectionSet.None;
+}
+
 internal sealed record ObjectAssetCacheSaveRequest(
     string? GameVersion,
     string? SqpackIndexFingerprint,
+    ClientLanguage Language,
     ObjectAssetCacheSectionSet Sections,
     IReadOnlyList<string> StaticCollisionPaths,
-    IReadOnlyList<ObjectAssetCacheStaticBgObject> StaticGameDataBgObjects,
-    IReadOnlyList<ObjectAssetCacheResolvedVfxEntry> StaticResolvedVfxEntries,
+    IReadOnlyList<BgObjectAsset> StaticGameDataBgObjects,
+    IReadOnlyList<ResolvedVfxPath> StaticResolvedVfxEntries,
     IReadOnlyList<ObjectAssetCacheBgModel> BgModels,
-    IReadOnlyList<ObjectAssetCacheStandaloneVfx> StandaloneVfxAssets,
+    IReadOnlyList<ObjectAssetCacheRuntimeVfx> RuntimeVfxAssets,
     IReadOnlyList<ObjectAssetCacheTimelineReferencedVfxEntry> TimelineReferencedVfxEntries);
-
-internal sealed record ObjectAssetCacheStaticBgObject(
-    string ModelPath,
-    string Source,
-    uint RowId,
-    string SourcePath,
-    IReadOnlyList<uint> TerritoryIds,
-    IReadOnlyList<string> TerritoryNames,
-    IReadOnlyList<string> SearchTerms);
-
-internal sealed record ObjectAssetCacheResolvedVfxEntry(
-    string Path,
-    KnownVfxFamily Family,
-    RuntimeVfxEvidence Evidence,
-    AssetPathSource Sources,
-    AssetPathContract Contracts,
-    IReadOnlyList<string> SearchTerms,
-    VfxAnalysis? Analysis);
 
 internal sealed record ObjectAssetCacheBgModel(
     string Path,
     IReadOnlyList<string> Sources,
     IReadOnlyList<uint> TerritoryIds,
-    IReadOnlyList<string> TerritoryNames);
+    IReadOnlyList<string> TerritoryNames,
+    IReadOnlyList<string> SearchTerms);
 
-internal sealed record ObjectAssetCacheStandaloneVfx(
+internal sealed record ObjectAssetCacheRuntimeVfx(
     string Path,
     RuntimeVfxEvidence Evidence,
     VfxAnalysis? Analysis);
@@ -279,6 +300,7 @@ internal sealed record ObjectAssetCacheManifest(
     string CacheFileName,
     string? GameVersion,
     string? SqpackIndexFingerprint,
+    [property: JsonRequired] ClientLanguage Language,
     DateTime CreatedUtc,
     long PayloadLength,
     IReadOnlyList<ObjectAssetCacheManifestSection> Sections);
@@ -297,7 +319,6 @@ internal enum ObjectAssetCacheSectionKind : byte
     StaticBgObjects        = 2,
     StaticResolvedVfx      = 3,
     BgModels               = 4,
-    StandaloneVfx          = 5,
+    RuntimeVfx             = 5,
     TimelineReferencedVfx  = 6,
 }
-

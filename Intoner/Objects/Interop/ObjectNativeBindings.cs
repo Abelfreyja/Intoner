@@ -1,4 +1,6 @@
 using Dalamud.Plugin.Services;
+using FFXIVClientStructs.FFXIV.Client.LayoutEngine;
+using FFXIVClientStructs.FFXIV.Client.LayoutEngine.Group;
 using Intoner.Objects.Models;
 using Intoner.Objects.Utils;
 using Intoner.Services.Interop;
@@ -14,19 +16,24 @@ internal sealed unsafe class ObjectNativeBindings
     [StructLayout(LayoutKind.Auto)]
     public readonly struct FurnitureBinding
     {
-        public FurnitureBinding(nint createAddress, nint destroyAddress, nint applyStateAddress)
+        private const int HelperSubtype = 0x0C;
+        private readonly delegate* unmanaged<short, uint, Transform*, byte*, byte*, byte, uint, int, nint, nint, SharedGroupLayoutInstance*> _create;
+        private readonly delegate* unmanaged<SharedGroupLayoutInstance**, nint, void> _destroy;
+
+        public FurnitureBinding(nint createAddress, nint destroyAddress)
         {
-            CreateAddress = createAddress;
-            DestroyAddress = destroyAddress;
-            ApplyStateAddress = applyStateAddress;
+            _create = (delegate* unmanaged<short, uint, Transform*, byte*, byte*, byte, uint, int, nint, nint, SharedGroupLayoutInstance*>)createAddress;
+            _destroy = (delegate* unmanaged<SharedGroupLayoutInstance**, nint, void>)destroyAddress;
         }
 
-        public nint CreateAddress { get; }
-        public nint DestroyAddress { get; }
-        public nint ApplyStateAddress { get; }
-
         public bool IsAvailable
-            => CreateAddress != nint.Zero && DestroyAddress != nint.Zero && ApplyStateAddress != nint.Zero;
+            => _create != null && _destroy != null;
+
+        public SharedGroupLayoutInstance* Create(Transform* transform, byte* path)
+            => _create(-1, uint.MaxValue, transform, path, null, 1, 0, HelperSubtype, 0, 0);
+
+        public void Destroy(SharedGroupLayoutInstance* instance)
+            => _destroy(&instance, 0);
     }
 
     [StructLayout(LayoutKind.Auto)]
@@ -121,19 +128,11 @@ internal sealed unsafe class ObjectNativeBindings
             sigScanner,
             IntonerSignatures.NativeFurnitureDestroy);
 
-        // writes shared group housing state, updates layout world state, and invokes the collider state callback
-        nint applyStateAddress = NativeAddressResolver.TryResolveJmpCallTarget(
-            _logger,
-            sigScanner,
-            IntonerSignatures.NativeFurnitureApplyState);
-
-        if (createAddress == nint.Zero || destroyAddress == nint.Zero || applyStateAddress == nint.Zero)
+        if (createAddress == nint.Zero || destroyAddress == nint.Zero)
         {
             return default;
         }
 
-        return new FurnitureBinding(createAddress, destroyAddress, applyStateAddress);
+        return new FurnitureBinding(createAddress, destroyAddress);
     }
 }
-
-

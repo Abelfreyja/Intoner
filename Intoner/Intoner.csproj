@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project Sdk="Dalamud.NET.Sdk/15.0.0">
   <PropertyGroup>
     <Version>0.2.5.0</Version>
@@ -6,19 +6,44 @@
     <PackageProjectUrl>https://github.com/Abelfreyja/Intoner</PackageProjectUrl>
     <PackageLicenseExpression>AGPL-3.0-or-later</PackageLicenseExpression>
     <IsPackable>false</IsPackable>
-    <Platforms>x64</Platforms>
-    <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
-    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
-    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
-    <CopyLocalLockfileAssemblies>true</CopyLocalLockfileAssemblies>
     <ImplicitUsings>enable</ImplicitUsings>
     <NoWarn>$(NoWarn);MA0048</NoWarn>
   </PropertyGroup>
+
   <PropertyGroup Condition="'$(IntonerVerifyOutputPath)' != ''">
     <OutputPath>$(IntonerVerifyOutputPath)</OutputPath>
   </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Update="DotNet.ReproducibleBuilds" Version="2.0.5" />
+    <PackageReference Include="Meziantou.Analyzer" Version="3.0.317" PrivateAssets="all" IncludeAssets="runtime; build; native; contentfiles; analyzers; buildtransitive" />
+    <PackageReference Include="MessagePack" Version="3.1.12" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.14" />
+    <PackageReference Include="Microsoft.Extensions.FileProviders.Physical" Version="10.0.14" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.14" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.14" />
+    <PackageReference Include="SharpDX.D3DCompiler" Version="4.2.0" />
+    <PackageReference Include="SharpDX.Direct3D11" Version="4.2.0" />
+    <PackageReference Include="SharpDX.DXGI" Version="4.2.0" />
+    <PackageReference Include="SharpDX.Mathematics" Version="4.2.0" />
+    <PackageReference Include="SonarAnalyzer.CSharp" Version="10.35.0.4138" PrivateAssets="all" IncludeAssets="runtime; build; native; contentfiles; analyzers; buildtransitive" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Intoner.Api\Intoner.Api.csproj" />
+    <ProjectReference Include="..\Submodules\Penumbra.Api\Penumbra.Api.csproj" />
+    <ProjectReference Include="..\Submodules\Penumbra.GameData\Penumbra.GameData.csproj" />
+    <ProjectReference Include="..\Submodules\Penumbra.String\Penumbra.String.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="images\intoner.png" LogicalName="intoner.png" />
+    <EmbeddedResource Include="Objects\**\*.hlsl;Objects\**\*.hlsli">
+      <LogicalName>$([System.String]::Copy('%(Identity)').Replace('\', '.').Replace('/', '.'))</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
   <Target Name="SetIntonerSourceRevisionId" BeforeTargets="InitializeSourceControlInformationFromSourceControlManager;InitializeSourceControlInformation" Condition="'$(SourceRevisionId)' == ''">
     <Exec Condition="'$(Configuration)' == 'Debug' and Exists('$(MSBuildProjectDirectory)/../.git')" Command="git describe --tags --dirty --always --long" WorkingDirectory="$(MSBuildProjectDirectory)/.." ConsoleToMsBuild="true" IgnoreExitCode="true" StandardOutputImportance="Low" StandardErrorImportance="Low">
       <Output TaskParameter="ConsoleOutput" ItemName="_IntonerGitDescribeOutput" />
@@ -35,65 +60,4 @@
   <Target Name="NotifyDalamudAfterPackaging" AfterTargets="DefaultDalamudPackagerDebug" Condition="'$(Configuration)' == 'Debug' and '$(NotifyDalamudAfterBuild)' != 'false'">
     <Touch Files="$(TargetPath)" />
   </Target>
-  <ItemGroup>
-    <PackageReference Include="Meziantou.Analyzer" Version="3.0.58">
-      <PrivateAssets>all</PrivateAssets>
-      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
-    </PackageReference>
-    <PackageReference Include="MessagePack" Version="3.1.7" />
-    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.7" />
-    <PackageReference Include="Microsoft.Extensions.FileProviders.Physical" Version="10.0.7" />
-    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.7" />
-    <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.7" />
-    <PackageReference Include="SharpDX.D3DCompiler" Version="4.2.0" />
-    <PackageReference Include="SharpDX.Direct3D11" Version="4.2.0" />
-    <PackageReference Include="SharpDX.DXGI" Version="4.2.0" />
-    <PackageReference Include="SharpDX.Mathematics" Version="4.2.0" />
-    <PackageReference Include="SonarAnalyzer.CSharp" Version="10.25.0.139117">
-      <PrivateAssets>all</PrivateAssets>
-      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
-    </PackageReference>
-  </ItemGroup>
-  <ItemGroup>
-    <ProjectReference Include="..\Intoner.Api\Intoner.Api.csproj" />
-    <ProjectReference Include="..\Submodules\Penumbra.Api\Penumbra.Api.csproj" />
-    <ProjectReference Include="..\Submodules\Penumbra.GameData\Penumbra.GameData.csproj" />
-    <ProjectReference Include="..\Submodules\Penumbra.String\Penumbra.String.csproj" />
-  </ItemGroup>
-  <ItemGroup>
-    <EmbeddedResource Include="images\intoner.png" LogicalName="intoner.png" />
-    <EmbeddedResource Include="Objects\Rendering\Primitives\Shaders\ScenePrimitives.hlsl">
-      <LogicalName>Objects.Rendering.Primitives.Shaders.ScenePrimitives.hlsl</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="Objects\Rendering\Scene\Shaders\*.hlsli">
-      <LogicalName>Objects.Rendering.Scene.Shaders.%(Filename)%(Extension)</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="Objects\Rendering\Surfaces\Shaders\WorldSurface.hlsl">
-      <LogicalName>Objects.Rendering.Surfaces.Shaders.WorldSurface.hlsl</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="Objects\Runtime\Selection\Shaders\SceneSelection.hlsl">
-      <LogicalName>Objects.Runtime.Selection.Shaders.SceneSelection.hlsl</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="Objects\UI\Shaders\EdgeGlow\EdgeGlow.hlsl">
-      <LogicalName>Objects.UI.Shaders.EdgeGlow.EdgeGlow.hlsl</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="Objects\UI\Shaders\EdgeGlow\*.hlsli">
-      <LogicalName>Objects.UI.Shaders.EdgeGlow.%(Filename)%(Extension)</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="Objects\Preview\Rendering\Shaders\Viewport.hlsl">
-      <LogicalName>Objects.Preview.Rendering.Shaders.Viewport.hlsl</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="Objects\UI\Shaders\Window\ObjectSplashScreenBanner.hlsl">
-      <LogicalName>Objects.UI.Shaders.Window.ObjectSplashScreenBanner.hlsl</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="Objects\UI\Shaders\Window\*.hlsli">
-      <LogicalName>Objects.UI.Shaders.Window.%(Filename)%(Extension)</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="Objects\UI\Shaders\Window\ObjectWindowBlur.hlsl">
-      <LogicalName>Objects.UI.Shaders.Window.ObjectWindowBlur.hlsl</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="Objects\UI\Shaders\Window\ObjectWindowGlass.hlsl">
-      <LogicalName>Objects.UI.Shaders.Window.ObjectWindowGlass.hlsl</LogicalName>
-    </EmbeddedResource>
-  </ItemGroup>
 </Project>

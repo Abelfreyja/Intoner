@@ -1,65 +1,111 @@
 using Dalamud.Hooking;
 using Dalamud.Plugin.Services;
 using Intoner.Objects.Utils;
-using Penumbra.String.Classes;
-using System.Runtime.InteropServices;
-using System.Text;
-using Intoner.Utils;
-
 using Intoner.Services.Interop;
+using Intoner.Utils;
+using Microsoft.Extensions.Logging;
+using System.Text;
 
 namespace Intoner.Objects.Resources;
 
 internal sealed unsafe class ObjectResourceCreateFileHook : IDisposable
 {
-    private const int PointerPayloadSize = 28;
+    internal const int PointerPayloadSize = 28;
     private const int PointerPayloadAddressOffset = 2;
     private const int PointerPayloadLengthOffset = 18;
     private const int PointerPayloadByteStride = 2;
-    private const int FileNameStorageSize = Utf8GamePath.MaxGamePathLength;
     private const char PointerPayloadPrefix = (char)((byte)'L' | (('?' & 0x00FF) << 8));
     private static readonly nint InvalidHandleValue = new(-1);
+    private static readonly Encoding StrictUtf8 = new UTF8Encoding(false, true);
 
     private delegate nint CreateFileWDelegate(char* fileName, uint access, uint shareMode, nint security, uint creation, uint flags, nint template);
 
-    private readonly Hook<CreateFileWDelegate> _createFileHook;
-    private readonly ThreadLocal<nint> _fileNameStorage = new(SetupStorage, true);
+    private readonly Hook<CreateFileWDelegate>? _createFileHook;
+    private readonly CreateFileWDelegate? _createFileOriginal;
+    private readonly InteropHookCollection _hooks;
+    private readonly ThreadLocal<(nint Address, int Length)> _activePayload = new(static () => default);
     private readonly DisposalState _disposeState = new();
-    private readonly ObjectLockedOnce _enableOnce = new();
 
-    public ObjectResourceCreateFileHook(IGameInteropProvider gameInteropProvider)
+    public ObjectResourceCreateFileHook(IGameInteropProvider gameInteropProvider, ILogger logger)
     {
-        _createFileHook = gameInteropProvider.HookFromImport<CreateFileWDelegate>(
-            null,
-            "KERNEL32.dll",
-            "CreateFileW",
-            0,
-            CreateFileWDetour);
+        _hooks = new InteropHookCollection(logger);
+        try
+        {
+            _createFileHook = _hooks.Add(gameInteropProvider.HookFromImport<CreateFileWDelegate>(
+                null,
+                "KERNEL32.dll",
+                "CreateFileW",
+                0,
+                CreateFileWDetour));
+
+            _createFileOriginal = _createFileHook?.Original;
+        }
+        catch
+        {
+            _hooks.Dispose();
+            _activePayload.Dispose();
+            throw;
+        }
     }
 
+    public bool IsDisposed
+        => _hooks.IsDisposed;
+
     public bool Enable()
-        => _enableOnce.TryExecute(
-            () =>
-            {
-                _createFileHook.Enable();
-                return true;
-            },
-            () => !_disposeState.IsDisposing);
+        => !_disposeState.IsDisposing && _createFileHook is not null && _hooks.Enable();
 
     public void Dispose()
     {
-        if (!_disposeState.TryBeginDispose())
+        if (!_disposeState.TryBeginDispose() && _hooks.IsDisposed)
         {
             return;
         }
 
-        InteropHookUtility.DisposeHook(_createFileHook);
-        foreach (var pointer in _fileNameStorage.Values)
+        _hooks.Dispose();
+
+        if (_hooks.IsDisposed)
         {
-            Marshal.FreeHGlobal(pointer);
+            _activePayload.Dispose();
+        }
+    }
+
+    public ReadScope EnterRead(byte* address, int length)
+    {
+        if (_disposeState.IsDisposing || address == null || length <= 0
+         || length >= ObjectResourcePathEncoding.MaxNativePathByteCount)
+        {
+            return default;
         }
 
-        _fileNameStorage.Dispose();
+        InteropHookCollection.CallbackScope operation = _hooks.EnterOperation();
+
+        if (!operation.IsActive
+         || !ObjectThreadLocalUtility.TryRead(_activePayload, default, out (nint Address, int Length) previous)
+         || !ObjectThreadLocalUtility.TryWrite(_activePayload, ((nint)address, length)))
+        {
+            operation.Dispose();
+            return default;
+        }
+
+        return new ReadScope(this, previous, operation);
+    }
+
+    public readonly struct ReadScope(
+        ObjectResourceCreateFileHook owner,
+        (nint Address, int Length) previous,
+        InteropHookCollection.CallbackScope operation) : IDisposable
+    {
+        public bool IsActive => owner is not null;
+
+        public void Dispose()
+        {
+            if (owner is not null)
+            {
+                _ = ObjectThreadLocalUtility.TryWrite(owner._activePayload, previous);
+            }
+
+            operation.Dispose();
+        }
     }
 
     public static void WritePointerPayload(char* buffer, byte* address, int length)
@@ -74,81 +120,99 @@ internal sealed unsafe class ObjectResourceCreateFileHook : IDisposable
         ptr[PointerPayloadSize - 1] = 0;
     }
 
-    private static nint SetupStorage()
-    {
-        var pointer = (char*)Marshal.AllocHGlobal(2 * FileNameStorageSize);
-        pointer[0] = '\\';
-        pointer[1] = '\\';
-        pointer[2] = '?';
-        pointer[3] = '\\';
-        pointer[4] = '\0';
-        return (nint)pointer;
-    }
-
     private nint CreateFileWDetour(char* fileName, uint access, uint shareMode, nint security, uint creation, uint flags, nint template)
     {
-        if (CheckPointer(fileName, out var actualName))
+        using InteropHookCollection.CallbackScope callback = _hooks.EnterCallback();
+
+        if (!CheckPointer(fileName, out ReadOnlySpan<byte> actualName))
         {
-            return TryWriteFileName(actualName, out char* translatedPointer)
-                ? _createFileHook.OriginalDisposeSafe(translatedPointer, access, shareMode, security, creation, flags, template)
-                : InvalidHandleValue;
+            return _createFileOriginal!(fileName, access, shareMode, security, creation, flags, template);
         }
 
-        return _createFileHook.OriginalDisposeSafe(fileName, access, shareMode, security, creation, flags, template);
+        Span<char> translatedName = stackalloc char[actualName.Length + 9];
+
+        if (!TryWriteFileName(actualName, translatedName))
+        {
+            return InvalidHandleValue;
+        }
+
+        fixed (char* translatedPointer = translatedName)
+        {
+            return _createFileOriginal!(translatedPointer, access, shareMode, security, creation, flags, template);
+        }
     }
 
-    private bool TryWriteFileName(ReadOnlySpan<byte> actualName, out char* fileName)
+    internal static bool TryWriteFileName(ReadOnlySpan<byte> actualName, Span<char> destination)
     {
-        fileName = null;
-        if (_disposeState.IsDisposing
-            || !ObjectThreadLocalUtility.TryRead(_fileNameStorage, nint.Zero, out var fileNameStorage)
-            || fileNameStorage == nint.Zero)
+        if (actualName.IsEmpty || actualName.Contains((byte)0))
         {
             return false;
         }
 
-        Span<char> span = new((char*)fileNameStorage + 4, FileNameStorageSize - 4);
-        if (Encoding.UTF8.GetCharCount(actualName) >= span.Length)
-        {
-            return false;
-        }
+        int written;
 
-        int written = Encoding.UTF8.GetChars(actualName, span);
-        for (int i = 0; i < written; ++i)
+        try
         {
-            if (span[i] == '/')
+            if (StrictUtf8.GetCharCount(actualName) >= destination.Length)
             {
-                span[i] = '\\';
+                return false;
             }
+
+            written = StrictUtf8.GetChars(actualName, destination);
+        }
+        catch (DecoderFallbackException)
+        {
+            return false;
         }
 
-        span[written] = '\0';
-        fileName = (char*)fileNameStorage;
+        Span<char> path = destination[..written];
+        path.Replace('/', '\\');
+        bool hasDevicePrefix = path.StartsWith(@"\\?\") || path.StartsWith(@"\\.\");
+        bool isUnc = !hasDevicePrefix && path.StartsWith(@"\\");
+        ReadOnlySpan<char> prefix = isUnc ? @"\\?\UNC\" : @"\\?\";
+
+        if (hasDevicePrefix)
+        {
+            prefix = [];
+        }
+
+        int skip = isUnc ? 2 : 0;
+        int length = written - skip + prefix.Length;
+
+        if (length >= destination.Length)
+        {
+            return false;
+        }
+
+        path[skip..].CopyTo(destination[prefix.Length..]);
+        prefix.CopyTo(destination);
+        destination[length] = '\0';
         return true;
     }
 
-    private static bool CheckPointer(char* buffer, out ReadOnlySpan<byte> fileName)
+    private bool CheckPointer(char* buffer, out ReadOnlySpan<byte> fileName)
     {
-        if (buffer == null || buffer[0] != PointerPayloadPrefix)
+        fileName = default;
+
+        if (buffer == null
+         || !ObjectThreadLocalUtility.TryRead(_activePayload, default, out (nint Address, int Length) payload)
+         || payload.Address == nint.Zero)
         {
-            fileName = ReadOnlySpan<byte>.Empty;
             return false;
         }
 
-        byte* ptr = (byte*)buffer;
-        ulong address = ReadPayloadValue(ptr, PointerPayloadAddressOffset, sizeof(ulong));
-        ulong length = ReadPayloadValue(ptr, PointerPayloadLengthOffset, sizeof(uint));
+        Span<byte> actualPayload = stackalloc byte[PointerPayloadSize];
+        char* expectedPayload = stackalloc char[PointerPayloadSize / sizeof(char)];
+        WritePointerPayload(expectedPayload, (byte*)payload.Address, payload.Length);
 
-        if (address == 0
-            || length == 0
-            || length > int.MaxValue
-            || !PtrGuard.IsReadable((nint)address, (nuint)length))
+        if (!PtrGuard.TryReadUnalignedBytes((nint)buffer, actualPayload)
+         || !actualPayload.SequenceEqual(new ReadOnlySpan<byte>(expectedPayload, PointerPayloadSize))
+         || !PtrGuard.IsReadable(payload.Address, (nuint)payload.Length))
         {
-            fileName = ReadOnlySpan<byte>.Empty;
             return false;
         }
 
-        fileName = new ReadOnlySpan<byte>((void*)address, (int)length);
+        fileName = new ReadOnlySpan<byte>((void*)payload.Address, payload.Length);
         return true;
     }
 
@@ -161,16 +225,4 @@ internal sealed unsafe class ObjectResourceCreateFileHook : IDisposable
             ptr[index + 1] = 0xFF;
         }
     }
-
-    private static ulong ReadPayloadValue(byte* ptr, int offset, int byteCount)
-    {
-        ulong value = 0;
-        for (int i = 0; i < byteCount; ++i)
-        {
-            value |= (ulong)ptr[offset + (i * PointerPayloadByteStride)] << (i * 8);
-        }
-
-        return value;
-    }
 }
-

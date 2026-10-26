@@ -37,26 +37,7 @@ internal static class ObjectLibraryRules
     public static string ResolveAvailableGroupName(
         string preferredName,
         IReadOnlySet<string> unavailableNames)
-    {
-        string preferred = NormalizeName(preferredName);
-        if (preferred.Length == 0 || !unavailableNames.Contains(preferred))
-        {
-            return preferred;
-        }
-
-        for (int number = 2; number < int.MaxValue; ++number)
-        {
-            string suffix = $" ({number})";
-            int baseLength = Math.Min(preferred.Length, MaximumNameLength - suffix.Length);
-            string candidate = preferred[..baseLength].TrimEnd() + suffix;
-            if (!unavailableNames.Contains(candidate))
-            {
-                return candidate;
-            }
-        }
-
-        return string.Empty;
-    }
+        => TextUtility.ResolveAvailableName(NormalizeName(preferredName), unavailableNames, MaximumNameLength);
 
     public static bool TryNormalizePreset(
         ObjectLibraryPreset? preset,
@@ -70,29 +51,26 @@ internal static class ObjectLibraryRules
 
         ObjectData? model = preset.Model switch
         {
-            BgObjectModel bgObject when preset.Kind == ObjectKind.BgObject => bgObject with
-            {
-                ModelPath = GameAssetPathRules.NormalizeGamePath(bgObject.ModelPath),
-            },
+            BgObjectModel bgObject when preset.Kind == ObjectKind.BgObject => bgObject,
             FurnitureModel furniture when preset.Kind == ObjectKind.Furniture => furniture with
             {
-                SharedGroupPath = GameAssetPathRules.NormalizeGamePath(furniture.SharedGroupPath),
                 AttachmentParentId = null,
             },
-            VfxModel vfx when preset.Kind == ObjectKind.Vfx => vfx with
-            {
-                VfxPath = GameAssetPathRules.NormalizeGamePath(vfx.VfxPath),
-            },
+            VfxModel vfx when preset.Kind == ObjectKind.Vfx => vfx,
             LightModel light when preset.Kind == ObjectKind.Light => light,
             _ => null,
         };
-        if (model is null || !HasRequiredAsset(model))
+        if (model is null
+         || !ObjectSnapshotUtility.TryNormalizeRootResourcePath(model, out ObjectData normalizedModel)
+         || !HasRequiredAsset(normalizedModel)
+         || normalizedModel is BgObjectModel { ColliderDefinition: { } definition } bg
+            && !BgColliderDefinitionUtility.IsValid(definition, bg.ModelPath))
         {
             normalizedPreset = null;
             return false;
         }
 
-        normalizedPreset = preset with { Model = model };
+        normalizedPreset = preset with { Model = normalizedModel };
         return true;
     }
 
@@ -101,7 +79,8 @@ internal static class ObjectLibraryRules
         && (left.Model, right.Model) switch
         {
             (BgObjectModel leftModel, BgObjectModel rightModel)
-                => PathsMatch(leftModel.ModelPath, rightModel.ModelPath),
+                => PathsMatch(leftModel.ModelPath, rightModel.ModelPath)
+                && leftModel.ColliderDefinition == rightModel.ColliderDefinition,
             (FurnitureModel leftModel, FurnitureModel rightModel)
                 => leftModel.HousingRowId == rightModel.HousingRowId
                 && leftModel.ItemRowId == rightModel.ItemRowId
@@ -109,7 +88,8 @@ internal static class ObjectLibraryRules
             (VfxModel leftModel, VfxModel rightModel)
                 => PathsMatch(leftModel.VfxPath, rightModel.VfxPath),
             (LightModel leftModel, LightModel rightModel)
-                => leftModel.LightType == rightModel.LightType,
+                => leftModel.LightType == rightModel.LightType
+                && PathsMatch(leftModel.ProjectionTexturePath, rightModel.ProjectionTexturePath),
             _ => false,
         };
 
@@ -162,7 +142,7 @@ internal static class ObjectLibraryRules
             if (prefab.Id == Guid.Empty
              || name.Length == 0
              || prefab.CreatedAtUtc == default
-             || !prefab.CapturedIn.Scope.IsValid
+             || !prefab.CapturedIn.IsAssigned
              || memberIds.Length == 0
              || groupIds.Contains(prefab.Id)
              || parentFolderId is { } parentId && !folderIds.Contains(parentId)

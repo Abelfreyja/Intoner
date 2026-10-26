@@ -186,8 +186,13 @@ internal static class SearchTermUtility
     public static string BuildNormalizedSearchTextFromSet(HashSet<string> searchTerms)
     {
         StringBuilder builder = new(128);
-        foreach (string searchTerm in BuildStableTerms(searchTerms))
+        foreach (string searchTerm in searchTerms)
         {
+            if (builder.Length > 0)
+            {
+                builder.Append('\n');
+            }
+
             AppendNormalizedText(builder, searchTerm);
         }
 
@@ -201,6 +206,10 @@ internal static class SearchTermUtility
             if (char.IsLetterOrDigit(character))
             {
                 builder.Append(char.ToLowerInvariant(character));
+            }
+            else if (character == '\n')
+            {
+                builder.Append('\n');
             }
         }
     }
@@ -221,4 +230,3 @@ internal static class SearchTermUtility
         builder.Clear();
     }
 }
-

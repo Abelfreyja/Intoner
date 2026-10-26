@@ -3,6 +3,7 @@ using FFXIVClientStructs.FFXIV.Client.Graphics.Scene;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine;
 using Intoner.Objects.Interop;
 using Intoner.Objects.Models;
+using Intoner.Objects.Resources;
 using Intoner.Objects.Utils;
 using Intoner.Scene;
 using Intoner.Utils;
@@ -50,6 +51,11 @@ internal interface IObjectRuntime : ISceneSelectableRuntime, IDisposable
     new ObjectSnapshot Snapshot { get; }
 
     /// <summary>
+    /// Gets the revisions in use, or null while collection resources are pending.
+    /// </summary>
+    ObjectResourceRevision? ResourceRevision { get; }
+
+    /// <summary>
     /// Gets the current native address for this object runtime.
     /// </summary>
     nint Address { get; }
@@ -63,6 +69,14 @@ internal interface IObjectRuntime : ISceneSelectableRuntime, IDisposable
     /// Runs one framework update step.
     /// </summary>
     void FrameworkUpdate();
+
+    /// <summary>
+    /// Resolves both bounds shapes while allowing shared input observation.
+    /// </summary>
+    /// <param name="worldBounds">the axis aligned world bounds when available</param>
+    /// <param name="orientedBounds">the oriented local bounds when available</param>
+    /// <returns>the availability of each bounds shape, independently</returns>
+    (bool World, bool Oriented) GetBounds(out AxisAlignedBounds worldBounds, out OrientedBounds orientedBounds);
 
     /// <summary>
     /// Tries to resolve axis aligned world bounds.
@@ -119,9 +133,15 @@ internal interface IObjectRuntime : ISceneSelectableRuntime, IDisposable
 internal struct DeferredVisualState
 {
     private bool _needsReplay;
+    private bool _runtimeStateApplied;
+
+    public readonly bool NeedsReplay => _needsReplay;
 
     public void Reset()
-        => _needsReplay = false;
+    {
+        _needsReplay = false;
+        _runtimeStateApplied = false;
+    }
 
     public void RequestReplay()
         => _needsReplay = true;
@@ -137,7 +157,16 @@ internal struct DeferredVisualState
         var model = (TModel)snapshot.Model;
         var previousModel = (TModel)previousSnapshot.Model;
 
+        if (_runtimeStateApplied && !_needsReplay
+            && snapshot.Transform == previousSnapshot.Transform && snapshot.Visible == previousSnapshot.Visible
+            && snapshot.Model == previousSnapshot.Model)
+        {
+            return ObjectRuntimeUpdateResult.Applied;
+        }
+
         applyRuntimeState(snapshot);
+        _runtimeStateApplied = true;
+
         if (!_needsReplay && !needsVisualState(model, previousModel))
         {
             return ObjectRuntimeUpdateResult.Applied;
@@ -160,6 +189,7 @@ internal struct DeferredVisualState
 
         var model = (TModel)snapshot.Model;
         applyRuntimeState(snapshot);
+        _runtimeStateApplied = true;
         if (!tryApplyVisualState(model))
         {
             return;
@@ -179,6 +209,7 @@ internal abstract class ObjectRuntime : IObjectRuntime
     protected ILogger Logger { get; }
 
     public ObjectSnapshot Snapshot { get; protected set; }
+    public ObjectResourceRevision? ResourceRevision { get; internal set; }
     SceneItemSnapshot ISceneItemRuntime.Snapshot => Snapshot;
 
     public abstract ObjectKind Kind { get; }
@@ -212,6 +243,9 @@ internal abstract class ObjectRuntime : IObjectRuntime
 
     public abstract void AppendSelectionDraws(SceneSelectionCollector collector);
 
+    public virtual (bool World, bool Oriented) GetBounds(out AxisAlignedBounds worldBounds, out OrientedBounds orientedBounds)
+        => (TryGetBounds(out worldBounds), TryGetOrientedBounds(out orientedBounds));
+
     public abstract bool TryGetBounds(out AxisAlignedBounds bounds);
     public abstract bool TryGetOrientedBounds(out OrientedBounds bounds);
     public virtual bool TryGetPlacementClearance(out ObjectPlacementClearance clearance)
@@ -234,7 +268,11 @@ internal abstract class ObjectRuntime : IObjectRuntime
         }
 
         _disposed = true;
-        if (FrameworkThreadUtility.TryRun(Framework, DisposeUnsafe))
+        if (FrameworkThreadUtility.TryRun(Framework, () =>
+            {
+                using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferWrites();
+                DisposeUnsafe();
+            }))
         {
             return;
         }
@@ -379,5 +417,3 @@ internal abstract unsafe class LayoutDrawObjectRuntime : LayoutObjectRuntime
     protected virtual bool CanResolveDrawObjectBounds(DrawObject* drawObject)
         => drawObject != null;
 }
-
-

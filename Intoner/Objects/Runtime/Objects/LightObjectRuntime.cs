@@ -1,6 +1,9 @@
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Graphics;
+using FFXIVClientStructs.FFXIV.Client.Graphics.Kernel;
+using FFXIVClientStructs.FFXIV.Client.System.Resource.Handle;
 using Intoner.Objects.Models;
+using Intoner.Objects.Resources;
 using Intoner.Objects.Utils;
 using Intoner.Scene;
 using Microsoft.Extensions.Logging;
@@ -16,7 +19,9 @@ namespace Intoner.Objects.Runtime;
 
 internal sealed unsafe class LightObjectRuntime : DrawObjectRuntime
 {
+    private readonly ObjectResolvedRootPath _projectionResource;
     private SceneLight* _light;
+    private TextureResourceHandle* _pendingProjectionTexture;
 
     public override ObjectKind Kind
         => ObjectKind.Light;
@@ -34,10 +39,27 @@ internal sealed unsafe class LightObjectRuntime : DrawObjectRuntime
         IFramework framework,
         ILogger logger,
         ObjectSnapshot snapshot,
-        SceneLight* light)
+        SceneLight* light,
+        ObjectResolvedRootPath projectionResource)
         : base(framework, logger, snapshot)
     {
         _light = light;
+        _projectionResource = projectionResource;
+    }
+
+    internal override void Initialize()
+    {
+        if (((LightModel)Snapshot.Model).ProjectionTexturePath.Length == 0)
+        {
+            return;
+        }
+
+        _pendingProjectionTexture = (TextureResourceHandle*)ResourceHandle.GetAsync(_projectionResource.CreatePath);
+
+        if (_pendingProjectionTexture == null)
+        {
+            throw new InvalidOperationException($"light projection texture request failed: {_projectionResource.RequestedPath}");
+        }
     }
 
     protected override void FrameworkUpdateUnsafe()
@@ -47,6 +69,7 @@ internal sealed unsafe class LightObjectRuntime : DrawObjectRuntime
             return;
         }
 
+        ApplyProjectionTexture();
         var drawObject = (DrawObject*)_light;
         drawObject->UpdateMaterials();
     }
@@ -71,15 +94,15 @@ internal sealed unsafe class LightObjectRuntime : DrawObjectRuntime
                     CreateScaledWorldTransform(Snapshot.Transform, new Vector3(MathF.Max(0.25f, lightModel.Shape.Range))));
                 break;
             case LightType.SpotLight:
-            {
-                var range = MathF.Max(0.25f, lightModel.Shape.Range);
-                var radius = MathF.Max(0.1f, MathF.Tan(MathF.Max(1f, lightModel.Shape.LightAngle) * (MathF.PI / 360f)) * range);
-                collector.AddPrimitive(
-                    Snapshot,
-                    SceneSelectionPrimitiveKind.Cone,
-                    CreateScaledWorldTransform(Snapshot.Transform, new Vector3(radius, radius, range)));
-                break;
-            }
+                {
+                    var range = MathF.Max(0.25f, lightModel.Shape.Range);
+                    var radius = MathF.Max(0.1f, MathF.Tan(MathF.Max(1f, lightModel.Shape.LightAngle) * (MathF.PI / 360f)) * range);
+                    collector.AddPrimitive(
+                        Snapshot,
+                        SceneSelectionPrimitiveKind.Cone,
+                        CreateScaledWorldTransform(Snapshot.Transform, new Vector3(radius, radius, range)));
+                    break;
+                }
             case LightType.FlatLight:
                 collector.AddPrimitive(
                     Snapshot,
@@ -99,26 +122,91 @@ internal sealed unsafe class LightObjectRuntime : DrawObjectRuntime
     }
 
     protected override ObjectRuntimeUpdateResult ValidateSnapshotUpdate(ObjectSnapshot snapshot)
-        => _light != null
-            ? ObjectRuntimeUpdateResult.Applied
-            : ObjectRuntimeUpdateResult.RequiresRecreate;
+    {
+        LightModel model = (LightModel)snapshot.Model;
+        LightModel previousModel = (LightModel)Snapshot.Model;
+
+        if (_light == null
+         || !string.Equals(model.ProjectionTexturePath, previousModel.ProjectionTexturePath, StringComparison.OrdinalIgnoreCase)
+         || model.ProjectionTexturePath.Length > 0
+         && (model.LightType != previousModel.LightType
+             || !string.Equals(snapshot.CollectionId, Snapshot.CollectionId, StringComparison.OrdinalIgnoreCase)))
+        {
+            return ObjectRuntimeUpdateResult.RequiresRecreate;
+        }
+
+        return ObjectRuntimeUpdateResult.Applied;
+    }
 
     protected override ObjectRuntimeUpdateResult ApplySnapshotUnsafe(ObjectSnapshot snapshot, ObjectSnapshot previousSnapshot)
         => ApplySnapshotStateUnsafe(snapshot);
 
     protected override ObjectRuntimeUpdateResult RefreshResourcesUnsafe(ObjectSnapshot snapshot)
-        => ObjectRuntimeUpdateResult.Applied;
+        => ((LightModel)snapshot.Model).ProjectionTexturePath.Length > 0
+            ? ObjectRuntimeUpdateResult.RequiresRecreate
+            : ObjectRuntimeUpdateResult.Applied;
 
     protected override void DisposeUnsafe()
     {
+        ReleasePendingProjectionTexture();
+
         if (_light == null)
         {
             return;
         }
 
-        Logger.LogInformation("destroying light 0x{Address:X}", (ulong)(nint)_light);
+        nint address = (nint)_light;
+        ObjectResourceLog.Write(() => Logger.LogInformation("destroying light 0x{Address:X}", (ulong)address));
         DestroyNative((DrawObject*)_light);
         _light = null;
+    }
+
+    private void ApplyProjectionTexture()
+    {
+        if (_pendingProjectionTexture == null)
+        {
+            return;
+        }
+
+        byte readState = Volatile.Read(ref _pendingProjectionTexture->ReadState);
+        byte loadState = Volatile.Read(ref _pendingProjectionTexture->LoadState);
+        bool failed = readState == 3 || loadState > 7;
+
+        if (!failed && (readState != 2 || loadState < 7))
+        {
+            return;
+        }
+
+        LightModel model = (LightModel)Snapshot.Model;
+        TextureFlags expectedType = model.LightType == LightType.AreaLight
+            ? TextureFlags.TextureTypeCube
+            : TextureFlags.TextureType2D;
+
+        if (failed
+         || _pendingProjectionTexture->Texture == null
+         || (_pendingProjectionTexture->Texture->Flags & TextureFlags.TextureTypeMask) != expectedType)
+        {
+            Logger.LogWarning("light projection texture rejected; object={ObjectId}; path={Path}; load={LoadState}; expected={TextureType}",
+                Snapshot.Id, _projectionResource.RequestedPath, loadState, expectedType);
+            ReleasePendingProjectionTexture();
+            return;
+        }
+
+        _light->ProjectedTexture = _pendingProjectionTexture;
+        _pendingProjectionTexture = null;
+        ((DrawObject*)_light)->LoadState = 2;
+        _light->UpdateRender();
+    }
+
+    private void ReleasePendingProjectionTexture()
+    {
+        TextureResourceHandle* pending = _pendingProjectionTexture;
+        _pendingProjectionTexture = null;
+
+        if (pending != null)
+        {
+            pending->DecRef();
+        }
     }
 
     private ObjectRuntimeUpdateResult ApplySnapshotStateUnsafe(ObjectSnapshot snapshot)
@@ -171,7 +259,7 @@ internal sealed unsafe class LightObjectRuntime : DrawObjectRuntime
 
     private static RenderLightFlags ToRenderLightFlags(LightFlags lightFlags)
     {
-        RenderLightFlags flags = 0;
+        RenderLightFlags flags = default;
         if (lightFlags.EnableMaterialReflection)
         {
             flags |= RenderLightFlags.SpecularHighlights;
@@ -201,4 +289,3 @@ internal sealed unsafe class LightObjectRuntime : DrawObjectRuntime
             SceneTransformMath.CreateRotationQuaternion(transform.RotationDegrees),
             Vector3.Multiply(transform.Scale, localScale));
 }
-

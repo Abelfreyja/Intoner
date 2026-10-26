@@ -169,7 +169,6 @@ internal sealed class PreviewCacheStateStore(
                     }
 
                     state.GeometryEntry = null;
-                    state.HasLoadedGeometry = false;
                     state.NextLoadRetryAtMs = 0;
                     state.Error = null;
                 }
@@ -201,7 +200,7 @@ internal sealed class PreviewCacheStateStore(
             return;
         }
 
-        if (!IsExpired(renderState.LastAccessAtMs, now, thumbnailPolicy.PendingTextureRetention))
+        if (!PreviewCachePolicy.IsExpired(renderState.LastAccessAtMs, now, thumbnailPolicy.PendingTextureRetention))
         {
             return;
         }
@@ -249,7 +248,7 @@ internal sealed class PreviewCacheStateStore(
                     continue;
                 }
 
-                bool shouldEvict = IsExpired(renderState.LastAccessAtMs, now, policy.TextureRetention)
+                bool shouldEvict = PreviewCachePolicy.IsExpired(renderState.LastAccessAtMs, now, policy.TextureRetention)
                     || remainingCount > policy.MaxTextureCount
                     || totalBytes > policy.MaxTextureBytes;
                 if (!shouldEvict)
@@ -276,18 +275,8 @@ internal sealed class PreviewCacheStateStore(
             return false;
         }
 
-        return IsExpired(state.LastThumbnailAccessAtMs, now, thumbnailPolicy.AssetRetention)
-            && IsExpired(state.LastDetailAccessAtMs, now, detailGeometryAssetRetention);
-    }
-
-    private static bool IsExpired(long lastAccessAtMs, long now, TimeSpan retention)
-    {
-        if (lastAccessAtMs <= 0)
-        {
-            return true;
-        }
-
-        return now - lastAccessAtMs >= retention.TotalMilliseconds;
+        return PreviewCachePolicy.IsExpired(state.LastThumbnailAccessAtMs, now, thumbnailPolicy.AssetRetention)
+            && PreviewCachePolicy.IsExpired(state.LastDetailAccessAtMs, now, detailGeometryAssetRetention);
     }
 
     [StructLayout(LayoutKind.Auto)]

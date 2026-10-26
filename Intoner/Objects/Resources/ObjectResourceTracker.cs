@@ -1,3 +1,4 @@
+using FFXIVClientStructs.FFXIV.Client.System.Resource.Handle;
 using Intoner.Objects.Utils;
 using Microsoft.Extensions.Logging;
 
@@ -8,14 +9,60 @@ internal readonly record struct ObjectResourceScope
 {
     internal ObjectResourceScope(string resourceCollectionId, string resolvedPath, long resourceScopeId = 0)
     {
+        if (ObjectScopedResourcePathUtility.TryParse(resolvedPath, out ObjectScopedResourcePath scopedPath))
+        {
+            if (resourceScopeId != 0 && resourceScopeId != scopedPath.ResourceScopeId)
+            {
+                throw new ArgumentException("resource scope id must match the generation declared by the path", nameof(resourceScopeId));
+            }
+
+            resourceScopeId = scopedPath.ResourceScopeId;
+            resolvedPath = scopedPath.Path;
+        }
+
+        string normalizedPath = ObjectScopedResourcePathUtility.Create(0, resolvedPath);
         ResourceCollectionId = ObjectCollectionKeyUtility.NormalizeCollectionId(resourceCollectionId);
-        ResolvedPath = ObjectResourcePathUtility.NormalizeTrackedPath(resolvedPath);
+        ResolvedPath = normalizedPath.Length > 0 ? normalizedPath : resolvedPath;
         ResourceScopeId = resourceScopeId;
     }
 
     public string ResourceCollectionId { get; } = string.Empty;
     public string ResolvedPath { get; } = string.Empty;
     public long ResourceScopeId { get; }
+
+    public bool Equals(ObjectResourceScope other)
+        => ResourceScopeId == other.ResourceScopeId
+            && string.Equals(ResourceCollectionId, other.ResourceCollectionId, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(ResolvedPath, other.ResolvedPath, StringComparison.OrdinalIgnoreCase);
+
+    public override int GetHashCode()
+        => HashCode.Combine(ResourceScopeId,
+            StringComparer.OrdinalIgnoreCase.GetHashCode(ResourceCollectionId ?? string.Empty),
+            StringComparer.OrdinalIgnoreCase.GetHashCode(ResolvedPath ?? string.Empty));
+    public bool MatchesPath(string path)
+    {
+        if (ObjectScopedResourcePathUtility.IsForeignScopedPath(path))
+        {
+            return false;
+        }
+
+        if (ObjectScopedResourcePathUtility.IsObjectScopedPath(path))
+        {
+            if (!ObjectScopedResourcePathUtility.TryParse(path, out ObjectScopedResourcePath declared)
+             || declared.ResourceScopeId != ResourceScopeId)
+            {
+                return false;
+            }
+
+            return string.Equals(declared.Path, ResolvedPath, StringComparison.OrdinalIgnoreCase);
+        }
+
+        string currentPath = ObjectScopedResourcePathUtility.Create(0, path);
+        return currentPath.Length > 0
+            && (string.Equals(currentPath, ResolvedPath, StringComparison.OrdinalIgnoreCase)
+                || ObjectMemoryResourcePathUtility.TryParse(ResolvedPath, out ObjectMemoryResourcePath memoryPath)
+                    && string.Equals(currentPath, memoryPath.GamePath, StringComparison.OrdinalIgnoreCase));
+    }
 }
 
 internal enum ObjectResourceRegistrationKind
@@ -43,6 +90,8 @@ internal struct ObjectResourceRegistration
 
     public void Clear(ObjectResourceTracker tracker)
     {
+        using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferWrites();
+
         if (_address == nint.Zero)
         {
             return;
@@ -69,7 +118,9 @@ internal struct ObjectResourceRegistration
         nint address,
         ObjectResourceScope scope)
     {
-        if (address == nint.Zero || scope.ResourceCollectionId.Length == 0 || scope.ResolvedPath.Length == 0)
+        using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferWrites();
+
+        if (address == nint.Zero || string.IsNullOrEmpty(scope.ResourceCollectionId) || string.IsNullOrEmpty(scope.ResolvedPath))
         {
             Clear(tracker);
             return;
@@ -87,13 +138,14 @@ internal struct ObjectResourceRegistration
             Clear(tracker);
         }
 
-        if (kind == ObjectResourceRegistrationKind.RootInstance)
+        bool registered = kind == ObjectResourceRegistrationKind.RootInstance
+            ? tracker.RegisterOrUpdateRootInstance(address, _ownerId, scope)
+            : tracker.RegisterOrUpdateRootHandle(address, _ownerId, scope);
+
+        if (!registered)
         {
-            tracker.RegisterOrUpdateRootInstance(address, _ownerId, scope);
-        }
-        else
-        {
-            tracker.RegisterOrUpdateRootHandle(address, _ownerId, scope);
+            Clear(tracker);
+            return;
         }
 
         _address = address;
@@ -139,10 +191,10 @@ internal sealed class ObjectResourceTracker : IDisposable
         _loadScope = loadScope;
     }
 
-    public void RegisterOrUpdateRootHandle(nint resourceHandleAddress, Guid ownerId, ObjectResourceScope handleScope)
+    public bool RegisterOrUpdateRootHandle(nint resourceHandleAddress, Guid ownerId, ObjectResourceScope handleScope)
         => RegisterOrUpdateRootScope(_handleScopes, resourceHandleAddress, ownerId, handleScope);
 
-    public void RegisterOrUpdateRootInstance(nint instanceAddress, Guid ownerId, ObjectResourceScope instanceScope)
+    public bool RegisterOrUpdateRootInstance(nint instanceAddress, Guid ownerId, ObjectResourceScope instanceScope)
         => RegisterOrUpdateRootScope(_instanceScopes, instanceAddress, ownerId, instanceScope);
 
     public ObjectResourceLoadScopeToken EnterHandleScope(nint resourceHandleAddress, ObjectScopedResourcePath path)
@@ -169,6 +221,17 @@ internal sealed class ObjectResourceTracker : IDisposable
         ValidateRegistration(resourceHandleAddress, handleScope);
 
         using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferWrites();
+
+        if (!TryValidateRegistrationPath(resourceHandleAddress, Guid.Empty, handleScope))
+        {
+            return;
+        }
+
+        if (!TryValidateHandleScope(resourceHandleAddress, Guid.Empty, ref handleScope))
+        {
+            return;
+        }
+
         lock (_lock)
         {
             if (_disposed)
@@ -239,7 +302,7 @@ internal sealed class ObjectResourceTracker : IDisposable
         }
     }
 
-    private void RegisterOrUpdateRootScope(
+    private bool RegisterOrUpdateRootScope(
         Dictionary<nint, TrackedResourceScopes> scopesByAddress,
         nint address,
         Guid ownerId,
@@ -252,18 +315,32 @@ internal sealed class ObjectResourceTracker : IDisposable
         }
 
         using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferWrites();
+
+        if (!TryValidateRegistrationPath(address, ownerId, scope))
+        {
+            return false;
+        }
+
+        if (ReferenceEquals(scopesByAddress, _handleScopes)
+         && !TryValidateHandleScope(address, ownerId, ref scope))
+        {
+            return false;
+        }
+
         lock (_lock)
         {
             if (_disposed)
             {
-                return;
+                return false;
             }
 
             TrackedResourceScopes trackedScopes = GetOrAddTrackedScopes(scopesByAddress, address);
             string kind = ReferenceEquals(scopesByAddress, _handleScopes) ? "root handle" : "root instance";
             bool hadScope = trackedScopes.RootScopes.TryGetValue(ownerId, out ObjectResourceScope previousScope);
             bool changed;
-            if (TryRetainScope(trackedScopes, scope, out ObjectResourceScope retainedScope))
+            bool retained = TryRetainScope(trackedScopes, scope, out ObjectResourceScope retainedScope);
+
+            if (retained)
             {
                 trackedScopes.RootScopes[ownerId] = retainedScope;
                 changed = !hadScope || previousScope != retainedScope;
@@ -280,7 +357,7 @@ internal sealed class ObjectResourceTracker : IDisposable
             else
             {
                 changed = trackedScopes.RootScopes.Remove(ownerId);
-                ObjectResourceLog.Write(() => _logger.LogWarning("object resource registration rejected; reason=collection unavailable; address=0x{Address:X}; owner={OwnerId}; collection={CollectionId}; generation={ResourceScopeId}; path={Path}",
+                ObjectResourceLog.Write(() => _logger.LogWarning("object resource registration rejected; reason=collection generation unavailable, ambiguous or mismatched; address=0x{Address:X}; owner={OwnerId}; collection={CollectionId}; generation={ResourceScopeId}; path={Path}",
                     (ulong)address, ownerId, scope.ResourceCollectionId, scope.ResourceScopeId, scope.ResolvedPath));
                 if (changed)
                 {
@@ -294,24 +371,112 @@ internal sealed class ObjectResourceTracker : IDisposable
             {
                 LogScopeConflict(address, trackedScopes);
             }
+
+            return retained;
         }
+    }
+
+    private unsafe bool TryValidateHandleScope(nint address, Guid ownerId, ref ObjectResourceScope scope)
+    {
+        if (!ObjectResourcePathEncoding.TryReadHandlePath((ResourceHandle*)address, out string handlePath))
+        {
+            return true;
+        }
+
+        string reason;
+
+        if (ObjectScopedResourcePathUtility.IsForeignScopedPath(handlePath))
+        {
+            reason = "foreign private path";
+        }
+        else if (ObjectScopedResourcePathUtility.IsObjectScopedPath(handlePath))
+        {
+            if (!ObjectScopedResourcePathUtility.TryParse(handlePath, out ObjectScopedResourcePath scopedPath))
+            {
+                reason = "malformed private path";
+            }
+            else if (scope.ResourceScopeId != 0 && scope.ResourceScopeId != scopedPath.ResourceScopeId)
+            {
+                reason = "generation mismatch";
+            }
+            else if (!_collectionStore.TryGetCollectionByResourceScopeId(scopedPath.ResourceScopeId, out ObjectCollectionResolveData? collection)
+                  || !string.Equals(collection.CollectionId, scope.ResourceCollectionId, StringComparison.OrdinalIgnoreCase))
+            {
+                reason = "collection unavailable or mismatched";
+            }
+            else
+            {
+                if (scope.ResourceScopeId == 0)
+                {
+                    scope = new ObjectResourceScope(scope.ResourceCollectionId, scope.ResolvedPath, scopedPath.ResourceScopeId);
+                }
+
+                if (scope.MatchesPath(handlePath))
+                {
+                    return true;
+                }
+
+                reason = "path mismatch";
+            }
+        }
+        else
+        {
+            if (scope.MatchesPath(handlePath))
+            {
+                return true;
+            }
+
+            reason = "path mismatch";
+        }
+
+        return RejectRegistration(address, ownerId, scope, handlePath, reason);
+    }
+
+    private bool TryValidateRegistrationPath(nint address, Guid ownerId, ObjectResourceScope scope)
+    {
+        if (ObjectScopedResourcePathUtility.Create(0, scope.ResolvedPath).Length == 0)
+        {
+            return RejectRegistration(address, ownerId, scope, string.Empty, "invalid registration path");
+        }
+
+        return true;
+    }
+
+    private bool RejectRegistration(nint address, Guid ownerId, ObjectResourceScope scope, string nativePath, string reason)
+    {
+        ObjectResourceLog.Write(() => _logger.LogWarning("object resource registration rejected; reason={Reason}; address=0x{Address:X}; owner={OwnerId}; collection={CollectionId}; generation={ResourceScopeId}; path={Path}; nativePath={NativePath}",
+            reason, (ulong)address, ownerId, scope.ResourceCollectionId, scope.ResourceScopeId, scope.ResolvedPath, nativePath));
+        return false;
     }
 
     private bool TryRetainScope(TrackedResourceScopes trackedScopes, ObjectResourceScope scope, out ObjectResourceScope retainedScope)
     {
         retainedScope = default;
         long resourceScopeId = scope.ResourceScopeId;
+
         if (resourceScopeId == 0)
         {
             // root registration follows the generation already returned by the native loader
-            resourceScopeId = trackedScopes.RedirectedScopes.FirstOrDefault(redirectedScope
-                => string.Equals(redirectedScope.ResourceCollectionId, scope.ResourceCollectionId, StringComparison.Ordinal)
-                && string.Equals(redirectedScope.ResolvedPath, scope.ResolvedPath, StringComparison.OrdinalIgnoreCase)).ResourceScopeId;
+            foreach (ObjectResourceScope redirectedScope in trackedScopes.RedirectedScopes)
+            {
+                if (!string.Equals(redirectedScope.ResourceCollectionId, scope.ResourceCollectionId, StringComparison.OrdinalIgnoreCase)
+                 || !string.Equals(redirectedScope.ResolvedPath, scope.ResolvedPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (resourceScopeId != 0 && resourceScopeId != redirectedScope.ResourceScopeId)
+                {
+                    return false;
+                }
+
+                resourceScopeId = redirectedScope.ResourceScopeId;
+            }
         }
 
         if (resourceScopeId == 0
          && _loadScope.TryReadActiveCollection(out ObjectCollectionResolveData activeCollection)
-         && string.Equals(activeCollection.CollectionId, scope.ResourceCollectionId, StringComparison.Ordinal))
+         && string.Equals(activeCollection.CollectionId, scope.ResourceCollectionId, StringComparison.OrdinalIgnoreCase))
         {
             resourceScopeId = activeCollection.ResourceScopeId;
         }
@@ -326,11 +491,21 @@ internal sealed class ObjectResourceTracker : IDisposable
                 return false;
             }
 
+            if (!string.Equals(lease.Snapshot.CollectionId, scope.ResourceCollectionId, StringComparison.OrdinalIgnoreCase))
+            {
+                lease.Dispose();
+                return false;
+            }
+
             resourceScopeId = lease.Snapshot.ResourceScopeId;
             if (!trackedScopes.Leases.TryAdd(resourceScopeId, lease))
             {
                 lease.Dispose();
             }
+        }
+        else if (!string.Equals(lease.Snapshot.CollectionId, scope.ResourceCollectionId, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
         }
 
         retainedScope = new ObjectResourceScope(scope.ResourceCollectionId, scope.ResolvedPath, resourceScopeId);
@@ -456,7 +631,7 @@ internal sealed class ObjectResourceTracker : IDisposable
             throw new ArgumentException("resource scope address must not be zero", nameof(address));
         }
 
-        if (scope.ResourceCollectionId.Length == 0 || scope.ResolvedPath.Length == 0)
+        if (string.IsNullOrEmpty(scope.ResourceCollectionId) || string.IsNullOrEmpty(scope.ResolvedPath))
         {
             throw new ArgumentException("tracked resource scope must include collection id and resolved path", nameof(scope));
         }

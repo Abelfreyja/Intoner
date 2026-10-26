@@ -11,24 +11,6 @@ internal sealed partial class EditorToolbar
 {
     private const string SurfaceAlignPopupId = "##objectSurfaceAlignPopup";
 
-    private bool SurfaceAlignToNormal
-    {
-        get => _gizmo.Settings.SurfaceAlignToNormal;
-        set => _gizmo.Settings.SurfaceAlignToNormal = value;
-    }
-
-    private bool SurfaceItemTargetsEnabled
-    {
-        get => _gizmo.Settings.SurfaceItemTargetsEnabled;
-        set => _gizmo.Settings.SurfaceItemTargetsEnabled = value;
-    }
-
-    private SceneSurfaceTargetShape SurfaceTargetShape
-    {
-        get => _gizmo.Settings.SurfaceTargetShape;
-        set => _gizmo.Settings.SurfaceTargetShape = value;
-    }
-
     private void DrawSurfaceAlignToolbarButton(ToolbarSurfaceMode mode)
     {
         var accent = ResolveSurfaceAlignAccentColor();
@@ -40,7 +22,6 @@ internal sealed partial class EditorToolbar
             IsSurfaceAlignPopupOpen(),
             ToggleSurfaceAlignToNormal,
             accent,
-            useAccentFill: false,
             useNeutralHoverFill: true,
             hoverBorderColor: ThemeColors.AccentGreen,
             drawBackground: DrawSurfaceAlignToolbarButtonBackground,
@@ -59,48 +40,14 @@ internal sealed partial class EditorToolbar
 
     private void DrawSurfaceAlignToolbarButtonBackground(ImDrawListPtr drawList, Vector2 min, Vector2 max, bool hovered, bool active)
     {
-        var scale = ImGuiHelpers.GlobalScale;
-        var inset = 3f * scale;
-        var innerMin = min + new Vector2(inset, inset);
-        var innerMax = max - new Vector2(inset, inset);
-        if (innerMax.X <= innerMin.X || innerMax.Y <= innerMin.Y)
-        {
-            return;
-        }
-
-        var bandGap = MathF.Max(1f * scale, 1f);
-        var bandWidth = ((innerMax.X - innerMin.X) - bandGap) * 0.5f;
-        if (bandWidth <= 0f)
-        {
-            return;
-        }
-
-        float alpha = 0.31f;
+        float peakAlpha = hovered ? 0.38f : 0.31f;
         if (active)
         {
-            alpha = 0.44f;
+            peakAlpha = 0.44f;
         }
-        else if (hovered)
-        {
-            alpha = 0.38f;
-        }
-
-        DrawTransformSnapToolbarBand(
-            drawList,
-            new Vector2(innerMin.X, innerMin.Y),
-            new Vector2(innerMin.X + bandWidth, innerMax.Y),
-            ThemeColors.AccentGreen,
-            SurfaceAlignToNormal,
-            alpha);
-
-        var rightMinX = innerMin.X + bandWidth + bandGap;
-        DrawTransformSnapToolbarBand(
-            drawList,
-            new Vector2(rightMinX, innerMin.Y),
-            new Vector2(innerMax.X, innerMax.Y),
-            ThemeColors.AccentYellow,
-            SurfaceItemTargetsEnabled,
-            alpha);
+        DrawToolbarStateBands(drawList, min, max,
+            [(ThemeColors.AccentGreen, _gizmo.Settings.SurfaceAlignToNormal), (ThemeColors.AccentYellow, _gizmo.Settings.SurfaceItemTargetsEnabled)],
+            peakAlpha);
     }
 
     private void DrawSurfaceAlignToolbarTooltip()
@@ -116,23 +63,29 @@ internal sealed partial class EditorToolbar
                 new(
                     FontAwesomeIcon.Compass,
                     "Normal alignment",
-                    SurfaceAlignToNormal,
+                    _gizmo.Settings.SurfaceAlignToNormal,
                     Accent: ThemeColors.AccentGreen),
                 new(
                     FontAwesomeIcon.Cubes,
                     "Scene item targets",
-                    SurfaceItemTargetsEnabled,
+                    _gizmo.Settings.SurfaceItemTargetsEnabled,
                     Accent: ThemeColors.AccentYellow),
                 new(
                     FontAwesomeIcon.BorderAll,
                     "Target shape",
                     null,
-                    FormatSceneSurfaceTargetShape(SurfaceTargetShape),
+                    FormatSceneSurfaceTargetShape(_gizmo.Settings.SurfaceTargetShape),
                     ThemeColors.AccentYellow),
-            ]);
+            ],
+            []);
 
     private void DrawSurfaceAlignPopup(Vector2 anchorMin, Vector2 anchorMax)
     {
+        if (!IsSurfaceAlignPopupOpen())
+        {
+            return;
+        }
+
         var scale = ImGuiHelpers.GlobalScale;
         var accent = ThemeColors.AccentGreen;
         var popupWidth = 320f * scale;
@@ -161,33 +114,33 @@ internal sealed partial class EditorToolbar
             return;
         }
 
-        var alignToNormal = SurfaceAlignToNormal;
+        var alignToNormal = _gizmo.Settings.SurfaceAlignToNormal;
         if (EditorPropertyTable.Checkbox("surfaceAlignNormal", "Align To Normal", ref alignToNormal))
         {
-            SurfaceAlignToNormal = alignToNormal;
+            _gizmo.Settings.SurfaceAlignToNormal = alignToNormal;
         }
 
-        var itemTargets = SurfaceItemTargetsEnabled;
+        var itemTargets = _gizmo.Settings.SurfaceItemTargetsEnabled;
         if (EditorPropertyTable.Checkbox("surfaceItemTargets", "Scene Item Targets", ref itemTargets))
         {
-            SurfaceItemTargetsEnabled = itemTargets;
+            _gizmo.Settings.SurfaceItemTargetsEnabled = itemTargets;
         }
 
-        var targetShape = SurfaceTargetShape;
+        var targetShape = _gizmo.Settings.SurfaceTargetShape;
         if (DrawSceneSurfaceTargetShapeRow(ref targetShape))
         {
-            SurfaceTargetShape = targetShape;
+            _gizmo.Settings.SurfaceTargetShape = targetShape;
         }
     }
 
     private Vector4? ResolveSurfaceAlignAccentColor()
     {
-        if (SurfaceAlignToNormal)
+        if (_gizmo.Settings.SurfaceAlignToNormal)
         {
             return ThemeColors.AccentGreen;
         }
 
-        return SurfaceItemTargetsEnabled
+        return _gizmo.Settings.SurfaceItemTargetsEnabled
             ? ThemeColors.AccentYellow
             : null;
     }
@@ -250,5 +203,5 @@ internal sealed partial class EditorToolbar
         => ImGui.IsPopupOpen(SurfaceAlignPopupId);
 
     private void ToggleSurfaceAlignToNormal()
-        => SurfaceAlignToNormal = !SurfaceAlignToNormal;
+        => _gizmo.Settings.SurfaceAlignToNormal = !_gizmo.Settings.SurfaceAlignToNormal;
 }

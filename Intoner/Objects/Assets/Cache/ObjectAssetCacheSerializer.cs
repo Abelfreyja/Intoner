@@ -1,3 +1,7 @@
+using Dalamud.Game;
+using Intoner.Objects.Models;
+using Intoner.Objects.Resources;
+using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -5,9 +9,9 @@ namespace Intoner.Objects.Assets.Cache;
 
 internal static class ObjectAssetCacheSerializer
 {
-    internal const int FormatVersion = 1;
-    internal const string CacheFileName = "assets.cache";
+    internal const int FormatVersion = 2;
     private static readonly StringComparer PathComparer = StringComparer.OrdinalIgnoreCase;
+    private static readonly Encoding CacheEncoding = new UTF8Encoding(false, true);
 
     public static IReadOnlyDictionary<ObjectAssetCacheSectionKind, ObjectAssetCacheSectionPayload> SerializeSections(ObjectAssetCacheSaveRequest request)
     {
@@ -22,7 +26,7 @@ internal static class ObjectAssetCacheSerializer
                 ObjectAssetCacheSectionKind.StaticBgObjects => BuildStaticBgObjectSection(request.StaticGameDataBgObjects),
                 ObjectAssetCacheSectionKind.StaticResolvedVfx => BuildStaticResolvedVfxSection(request.StaticResolvedVfxEntries),
                 ObjectAssetCacheSectionKind.BgModels => BuildBgModelSection(request.BgModels),
-                ObjectAssetCacheSectionKind.StandaloneVfx => BuildStandaloneVfxSection(request.StandaloneVfxAssets),
+                ObjectAssetCacheSectionKind.RuntimeVfx => BuildRuntimeVfxSection(request.RuntimeVfxAssets),
                 ObjectAssetCacheSectionKind.TimelineReferencedVfx => BuildTimelineReferencedVfxSection(request.TimelineReferencedVfxEntries),
                 _ => throw new InvalidOperationException($"unsupported cache section kind {descriptor.Kind}"),
             };
@@ -64,13 +68,16 @@ internal static class ObjectAssetCacheSerializer
     public static ObjectAssetCacheManifest BuildManifest(
         string? gameVersion,
         string? sqpackIndexFingerprint,
-        ObjectAssetCacheSerializedData serializedData)
+        ClientLanguage language,
+        ObjectAssetCacheSerializedData serializedData,
+        string cacheFileName)
         => new(
             ObjectAssetCacheService.SchemaVersion,
             FormatVersion,
-            CacheFileName,
+            cacheFileName,
             string.IsNullOrWhiteSpace(gameVersion) ? null : gameVersion,
             string.IsNullOrWhiteSpace(sqpackIndexFingerprint) ? null : sqpackIndexFingerprint,
+            language,
             DateTime.UtcNow,
             serializedData.PayloadLength,
             serializedData.Sections
@@ -85,51 +92,90 @@ internal static class ObjectAssetCacheSerializer
     public static ObjectAssetCacheSnapshot Deserialize(
         ObjectAssetCacheManifest manifest,
         IReadOnlyDictionary<ObjectAssetCacheSectionKind, ReadOnlyMemory<byte>> sectionPayloads)
-    {
-        IReadOnlyList<string> staticCollisionPaths =
-            ReadStringListSection(sectionPayloads, ObjectAssetCacheSectionKind.StaticCollisionPaths);
-        IReadOnlyList<ObjectAssetCacheStaticBgObject> staticBgObjects =
-            ReadStaticBgObjectSection(sectionPayloads, ObjectAssetCacheSectionKind.StaticBgObjects);
-        IReadOnlyList<ObjectAssetCacheResolvedVfxEntry> staticResolvedVfxEntries =
-            ReadStaticResolvedVfxSection(sectionPayloads, ObjectAssetCacheSectionKind.StaticResolvedVfx);
-        IReadOnlyList<ObjectAssetCacheBgModel> bgModels =
-            ReadBgModelSection(sectionPayloads, ObjectAssetCacheSectionKind.BgModels);
-        IReadOnlyList<ObjectAssetCacheStandaloneVfx> standaloneVfxAssets =
-            ReadStandaloneVfxSection(sectionPayloads, ObjectAssetCacheSectionKind.StandaloneVfx);
-        IReadOnlyList<ObjectAssetCacheTimelineReferencedVfxEntry> timelineReferencedVfxEntries =
-            ReadTimelineReferencedVfxSection(sectionPayloads, ObjectAssetCacheSectionKind.TimelineReferencedVfx);
+        => Deserialize(manifest, sectionPayloads, out _);
 
-        return new ObjectAssetCacheSnapshot(
+    public static ObjectAssetCacheSnapshot Deserialize(
+        ObjectAssetCacheManifest manifest,
+        IReadOnlyDictionary<ObjectAssetCacheSectionKind, ReadOnlyMemory<byte>> sectionPayloads,
+        out ObjectAssetCacheSectionSet loadedSections)
+    {
+        if (!manifest.TryBuildSectionMap(out IReadOnlyDictionary<ObjectAssetCacheSectionKind, ObjectAssetCacheManifestSection>? manifestSections, out string? error))
+        {
+            throw new InvalidDataException(error);
+        }
+
+        ObjectAssetCacheSectionSet loaded = ObjectAssetCacheSectionSet.None;
+        ObjectAssetCacheSnapshot snapshot = new(
             manifest.GameVersion,
-            staticCollisionPaths,
-            staticBgObjects,
-            staticResolvedVfxEntries,
-            bgModels,
-            standaloneVfxAssets,
-            timelineReferencedVfxEntries);
+            Read<string>(ObjectAssetCacheSectionKind.StaticCollisionPaths),
+            Read<BgObjectAsset>(ObjectAssetCacheSectionKind.StaticBgObjects),
+            Read<ResolvedVfxPath>(ObjectAssetCacheSectionKind.StaticResolvedVfx),
+            Read<ObjectAssetCacheBgModel>(ObjectAssetCacheSectionKind.BgModels),
+            Read<ObjectAssetCacheRuntimeVfx>(ObjectAssetCacheSectionKind.RuntimeVfx),
+            Read<ObjectAssetCacheTimelineReferencedVfxEntry>(ObjectAssetCacheSectionKind.TimelineReferencedVfx));
+        loadedSections = loaded;
+        return snapshot;
+
+        T[] Read<T>(ObjectAssetCacheSectionKind kind)
+        {
+            if (!sectionPayloads.TryGetValue(kind, out ReadOnlyMemory<byte> payload)
+             || !manifestSections.TryGetValue(kind, out ObjectAssetCacheManifestSection? section))
+            {
+                return [];
+            }
+
+            try
+            {
+                T[] items = (T[])ReadSectionPayload(kind, section.Count, payload, capture: true);
+                loaded |= kind.ToSectionSet();
+                return items;
+            }
+            catch (Exception ex) when (ex is InvalidDataException or EndOfStreamException or FormatException or DecoderFallbackException)
+            {
+                return [];
+            }
+        }
     }
+
+    public static bool TryValidateSectionPayload(ObjectAssetCacheSectionKind kind, int expectedCount, ReadOnlyMemory<byte> payload)
+    {
+        try
+        {
+            _ = ReadSectionPayload(kind, expectedCount, payload, capture: false);
+            return true;
+        }
+        catch (Exception ex) when (ex is InvalidDataException or EndOfStreamException or FormatException or DecoderFallbackException)
+        {
+            return false;
+        }
+    }
+
+    private static object ReadSectionPayload(ObjectAssetCacheSectionKind kind, int expectedCount, ReadOnlyMemory<byte> payload, bool capture)
+        => kind switch
+        {
+            ObjectAssetCacheSectionKind.StaticCollisionPaths => ReadStringListSection(payload, expectedCount, capture),
+            ObjectAssetCacheSectionKind.StaticBgObjects => ReadStaticBgObjectSection(payload, expectedCount, capture),
+            ObjectAssetCacheSectionKind.StaticResolvedVfx => ReadStaticResolvedVfxSection(payload, expectedCount, capture),
+            ObjectAssetCacheSectionKind.BgModels => ReadBgModelSection(payload, expectedCount, capture),
+            ObjectAssetCacheSectionKind.RuntimeVfx => ReadRuntimeVfxSection(payload, expectedCount, capture),
+            ObjectAssetCacheSectionKind.TimelineReferencedVfx => ReadTimelineReferencedVfxSection(payload, expectedCount, capture),
+            _ => throw new InvalidDataException($"unsupported cache section kind {kind}"),
+        };
 
     private static ObjectAssetCacheSectionPayload BuildStringListSection(ObjectAssetCacheSectionKind kind, IReadOnlyList<string> values)
     {
         string[] orderedValues = NormalizeStringList(values);
         StringTable stringTable = StringTable.Create(orderedValues);
 
-        using MemoryStream stream = new();
-        using BinaryWriter writer = new(stream, Encoding.UTF8, leaveOpen: true);
-        stringTable.Write(writer);
-        writer.Write7BitEncodedInt(orderedValues.Length);
-        foreach (string value in orderedValues)
+        return WriteSection(kind, orderedValues, stringTable, static (writer, table, value) =>
         {
-            writer.Write7BitEncodedInt(stringTable.GetId(value));
-        }
-
-        writer.Flush();
-        return new ObjectAssetCacheSectionPayload(kind, orderedValues.Length, stream.ToArray());
+            writer.Write7BitEncodedInt(table.GetId(value));
+        });
     }
 
-    private static ObjectAssetCacheSectionPayload BuildStaticBgObjectSection(IReadOnlyList<ObjectAssetCacheStaticBgObject> bgObjects)
+    private static ObjectAssetCacheSectionPayload BuildStaticBgObjectSection(IReadOnlyList<BgObjectAsset> bgObjects)
     {
-        List<ObjectAssetCacheStaticBgObject> orderedObjects = bgObjects
+        List<BgObjectAsset> orderedObjects = bgObjects
             .OrderBy(static asset => asset.ModelPath, PathComparer)
             .ToList();
         StringTable stringTable = StringTable.Create(
@@ -137,53 +183,63 @@ internal static class ObjectAssetCacheSerializer
                 .Concat(orderedObjects.Select(static asset => asset.Source))
                 .Concat(orderedObjects.Select(static asset => asset.SourcePath))
                 .Concat(orderedObjects.SelectMany(static asset => asset.TerritoryNames))
-                .Concat(orderedObjects.SelectMany(static asset => asset.SearchTerms)));
+                .Concat(orderedObjects.SelectMany(static asset => asset.SearchTerms))
+                .Concat(orderedObjects.SelectMany(static asset => asset.ColliderDefinitions.Select(static p => p.SourcePath)))
+                .Concat(orderedObjects.SelectMany(static asset => asset.ColliderDefinitions.Select(static p => p.PcbPath))));
 
-        using MemoryStream stream = new();
-        using BinaryWriter writer = new(stream, Encoding.UTF8, leaveOpen: true);
-        stringTable.Write(writer);
-        writer.Write7BitEncodedInt(orderedObjects.Count);
-        foreach (ObjectAssetCacheStaticBgObject bgObject in orderedObjects)
+        return WriteSection(ObjectAssetCacheSectionKind.StaticBgObjects, orderedObjects, stringTable, static (writer, table, bgObject) =>
         {
-            writer.Write7BitEncodedInt(stringTable.GetId(bgObject.ModelPath));
-            writer.Write7BitEncodedInt(stringTable.GetId(bgObject.Source));
+            writer.Write7BitEncodedInt(table.GetId(bgObject.ModelPath));
+            writer.Write7BitEncodedInt(table.GetId(bgObject.Source));
             writer.Write(bgObject.RowId);
-            writer.Write7BitEncodedInt(stringTable.GetId(bgObject.SourcePath));
+            writer.Write7BitEncodedInt(table.GetId(bgObject.SourcePath));
             WriteUInt32List(writer, bgObject.TerritoryIds);
-            WriteStringList(writer, stringTable, bgObject.TerritoryNames);
-            WriteStringList(writer, stringTable, bgObject.SearchTerms);
-        }
-
-        writer.Flush();
-        return new ObjectAssetCacheSectionPayload(ObjectAssetCacheSectionKind.StaticBgObjects, orderedObjects.Count, stream.ToArray());
+            WriteStringList(writer, table, bgObject.TerritoryNames);
+            WriteStringList(writer, table, bgObject.SearchTerms);
+            writer.Write(bgObject.ColliderDefinitionsComplete);
+            writer.Write7BitEncodedInt(bgObject.ColliderDefinitions.Count);
+            foreach (BgColliderDefinition definition in bgObject.ColliderDefinitions)
+            {
+                writer.Write7BitEncodedInt(table.GetId(definition.SourcePath));
+                writer.Write((byte)definition.Kind);
+                writer.Write7BitEncodedInt(table.GetId(definition.PcbPath));
+                writer.Write(definition.MaterialId);
+                writer.Write(definition.MaterialMask);
+                writer.Write(definition.Shape is not null);
+                if (definition.Shape is { } shape)
+                {
+                    WriteVector3(writer, shape.Translation);
+                    WriteVector3(writer, shape.Rotation);
+                    WriteVector3(writer, shape.Scale);
+                    WriteVector3(writer, shape.BoundsMin);
+                    WriteVector3(writer, shape.BoundsMax);
+                    writer.Write(shape.MaterialId);
+                    writer.Write(shape.MaterialMask);
+                }
+            }
+        });
     }
 
-    private static ObjectAssetCacheSectionPayload BuildStaticResolvedVfxSection(IReadOnlyList<ObjectAssetCacheResolvedVfxEntry> entries)
+    private static ObjectAssetCacheSectionPayload BuildStaticResolvedVfxSection(IReadOnlyList<ResolvedVfxPath> entries)
     {
-        List<ObjectAssetCacheResolvedVfxEntry> orderedEntries = entries
+        List<ResolvedVfxPath> orderedEntries = entries
             .OrderBy(static asset => asset.Path, PathComparer)
             .ToList();
         StringTable stringTable = StringTable.Create(
             orderedEntries.Select(static asset => asset.Path)
                 .Concat(orderedEntries.SelectMany(static asset => asset.SearchTerms)));
 
-        using MemoryStream stream = new();
-        using BinaryWriter writer = new(stream, Encoding.UTF8, leaveOpen: true);
-        stringTable.Write(writer);
-        writer.Write7BitEncodedInt(orderedEntries.Count);
-        foreach (ObjectAssetCacheResolvedVfxEntry entry in orderedEntries)
+        return WriteSection(ObjectAssetCacheSectionKind.StaticResolvedVfx, orderedEntries, stringTable, static (writer, table, entry) =>
         {
-            writer.Write7BitEncodedInt(stringTable.GetId(entry.Path));
+            writer.Write7BitEncodedInt(table.GetId(entry.Path));
             writer.Write((ushort)entry.Family);
             writer.Write((uint)entry.Evidence);
             writer.Write((ushort)entry.Sources);
             writer.Write((byte)entry.Contracts);
-            WriteStringList(writer, stringTable, entry.SearchTerms);
+            WriteStringList(writer, table, entry.SearchTerms);
             WriteVfxAnalysis(writer, entry.Analysis);
-        }
-
-        writer.Flush();
-        return new ObjectAssetCacheSectionPayload(ObjectAssetCacheSectionKind.StaticResolvedVfx, orderedEntries.Count, stream.ToArray());
+            writer.Write((byte)entry.TimelineContext);
+        });
     }
 
     private static ObjectAssetCacheSectionPayload BuildBgModelSection(IReadOnlyList<ObjectAssetCacheBgModel> bgModels)
@@ -194,44 +250,32 @@ internal static class ObjectAssetCacheSerializer
         StringTable stringTable = StringTable.Create(
             orderedModels.Select(static model => model.Path)
                 .Concat(orderedModels.SelectMany(static model => model.Sources))
-                .Concat(orderedModels.SelectMany(static model => model.TerritoryNames)));
+                .Concat(orderedModels.SelectMany(static model => model.TerritoryNames))
+                .Concat(orderedModels.SelectMany(static model => model.SearchTerms)));
 
-        using MemoryStream stream = new();
-        using BinaryWriter writer = new(stream, Encoding.UTF8, leaveOpen: true);
-        stringTable.Write(writer);
-        writer.Write7BitEncodedInt(orderedModels.Count);
-        foreach (ObjectAssetCacheBgModel bgModel in orderedModels)
+        return WriteSection(ObjectAssetCacheSectionKind.BgModels, orderedModels, stringTable, static (writer, table, bgModel) =>
         {
-            writer.Write7BitEncodedInt(stringTable.GetId(bgModel.Path));
-            WriteStringList(writer, stringTable, bgModel.Sources);
+            writer.Write7BitEncodedInt(table.GetId(bgModel.Path));
+            WriteStringList(writer, table, bgModel.Sources);
             WriteUInt32List(writer, bgModel.TerritoryIds);
-            WriteStringList(writer, stringTable, bgModel.TerritoryNames);
-        }
-
-        writer.Flush();
-        return new ObjectAssetCacheSectionPayload(ObjectAssetCacheSectionKind.BgModels, orderedModels.Count, stream.ToArray());
+            WriteStringList(writer, table, bgModel.TerritoryNames);
+            WriteStringList(writer, table, bgModel.SearchTerms);
+        });
     }
 
-    private static ObjectAssetCacheSectionPayload BuildStandaloneVfxSection(IReadOnlyList<ObjectAssetCacheStandaloneVfx> assets)
+    private static ObjectAssetCacheSectionPayload BuildRuntimeVfxSection(IReadOnlyList<ObjectAssetCacheRuntimeVfx> assets)
     {
-        List<ObjectAssetCacheStandaloneVfx> orderedAssets = assets
+        List<ObjectAssetCacheRuntimeVfx> orderedAssets = assets
             .OrderBy(static asset => asset.Path, PathComparer)
             .ToList();
         StringTable stringTable = StringTable.Create(orderedAssets.Select(static asset => asset.Path));
 
-        using MemoryStream stream = new();
-        using BinaryWriter writer = new(stream, Encoding.UTF8, leaveOpen: true);
-        stringTable.Write(writer);
-        writer.Write7BitEncodedInt(orderedAssets.Count);
-        foreach (ObjectAssetCacheStandaloneVfx vfxAsset in orderedAssets)
+        return WriteSection(ObjectAssetCacheSectionKind.RuntimeVfx, orderedAssets, stringTable, static (writer, table, vfxAsset) =>
         {
-            writer.Write7BitEncodedInt(stringTable.GetId(vfxAsset.Path));
+            writer.Write7BitEncodedInt(table.GetId(vfxAsset.Path));
             writer.Write((uint)vfxAsset.Evidence);
             WriteVfxAnalysis(writer, vfxAsset.Analysis);
-        }
-
-        writer.Flush();
-        return new ObjectAssetCacheSectionPayload(ObjectAssetCacheSectionKind.StandaloneVfx, orderedAssets.Count, stream.ToArray());
+        });
     }
 
     private static ObjectAssetCacheSectionPayload BuildTimelineReferencedVfxSection(IReadOnlyList<ObjectAssetCacheTimelineReferencedVfxEntry> entries)
@@ -241,137 +285,189 @@ internal static class ObjectAssetCacheSerializer
             .ToList();
         StringTable stringTable = StringTable.Create(orderedEntries.Select(static asset => asset.Path));
 
+        return WriteSection(ObjectAssetCacheSectionKind.TimelineReferencedVfx, orderedEntries, stringTable, static (writer, table, entry) =>
+        {
+            writer.Write7BitEncodedInt(table.GetId(entry.Path));
+            writer.Write((uint)entry.Evidence);
+            writer.Write((byte)entry.Context);
+        });
+    }
+
+    private static ObjectAssetCacheSectionPayload WriteSection<T>(
+        ObjectAssetCacheSectionKind kind,
+        IReadOnlyList<T> items,
+        StringTable stringTable,
+        Action<BinaryWriter, StringTable, T> writeItem)
+    {
         using MemoryStream stream = new();
         using BinaryWriter writer = new(stream, Encoding.UTF8, leaveOpen: true);
         stringTable.Write(writer);
-        writer.Write7BitEncodedInt(orderedEntries.Count);
-        foreach (ObjectAssetCacheTimelineReferencedVfxEntry entry in orderedEntries)
+        writer.Write7BitEncodedInt(items.Count);
+        foreach (T item in items)
         {
-            writer.Write7BitEncodedInt(stringTable.GetId(entry.Path));
-            writer.Write((uint)entry.Evidence);
-            writer.Write((byte)entry.Context);
+            writeItem(writer, stringTable, item);
         }
 
         writer.Flush();
-        return new ObjectAssetCacheSectionPayload(ObjectAssetCacheSectionKind.TimelineReferencedVfx, orderedEntries.Count, stream.ToArray());
+        return new ObjectAssetCacheSectionPayload(kind, items.Count, stream.ToArray());
     }
 
-    private static IReadOnlyList<string> ReadStringListSection(
-        IReadOnlyDictionary<ObjectAssetCacheSectionKind, ReadOnlyMemory<byte>> sectionPayloads,
-        ObjectAssetCacheSectionKind kind)
+    private static string[] ReadStringListSection(ReadOnlyMemory<byte> payload, int expectedCount, bool capture)
     {
-        if (!sectionPayloads.TryGetValue(kind, out ReadOnlyMemory<byte> payload))
-        {
-            return [];
-        }
-
         using MemoryStream stream = CreateReadOnlyStream(payload);
-        using BinaryReader reader = new(stream, Encoding.UTF8, leaveOpen: true);
+        using BinaryReader reader = new(stream, CacheEncoding, leaveOpen: true);
         string[] stringTable = ReadStringTable(reader);
-        return ReadStringList(reader, stringTable);
+        string[] values = ReadStringList(reader, stringTable, capture, expectedCount);
+        EnsureSectionComplete(reader);
+        return values;
     }
 
-    private static IReadOnlyList<ObjectAssetCacheStaticBgObject> ReadStaticBgObjectSection(
-        IReadOnlyDictionary<ObjectAssetCacheSectionKind, ReadOnlyMemory<byte>> sectionPayloads,
-        ObjectAssetCacheSectionKind kind)
-        => ReadSectionItems(
-            sectionPayloads,
-            kind,
-            static (reader, stringTable) =>
+    private static BgObjectAsset[] ReadStaticBgObjectSection(ReadOnlyMemory<byte> payload, int expectedCount, bool capture)
+    {
+        HashSet<string> paths = new(PathComparer);
+        return ReadSectionItems(
+            payload, expectedCount, minimumItemBytes: 10, capture,
+            (reader, stringTable, captureItem) =>
             {
-                string modelPath = stringTable[reader.Read7BitEncodedInt()];
-                string source = stringTable[reader.Read7BitEncodedInt()];
+                string modelPath = ReadUniqueTablePath(reader, stringTable, paths);
+                string source = ReadTableString(reader, stringTable);
                 uint rowId = reader.ReadUInt32();
-                string sourcePath = stringTable[reader.Read7BitEncodedInt()];
-                uint[] territoryIds = ReadUInt32List(reader);
-                string[] territoryNames = ReadStringList(reader, stringTable);
-                string[] searchTerms = ReadStringList(reader, stringTable);
-                return new ObjectAssetCacheStaticBgObject(modelPath, source, rowId, sourcePath, territoryIds, territoryNames, searchTerms);
-            });
+                string sourcePath = ReadTableString(reader, stringTable);
+                uint[] territoryIds = ReadUInt32List(reader, captureItem);
+                string[] territoryNames = ReadStringList(reader, stringTable, captureItem);
+                string[] searchTerms = ReadStringList(reader, stringTable, captureItem);
+                bool definitionsComplete = ReadFlag(reader);
+                int definitionCount = ReadCount(reader, minimumItemBytes: 20);
+                List<BgColliderDefinition> definitions = captureItem ? new(definitionCount) : [];
+                for (int index = 0; index < definitionCount; index++)
+                {
+                    string definitionSource = ReadTableString(reader, stringTable);
+                    BgCollisionKind kind = (BgCollisionKind)reader.ReadByte();
+                    string pcbPath = ReadTableString(reader, stringTable);
+                    ulong materialId = reader.ReadUInt64();
+                    ulong materialMask = reader.ReadUInt64();
+                    BgAnalyticShape? shape = ReadFlag(reader) ? new(
+                        ReadVector3(reader), ReadVector3(reader), ReadVector3(reader),
+                        ReadVector3(reader), ReadVector3(reader), reader.ReadUInt32(), reader.ReadUInt32()) : null;
+                    BgColliderDefinition definition = new(modelPath, definitionSource, kind, pcbPath, materialId, materialMask, shape);
 
-    private static IReadOnlyList<ObjectAssetCacheResolvedVfxEntry> ReadStaticResolvedVfxSection(
-        IReadOnlyDictionary<ObjectAssetCacheSectionKind, ReadOnlyMemory<byte>> sectionPayloads,
-        ObjectAssetCacheSectionKind kind)
-        => ReadSectionItems(
-            sectionPayloads,
-            kind,
-            static (reader, stringTable) =>
+                    if (!BgColliderDefinitionUtility.IsValid(definition, modelPath))
+                    {
+                        throw new InvalidDataException("invalid cached BG collider");
+                    }
+
+                    if (captureItem)
+                    {
+                        definitions.Add(definition);
+                    }
+                }
+
+                return captureItem ? new BgObjectAsset(modelPath, source, rowId, sourcePath, territoryIds, territoryNames, searchTerms)
+                {
+                    ColliderDefinitions = definitions,
+                    ColliderDefinitionsComplete = definitionsComplete,
+                } : null!;
+            });
+    }
+
+    private static ResolvedVfxPath[] ReadStaticResolvedVfxSection(ReadOnlyMemory<byte> payload, int expectedCount, bool capture)
+    {
+        HashSet<string> paths = new(PathComparer);
+        return ReadSectionItems(
+            payload, expectedCount, minimumItemBytes: 13, capture,
+            (reader, stringTable, captureItem) =>
             {
-                string path = stringTable[reader.Read7BitEncodedInt()];
+                string path = ReadUniqueTablePath(reader, stringTable, paths);
                 KnownVfxFamily family = (KnownVfxFamily)reader.ReadUInt16();
                 RuntimeVfxEvidence evidence = (RuntimeVfxEvidence)reader.ReadUInt32();
                 AssetPathSource sources = (AssetPathSource)reader.ReadUInt16();
                 AssetPathContract contracts = (AssetPathContract)reader.ReadByte();
-                string[] searchTerms = ReadStringList(reader, stringTable);
-                VfxAnalysis? analysis = ReadVfxAnalysis(reader);
-                return new ObjectAssetCacheResolvedVfxEntry(path, family, evidence, sources, contracts, searchTerms, analysis);
+                string[] searchTerms = ReadStringList(reader, stringTable, captureItem);
+                VfxAnalysis? analysis = ReadVfxAnalysis(reader, captureItem);
+                VfxTimelineContext context = (VfxTimelineContext)reader.ReadByte();
+                return captureItem ? new ResolvedVfxPath(path, family, evidence, sources, contracts, searchTerms, analysis, context) : null!;
+            });
+    }
+
+    private static ObjectAssetCacheBgModel[] ReadBgModelSection(ReadOnlyMemory<byte> payload, int expectedCount, bool capture)
+        => ReadSectionItems(
+            payload, expectedCount, minimumItemBytes: 5, capture,
+            static (reader, stringTable, captureItem) =>
+            {
+                string path = ReadTableString(reader, stringTable);
+                string[] sources = ReadStringList(reader, stringTable, captureItem);
+                uint[] territoryIds = ReadUInt32List(reader, captureItem);
+                string[] territoryNames = ReadStringList(reader, stringTable, captureItem);
+                string[] searchTerms = ReadStringList(reader, stringTable, captureItem);
+                return captureItem ? new ObjectAssetCacheBgModel(path, sources, territoryIds, territoryNames, searchTerms) : null!;
             });
 
-    private static IReadOnlyList<ObjectAssetCacheBgModel> ReadBgModelSection(
-        IReadOnlyDictionary<ObjectAssetCacheSectionKind, ReadOnlyMemory<byte>> sectionPayloads,
-        ObjectAssetCacheSectionKind kind)
+    private static ObjectAssetCacheRuntimeVfx[] ReadRuntimeVfxSection(ReadOnlyMemory<byte> payload, int expectedCount, bool capture)
         => ReadSectionItems(
-            sectionPayloads,
-            kind,
-            static (reader, stringTable) =>
+            payload, expectedCount, minimumItemBytes: 6, capture,
+            static (reader, stringTable, captureItem) =>
             {
-                string path = stringTable[reader.Read7BitEncodedInt()];
-                string[] sources = ReadStringList(reader, stringTable);
-                uint[] territoryIds = ReadUInt32List(reader);
-                string[] territoryNames = ReadStringList(reader, stringTable);
-                return new ObjectAssetCacheBgModel(path, sources, territoryIds, territoryNames);
-            });
-
-    private static IReadOnlyList<ObjectAssetCacheStandaloneVfx> ReadStandaloneVfxSection(
-        IReadOnlyDictionary<ObjectAssetCacheSectionKind, ReadOnlyMemory<byte>> sectionPayloads,
-        ObjectAssetCacheSectionKind kind)
-        => ReadSectionItems(
-            sectionPayloads,
-            kind,
-            static (reader, stringTable) =>
-            {
-                string path = stringTable[reader.Read7BitEncodedInt()];
+                string path = ReadTableString(reader, stringTable);
                 RuntimeVfxEvidence evidence = (RuntimeVfxEvidence)reader.ReadUInt32();
-                VfxAnalysis? analysis = ReadVfxAnalysis(reader);
-                return new ObjectAssetCacheStandaloneVfx(path, evidence, analysis);
+                VfxAnalysis? analysis = ReadVfxAnalysis(reader, captureItem);
+                return captureItem ? new ObjectAssetCacheRuntimeVfx(path, evidence, analysis) : null!;
             });
 
-    private static IReadOnlyList<ObjectAssetCacheTimelineReferencedVfxEntry> ReadTimelineReferencedVfxSection(
-        IReadOnlyDictionary<ObjectAssetCacheSectionKind, ReadOnlyMemory<byte>> sectionPayloads,
-        ObjectAssetCacheSectionKind kind)
+    private static ObjectAssetCacheTimelineReferencedVfxEntry[] ReadTimelineReferencedVfxSection(ReadOnlyMemory<byte> payload, int expectedCount, bool capture)
         => ReadSectionItems(
-            sectionPayloads,
-            kind,
-            static (reader, stringTable) =>
+            payload, expectedCount, minimumItemBytes: 6, capture,
+            static (reader, stringTable, captureItem) =>
             {
-                string path = stringTable[reader.Read7BitEncodedInt()];
+                string path = ReadTableString(reader, stringTable);
                 RuntimeVfxEvidence evidence = (RuntimeVfxEvidence)reader.ReadUInt32();
                 VfxTimelineContext context = (VfxTimelineContext)reader.ReadByte();
-                return new ObjectAssetCacheTimelineReferencedVfxEntry(path, evidence, context);
+                return captureItem ? new ObjectAssetCacheTimelineReferencedVfxEntry(path, evidence, context) : null!;
             });
 
     private static T[] ReadSectionItems<T>(
-        IReadOnlyDictionary<ObjectAssetCacheSectionKind, ReadOnlyMemory<byte>> sectionPayloads,
-        ObjectAssetCacheSectionKind kind,
-        Func<BinaryReader, string[], T> readItem)
+        ReadOnlyMemory<byte> payload,
+        int expectedCount,
+        int minimumItemBytes,
+        bool capture,
+        Func<BinaryReader, string[], bool, T> readItem)
     {
-        if (!sectionPayloads.TryGetValue(kind, out ReadOnlyMemory<byte> payload))
-        {
-            return [];
-        }
-
         using MemoryStream stream = CreateReadOnlyStream(payload);
-        using BinaryReader reader = new(stream, Encoding.UTF8, leaveOpen: true);
+        using BinaryReader reader = new(stream, CacheEncoding, leaveOpen: true);
         string[] stringTable = ReadStringTable(reader);
-        int count = reader.Read7BitEncodedInt();
-        T[] items = new T[count];
+        int count = ReadCount(reader, minimumItemBytes);
+        ValidateItemCount(count, expectedCount);
+        T[] items = capture ? new T[count] : [];
         for (int i = 0; i < count; i++)
         {
-            items[i] = readItem(reader, stringTable);
+            T item = readItem(reader, stringTable, capture);
+
+            if (capture)
+            {
+                items[i] = item;
+            }
         }
 
+        EnsureSectionComplete(reader);
         return items;
     }
+
+    private static void WriteVector3(BinaryWriter writer, Vector3 value)
+    {
+        writer.Write(value.X);
+        writer.Write(value.Y);
+        writer.Write(value.Z);
+    }
+
+    private static Vector3 ReadVector3(BinaryReader reader)
+        => new(reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle());
+
+    private static bool ReadFlag(BinaryReader reader)
+        => reader.ReadByte() switch
+        {
+            0 => false,
+            1 => true,
+            _ => throw new InvalidDataException("invalid cache boolean"),
+        };
 
     private static void WriteStringList(BinaryWriter writer, StringTable stringTable, IReadOnlyList<string> values)
     {
@@ -393,16 +489,96 @@ internal static class ObjectAssetCacheSerializer
         }
     }
 
-    private static string[] ReadStringList(BinaryReader reader, string[] stringTable)
+    private static string[] ReadStringList(BinaryReader reader, string[] stringTable, bool capture, int? expectedCount = null)
     {
-        int count = reader.Read7BitEncodedInt();
-        string[] values = new string[count];
+        int count = ReadCount(reader, minimumItemBytes: 1);
+
+        if (expectedCount is { } expected)
+        {
+            ValidateItemCount(count, expected);
+        }
+
+        string[] values = capture ? new string[count] : [];
         for (int i = 0; i < count; i++)
         {
-            values[i] = stringTable[reader.Read7BitEncodedInt()];
+            string value = ReadTableString(reader, stringTable);
+
+            if (capture)
+            {
+                values[i] = value;
+            }
         }
 
         return values;
+    }
+
+    private static string ReadTableString(BinaryReader reader, string[] stringTable)
+    {
+        int id = reader.Read7BitEncodedInt();
+
+        if ((uint)id >= (uint)stringTable.Length)
+        {
+            throw new InvalidDataException("invalid cache string table id");
+        }
+
+        return stringTable[id];
+    }
+
+    private static string ReadUniqueTablePath(BinaryReader reader, string[] stringTable, HashSet<string> paths)
+    {
+        string path = ObjectResolvedPath.FromGamePath(ReadTableString(reader, stringTable)).Path;
+
+        if (path.Length == 0)
+        {
+            throw new InvalidDataException("invalid cache asset path");
+        }
+
+        if (!paths.Add(path))
+        {
+            throw new InvalidDataException("duplicate cache asset path");
+        }
+
+        return path;
+    }
+
+    private static int ReadCount(BinaryReader reader, int minimumItemBytes)
+    {
+        int count = ReadNonNegativeInt(reader);
+
+        if (count > (reader.BaseStream.Length - reader.BaseStream.Position) / minimumItemBytes)
+        {
+            throw new InvalidDataException("cache count exceeds the remaining section data");
+        }
+
+        return count;
+    }
+
+    private static int ReadNonNegativeInt(BinaryReader reader)
+    {
+        int value = reader.Read7BitEncodedInt();
+
+        if (value < 0)
+        {
+            throw new InvalidDataException("negative cache count");
+        }
+
+        return value;
+    }
+
+    private static void ValidateItemCount(int count, int expectedCount)
+    {
+        if (count != expectedCount)
+        {
+            throw new InvalidDataException("cache item count does not match its manifest");
+        }
+    }
+
+    private static void EnsureSectionComplete(BinaryReader reader)
+    {
+        if (reader.BaseStream.Position != reader.BaseStream.Length)
+        {
+            throw new InvalidDataException("unexpected data after the cache section");
+        }
     }
 
     private static void WriteVfxAnalysis(BinaryWriter writer, VfxAnalysis? analysis)
@@ -431,23 +607,30 @@ internal static class ObjectAssetCacheSerializer
         writer.Write((byte)analysis.LoopFacts.Sources);
     }
 
-    private static VfxAnalysis? ReadVfxAnalysis(BinaryReader reader)
+    private static VfxAnalysis? ReadVfxAnalysis(BinaryReader reader, bool capture)
     {
-        if (!reader.ReadBoolean())
+        byte hasAnalysis = reader.ReadByte();
+
+        if (hasAnalysis > 1)
+        {
+            throw new InvalidDataException("invalid cache analysis flag");
+        }
+
+        if (hasAnalysis == 0)
         {
             return null;
         }
 
-        int schedulerCount = reader.Read7BitEncodedInt();
-        int schedulerItemCount = reader.Read7BitEncodedInt();
-        int schedulerTriggerCount = reader.Read7BitEncodedInt();
-        int timelineCount = reader.Read7BitEncodedInt();
-        int emitterCount = reader.Read7BitEncodedInt();
-        int particleCount = reader.Read7BitEncodedInt();
-        int modelCount = reader.Read7BitEncodedInt();
+        int schedulerCount = ReadNonNegativeInt(reader);
+        int schedulerItemCount = ReadNonNegativeInt(reader);
+        int schedulerTriggerCount = ReadNonNegativeInt(reader);
+        int timelineCount = ReadNonNegativeInt(reader);
+        int emitterCount = ReadNonNegativeInt(reader);
+        int particleCount = ReadNonNegativeInt(reader);
+        int modelCount = ReadNonNegativeInt(reader);
         VfxDrawLayer drawLayer = (VfxDrawLayer)reader.ReadSByte();
-        int binderCount = reader.Read7BitEncodedInt();
-        int timelineBinderCount = reader.Read7BitEncodedInt();
+        int binderCount = ReadNonNegativeInt(reader);
+        int timelineBinderCount = ReadNonNegativeInt(reader);
         VfxBinderTypes binderTypes = (VfxBinderTypes)reader.ReadByte();
         VfxBinderProperties binderPropertyFlags = (VfxBinderProperties)reader.ReadUInt16();
         VfxParticleTypes particleTypes = (VfxParticleTypes)reader.ReadUInt16();
@@ -455,7 +638,7 @@ internal static class ObjectAssetCacheSerializer
         VfxLoopBehavior loopBehavior = (VfxLoopBehavior)reader.ReadByte();
         VfxLoopSource loopSources = (VfxLoopSource)reader.ReadByte();
 
-        return new VfxAnalysis(
+        return capture ? new VfxAnalysis(
             schedulerCount,
             schedulerItemCount,
             schedulerTriggerCount,
@@ -471,16 +654,21 @@ internal static class ObjectAssetCacheSerializer
                 binderPropertyFlags),
             particleTypes,
             featureFlags,
-            new VfxLoopFacts(loopBehavior, loopSources));
+            new VfxLoopFacts(loopBehavior, loopSources)) : null;
     }
 
-    private static uint[] ReadUInt32List(BinaryReader reader)
+    private static uint[] ReadUInt32List(BinaryReader reader, bool capture)
     {
-        int count = reader.Read7BitEncodedInt();
-        uint[] values = new uint[count];
+        int count = ReadCount(reader, minimumItemBytes: sizeof(uint));
+        uint[] values = capture ? new uint[count] : [];
         for (int i = 0; i < count; i++)
         {
-            values[i] = reader.ReadUInt32();
+            uint value = reader.ReadUInt32();
+
+            if (capture)
+            {
+                values[i] = value;
+            }
         }
 
         return values;
@@ -488,17 +676,20 @@ internal static class ObjectAssetCacheSerializer
 
     private static string[] ReadStringTable(BinaryReader reader)
     {
-        int count = reader.Read7BitEncodedInt();
+        int count = ReadCount(reader, minimumItemBytes: 1);
         string[] strings = new string[count];
         for (int i = 0; i < count; i++)
         {
+            long stringOffset = reader.BaseStream.Position;
+            _ = ReadCount(reader, minimumItemBytes: 1);
+            reader.BaseStream.Position = stringOffset;
             strings[i] = reader.ReadString();
         }
 
         return strings;
     }
 
-    private static string[] NormalizeStringList(IReadOnlyList<string> values)
+    private static string[] NormalizeStringList(IEnumerable<string> values)
         => values
             .Where(static value => !string.IsNullOrWhiteSpace(value))
             .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -549,18 +740,17 @@ internal static class ObjectAssetCacheSerializer
             Strings = strings;
             _ids = strings
                 .Select(static (value, index) => new KeyValuePair<string, int>(value, index))
-                .ToDictionary(static pair => pair.Key, static pair => pair.Value, StringComparer.OrdinalIgnoreCase);
+                .ToDictionary(static pair => pair.Key, static pair => pair.Value, StringComparer.Ordinal);
         }
 
         public string[] Strings { get; }
 
         public static StringTable Create(IEnumerable<string> values)
-            => new(
-                values
-                    .Where(static value => !string.IsNullOrWhiteSpace(value))
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .OrderBy(static value => value, StringComparer.OrdinalIgnoreCase)
-                    .ToArray());
+            => new(values
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(static value => value, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(static value => value, StringComparer.Ordinal)
+                .ToArray());
 
         public int GetId(string value)
             => _ids[value];
@@ -575,4 +765,3 @@ internal static class ObjectAssetCacheSerializer
         }
     }
 }
-

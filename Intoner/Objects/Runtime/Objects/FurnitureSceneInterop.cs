@@ -8,7 +8,6 @@ using Intoner.Objects.Models;
 using Intoner.Objects.Utils;
 using Intoner.Scene;
 using Microsoft.Extensions.Logging;
-using System.Numerics;
 using GraphicsSceneObject = FFXIVClientStructs.FFXIV.Client.Graphics.Scene.Object;
 using ObjectHighlightColor = FFXIVClientStructs.FFXIV.Client.Game.Object.ObjectHighlightColor;
 
@@ -26,84 +25,74 @@ internal static unsafe class FurnitureSceneInterop
         AppendSelectionDraws(&instance->Instances, snapshot, collector);
     }
 
-    public static void ApplyRuntimeState(SharedGroupLayoutInstance* instance, ObjectSnapshot snapshot)
+    public static bool ApplyRuntimeState(FurnitureNativeInstance native, ObjectSnapshot snapshot)
     {
-        ObjectLayoutInterop.ApplyTransform(instance, snapshot.Transform);
-        ObjectLayoutInterop.ApplyVisibilityState((ILayoutInstance*)instance, snapshot.Visible);
-        _ = ObjectLayoutInterop.TryRefreshVisualSharedGroupState(instance);
+        SharedGroupLayoutInstance* instance = native.Instance;
+        ObjectLayoutInterop.ApplyTransform((ILayoutInstance*)instance, snapshot.Transform);
+        native.SetParticipation(snapshot.Visible, ((FurnitureModel)snapshot.Model).CameraCollision);
+
+        return RefreshVisualState(native);
+    }
+
+    public static bool RefreshVisualState(FurnitureNativeInstance native)
+    {
+        SharedGroupLayoutInstance* instance = native.Instance;
+        if (instance == null)
+        {
+            return false;
+        }
+
+        bool ready = ObjectLayoutInterop.TryRefreshSharedGroupTransforms(instance);
+        if (!ready)
+        {
+            instance->Instances.ApplyTransforms();
+        }
+
+        ObjectLayoutInterop.ApplySharedGroupVisibility(instance, native.Visible);
+
+        return ready;
     }
 
     public static bool TryApplyVisualState(ILogger logger, SharedGroupLayoutInstance* instance, FurnitureModel furnitureModel)
     {
-        if (!ObjectLayoutInterop.IsSharedGroupReady(instance))
+        if (!ObjectLayoutInterop.IsPrimaryLoaded(instance) || instance->Instances.Instances.Count == 0)
         {
             return false;
         }
 
-        if (!TryApplyTransparency(instance, furnitureModel.Transparency))
+        if (!TryApplyChildTransparency(&instance->Instances, furnitureModel.Transparency))
         {
             return false;
         }
 
-        if (!TryApplyOutlineColor(instance, furnitureModel.OutlineColor))
-        {
-            return false;
-        }
+        ApplyOutlineColor(&instance->Instances, furnitureModel.OutlineColor);
 
         if (furnitureModel.Color.UseCustomColor)
         {
-            if (!HasChildInstances(instance))
-            {
-                return false;
-            }
-
-            ApplyCustomStainColor(instance, furnitureModel.Color.CustomColor);
+            ByteColor stainColor = ColorUtility.ToOpaqueByteColor(furnitureModel.Color.CustomColor);
+            ApplyCustomStainColor(&instance->Instances, &stainColor);
             return true;
         }
 
         return TryApplyNativeStainColor(logger, instance, furnitureModel.Color.StainId);
     }
 
-    private static bool HasChildInstances(SharedGroupLayoutInstance* instance)
-        => (nint)instance->Instances.Instances.First != (nint)instance->Instances.Instances.Last;
-
-    private static bool TryApplyTransparency(SharedGroupLayoutInstance* instance, float transparency)
-    {
-        if (!HasChildInstances(instance))
-        {
-            return false;
-        }
-
-        return TryApplyChildTransparency(&instance->Instances, transparency);
-    }
-
-    private static bool TryApplyOutlineColor(SharedGroupLayoutInstance* instance, ObjectOutlineColor outlineColor)
-    {
-        if (!HasChildInstances(instance))
-        {
-            return false;
-        }
-
-        ApplyOutlineColor(&instance->Instances, outlineColor);
-        return true;
-    }
-
     private static bool TryApplyNativeStainColor(ILogger logger, SharedGroupLayoutInstance* instance, byte chosenStainId)
     {
         var stainInfo = instance->StainInfo;
-        
+
         if (chosenStainId == 0 && (stainInfo == null || stainInfo->DefaultStainIndex is 0 or byte.MaxValue))
         {
             return true;
         }
 
-        var sharedGroupChildCount = GetSharedGroupChildCount(instance);
+        int sharedGroupChildCount = instance->Instances.Instances.Count;
         if (stainInfo == null)
         {
             logger.LogInformation(
                 "furniture dye is unavailable for shared group 0x{Address:X}; stain info is null; primary path {PrimaryPath}; shared group children {ChildCount}",
                 (ulong)(nint)instance,
-                GetPrimaryPath(instance),
+                GetInstancePath(instance->GetPrimaryPath()),
                 sharedGroupChildCount);
         }
         else if (instance->TryApplyStain(chosenStainId))
@@ -124,7 +113,7 @@ internal static unsafe class FurnitureSceneInterop
                 stainInfo->DefaultStainIndex,
                 stainInfo->ChosenStainIndex,
                 (uint)stainInfo->Flags,
-                GetPrimaryPath(instance),
+                GetInstancePath(instance->GetPrimaryPath()),
                 sharedGroupChildCount);
         }
 
@@ -168,35 +157,6 @@ internal static unsafe class FurnitureSceneInterop
 
         stainColor = *nativeColor;
         return true;
-    }
-
-    private static int GetSharedGroupChildCount(SharedGroupLayoutInstance* instance)
-        => GetChildCount(&instance->Instances);
-
-    private static int GetChildCount(ChildNodeContainer* container)
-    {
-        var first = (nint)container->Instances.First;
-        var last = (nint)container->Instances.Last;
-        return first == 0 || last < first
-            ? 0
-            : (int)((last - first) / sizeof(nint));
-    }
-
-    private static string GetPrimaryPath(SharedGroupLayoutInstance* instance)
-    {
-        if (instance == null)
-        {
-            return string.Empty;
-        }
-
-        var primaryPath = instance->GetPrimaryPath();
-        return primaryPath.HasValue ? primaryPath.ToString() : string.Empty;
-    }
-
-    private static void ApplyCustomStainColor(SharedGroupLayoutInstance* instance, Vector4 customColor)
-    {
-        var stainColor = ColorUtility.ToOpaqueByteColor(customColor);
-        ApplyCustomStainColor(&instance->Instances, &stainColor);
     }
 
     private static void ApplyCustomStainColor(ChildNodeContainer* container, ByteColor* stainColor)
@@ -324,4 +284,3 @@ internal static unsafe class FurnitureSceneInterop
     private static string GetInstancePath(CStringPointer path)
         => path.HasValue ? path.ToString() : string.Empty;
 }
-

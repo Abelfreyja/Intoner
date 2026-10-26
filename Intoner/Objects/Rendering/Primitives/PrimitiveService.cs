@@ -129,14 +129,15 @@ internal sealed class PrimitiveService : ISceneRenderPass, IDisposable
                 return;
             }
 
-            if (_renderer.Draw(_drawCommands.Lines, _drawCommands.Points, _drawCommands.Screens, drawState, frame)
+            if (_renderer.Draw(_drawCommands.Lines, _drawCommands.Points, _drawCommands.Screens, _drawCommands.Texts, drawState, frame)
                 && Interlocked.Exchange(ref _loggedDrawSuccess, 1) == 0)
             {
                 _logger.LogInformation(
-                    "native primitive drawing submitted first callback batch with {LineCount} lines, {PointCount} points, {ScreenCount} screen primitives, {DepthMode} depth mode, and {AntiAliasing} anti aliasing",
+                    "native primitive drawing submitted first callback batch with {LineCount} lines, {PointCount} points, {ScreenCount} screen primitives, {TextCount} labels, {DepthMode} depth mode, and {AntiAliasing} anti aliasing",
                     _drawCommands.LineCount,
                     _drawCommands.PointCount,
                     _drawCommands.ScreenCount,
+                    _drawCommands.TextCount,
                     drawState.DepthMode,
                     drawState.AntiAliasing);
             }
@@ -147,6 +148,10 @@ internal sealed class PrimitiveService : ISceneRenderPass, IDisposable
             {
                 _logger.LogWarning(ex, "native primitive draw command failed");
             }
+        }
+        finally
+        {
+            _drawCommands.Clear();
         }
     }
 

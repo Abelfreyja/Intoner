@@ -12,9 +12,23 @@ namespace Intoner.Objects.UI;
 
 internal sealed partial class SceneItemInspector
 {
+    private readonly List<EditorIconButton.Item> _displayActions = [];
+
     private void DrawDisplayInspectorHero(DisplaySnapshot selected)
     {
-        Vector2 actionSize = ResolveDisplayInspectorActionsSize();
+        bool inputActive = _sceneInputService.IsActiveFor(selected.Id);
+        _displayActions.Clear();
+        _displayActions.Add(new("displayInteract", FontAwesomeIcon.MousePointer,
+            inputActive ? "Stop Interacting With Display" : "Interact With Display",
+            _sceneInputService.CanActivate(selected.Id) || inputActive, inputActive));
+        _displayActions.Add(new("displayDuplicate", FontAwesomeIcon.Copy, "Duplicate Display"));
+        _displayActions.Add(new("displayVisibility", selected.Visible ? FontAwesomeIcon.EyeSlash : FontAwesomeIcon.Eye,
+            selected.Visible ? "Hide Display" : "Show Display"));
+        _displayActions.Add(new("displayLock", selected.Locked ? FontAwesomeIcon.Unlock : FontAwesomeIcon.Lock,
+            selected.Locked ? "Unlock Display" : "Lock Display"));
+        _displayActions.Add(new("displayMoveToPlayer", FontAwesomeIcon.Running, "Move Display To Player"));
+        _displayActions.Add(new("displayRemove", FontAwesomeIcon.Trash, "Remove Display",
+            IconColor: ThemeColors.DimRed, TooltipTitleColor: ThemeColors.DimRed));
         EditorHeroCard.Draw(
             "display-inspector-hero",
             new EditorHeroCard.Content(
@@ -23,132 +37,49 @@ internal sealed partial class SceneItemInspector
                 SceneItemPresentation.BuildDisplayStatus(selected),
                 ThemeColors.AccentPrimary,
                 null),
-            new EditorHeroCard.Actions(
-                () => DrawDisplayInspectorActions(selected, actionSize.Y),
-                actionSize));
+            new EditorHeroCard.Actions(_displayActions, id => ExecuteDisplayInspectorAction(selected, id)));
     }
 
-    private void DrawDisplayInspectorActions(DisplaySnapshot selected, float edge)
+    private void ExecuteDisplayInspectorAction(DisplaySnapshot selected, string id)
     {
-        bool inputActive = _sceneInputService.IsActiveFor(selected.Id);
-        bool canInteract = _sceneInputService.CanActivate(selected.Id);
-        using (ImRaii.Disabled(!canInteract && !inputActive))
+        switch (id)
         {
-            if (EditorIconButton.DrawDefault(
-                    "displayInteract",
-                    FontAwesomeIcon.MousePointer,
-                    inputActive ? "Stop Interacting With Display" : "Interact With Display",
-                    selected: inputActive,
-                    edgeOverride: edge))
-            {
-                if (inputActive)
-                {
+            case "displayInteract":
+                if (_sceneInputService.IsActiveFor(selected.Id))
                     _sceneInputService.Deactivate();
-                }
                 else
-                {
-                    _ = _sceneInputService.TryActivate(
-                        selected.Id,
+                    _ = _sceneInputService.TryActivate(selected.Id,
                         EditorInputUtility.CaptureScenePointerButtons(includeAuxiliaryButtons: true));
-                }
-            }
-        }
-
-        ImGui.SameLine();
-        if (EditorIconButton.DrawDefault("displayDuplicate", FontAwesomeIcon.Copy, "Duplicate Display", edgeOverride: edge))
-        {
-            _ = _historyCoordinator.TryDuplicateSceneItems([selected]);
-        }
-
-        ImGui.SameLine();
-        FontAwesomeIcon visibilityIcon = selected.Visible
-            ? FontAwesomeIcon.EyeSlash
-            : FontAwesomeIcon.Eye;
-        if (EditorIconButton.DrawDefault(
-                "displayVisibility",
-                visibilityIcon,
-                selected.Visible ? "Hide Display" : "Show Display",
-                edgeOverride: edge))
-        {
-            _ = _sceneCommands.TrySetSceneItemsVisibleWithHistory([selected], !selected.Visible);
-        }
-
-        ImGui.SameLine();
-        FontAwesomeIcon lockIcon = selected.Locked
-            ? FontAwesomeIcon.Unlock
-            : FontAwesomeIcon.Lock;
-        if (EditorIconButton.DrawDefault(
-                "displayLock",
-                lockIcon,
-                selected.Locked ? "Unlock Display" : "Lock Display",
-                edgeOverride: edge))
-        {
-            _ = _sceneCommands.TrySetSceneItemsLockedWithHistory([selected], !selected.Locked);
-        }
-
-        ImGui.SameLine();
-        if (EditorIconButton.DrawDefault("displayMoveToPlayer", FontAwesomeIcon.Running, "Move Display To Player", edgeOverride: edge))
-        {
-            _ = _historyCoordinator.TryMoveItemToPlayer(selected.Id);
-        }
-
-        ImGui.SameLine();
-        if (EditorIconButton.DrawDefault(
-                "displayRemove",
-                FontAwesomeIcon.Trash,
-                "Remove Display",
-                edgeOverride: edge,
-                iconColor: ThemeColors.DimRed,
-                tooltipTitleColor: ThemeColors.DimRed))
-        {
-            _ = _historyCoordinator.TryRemoveSceneItems([selected]);
+                break;
+            case "displayDuplicate":
+                _ = _historyCoordinator.TryDuplicateSceneItems([selected]);
+                break;
+            case "displayVisibility":
+                _ = _sceneCommands.TrySetSceneItemsVisibleWithHistory([selected], !selected.Visible);
+                break;
+            case "displayLock":
+                _ = _sceneCommands.TrySetSceneItemsLockedWithHistory([selected], !selected.Locked);
+                break;
+            case "displayMoveToPlayer":
+                _ = _historyCoordinator.TryMoveItemToPlayer(selected.Id);
+                break;
+            case "displayRemove":
+                _ = _historyCoordinator.TryRemoveSceneItems([selected]);
+                break;
         }
     }
 
     private void DrawDisplayInspectorDetails(DisplaySnapshot selected)
     {
-        Vector2 padding = EditorLayout.ResolveObjectListCardPadding();
-        float availableHeight = MathF.Max(1f, ImGui.GetContentRegionAvail().Y - ImGui.GetStyle().ItemSpacing.Y);
-        float innerHeight = MathF.Max(1f, availableHeight - (padding.Y * 2f) - ImGui.GetStyle().ItemSpacing.Y);
-        Vector4 background = ThemeColors.ButtonDefault with { W = 0.24f };
-        float rounding = EditorLayout.Scaled(8f);
-
-        EditorCard.DrawPanelCard(
-            "display-inspector-details",
-            background,
-            ThemeColors.AccentPrimary with { W = 0.18f },
-            rounding,
-            padding,
-            () =>
-            {
-                using var childBg = ImRaii.PushColor(ImGuiCol.ChildBg, Vector4.Zero);
-                using var child = EditorScrollList.Begin(
-                    "##displayInspectorScroll",
-                    new Vector2(0f, innerHeight),
-                    _editorOverlayLayer.CreateScrollPanelOptions(background, rounding, ThemeColors.AccentPrimary));
-                if (child)
-                {
-                    ImGui.TextUnformatted(selected.Name);
-                    ImGui.TextDisabled($"Display | created {EditorTimestampFormatter.FormatFull(selected.CreatedAtUtc)}");
-                    ImGuiHelpers.ScaledDummy(6f);
-                    DrawDisplaySnapshotEditor(selected);
-                }
-            });
+        EditorCard.DrawRemainingSpaceScrollCard("display-inspector-details", "##displayInspectorScroll", _editorOverlayLayer, _ =>
+        {
+            ImGui.TextUnformatted(selected.Name);
+            ImGui.TextDisabled($"Display | created {EditorTimestampFormatter.FormatFull(selected.CreatedAtUtc)}");
+            ImGuiHelpers.ScaledDummy(6f);
+            DrawDisplaySnapshotEditor(selected);
+        });
     }
 
-    private static Vector2 ResolveDisplayInspectorActionsSize()
-    {
-        float edge = EditorIconButton.MeasureMaxEdge(
-            FontAwesomeIcon.Copy,
-            FontAwesomeIcon.MousePointer,
-            FontAwesomeIcon.Eye,
-            FontAwesomeIcon.EyeSlash,
-            FontAwesomeIcon.Lock,
-            FontAwesomeIcon.Unlock,
-            FontAwesomeIcon.Running,
-            FontAwesomeIcon.Trash);
-        return new Vector2(EditorLayout.ResolveActionStripWidth(edge, 6), edge);
-    }
 
     private void DrawDisplaySnapshotEditor(DisplaySnapshot snapshot)
     {
@@ -196,46 +127,11 @@ internal sealed partial class SceneItemInspector
                         true);
                 }
 
-                Vector3 position = updated.Transform.Position;
-                if (_transformEditor.DrawPositionClipboardRow("displayPosition", ref position))
-                {
-                    updated = updated with
-                    {
-                        Transform = _transformEditor.ApplyInspectorPositionEdit(
-                            "DisplayPosition",
-                            "Move Display",
-                            SceneHistoryKind.Move,
-                            snapshot,
-                            position),
-                    };
-                }
+                SceneTransform transform = _transformEditor.DrawInspectorRows(snapshot);
 
-                Vector3 rotation = updated.Transform.RotationDegrees;
-                if (_transformEditor.DrawRotationClipboardRow("displayRotation", ref rotation))
+                if (transform != updated.Transform)
                 {
-                    updated = updated with
-                    {
-                        Transform = _transformEditor.ApplyInspectorRotationEdit(
-                            "DisplayRotation",
-                            "Rotate Display",
-                            SceneHistoryKind.Transform,
-                            snapshot,
-                            rotation),
-                    };
-                }
-
-                Vector3 scale = updated.Transform.Scale;
-                if (_transformEditor.DrawScaleClipboardRow("displayScale", ref scale))
-                {
-                    updated = updated with
-                    {
-                        Transform = _transformEditor.ApplyInspectorScaleEdit(
-                            "DisplayScale",
-                            "Scale Display",
-                            SceneHistoryKind.Transform,
-                            snapshot,
-                            scale),
-                    };
+                    updated = updated with { Transform = transform };
                 }
             }
         }
