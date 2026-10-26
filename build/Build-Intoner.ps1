@@ -100,7 +100,7 @@ function Get-BuildArguments(
         $arguments += "--no-restore"
     }
 
-    if (-not [string]::IsNullOrWhiteSpace($Version))
+    if ($TargetPath -eq $projectPath -and -not [string]::IsNullOrWhiteSpace($Version))
     {
         $arguments += "-p:Version=$Version"
     }

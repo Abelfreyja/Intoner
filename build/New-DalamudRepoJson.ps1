@@ -17,42 +17,22 @@ param(
 
     [string] $ExistingRepoJsonPath,
 
-    [string] $ReleaseAssemblyVersion,
-
     [string] $RepoUrl = "https://github.com/Abelfreyja/Intoner"
 )
 
 $ErrorActionPreference = "Stop"
 
-function Read-JsonFile([string] $Path)
+function Read-Manifest([string] $Path)
 {
-    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path))
+    $manifests = @(Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json)
+
+    if ($manifests.Count -ne 1 -or $null -eq $manifests[0] -or
+        [string]::IsNullOrWhiteSpace($manifests[0].InternalName))
     {
-        return $null
+        throw "manifest '$Path' must contain one plugin with an InternalName"
     }
 
-    $content = Get-Content -LiteralPath $Path -Raw
-    if ([string]::IsNullOrWhiteSpace($content))
-    {
-        return $null
-    }
-
-    return $content | ConvertFrom-Json
-}
-
-function ConvertTo-ManifestObject($Value)
-{
-    if ($null -eq $Value)
-    {
-        return $null
-    }
-
-    if ($Value -is [array])
-    {
-        return $Value | Select-Object -First 1
-    }
-
-    return $Value
+    return $manifests[0]
 }
 
 function Remove-Property($Object, [string] $Name)
@@ -102,9 +82,27 @@ function Get-Version([string] $Value, [string] $Name)
     return [Version]::Parse($Value)
 }
 
-$pluginManifest = Get-Content -LiteralPath (Resolve-Path -LiteralPath $PluginManifestPath) -Raw | ConvertFrom-Json
-$existingManifest = ConvertTo-ManifestObject (Read-JsonFile $ExistingRepoJsonPath)
-$manifest = if ($Channel -eq "testing" -and $null -ne $existingManifest)
+$pluginManifest = Read-Manifest $PluginManifestPath
+$existingManifest = if (-not [string]::IsNullOrWhiteSpace($ExistingRepoJsonPath))
+{
+    Read-Manifest $ExistingRepoJsonPath
+}
+else
+{
+    $null
+}
+
+if ($null -ne $existingManifest -and $existingManifest.InternalName -ne $pluginManifest.InternalName)
+{
+    throw "InternalName mismatch in '$ExistingRepoJsonPath': expected '$($pluginManifest.InternalName)', found '$($existingManifest.InternalName)'"
+}
+
+if ($Channel -eq "testing" -and $null -eq $existingManifest)
+{
+    throw "testing releases require existing stable repository metadata"
+}
+
+$manifest = if ($Channel -eq "testing")
 {
     $existingManifest
 }
@@ -139,14 +137,7 @@ if ($Channel -eq "release")
 else
 {
     $testingVersion = Get-Version $pluginManifest.AssemblyVersion "testing AssemblyVersion"
-    $releaseVersion = if (-not [string]::IsNullOrWhiteSpace($ReleaseAssemblyVersion))
-    {
-        Get-Version $ReleaseAssemblyVersion "ReleaseAssemblyVersion"
-    }
-    else
-    {
-        Get-Version $manifest.AssemblyVersion "AssemblyVersion"
-    }
+    $releaseVersion = Get-Version $existingManifest.AssemblyVersion "existing AssemblyVersion"
 
     if ($testingVersion -le $releaseVersion)
     {

@@ -12,7 +12,7 @@ internal static class ObjectLibraryDocuments
     private const int PrefabFileVersion = 2;
 
     private static readonly JsonSerializerOptions JsonOptions = CreateJsonOptions();
-    private static readonly JsonSerializerOptions ReleasedJsonOptions = LegacyObjectLocation.CreateJsonOptions(JsonOptions);
+    private static readonly JsonSerializerOptions LegacyJsonOptions = LegacySceneLocationConverter.CreateJsonOptions(JsonOptions);
 
     public static ObjectLibraryStateDocument EmptyState { get; } = new()
     {
@@ -39,7 +39,7 @@ internal static class ObjectLibraryDocuments
             return null;
         }
 
-        JsonSerializerOptions options = version == 1 ? ReleasedJsonOptions : JsonOptions;
+        JsonSerializerOptions options = version == 1 ? LegacyJsonOptions : JsonOptions;
         ObjectLibraryPrefabDocument? document = root.RootElement.Deserialize<ObjectLibraryPrefabDocument>(options);
         return document is null ? null : document with { Version = PrefabFileVersion };
     }

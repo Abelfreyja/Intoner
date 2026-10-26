@@ -13,7 +13,7 @@ internal static class ObjectLayoutJsonSerializer
 {
     public static readonly JsonSerializerOptions JsonOptions = JsonSerializerOptionsUtility.CreateStrictIndented();
 
-    internal static readonly JsonSerializerOptions ReleasedJsonOptions = LegacyObjectLocation.CreateJsonOptions(JsonOptions);
+    internal static readonly JsonSerializerOptions LegacyJsonOptions = LegacySceneLocationConverter.CreateJsonOptions(JsonOptions);
 
     public static string SerializeLayout(ObjectLayoutSnapshot layout)
         => JsonSerializer.Serialize(BuildLayoutDocument(layout), JsonOptions);
@@ -66,7 +66,7 @@ internal static class ObjectLayoutJsonSerializer
             }
 
             if ((formatVersion < 3 && !TryUpgradeLayout(root, formatVersion, out root, out errorMessage))
-                || !TryDeserialize(root, "selected layout file", out ObjectLayoutFileDocument? document, out errorMessage, formatVersion < 3 ? ReleasedJsonOptions : JsonOptions))
+                || !TryDeserialize(root, "selected layout file", out ObjectLayoutFileDocument? document, out errorMessage, formatVersion < 3 ? LegacyJsonOptions : JsonOptions))
             {
                 return false;
             }
@@ -180,7 +180,7 @@ internal static class ObjectLayoutJsonSerializer
                 return false;
             }
 
-            if (!TryDeserialize(root, "autosave file", out ObjectLayoutAutosaveDocument? document, out errorMessage, formatVersion == 2 ? ReleasedJsonOptions : JsonOptions))
+            if (!TryDeserialize(root, "autosave file", out ObjectLayoutAutosaveDocument? document, out errorMessage, formatVersion == 2 ? LegacyJsonOptions : JsonOptions))
             {
                 return false;
             }

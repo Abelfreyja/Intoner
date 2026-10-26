@@ -15,7 +15,7 @@ internal sealed class DisplayPersistence
     {
         IncludeFields = true,
     };
-    private static readonly JsonSerializerOptions ReleasedJsonOptions = LegacyObjectLocation.CreateJsonOptions(JsonOptions);
+    private static readonly JsonSerializerOptions LegacyJsonOptions = LegacySceneLocationConverter.CreateJsonOptions(JsonOptions);
 
     private readonly ILogger<DisplayPersistence> _logger;
     private readonly ISceneStore _sceneStore;
@@ -49,7 +49,7 @@ internal sealed class DisplayPersistence
 
             if (version is 1 or DisplayDocument.CurrentFormatVersion)
             {
-                DisplayDocument? document = root.Deserialize<DisplayDocument>(version == 1 ? ReleasedJsonOptions : JsonOptions);
+                DisplayDocument? document = root.Deserialize<DisplayDocument>(version == 1 ? LegacyJsonOptions : JsonOptions);
                 if (document?.Displays is null || document.Displays.Any(static display => display is null))
                 {
                     throw new JsonException("Invalid display list.");

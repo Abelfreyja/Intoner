@@ -31,10 +31,11 @@ permissions:
   contents: write
 
 concurrency:
-  group: intoner-release-${{ inputs.channel }}
+  group: intoner-release
   cancel-in-progress: false
 
 env:
+  RELEASE_CHANNEL: ${{ inputs.channel }}
   RELEASE_DOWNLOAD_URL: https://github.com/Abelfreyja/Intoner/releases/latest/download/latest.zip
   TESTING_DOWNLOAD_URL: https://github.com/Abelfreyja/Intoner/releases/download/testing/latest.zip
 
@@ -45,6 +46,13 @@ jobs:
     timeout-minutes: 45
 
     steps:
+    - name: Check release branch
+      shell: pwsh
+      run: |
+        if ($env:GITHUB_REF_TYPE -ne "branch") {
+          throw "Run releases from a branch, not a tag."
+        }
+
     - name: Checkout
       uses: actions/checkout@v5
       with:
@@ -70,13 +78,28 @@ jobs:
     - name: Resolve version
       id: version
       shell: pwsh
+      env:
+        RELEASE_BUMP: ${{ inputs.bump }}
+        REQUESTED_VERSION: ${{ inputs.version }}
       run: >
         .\build\Resolve-IntonerReleaseVersion.ps1
         -ProjectPath "Intoner\Intoner.csproj"
-        -Channel "${{ inputs.channel }}"
-        -Bump "${{ inputs.bump }}"
-        -Version "${{ inputs.version }}"
+        -Channel $env:RELEASE_CHANNEL
+        -Bump $env:RELEASE_BUMP
+        -Version $env:REQUESTED_VERSION
         -GitHubOutputPath $env:GITHUB_OUTPUT
+
+    - name: Check release tag
+      if: inputs.channel == 'release'
+      shell: pwsh
+      env:
+        RELEASE_VERSION: ${{ steps.version.outputs.version }}
+      run: |
+        $PSNativeCommandUseErrorActionPreference = $true
+        $tag = "v$env:RELEASE_VERSION"
+        if (git tag --list $tag) {
+          throw "Release tag '$tag' already exists."
+        }
 
     - name: Build dependencies
       shell: pwsh
@@ -85,95 +108,95 @@ jobs:
     - name: Build Intoner
       id: build
       shell: pwsh
-      run: .\build\Build-Intoner.ps1 -Mode verify -Configuration Release -Restore -Version "${{ steps.version.outputs.build_version }}" -GitHubOutputPath $env:GITHUB_OUTPUT
+      env:
+        BUILD_VERSION: ${{ steps.version.outputs.build_version }}
+      run: .\build\Build-Intoner.ps1 -Mode verify -Configuration Release -Restore -Version $env:BUILD_VERSION -GitHubOutputPath $env:GITHUB_OUTPUT
 
     - name: Read existing repo metadata
       id: existing_repo
       shell: pwsh
       run: |
+        $PSNativeCommandUseErrorActionPreference = $true
         $outputPath = Join-Path $env:RUNNER_TEMP "existing-repo.json"
-        git fetch origin repo --depth=1 2>$null
-        if ($LASTEXITCODE -eq 0) {
-          git show FETCH_HEAD:repo.json | Set-Content -LiteralPath $outputPath -Encoding utf8
-          "path=$outputPath" >> $env:GITHUB_OUTPUT
-        } else {
-          "path=" >> $env:GITHUB_OUTPUT
-        }
-
-        exit 0
+        git fetch origin refs/heads/repo --depth=1
+        $metadata = git show FETCH_HEAD:repo.json
+        $metadata | Set-Content -LiteralPath $outputPath -Encoding utf8
+        "path=$outputPath" >> $env:GITHUB_OUTPUT
 
     - name: Generate repo JSON
       shell: pwsh
-      run: |
-        $arguments = @{
-          Channel = "${{ inputs.channel }}"
-          PluginManifestPath = "${{ steps.build.outputs.package_path }}/Intoner.json"
-          OutputPath = "repo.json"
-          ReleaseDownloadUrl = "${{ env.RELEASE_DOWNLOAD_URL }}"
-          TestingDownloadUrl = "${{ env.TESTING_DOWNLOAD_URL }}"
-        }
-
-        $existingRepoPath = "${{ steps.existing_repo.outputs.path }}"
-        if (-not [string]::IsNullOrWhiteSpace($existingRepoPath)) {
-          $arguments.ExistingRepoJsonPath = $existingRepoPath
-        }
-
-        if ("${{ inputs.channel }}" -eq "testing") {
-          $arguments.ReleaseAssemblyVersion = "${{ steps.version.outputs.base_version }}"
-        }
-
-        & .\build\New-DalamudRepoJson.ps1 @arguments
+      env:
+        PACKAGE_PATH: ${{ steps.build.outputs.package_path }}
+        EXISTING_REPO_PATH: ${{ steps.existing_repo.outputs.path }}
+      run: >
+        .\build\New-DalamudRepoJson.ps1
+        -Channel $env:RELEASE_CHANNEL
+        -PluginManifestPath "$env:PACKAGE_PATH/Intoner.json"
+        -OutputPath "repo.json"
+        -ExistingRepoJsonPath $env:EXISTING_REPO_PATH
+        -ReleaseDownloadUrl $env:RELEASE_DOWNLOAD_URL
+        -TestingDownloadUrl $env:TESTING_DOWNLOAD_URL
 
     - name: Configure git author
       shell: pwsh
       run: |
+        $PSNativeCommandUseErrorActionPreference = $true
         git config user.name "Intoner Release Bot"
         git config user.email "actions@github.com"
 
     - name: Commit release version
       if: inputs.channel == 'release'
       shell: pwsh
+      env:
+        RELEASE_VERSION: ${{ steps.version.outputs.version }}
       run: |
-        git diff --quiet -- Intoner/Intoner.csproj
-        if ($LASTEXITCODE -ne 0) {
+        $PSNativeCommandUseErrorActionPreference = $true
+        if (git diff --name-only -- Intoner/Intoner.csproj) {
           git add Intoner/Intoner.csproj
-          git commit -m "Release Intoner v${{ steps.version.outputs.version }}"
-          git push
+          git commit -m "Release Intoner v$env:RELEASE_VERSION"
+          git push origin "HEAD:$env:GITHUB_REF"
         }
 
     - name: Tag release
       if: inputs.channel == 'release'
       shell: pwsh
+      env:
+        RELEASE_VERSION: ${{ steps.version.outputs.version }}
       run: |
-        git tag "v${{ steps.version.outputs.version }}"
-        git push origin "v${{ steps.version.outputs.version }}"
+        $PSNativeCommandUseErrorActionPreference = $true
+        $tag = "v$env:RELEASE_VERSION"
+        git tag $tag
+        git push origin "refs/tags/$tag"
 
     - name: Tag testing release
       if: inputs.channel == 'testing'
       shell: pwsh
       run: |
+        $PSNativeCommandUseErrorActionPreference = $true
         git tag -f testing
-        git push origin testing --force
+        git push origin refs/tags/testing --force
 
     - name: Publish normal GitHub release
       if: inputs.channel == 'release'
-      uses: softprops/action-gh-release@v2
+      uses: softprops/action-gh-release@v3
       with:
         tag_name: v${{ steps.version.outputs.version }}
         name: Intoner v${{ steps.version.outputs.version }}
         make_latest: true
+        fail_on_unmatched_files: true
         files: |
           ${{ steps.build.outputs.package_path }}/latest.zip
           repo.json
 
     - name: Publish testing GitHub release
       if: inputs.channel == 'testing'
-      uses: softprops/action-gh-release@v2
+      uses: softprops/action-gh-release@v3
       with:
         tag_name: testing
         name: Intoner Testing
         prerelease: true
         make_latest: false
+        fail_on_unmatched_files: true
         overwrite_files: true
         files: |
           ${{ steps.build.outputs.package_path }}/latest.zip
@@ -181,4 +204,4 @@ jobs:
 
     - name: Publish Dalamud repo branch
       shell: pwsh
-      run: .\build\Publish-DalamudRepoBranch.ps1 -RepoJsonPath repo.json -Message "Update Intoner ${{ inputs.channel }} metadata"
+      run: .\build\Publish-DalamudRepoBranch.ps1 -RepoJsonPath repo.json -Message "Update Intoner $env:RELEASE_CHANNEL metadata"

@@ -238,7 +238,7 @@
       "intoner.api": {
         "type": "Project",
         "dependencies": {
-          "MessagePack.Annotations": "[3.1.12, )"
+          "MessagePack": "[3.1.12, )"
         }
       },
       "luna": {

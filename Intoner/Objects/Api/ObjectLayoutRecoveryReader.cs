@@ -57,7 +57,7 @@ internal static class ObjectLayoutRecoveryReader
                 return false;
             }
 
-            JsonSerializerOptions options = version < 3 ? ObjectLayoutJsonSerializer.ReleasedJsonOptions : ObjectLayoutJsonSerializer.JsonOptions;
+            JsonSerializerOptions options = version < 3 ? ObjectLayoutJsonSerializer.LegacyJsonOptions : ObjectLayoutJsonSerializer.JsonOptions;
             List<string> notes = [];
             List<(ObjectSnapshot Value, string Label)> objects = [];
             List<(SceneGroupSnapshot Value, string Label)> groups = [];

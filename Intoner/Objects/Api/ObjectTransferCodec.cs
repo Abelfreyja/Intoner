@@ -1,5 +1,5 @@
 using MessagePack;
-using MessagePack.Resolvers;
+using System.Buffers;
 using System.Buffers.Binary;
 using System.IO.Compression;
 
@@ -35,13 +35,7 @@ internal static class ObjectTransferCodec
     private const string FormatVersion = "2";
 
     internal const string Prefix = RootPrefix + FormatVersion + ":";
-    private const string ReleasedPrefix = RootPrefix + "1:";
-
-    private static readonly MessagePackSerializerOptions StandardOptions =
-        MessagePackSerializerOptions.Standard.WithSecurity(MessagePackSecurity.UntrustedData);
-
-    private static readonly MessagePackSerializerOptions ReleasedOptions = StandardOptions.WithResolver(
-        CompositeResolver.Create([new LegacyObjectLocationFormatter()], [StandardResolver.Instance]));
+    private const string LegacyPrefix = RootPrefix + "1:";
 
     public static bool TryEncode(ObjectTransferDocument? document, out string text)
     {
@@ -51,7 +45,7 @@ internal static class ObjectTransferCodec
             return false;
         }
 
-        byte[] messagePack = MessagePackSerializer.Serialize(document, StandardOptions);
+        byte[] messagePack = MessagePackSerializer.Serialize(document, WorldObjectSerializer.CurrentOptions);
         if (messagePack.Length > MaximumPayloadLength)
         {
             return false;
@@ -86,15 +80,15 @@ internal static class ObjectTransferCodec
             return new ObjectTransferDecodeResult(ObjectTransferDecodeStatus.NotIntoner, null);
         }
 
-        bool released = value.StartsWith(ReleasedPrefix, StringComparison.Ordinal);
-        if (!released && !value.StartsWith(Prefix, StringComparison.Ordinal))
+        bool legacy = value.StartsWith(LegacyPrefix, StringComparison.Ordinal);
+        if (!legacy && !value.StartsWith(Prefix, StringComparison.Ordinal))
         {
             return new ObjectTransferDecodeResult(ObjectTransferDecodeStatus.UnsupportedVersion, null);
         }
 
         try
         {
-            byte[] payload = DecodeBase64Url(value[(released ? ReleasedPrefix.Length : Prefix.Length)..]);
+            byte[] payload = DecodeBase64Url(value[(legacy ? LegacyPrefix.Length : Prefix.Length)..]);
             if (!TryDecodePayload(payload, out ReadOnlyMemory<byte> messagePack))
             {
                 return new ObjectTransferDecodeResult(ObjectTransferDecodeStatus.Invalid, null);
@@ -102,12 +96,14 @@ internal static class ObjectTransferCodec
 
             ObjectTransferDocument? document = MessagePackSerializer.Deserialize<ObjectTransferDocument>(
                 messagePack,
-                released ? ReleasedOptions : StandardOptions);
-            return document is not null && IsValid(document)
+                legacy ? WorldObjectSerializer.LegacyOptions : WorldObjectSerializer.CurrentOptions,
+                out int bytesRead);
+            return bytesRead == messagePack.Length && document is not null && IsValid(document)
                 ? new ObjectTransferDecodeResult(ObjectTransferDecodeStatus.Success, document)
                 : new ObjectTransferDecodeResult(ObjectTransferDecodeStatus.Invalid, null);
         }
         catch (Exception exception) when (exception is FormatException
+            or IOException
             or MessagePackSerializationException
             or OverflowException)
         {
@@ -286,8 +282,10 @@ internal static class ObjectTransferCodec
         }
 
         byte[] uncompressed = GC.AllocateUninitializedArray<byte>(uncompressedLength);
-        if (!BrotliDecoder.TryDecompress(payload.AsSpan(5), uncompressed, out int bytesWritten)
-            || bytesWritten != uncompressedLength)
+        using BrotliDecoder decoder = default;
+
+        if (decoder.Decompress(payload.AsSpan(5), uncompressed, out int bytesRead, out int bytesWritten) != OperationStatus.Done
+            || bytesRead != payload.Length - 5 || bytesWritten != uncompressedLength)
         {
             return false;
         }
