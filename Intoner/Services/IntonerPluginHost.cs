@@ -8,8 +8,6 @@ namespace Intoner.Services;
 
 internal sealed class IntonerPluginHost : IAsyncDisposable
 {
-    private const string CommandName = "/intoner";
-
     private readonly IntonerDalamudServices _dalamudServices;
     private readonly SemaphoreSlim _lifecycleLock = new(1, 1);
 
@@ -50,11 +48,15 @@ internal sealed class IntonerPluginHost : IAsyncDisposable
                 _provider.GetRequiredService<ILogger<IntonerPluginHost>>()), cancellationToken).ConfigureAwait(false);
             await _provider.GetRequiredService<IntonerPluginRuntime>().StartAsync(cancellationToken).ConfigureAwait(false);
 
-            _dalamudServices.CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
+            _commandRegistered = _dalamudServices.CommandManager.AddHandler(IntonerCommand.Name, new CommandInfo(OnCommand)
             {
-                HelpMessage = "Open Intoner.",
+                HelpMessage = $"Toggle Intoner. Use {IntonerCommand.Name} help for more commands.",
             });
-            _commandRegistered = true;
+
+            if (!_commandRegistered)
+            {
+                throw new InvalidOperationException($"The {IntonerCommand.Name} command is already registered.");
+            }
 
             IUiBuilder uiBuilder = _dalamudServices.PluginInterface.UiBuilder;
             uiBuilder.OpenConfigUi += HandleOpenConfigUiRequested;
@@ -107,7 +109,7 @@ internal sealed class IntonerPluginHost : IAsyncDisposable
 
         if (_commandRegistered)
         {
-            _dalamudServices.CommandManager.RemoveHandler(CommandName);
+            _dalamudServices.CommandManager.RemoveHandler(IntonerCommand.Name);
         }
 
         await _lifecycleLock.WaitAsync().ConfigureAwait(false);
@@ -217,21 +219,96 @@ internal sealed class IntonerPluginHost : IAsyncDisposable
     }
 
     private void OnCommand(string command, string args)
-        => RequestMainWindowToggle();
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        if (!IntonerCommand.TryParse(args, out IntonerCommand request, out string error))
+        {
+            _dalamudServices.ChatGui.PrintIntonerError(error);
+            return;
+        }
+
+        if (request.Kind == IntonerCommandKind.Help)
+        {
+            _dalamudServices.ChatGui.PrintIntoner(IntonerChat.Help(request.Argument));
+            return;
+        }
+
+        _ = ExecuteCommandAsync(request);
+    }
+
+    private async Task ExecuteCommandAsync(IntonerCommand command)
+    {
+        IntonerSessionHost? session = _sessionHost;
+
+        try
+        {
+            if (_dalamudServices.Framework.IsInFrameworkUpdateThread)
+            {
+                ExecuteSessionCommand(command, session);
+            }
+            else
+            {
+                await _dalamudServices.Framework.RunOnTick(() => ExecuteSessionCommand(command, session),
+                    cancellationToken: _lifecycleToken).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (_lifecycleToken.IsCancellationRequested || _dalamudServices.Framework.IsFrameworkUnloading)
+        {
+            // shutdown cancels queued commands
+        }
+        catch (Exception ex)
+        {
+            _dalamudServices.Log.Error(ex, "Intoner command failed");
+            _dalamudServices.ChatGui.PrintIntonerError("The command failed. Check the log for details.");
+        }
+    }
+
+    private void ExecuteSessionCommand(IntonerCommand command, IntonerSessionHost? session)
+    {
+        if (_disposed || !_dalamudServices.Framework.IsInFrameworkUpdateThread || _dalamudServices.Framework.IsFrameworkUnloading)
+        {
+            return;
+        }
+
+        if (!_lifecycleLock.Wait(0, CancellationToken.None))
+        {
+            _dalamudServices.ChatGui.PrintIntonerError("Intoner is starting or stopping. Try again when it is ready.");
+            return;
+        }
+
+        try
+        {
+            if (!IsGameSessionActive || session is null || !ReferenceEquals(_sessionHost, session))
+            {
+                _dalamudServices.ChatGui.PrintIntonerError("Intoner is not ready. Log in and wait for it to finish loading.");
+                return;
+            }
+
+            session.ExecuteCommand(command);
+        }
+        finally
+        {
+            _lifecycleLock.Release();
+        }
+    }
 
     private void HandleOpenConfigUiRequested()
     {
-        if (IsGameSessionActive)
+        if (IsGameSessionActive && _sessionHost is not null)
         {
-            _sessionHost?.RequestConfigWindow();
+            _ = ExecuteCommandAsync(new(IntonerCommandKind.Settings));
         }
     }
 
     private void RequestMainWindowToggle()
     {
-        if (IsGameSessionActive)
+        if (IsGameSessionActive && _sessionHost is not null)
         {
-            _sessionHost?.RequestMainWindowToggle();
+            _ = ExecuteCommandAsync(new(IntonerCommandKind.WindowToggle));
         }
     }
 }

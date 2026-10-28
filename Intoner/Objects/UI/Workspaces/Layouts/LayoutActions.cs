@@ -83,15 +83,15 @@ namespace Intoner.Objects.UI
 
         public bool SetCreation(Guid? layoutId)
         {
-            PersistentMutationResult result = _history.Execute("Set Creation Destination", () => _objects.SetCreationLayout(layoutId), static result => result.IsAccepted);
+            PersistentMutationResult result = _history.SetCreationLayout(layoutId);
             SetStatus(result.IsAccepted ? string.Empty : result.Message, !result.IsAccepted);
             return result.IsAccepted;
         }
 
         public void SetEnabled(Guid layoutId, bool enabled)
         {
-            PersistentMutationResult result = _history.Execute(enabled ? "Enable Layout" : "Disable Layout", () => _objects.SetLayoutEnabled(layoutId, enabled), static result => result.IsAccepted);
-            SetStatus(result.IsAccepted ? string.Empty : result.Message, !result.IsAccepted);
+            PersistentMutationResult result = _history.SetLayoutEnabled(layoutId, enabled);
+            SetStatus(result.IsSuccess ? string.Empty : result.Message, !result.IsSuccess);
         }
 
         public void Rename(ObjectLayoutSnapshot layout)

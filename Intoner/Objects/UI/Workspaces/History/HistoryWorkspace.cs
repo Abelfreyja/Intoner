@@ -71,15 +71,13 @@ internal sealed class HistoryWorkspace
     }
 
     internal bool TryUndoHistory()
-        => TryReplayHistory(_historyCoordinator.TryUndo);
+        => TryReplayHistory(_interaction.TryUndoHistory);
 
     internal bool TryRedoHistory()
-        => TryReplayHistory(_historyCoordinator.TryRedo);
+        => TryReplayHistory(_interaction.TryRedoHistory);
 
     private bool TryReplayHistory(Func<bool> replay)
     {
-        _interaction.CommitPendingHistory();
-
         if (!replay())
         {
             return false;
@@ -584,7 +582,7 @@ internal sealed class HistoryWorkspace
     }
 
     private bool TryJumpToHistoryState(IReadOnlyList<SceneHistoryEntry> entries, int stateIndex)
-        => TryReplayHistory(() => _historyCoordinator.TryJumpToState(stateIndex, entries));
+        => TryReplayHistory(() => _interaction.TryJumpToHistoryState(stateIndex, entries));
 
     private void OpenHistoryCheckpointDialog(IReadOnlyList<SceneHistoryEntry> entries, int stateIndex)
     {

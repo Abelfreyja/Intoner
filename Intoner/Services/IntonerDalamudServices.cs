@@ -6,6 +6,7 @@ namespace Intoner.Services;
 internal sealed record IntonerDalamudServices(
     IDalamudPluginInterface PluginInterface,
     ICommandManager CommandManager,
+    IChatGui ChatGui,
     IClientState ClientState,
     ICondition Condition,
     IDataManager DataManager,

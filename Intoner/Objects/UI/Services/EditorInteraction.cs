@@ -82,6 +82,21 @@ internal sealed class EditorInteraction : IDisposable
         _gizmo.CancelInteractions();
     }
 
+    public bool TryUndoHistory()
+        => ReplayHistory(_history.TryUndo);
+
+    public bool TryRedoHistory()
+        => ReplayHistory(_history.TryRedo);
+
+    public bool TryJumpToHistoryState(int stateIndex, IReadOnlyList<SceneHistoryEntry> entries)
+        => ReplayHistory(() => _history.TryJumpToState(stateIndex, entries));
+
+    private bool ReplayHistory(Func<bool> replay)
+    {
+        CommitPendingHistory();
+        return replay();
+    }
+
     public void OpenDialog(EditorDialog.Request request)
     {
         DialogOpening?.Invoke();

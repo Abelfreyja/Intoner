@@ -169,6 +169,12 @@ internal sealed class EditorWindow : IntonerWindow, IDisposable
             case IntonerMainWindowRequestKind.Toggle:
                 Toggle();
                 return;
+            case IntonerMainWindowRequestKind.Open:
+                IsOpen = true;
+                return;
+            case IntonerMainWindowRequestKind.Close:
+                IsOpen = false;
+                return;
             case IntonerMainWindowRequestKind.OpenSettings:
                 OpenWorkspace(WorkspaceMode.Settings);
                 return;

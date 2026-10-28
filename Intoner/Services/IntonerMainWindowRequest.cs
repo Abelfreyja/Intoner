@@ -4,6 +4,8 @@ namespace Intoner.Services;
 internal enum IntonerMainWindowRequestKind
 {
     Toggle,
+    Open,
+    Close,
     OpenSettings,
 }
 

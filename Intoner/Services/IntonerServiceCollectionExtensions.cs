@@ -105,6 +105,7 @@ internal static class IntonerServiceCollectionExtensions
 
         services.AddSingleton(dalamudServices.PluginInterface);
         services.AddSingleton(dalamudServices.CommandManager);
+        services.AddSingleton(dalamudServices.ChatGui);
         services.AddSingleton(dalamudServices.ClientState);
         services.AddSingleton(dalamudServices.Condition);
         services.AddSingleton(dalamudServices.DataManager);
@@ -364,6 +365,7 @@ internal static class IntonerServiceCollectionExtensions
         services.AddScoped<DrawManager>();
         services.AddScoped<Gizmo>();
         services.AddScoped<EditorInteraction>();
+        services.AddScoped<EditorChatCommands>();
         services.AddScoped<EditorSceneState>();
         services.AddScoped<EditorSceneOverlay>();
         services.AddScoped<EditorShortcutHandler>();

@@ -3,6 +3,7 @@ using Intoner.Objects.Interop;
 using Intoner.Objects.Interop.Ipc;
 using Intoner.Objects.Runtime;
 using Intoner.Objects.UI;
+using Intoner.Objects.UI.Services;
 using Intoner.UI.Windows;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -12,13 +13,13 @@ namespace Intoner.Services;
 internal sealed class IntonerSessionHost : IAsyncDisposable
 {
     private readonly AsyncServiceScope _scope;
-    private readonly IntonerSession _session;
+    private readonly EditorChatCommands _commands;
     private int _disposed;
 
-    private IntonerSessionHost(AsyncServiceScope scope, IntonerSession session)
+    private IntonerSessionHost(AsyncServiceScope scope, EditorChatCommands commands)
     {
         _scope = scope;
-        _session = session;
+        _commands = commands;
     }
 
     public static async Task<IntonerSessionHost> CreateAsync(IServiceProvider provider)
@@ -37,8 +38,9 @@ internal sealed class IntonerSessionHost : IAsyncDisposable
             await scopedProvider.GetRequiredService<FurnitureEmoteGuard>().StartAsync().ConfigureAwait(false);
             await scopedProvider.GetRequiredService<CameraCollisionService>().StartAsync().ConfigureAwait(false);
             IntonerSession session = await Task.Run(() => scopedProvider.GetRequiredService<IntonerSession>()).ConfigureAwait(false);
+            EditorChatCommands commands = scopedProvider.GetRequiredService<EditorChatCommands>();
             session.Start();
-            return new IntonerSessionHost(scope, session);
+            return new IntonerSessionHost(scope, commands);
         }
         catch
         {
@@ -47,11 +49,8 @@ internal sealed class IntonerSessionHost : IAsyncDisposable
         }
     }
 
-    public void RequestMainWindowToggle()
-        => _session.RequestMainWindowToggle();
-
-    public void RequestConfigWindow()
-        => _session.RequestConfigWindow();
+    public void ExecuteCommand(IntonerCommand command)
+        => _commands.Execute(command);
 
     public ValueTask DisposeAsync()
         => Interlocked.Exchange(ref _disposed, 1) == 0 ? _scope.DisposeAsync() : ValueTask.CompletedTask;
@@ -60,7 +59,6 @@ internal sealed class IntonerSessionHost : IAsyncDisposable
 internal sealed class IntonerSession : IDisposable
 {
     private readonly ILogger<IntonerSession> _logger;
-    private readonly IIntonerMediator        _mediator;
     private readonly IntonerWindowService    _windows;
     private readonly EditorWindow            _editor;
     private readonly EditorBackgroundWindow  _background;
@@ -71,7 +69,6 @@ internal sealed class IntonerSession : IDisposable
 
     public IntonerSession(
         ILogger<IntonerSession> logger,
-        IIntonerMediator mediator,
         IntonerWindowService windows,
         EditorWindow editor,
         EditorBackgroundWindow background,
@@ -79,7 +76,6 @@ internal sealed class IntonerSession : IDisposable
         ObjectSceneHost sceneHost)
     {
         _logger     = logger;
-        _mediator   = mediator;
         _windows    = windows;
         _editor     = editor;
         _background = background;
@@ -104,12 +100,6 @@ internal sealed class IntonerSession : IDisposable
         _started    = true;
         _logger.LogInformation("Intoner session services initialized");
     }
-
-    public void RequestMainWindowToggle()
-        => _mediator.Publish(IntonerMainWindowRequest.Toggle);
-
-    public void RequestConfigWindow()
-        => _mediator.Publish(IntonerMainWindowRequest.OpenSettings);
 
     public void Dispose()
     {

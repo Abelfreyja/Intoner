@@ -1,3 +1,4 @@
+using Intoner.Objects.Models;
 using Intoner.Scene;
 
 namespace Intoner.Objects.Runtime;
@@ -10,6 +11,12 @@ internal interface IObjectWorkspaceHistory
 
     /// <summary> records the actual saved changes when the operation commits </summary>
     T Execute<T>(string title, Func<T> mutation, Func<T, bool> committed);
+
+    /// <summary> changes layout membership and records the committed change </summary>
+    PersistentMutationResult SetLayoutEnabled(Guid layoutId, bool enabled);
+
+    /// <summary> changes the creation destination and records the committed change </summary>
+    PersistentMutationResult SetCreationLayout(Guid? layoutId);
 }
 
 internal sealed class ObjectWorkspaceHistory : IObjectWorkspaceHistory
@@ -17,15 +24,24 @@ internal sealed class ObjectWorkspaceHistory : IObjectWorkspaceHistory
     private readonly IObjectWorkspaceHistoryReplay _replay;
     private readonly ISceneHistoryManager _history;
     private readonly Lock _stateLock;
+    private readonly IObjectManager _objects;
 
-    public ObjectWorkspaceHistory(IObjectWorkspaceHistoryReplay replay, ISceneHistoryManager history, ObjectStateLock stateLock)
+    public ObjectWorkspaceHistory(IObjectWorkspaceHistoryReplay replay, ISceneHistoryManager history, ObjectStateLock stateLock,
+        IObjectManager objects)
     {
         _replay = replay;
         _history = history;
         _stateLock = stateLock.Value;
+        _objects = objects;
     }
 
     public event Action? MutationStarting;
+
+    public PersistentMutationResult SetLayoutEnabled(Guid layoutId, bool enabled)
+        => Execute(enabled ? "Enable Layout" : "Disable Layout", () => _objects.SetLayoutEnabled(layoutId, enabled), static result => result.IsAccepted);
+
+    public PersistentMutationResult SetCreationLayout(Guid? layoutId)
+        => Execute("Set Creation Destination", () => _objects.SetCreationLayout(layoutId), static result => result.IsAccepted);
 
     private static string Describe(string title, ObjectWorkspaceHistoryState before, ObjectWorkspaceHistoryState after, ObjectWorkspaceHistoryChange change)
     {

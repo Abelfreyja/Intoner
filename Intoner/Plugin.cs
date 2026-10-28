@@ -11,6 +11,7 @@ public sealed class Plugin : IAsyncDalamudPlugin
     public Plugin(
         IDalamudPluginInterface pluginInterface,
         ICommandManager commandManager,
+        IChatGui chatGui,
         IClientState clientState,
         ICondition condition,
         IDataManager dataManager,
@@ -25,6 +26,7 @@ public sealed class Plugin : IAsyncDalamudPlugin
         _host = new IntonerPluginHost(new IntonerDalamudServices(
             pluginInterface,
             commandManager,
+            chatGui,
             clientState,
             condition,
             dataManager,

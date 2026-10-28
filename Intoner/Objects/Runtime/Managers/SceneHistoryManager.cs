@@ -407,6 +407,7 @@ internal sealed class SceneHistoryManager : ISceneHistoryManager
 
         if (target < 0 || target >= _historySteps.Count)
         {
+            LastResult = SceneHistoryResult.Failed(target < 0 ? "No change is available to undo." : "No change is available to redo.");
             return false;
         }
 
