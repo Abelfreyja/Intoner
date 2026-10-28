@@ -1,7 +1,7 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project Sdk="Dalamud.NET.Sdk/15.0.0">
   <PropertyGroup>
-    <Version>0.2.5.0</Version>
+    <Version>0.3.0.0</Version>
     <Authors>abelfreyja</Authors>
     <PackageProjectUrl>https://github.com/Abelfreyja/Intoner</PackageProjectUrl>
     <PackageLicenseExpression>AGPL-3.0-or-later</PackageLicenseExpression>
@@ -10,11 +10,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <NoWarn>$(NoWarn);MA0048</NoWarn>
   </PropertyGroup>
-
   <PropertyGroup Condition="'$(IntonerVerifyOutputPath)' != ''">
     <OutputPath>$(IntonerVerifyOutputPath)</OutputPath>
   </PropertyGroup>
-
   <ItemGroup>
     <PackageReference Update="DotNet.ReproducibleBuilds" Version="2.0.5" />
     <PackageReference Include="Meziantou.Analyzer" Version="3.0.317" PrivateAssets="all" IncludeAssets="runtime; build; native; contentfiles; analyzers; buildtransitive" />
@@ -29,21 +27,18 @@
     <PackageReference Include="SharpDX.Mathematics" Version="4.2.0" />
     <PackageReference Include="SonarAnalyzer.CSharp" Version="10.35.0.4138" PrivateAssets="all" IncludeAssets="runtime; build; native; contentfiles; analyzers; buildtransitive" />
   </ItemGroup>
-
   <ItemGroup>
     <ProjectReference Include="..\Intoner.Api\Intoner.Api.csproj" />
     <ProjectReference Include="..\Submodules\Penumbra.Api\Penumbra.Api.csproj" />
     <ProjectReference Include="..\Submodules\Penumbra.GameData\Penumbra.GameData.csproj" />
     <ProjectReference Include="..\Submodules\Penumbra.String\Penumbra.String.csproj" />
   </ItemGroup>
-
   <ItemGroup>
     <EmbeddedResource Include="images\intoner.png" LogicalName="intoner.png" />
     <EmbeddedResource Include="Objects\**\*.hlsl;Objects\**\*.hlsli">
       <LogicalName>$([System.String]::Copy('%(Identity)').Replace('\', '.').Replace('/', '.'))</LogicalName>
     </EmbeddedResource>
   </ItemGroup>
-
   <Target Name="SetIntonerSourceRevisionId" BeforeTargets="InitializeSourceControlInformationFromSourceControlManager;InitializeSourceControlInformation" Condition="'$(SourceRevisionId)' == ''">
     <Exec Condition="'$(Configuration)' == 'Debug' and Exists('$(MSBuildProjectDirectory)/../.git')" Command="git describe --tags --dirty --always --long" WorkingDirectory="$(MSBuildProjectDirectory)/.." ConsoleToMsBuild="true" IgnoreExitCode="true" StandardOutputImportance="Low" StandardErrorImportance="Low">
       <Output TaskParameter="ConsoleOutput" ItemName="_IntonerGitDescribeOutput" />
