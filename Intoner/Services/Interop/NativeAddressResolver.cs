@@ -1,5 +1,6 @@
 using Dalamud.Plugin.Services;
 using Microsoft.Extensions.Logging;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
@@ -9,7 +10,7 @@ internal readonly record struct NativeDirectSignatureTarget(string Signature, st
 internal readonly record struct NativeRelativeBranchTarget(string Signature, string Label);
 internal readonly record struct NativeRipRelativePointerTarget(string Signature, int Offset, string Label);
 internal readonly record struct NativeResolvedAddressTarget(nint Address, string Label);
-internal readonly record struct NativeStaticAddressTarget(string Signature, int Offset, string Label);
+internal readonly record struct NativeStaticAddressTarget(string Signature, int DisplacementOffset, string Label);
 
 internal static class NativeAddressResolver
 {
@@ -53,27 +54,25 @@ internal static class NativeAddressResolver
         ILogger logger,
         ISigScanner sigScanner,
         NativeStaticAddressTarget target)
+        => TryResolveScannedTextMatch(
+            logger,
+            sigScanner,
+            target.Signature,
+            target.Label,
+            address => TryResolveRipRelativeAddress(logger, sigScanner, address, target.DisplacementOffset, target.Label));
+
+    [SuppressMessage("Security", "S6640", Justification = "CS virtual tables require typed unmanaged pointers")]
+    public static unsafe T* ReadVirtualTable<T>(ISigScanner sigScanner, T* table) where T : unmanaged
     {
-        if (TryScanSingleTextMatch(logger, sigScanner, target.Signature, target.Label) == nint.Zero)
+        if (table == null || !sigScanner.IsCopy)
         {
-            return nint.Zero;
+            return table;
         }
 
-        try
-        {
-            if (sigScanner.TryGetStaticAddressFromSig(target.Signature, out nint address, target.Offset))
-            {
-                return address;
-            }
-
-            logger.LogWarning("failed to resolve static address for {Label}", target.Label);
-            return nint.Zero;
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "failed to resolve static address for {Label}", target.Label);
-            return nint.Zero;
-        }
+        long offset = (nint)table - sigScanner.Module.BaseAddress - sigScanner.RDataSectionOffset;
+        return offset < 0 || offset > sigScanner.RDataSectionSize - sizeof(T)
+            ? null
+            : (T*)(sigScanner.RDataSectionBase + (nint)offset);
     }
 
     public static nint TryResolveRipRelativeAddress(
@@ -85,8 +84,24 @@ internal static class NativeAddressResolver
     {
         try
         {
-            var displacement = Marshal.ReadInt32(instructionAddress + displacementOffset);
-            return sigScanner.ResolveRelativeAddress(instructionAddress + displacementOffset + sizeof(int), displacement);
+            nint operandAddress = instructionAddress + displacementOffset;
+            nint readAddress = operandAddress;
+
+            if (sigScanner.IsCopy)
+            {
+                long offset = operandAddress - sigScanner.Module.BaseAddress - sigScanner.TextSectionOffset;
+
+                if (offset < 0 || offset > sigScanner.TextSectionSize - sizeof(int))
+                {
+                    logger.LogWarning("RIP relative operand for {Label} is outside executable game code", label);
+                    return nint.Zero;
+                }
+
+                readAddress = sigScanner.TextSectionBase + (nint)offset;
+            }
+
+            int displacement = Marshal.ReadInt32(readAddress);
+            return sigScanner.ResolveRelativeAddress(operandAddress + sizeof(int), displacement);
         }
         catch (Exception ex)
         {

@@ -1,10 +1,12 @@
+using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine;
 using FFXIVClientStructs.FFXIV.Common.Component.BGCollision;
+using Intoner.Services.Interop;
 
 namespace Intoner.Objects.Interop
 {
     /// <summary> tracks placed collider ownership across creation and furniture callbacks </summary>
-    internal sealed unsafe class ObjectCollisionOwnership : IDisposable
+    internal sealed unsafe class ObjectCollisionOwnership(ISigScanner sigScanner) : IDisposable
     {
         private readonly Lock _lock = new();
         private readonly HashSet<ObjectCollisionOwner> _owners = [];
@@ -73,10 +75,7 @@ namespace Intoner.Objects.Interop
         public void Register(ILayoutInstance* instance)
         {
             FurnitureNativeInstance? root = _current.Value as FurnitureNativeInstance;
-            bool owned = root is not null && (instance->Id.Type is InstanceType.SharedGroup or InstanceType.HelperObject
-                or InstanceType.Light or InstanceType.Vfx or InstanceType.EnvSpace or InstanceType.EnvLocation
-                || _creators.Contains((nint)instance->VirtualTable->CreatePrimary)
-                || _creators.Contains((nint)instance->VirtualTable->CreateSecondary));
+            bool owned = root is not null && BelongsToFurniture(instance);
             lock (_lock)
             {
                 _instances.Remove((nint)instance);
@@ -87,6 +86,21 @@ namespace Intoner.Objects.Interop
                 }
             }
         }
+
+        private bool BelongsToFurniture(ILayoutInstance* instance)
+        {
+            if (instance->Id.Type is InstanceType.SharedGroup or InstanceType.HelperObject
+                or InstanceType.Light or InstanceType.Vfx or InstanceType.EnvSpace or InstanceType.EnvLocation)
+            {
+                return true;
+            }
+
+            return HasColliderCreator(instance->VirtualTable)
+                || HasColliderCreator(NativeAddressResolver.ReadVirtualTable(sigScanner, instance->VirtualTable));
+        }
+
+        private bool HasColliderCreator(ILayoutInstance.ILayoutInstanceVirtualTable* table)
+            => table != null && (_creators.Contains((nint)table->CreatePrimary) || _creators.Contains((nint)table->CreateSecondary));
 
         public bool Contains(ILayoutInstance* instance, FurnitureNativeInstance root)
         {

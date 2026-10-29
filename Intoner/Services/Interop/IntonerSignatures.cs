@@ -104,28 +104,28 @@ internal static unsafe class IntonerSignatures
     public static readonly NativeRelativeBranchTarget CameraSweepSphere =
         new("E8 ?? ?? ?? ?? F3 44 0F 10 65 ?? F3 0F 10 75", "camera sphere sweep");
     public static readonly NativeStaticAddressTarget BgPartsLayoutInstanceVirtualTable =
-        new("48 83 C0 10 48 8D 0D ?? ?? ?? ?? 0F 1F 44 00 ?? 4C 89 70", 4, "BgPartsLayoutInstance virtual table");
+        new("48 83 C0 10 48 8D 0D ?? ?? ?? ?? 0F 1F 44 00 ?? 4C 89 70", 7, "BgPartsLayoutInstance virtual table");
     public static readonly NativeStaticAddressTarget VfxLayoutInstanceVirtualTable =
-        new("48 8D 05 ?? ?? ?? ?? 48 89 01 33 D2 48 89 51 ?? 48 89 51", 0, "VfxLayoutInstance virtual table");
+        new("48 8D 05 ?? ?? ?? ?? 48 89 01 33 D2 48 89 51 ?? 48 89 51", 3, "VfxLayoutInstance virtual table");
     public static readonly NativeStaticAddressTarget EnvLocationLayoutInstanceVirtualTable =
-        new("48 8D 0D ?? ?? ?? ?? 4C 89 70 ?? 4C 89 70 ?? 44 89 70 ?? 4C 89 70 ?? 4C 89 70 ?? 4C 89 70", 0, "EnvLocationLayoutInstance virtual table");
+        new("48 8D 0D ?? ?? ?? ?? 4C 89 70 ?? 4C 89 70 ?? 44 89 70 ?? 4C 89 70 ?? 4C 89 70 ?? 4C 89 70", 3, "EnvLocationLayoutInstance virtual table");
     public static readonly NativeStaticAddressTarget SharedGroupLayoutInstanceVirtualTable =
-        new("48 89 77 ?? 48 8D 05 ?? ?? ?? ?? 48 89 07 48 8D 05", 4, "SharedGroupLayoutInstance virtual table");
+        new("48 89 77 ?? 48 8D 05 ?? ?? ?? ?? 48 89 07 48 8D 05", 7, "SharedGroupLayoutInstance virtual table");
     public static readonly NativeStaticAddressTarget TriggerBoxLayoutInstanceVirtualTable =
-        new("48 83 C0 68 48 8D 0D ?? ?? ?? ?? 48 8D 15 ?? ?? ?? ?? 0F 1F 44 00", 4, "TriggerBoxLayoutInstance virtual table");
+        new("48 83 C0 68 48 8D 0D ?? ?? ?? ?? 48 8D 15 ?? ?? ?? ?? 0F 1F 44 00", 7, "TriggerBoxLayoutInstance virtual table");
     public static readonly NativeStaticAddressTarget CollisionBoxLayoutInstanceVirtualTable =
-        new("45 33 FF 4C 8D 25 ?? ?? ?? ?? 0F 1F 00 48 8D 8F", 3, "CollisionBoxLayoutInstance virtual table");
+        new("45 33 FF 4C 8D 25 ?? ?? ?? ?? 0F 1F 00 48 8D 8F", 6, "CollisionBoxLayoutInstance virtual table");
     public static readonly NativeStaticAddressTarget HousingObjectLayoutInstanceVirtualTable =
-        new("48 8D 05 ?? ?? ?? ?? 48 89 01 33 D2 48 89 51 ?? 48 8D 05 ?? ?? ?? ?? 48 89 51 ?? 89 51 ?? C7 41 ?? FF 80 07 F5", 0, "HousingObjectLayoutInstance virtual table");
+        new("48 8D 05 ?? ?? ?? ?? 48 89 01 33 D2 48 89 51 ?? 48 8D 05 ?? ?? ?? ?? 48 89 51 ?? 89 51 ?? C7 41 ?? FF 80 07 F5", 3, "HousingObjectLayoutInstance virtual table");
     public static readonly NativeStaticAddressTarget WaterRangeLayoutInstanceVirtualTable =
-        new("0F 83 ?? ?? ?? ?? 4C 8D 35 ?? ?? ?? ?? 90 48 8B CB", 6, "WaterRangeLayoutInstance virtual table");
+        new("0F 83 ?? ?? ?? ?? 4C 8D 35 ?? ?? ?? ?? 90 48 8B CB", 9, "WaterRangeLayoutInstance virtual table");
 
     public static readonly NativeRelativeBranchTarget LayoutWorldShutdownWrapper =
         new("E8 ?? ?? ?? ?? 48 8B 8B ?? ?? ?? ?? 84 C0 40 0F B6 FF", "LayoutWorld shutdown wrapper");
     public static readonly NativeDirectSignatureTarget LayoutWorldDeinitializeWrapper =
         new("48 8B 0D ?? ?? ?? ?? 48 85 C9 74 ?? 48 8B 01 48 FF 60 10", "LayoutWorld deinitialization wrapper");
     public static readonly NativeStaticAddressTarget MapRangeLayoutInstanceVirtualTable =
-        new("48 8D 05 ?? ?? ?? ?? C7 83 ?? ?? ?? ?? 00 FF 00 00", 0, "MapRangeLayoutInstance virtual table");
+        new("48 8D 05 ?? ?? ?? ?? C7 83 ?? ?? ?? ?? 00 FF 00 00", 3, "MapRangeLayoutInstance virtual table");
 
     public static readonly NativeDirectSignatureTarget ColliderFinalizer =
         new("40 53 48 83 EC 20 48 8D 05 ?? ?? ?? ?? 48 8B D9 48 89 01 48 8D 05 ?? ?? ?? ?? 48 89 41 ?? 48 8D 05 ?? ?? ?? ?? 48 89 41 ?? 48 8D 05 ?? ?? ?? ?? 48 89 41 ?? 48 81 C1 88 00 00 00", "Collider.Finalizer");
@@ -190,7 +190,7 @@ internal static unsafe class IntonerSignatures
     public static readonly NativeDirectSignatureTarget ResourceHandleTypeFromPath =
         new(GetResourceHandleType, "object resource handle type from path");
     public static readonly NativeStaticAddressTarget ResourceLodConfig =
-        new(LodConfig, 0, "object texture lod config");
+        new(LodConfig, 3, "object texture lod config");
     public static readonly NativeResolvedAddressTarget ResourceFileDescriptorRead =
         new((nint)FileDescriptor.MemberFunctionPointers.Read, "FileDescriptor.Read");
     public static readonly NativeResolvedAddressTarget ResourceFileJob =

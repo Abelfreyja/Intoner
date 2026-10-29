@@ -141,16 +141,17 @@ internal sealed unsafe class SceneRenderScheduler : IDisposable
                 Callbacks.TryRemove(callbackId, out _);
             }
 
-            InteropHookCollection? hooks = _hooks;
-            _hooks = null;
-            hooks?.Dispose();
-
-            if (hooks is { IsDisposed: false })
+            try
             {
-                _hooks = hooks;
+                _hooks?.Dispose();
+            }
+            catch
+            {
                 _startFailed = true;
+                throw;
             }
 
+            _hooks = null;
             _setRenderTargetsOriginal = null;
             lock (_queueLock)
             {
@@ -163,10 +164,8 @@ internal sealed unsafe class SceneRenderScheduler : IDisposable
 
     public void Dispose()
     {
-        if (_disposeState.TryBeginDispose())
-        {
-            Stop();
-        }
+        _disposeState.TryBeginDispose();
+        Stop();
     }
 
     private nint RegisterCallback()

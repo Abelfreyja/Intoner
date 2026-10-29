@@ -96,6 +96,13 @@ namespace Intoner.Objects.Interop
                     return;
                 }
 
+                SceneWrapper.SceneWrapperVirtualTable* factories = _bindings.GetSceneVirtualTable(world);
+
+                if (factories == null)
+                {
+                    throw new InvalidOperationException("collision scene virtual table is outside the game module");
+                }
+
                 _module = module;
                 _scene = new ObjectCollisionScene(_bindings, module);
                 _colliderFinalizerHook = AddHook(_bindings.ColliderFinalizer, (ColliderFinalizerDelegate)FinalizeCollider, "camera collider destruction");
@@ -117,15 +124,15 @@ namespace Intoner.Objects.Interop
                 }
 
                 _secondaryHook = AddHook(_bindings.SecondaryCreator, (ILayoutInstance.Delegates.CreateSecondary)CreateSecondary, "furniture secondary creation");
-                _meshHook = AddHook((nint)world->VirtualTable->AddColliderMesh, (SceneWrapper.Delegates.AddColliderMesh)CreateMesh, "mesh collider creation");
+                _meshHook = AddHook((nint)factories->AddColliderMesh, (SceneWrapper.Delegates.AddColliderMesh)CreateMesh, "mesh collider creation");
                 ReadOnlySpan<nint> primitiveFactories =
                 [
-                    (nint)world->VirtualTable->AddColliderMeshCylinder,
-                    (nint)world->VirtualTable->AddColliderBox,
-                    (nint)world->VirtualTable->AddColliderCylinder,
-                    (nint)world->VirtualTable->AddColliderSphere,
-                    (nint)world->VirtualTable->AddColliderPlane,
-                    (nint)world->VirtualTable->AddColliderPlaneTwoSided,
+                    (nint)factories->AddColliderMeshCylinder,
+                    (nint)factories->AddColliderBox,
+                    (nint)factories->AddColliderCylinder,
+                    (nint)factories->AddColliderSphere,
+                    (nint)factories->AddColliderPlane,
+                    (nint)factories->AddColliderPlaneTwoSided,
                 ];
                 foreach (nint factory in primitiveFactories)
                 {

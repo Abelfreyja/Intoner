@@ -67,11 +67,7 @@ internal sealed class SceneRenderService : IDisposable
 
     public void Dispose()
     {
-        if (!_disposeState.TryBeginDispose())
-        {
-            return;
-        }
-
+        _disposeState.TryBeginDispose();
         lock (_stateLock)
         {
             _passes.Clear();

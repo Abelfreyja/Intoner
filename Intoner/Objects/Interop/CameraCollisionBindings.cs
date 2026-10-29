@@ -9,6 +9,8 @@ namespace Intoner.Objects.Interop
 {
     internal sealed unsafe class CameraCollisionBindings
     {
+        private readonly ISigScanner _scanner;
+
         public readonly nint LayoutInstanceInit;
         public readonly nint ColliderFinalizer;
         public readonly nint SceneManagerUpdateScenes;
@@ -36,6 +38,7 @@ namespace Intoner.Objects.Interop
         // don't ask me lol
         public CameraCollisionBindings(ILogger<CameraCollisionBindings> logger, ISigScanner scanner)
         {
+            _scanner = scanner;
             ColliderFinalizer = Resolve(IntonerSignatures.ColliderFinalizer);
             LayoutInstanceInit = ResolveJmpCall(IntonerSignatures.ILayoutInstanceInit);
             SceneManagerUpdateScenes = Resolve(IntonerSignatures.SceneManagerUpdateScenes);
@@ -93,7 +96,11 @@ namespace Intoner.Objects.Interop
                 => NativeAddressResolver.TryResolveJmpCallTarget(logger, scanner, target);
 
             ILayoutInstance.ILayoutInstanceVirtualTable* ResolveVirtualTable(NativeStaticAddressTarget target)
-                => (ILayoutInstance.ILayoutInstanceVirtualTable*)NativeAddressResolver.TryResolveStaticAddress(logger, scanner, target);
+                => NativeAddressResolver.ReadVirtualTable(scanner,
+                    (ILayoutInstance.ILayoutInstanceVirtualTable*)NativeAddressResolver.TryResolveStaticAddress(logger, scanner, target));
         }
+
+        public SceneWrapper.SceneWrapperVirtualTable* GetSceneVirtualTable(SceneWrapper* scene)
+            => NativeAddressResolver.ReadVirtualTable(_scanner, scene->VirtualTable);
     }
 }
