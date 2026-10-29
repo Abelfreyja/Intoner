@@ -545,10 +545,7 @@ internal static class VfxAssetAnalyzer
             switch (chunk.Tag)
             {
                 case AvfxMagic.Texture:
-                case AvfxMagic.Model:
-                    GameAssetFileKind kind = chunk.Tag == AvfxMagic.Texture ? GameAssetFileKind.Atex : GameAssetFileKind.Mdl;
-
-                    if (!TryAddAvfxDependencyPath(data, chunk, kind, dependencyPaths))
+                    if (!TryAddAvfxDependencyPath(data, chunk, GameAssetFileKind.Atex, dependencyPaths))
                     {
                         return AssetDependencyPaths.Incomplete;
                     }
