@@ -20,9 +20,12 @@ namespace Intoner.Objects.UI;
 
 internal sealed class EditorWindow : IntonerWindow, IDisposable
 {
-    internal bool ShouldDrawSceneToolsWithoutEditor
-        => !_editorContentDrawnThisFrame
-           && _configurationService.Current.Ui.ShowSceneToolsWithoutEditor;
+    internal bool ShouldDrawBackgroundOverlay
+        => !_sceneOverlayDrawnThisFrame
+           && (_sceneOverlay.HasWorldPickerBounds
+               || (!_editorContentDrawnThisFrame && _configurationService.Current.Ui.ShowSceneToolsWithoutEditor));
+
+    internal bool IsInteractionBlocked => _interaction.Dialog.IsOpen;
 
     private readonly IUiBuilder                     _uiBuilder;
     private readonly EditorWorkspaceHost            _workspaces;
@@ -42,6 +45,7 @@ internal sealed class EditorWindow : IntonerWindow, IDisposable
     private readonly TitleBarWindowMetrics          _titleBarWindowMetrics;
     private readonly IDisposable                    _mainWindowRequestSubscription;
     private bool _editorContentDrawnThisFrame;
+    private bool _sceneOverlayDrawnThisFrame;
     private bool _editorContentWasDrawn;
     private IDisposable? _windowBackgroundColorScope;
 
@@ -64,7 +68,8 @@ internal sealed class EditorWindow : IntonerWindow, IDisposable
         TitleBarIconRenderer titleBarIconRenderer,
         EditorTitleBarIndicatorService titleBarIndicatorService,
         TitleBarWindowMetrics titleBarWindowMetrics,
-        IUiBuilder uiBuilder)
+        IUiBuilder uiBuilder,
+        EditorWorldPicker worldPicker)
         : base(buildInfo.WindowName, uiPerformance)
     {
         _uiBuilder                     = uiBuilder;
@@ -95,6 +100,7 @@ internal sealed class EditorWindow : IntonerWindow, IDisposable
             .AddFlags(ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
             .AddTitleBarButton(FontAwesomeIcon.Book, "Show Splash Screen", _startupView.ShowSplashScreen)
             .AddTitleBarButton(FontAwesomeIcon.ArrowsAlt, "Toolbar Dock Position", _workspaces.OpenToolbarDockMenu)
+            .AddTitleBarButton(FontAwesomeIcon.EyeDropper, "Pick from World", worldPicker.Begin)
             .Apply();
     }
 
@@ -105,14 +111,20 @@ internal sealed class EditorWindow : IntonerWindow, IDisposable
             return;
         }
 
-        bool shortcutsAllowed = !_interaction.Dialog.IsOpen && _configurationService.Current.Ui.EnableShortcutsWithoutEditor;
+        bool shortcutsAllowed = !_sceneOverlay.IsWorldPicking && !_interaction.Dialog.IsOpen && _configurationService.Current.Ui.EnableShortcutsWithoutEditor;
         _shortcutHandler.HandleEditorShortcuts(
             commandsEnabled: shortcutsAllowed,
-            sceneToolsEnabled: shortcutsAllowed && ShouldDrawSceneToolsWithoutEditor);
+            sceneToolsEnabled: shortcutsAllowed && ShouldDrawBackgroundOverlay);
     }
 
-    internal void DrawSceneToolsWithoutEditor()
+    internal void DrawBackgroundOverlay()
     {
+        if (_editorContentDrawnThisFrame || _sceneOverlay.IsWorldPicking || !_configurationService.Current.Ui.ShowSceneToolsWithoutEditor)
+        {
+            _sceneOverlay.DrawWorldPicker();
+            return;
+        }
+
         EditorSceneFrame frame = _sceneOverlay.PrepareFrame(false, processPointer: false);
         _sceneOverlay.DrawFrame(frame, GetEditorWindowArea(), drawGizmo: true);
     }
@@ -157,6 +169,7 @@ internal sealed class EditorWindow : IntonerWindow, IDisposable
     private void DeactivateEditorInteraction()
     {
         _editorContentDrawnThisFrame = false;
+        _sceneOverlayDrawnThisFrame = false;
         _editorContentWasDrawn = false;
         _shortcuts.DeactivateAll();
         _sceneOverlay.Deactivate();
@@ -183,7 +196,7 @@ internal sealed class EditorWindow : IntonerWindow, IDisposable
         }
     }
 
-    private void OpenWorkspace(WorkspaceMode workspaceMode)
+    internal void OpenWorkspace(WorkspaceMode workspaceMode)
     {
         IsOpen = true;
         _workspaces.SetWorkspaceMode(workspaceMode);
@@ -193,6 +206,7 @@ internal sealed class EditorWindow : IntonerWindow, IDisposable
     public override void Update()
     {
         _editorContentDrawnThisFrame = false;
+        _sceneOverlayDrawnThisFrame = false;
         RespectCloseHotkey = !_sceneOverlay.IsSelecting;
     }
 
@@ -261,7 +275,7 @@ internal sealed class EditorWindow : IntonerWindow, IDisposable
 
         bool showSplashScreen = _startupView.ShouldShowSplashScreen();
         _workspaces.RefreshContext();
-        if (!showSplashScreen && !_interaction.Dialog.IsOpen)
+        if (!showSplashScreen && !_interaction.Dialog.IsOpen && !_sceneOverlay.IsWorldPicking)
         {
             _shortcutHandler.HandleEditorShortcuts();
         }
@@ -286,6 +300,7 @@ internal sealed class EditorWindow : IntonerWindow, IDisposable
         }
 
         _sceneOverlay.DrawFrame(sceneFrame, editorWindowArea, !_interaction.Dialog.IsOpen);
+        _sceneOverlayDrawnThisFrame = true;
     }
 
     private void DrawTitleBar()

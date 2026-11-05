@@ -18,11 +18,11 @@ internal sealed class CreateWorkspace
     private readonly IObjectLayoutManager _layoutManager;
     private readonly LayoutActions _layoutActions;
     private readonly IObjectHousingModePolicy _housingModePolicy;
-    private readonly IObjectLibrary _objectLibrary;
     private readonly EditorOverlayLayer _editorOverlayLayer;
     private readonly SceneTransformEditor _transformEditor;
-    private readonly IFurnitureStainService _furnitureStainService;
+    private readonly FurnitureModelEditor _furnitureEditor;
     private readonly ObjectEditorCatalog _catalogInfo;
+    private readonly EditorAssetSoundQuery _assetSound;
     private readonly CreateBrowserSelection _browserSelection;
     private readonly ObjectCreationDraft _draft;
     private readonly ObjectPreviewRenderer _preview;
@@ -35,11 +35,11 @@ internal sealed class CreateWorkspace
     public CreateWorkspace(
         IObjectSceneView sceneView,
         IObjectHousingModePolicy housingModePolicy,
-        IObjectLibrary objectLibrary,
         EditorOverlayLayer editorOverlayLayer,
         SceneTransformEditor transformEditor,
-        IFurnitureStainService furnitureStainService,
+        FurnitureModelEditor furnitureEditor,
         ObjectEditorCatalog catalogInfo,
+        EditorAssetSoundQuery assetSound,
         CreateBrowserSelection browserSelection,
         ObjectCreationDraft draft,
         ObjectPreviewRenderer preview,
@@ -53,11 +53,11 @@ internal sealed class CreateWorkspace
         _layoutManager         = layoutManager;
         _layoutActions         = layoutActions;
         _housingModePolicy     = housingModePolicy;
-        _objectLibrary         = objectLibrary;
         _editorOverlayLayer    = editorOverlayLayer;
         _transformEditor       = transformEditor;
-        _furnitureStainService = furnitureStainService;
+        _furnitureEditor       = furnitureEditor;
         _catalogInfo           = catalogInfo;
+        _assetSound            = assetSound;
         _browserSelection      = browserSelection;
         _draft                 = draft;
         _preview               = preview;
@@ -291,12 +291,14 @@ internal sealed class CreateWorkspace
         if (_browserSelection.Source == CreateBrowserSelection.CreateBrowserSource.Library)
         {
             FontAwesomeIcon catalogIcon = SceneItemPresentation.ResolveObjectKindIcon(ObjectEditorCatalog.ToObjectKind(_browserSelection.Kind));
-            if (EditorIconButton.DrawAccent(
+            if (EditorIconButton.DrawToggle(
                     "createOpenCatalog",
                     catalogIcon,
-                    $"Open in {ObjectEditorCatalog.GetDraftKindLabel(_browserSelection.Kind)} Catalog",
+                    new Vector2(edge),
+                    false,
                     ThemeColors.AccentPrimary,
-                    edge))
+                    ThemeColors.AccentPrimary,
+                    $"Open in {ObjectEditorCatalog.GetDraftKindLabel(_browserSelection.Kind)} Catalog"))
             {
                 _catalogBrowser.OpenCurrentDraftInCatalog();
             }
@@ -304,56 +306,8 @@ internal sealed class CreateWorkspace
             return;
         }
 
-        bool hasPreset = _draft.TryCaptureCurrentLibraryPreset(out string name, out ObjectLibraryPreset? preset);
-        ObjectLibrarySnapshot library = _objectLibrary.Current;
-        IReadOnlyList<ObjectLibraryEntry> exactEntries = hasPreset
-            ? _libraryBrowser.ResolveLibraryPresetMatches(library, preset!)
-            : [];
-        bool saved = exactEntries.Count > 0;
-        string tooltip = exactEntries.Count switch
-        {
-            0 => "Save these settings to the Library",
-            1 => "Open this preset in the Library",
-            _ => "Choose which saved copy to open in the Library",
-        };
-        bool clicked;
-        Vector2 entriesMenuAnchor = ImGui.GetCursorScreenPos() + new Vector2(0f, edge);
-        using (ImRaii.Disabled(!hasPreset))
-        {
-            clicked = EditorIconButton.DrawToggle(
-                "createCurrentLibrary",
-                saved ? FontAwesomeIcon.LayerGroup : FontAwesomeIcon.FolderPlus,
-                new Vector2(edge),
-                saved,
-                ThemeColors.AccentPrimary,
-                ThemeColors.AccentOrange,
-                tooltip);
-        }
-
-        using (EditorContextMenu.PopupScope entriesMenu = EditorContextMenu.BeginDropdown(
-                   "##createCurrentLibraryEntries",
-                   clicked && exactEntries.Count > 1,
-                   entriesMenuAnchor))
-        {
-            if (entriesMenu)
-            {
-                _libraryBrowser.DrawLibraryEntryChoices("createCurrentLibrary", exactEntries);
-            }
-        }
-
-        if (!clicked)
-        {
-            return;
-        }
-
-        if (exactEntries.Count == 1)
-        {
-            _libraryBrowser.OpenLibraryEntry(exactEntries[0]);
-        }
-        else if (!saved && preset is not null)
-        {
-            _ = _objectLibrary.TryAdd(name, preset, null, out _);
-        }
+        _draft.TryCaptureCurrentLibraryPreset(out string name, out ObjectLibraryPreset? preset);
+        _libraryBrowser.DrawPresetLibraryButton(name, preset, edge);
     }
 
     internal void DrawCreatePanel(IReadOnlyList<ObjectKindInfo> kindInfos)
@@ -497,8 +451,7 @@ internal sealed class CreateWorkspace
         _preview.DrawPreviewSection(
             "furniture-preview",
             PreviewControlsText,
-            ObjectCatalogKind.Furniture,
-            _draft.Furniture.Model.SharedGroupPath,
+            _draft.Furniture.Model,
             _draft.Furniture.Preview);
 
         ImGuiHelpers.ScaledDummy(6f);
@@ -509,11 +462,10 @@ internal sealed class CreateWorkspace
             {
                 EditorPropertyTable.Checkbox("furnitureCreateVisible", "Visible", ref _draft.Furniture.Visible);
                 _transformEditor.DrawScaleClipboardRow("furnitureCreateScale", ref _draft.Furniture.Scale);
-                ObjectModelEditor.DrawFurnitureRows(
+                _furnitureEditor.Draw(
                     "create",
                     ref _draft.Furniture.Model,
-                    _furnitureStainService.GetStains(),
-                    _draft.Furniture.StainSelector);
+                    string.Empty);
             }
         }
     }
@@ -552,7 +504,7 @@ internal sealed class CreateWorkspace
             vfxModel = vfxModel with { Loop = false };
         }
 
-        ObjectModelEditor.DrawVfxRows("create", ref vfxModel, canUseReplayLoop);
+        ObjectModelEditor.DrawVfxRows("create", ref vfxModel, canUseReplayLoop, _assetSound.HasSound(vfxModel.VfxPath));
         _draft.Vfx.Model = vfxModel;
 
         _transformEditor.DrawScaleClipboardRow("vfxCreateScale", ref _draft.Vfx.Scale);

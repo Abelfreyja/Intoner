@@ -33,19 +33,36 @@ internal sealed class PreviewGeometryCache(PreviewMaterialResolver materialResol
         lock (_lock)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            if (_entries.TryGetValue(cacheKey, out PreviewAssetState.GeometryEntry? existingEntry)
-             && (!existingEntry.HasMissingModels || loadedModelIndices.Count <= existingEntry.LoadedModelIndices.Count
-              || !existingEntry.LoadedModelIndices.IsSubsetOf(loadedModelIndices)))
+            if (_entries.TryGetValue(cacheKey, out PreviewAssetState.GeometryEntry? existingEntry))
             {
-                return existingEntry;
+                lock (existingEntry.SyncRoot)
+                {
+                    if (existingEntry.Models.Error is null
+                        && (!existingEntry.Models.IsIncomplete || loadedModelIndices.Count <= existingEntry.Models.LoadedIndices.Count
+                            || !existingEntry.Models.LoadedIndices.IsSubsetOf(loadedModelIndices)))
+                    {
+                        return existingEntry;
+                    }
+                }
             }
 
-            PreviewAssetState.GeometryEntry entry = new(cacheKey, geometry, missingMaterials, modelCount, loadedModelIndices)
+            PreviewAssetState.GeometryEntry entry = new(cacheKey, geometry, missingMaterials, new(modelCount, loadedModelIndices))
             {
                 NextTextureRetryAtMs = materialResolver.GetNextTextureRetryAtMs(geometry, Environment.TickCount64),
             };
             _entries[cacheKey] = entry;
             return entry;
+        }
+    }
+
+    public PreviewAssetState.GeometryEntry? Invalidate(PreviewAssetState.GeometryEntry expected, string error)
+    {
+        lock (_lock)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+
+            expected.Models.Invalidate(error);
+            return _entries.GetValueOrDefault(expected.CacheKey);
         }
     }
 
@@ -118,6 +135,11 @@ internal sealed class PreviewGeometryCache(PreviewMaterialResolver materialResol
 
             lock (entry.SyncRoot)
             {
+                if (entry.Models.Error is not null)
+                {
+                    return entry;
+                }
+
                 snapshot = entry.Geometry.CreateRenderSnapshot();
                 missingMaterials = [.. entry.MissingMaterials];
                 refreshMaterials = missingMaterials.Count > 0 && now >= entry.NextMaterialRetryAtMs;
@@ -161,7 +183,7 @@ internal sealed class PreviewGeometryCache(PreviewMaterialResolver materialResol
                 return entry;
             }
 
-            replacement = new(entry.CacheKey, snapshot, missingMaterials, entry.ModelCount, entry.LoadedModelIndices)
+            replacement = new(entry.CacheKey, snapshot, missingMaterials, entry.Models)
             {
                 NextMaterialRetryAtMs = nextMaterialRetryAtMs,
                 NextTextureRetryAtMs = nextTextureRetryAtMs,
@@ -188,7 +210,11 @@ internal sealed class PreviewGeometryCache(PreviewMaterialResolver materialResol
 
             lock (expected.SyncRoot)
             {
-                replacement.NextModelRetryAtMs = expected.NextModelRetryAtMs;
+                if (expected.Models.Error is not null)
+                {
+                    return false;
+                }
+
                 replacement.LastThumbnailAccessAtMs = expected.LastThumbnailAccessAtMs;
                 replacement.LastDetailAccessAtMs = expected.LastDetailAccessAtMs;
             }

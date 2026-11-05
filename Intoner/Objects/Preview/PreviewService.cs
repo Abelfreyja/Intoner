@@ -85,6 +85,12 @@ internal sealed class PreviewService : IDisposable
             PreviewCacheState.Render renderState = state.ThumbnailRenderState;
             MarkThumbnailAccess(state, renderState, now);
             geometryEntry = state.GeometryEntry;
+
+            if (!state.HasLoadedGeometry && state.Error is not null)
+            {
+                renderState.ReleaseRetainedTextures();
+            }
+
             _textureUploader.ApplyPendingTexture(renderState, normalizedRequest, now);
             EnsureThumbnailWork(assetKey, state, renderState, normalizedRequest, now);
 
@@ -134,7 +140,7 @@ internal sealed class PreviewService : IDisposable
         lock (state.SyncRoot)
         {
             state.LastDetailAccessAtMs = now;
-            geometryEntry = state.GeometryEntry;
+            geometryEntry = state.HasLoadedGeometry ? state.GeometryEntry : null;
             QueueLoad(assetKey, state, now);
 
             result = new PreviewRender.Result(
@@ -409,7 +415,7 @@ internal sealed class PreviewService : IDisposable
                 return;
             }
 
-            if (!loadSucceeded && state.GeometryEntry is { } retainedGeometry)
+            if (!loadSucceeded && state.GeometryEntry is { Models.Error: null } retainedGeometry)
             {
                 geometryEntry = retainedGeometry;
                 attachedGeometryEntry = retainedGeometry;
@@ -515,7 +521,8 @@ internal sealed class PreviewService : IDisposable
                 return;
             }
 
-            if (!wasCanceled && !cancellationToken.IsCancellationRequested && ReferenceEquals(state.GeometryEntry, geometryEntry)
+            if (!wasCanceled && !cancellationToken.IsCancellationRequested && state.HasLoadedGeometry
+             && ReferenceEquals(state.GeometryEntry, geometryEntry)
              && renderState.HasRequestedRequest && renderState.RequestedRequest == request)
             {
                 if (pendingTexture is not null

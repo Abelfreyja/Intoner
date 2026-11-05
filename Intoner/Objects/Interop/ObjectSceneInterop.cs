@@ -1,4 +1,5 @@
 using FFXIVClientStructs.FFXIV.Client.Graphics.Scene;
+using FFXIVClientStructs.FFXIV.Client.System.Resource.Handle;
 using Intoner.Objects.Utils;
 using AxisAlignedBounds = FFXIVClientStructs.FFXIV.Common.Math.AxisAlignedBounds;
 using ObjectHighlightColor = FFXIVClientStructs.FFXIV.Client.Game.Object.ObjectHighlightColor;
@@ -13,6 +14,10 @@ internal static unsafe class ObjectSceneInterop
 
     public static bool IsDrawObjectLoaded(DrawObject* drawObject)
         => drawObject != null && drawObject->LoadState == DrawObjectLoadedState;
+
+    public static ApricotResourceHandle* GetVfxResourceHandle(VfxObject* vfx)
+        => vfx != null && vfx->VfxResourceInstance != null && vfx->VfxResourceInstance->VfxResourceObject != null
+            ? vfx->VfxResourceInstance->VfxResourceObject->ApricotResourceHandle : null;
 
     public static void UpdateCulling(DrawObject* drawObject)
         => drawObject->UpdateCulling();

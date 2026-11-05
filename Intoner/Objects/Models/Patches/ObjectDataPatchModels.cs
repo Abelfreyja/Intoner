@@ -43,6 +43,7 @@ internal sealed record FurnitureModelPatch : ObjectDataPatch
 {
     public string? SharedGroupPath { get; init; }
     public bool? CameraCollision { get; init; }
+    public bool? SoundEnabled { get; init; }
     public FurnitureColorPatch? Color { get; init; }
     public float? Transparency { get; init; }
     public ObjectOutlineColor? OutlineColor { get; init; }
@@ -50,6 +51,7 @@ internal sealed record FurnitureModelPatch : ObjectDataPatch
     public bool HasChanges
         => SharedGroupPath is not null
            || CameraCollision.HasValue
+           || SoundEnabled.HasValue
            || Transparency.HasValue
            || OutlineColor.HasValue
            || Color?.HasChanges == true;
@@ -61,6 +63,7 @@ internal sealed record VfxModelPatch : ObjectDataPatch
     public Vector4? Color { get; init; }
     public float? Speed { get; init; }
     public bool? Paused { get; init; }
+    public bool? SoundEnabled { get; init; }
     public float? FadeInSeconds { get; init; }
     public bool? ReplayOnTransform { get; init; }
     public bool? Loop { get; init; }
@@ -71,6 +74,7 @@ internal sealed record VfxModelPatch : ObjectDataPatch
            || Color.HasValue
            || Speed.HasValue
            || Paused.HasValue
+           || SoundEnabled.HasValue
            || FadeInSeconds.HasValue
            || ReplayOnTransform.HasValue
            || Loop.HasValue

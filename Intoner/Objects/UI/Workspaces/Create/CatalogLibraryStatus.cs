@@ -24,17 +24,11 @@ internal sealed class CatalogLibraryStatus
         ObjectCatalogBgObjectInfo? bgObjectInfo = null)
     {
         ObjectLibrarySnapshot library = _objectLibrary.Current;
-        CatalogBadgeCache badgeCache;
-        if (_catalogBadgeCache is not { } cached || cached.Revision != library.Revision)
+
+        if (_catalogBadgeCache is not { } badgeCache || badgeCache.Revision != library.Revision)
         {
-            badgeCache = new CatalogBadgeCache(
-                library.Revision,
-                CatalogLibraryTooltip.LocationIndex.Create(library));
+            badgeCache = new CatalogBadgeCache(library.Revision);
             _catalogBadgeCache = badgeCache;
-        }
-        else
-        {
-            badgeCache = cached;
         }
 
         if (badgeCache.Entries.TryGetValue(preset, out CatalogBadgeEntry? cachedEntry)
@@ -52,7 +46,7 @@ internal sealed class CatalogLibraryStatus
 
         if (entries.Count > 0)
         {
-            CatalogLibraryTooltip.Data tooltip = CatalogLibraryTooltip.Build(badgeCache.Locations, entries);
+            CatalogLibraryTooltip.Data tooltip = CatalogLibraryTooltip.Build(ObjectLibraryHierarchy.Create(library), entries);
             badges.Add(EditorBadge.Count(
                 FontAwesomeIcon.Star,
                 entries.Count,
@@ -99,9 +93,7 @@ internal sealed class CatalogLibraryStatus
         ObjectCatalogBgObjectInfo? BgObjectInfo,
         IReadOnlyList<EditorBadge> Badges);
 
-    internal sealed record CatalogBadgeCache(
-        long Revision,
-        CatalogLibraryTooltip.LocationIndex Locations)
+    internal sealed record CatalogBadgeCache(long Revision)
     {
         public Dictionary<ObjectLibraryPreset, CatalogBadgeEntry> Entries { get; } = [];
     }

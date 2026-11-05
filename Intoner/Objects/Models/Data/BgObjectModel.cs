@@ -5,6 +5,8 @@ namespace Intoner.Objects.Models;
 
 internal sealed record BgObjectModel : ObjectData
 {
+    internal override ObjectKind Kind => ObjectKind.BgObject;
+
     public string ModelPath { get; init; } = string.Empty;
     public BgColliderDefinition? ColliderDefinition { get; init; }
     public bool CameraCollision { get; init; } = true;

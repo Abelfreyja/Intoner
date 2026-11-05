@@ -1,3 +1,4 @@
+using Intoner.Objects.Assets;
 using Intoner.Objects.Preview;
 using Intoner.Objects.Resources;
 using System.Diagnostics.CodeAnalysis;
@@ -25,17 +26,26 @@ internal static class CatalogPreviewAssetFactory
     {
         asset = null;
         string normalizedPath = ObjectResolvedPath.FromGamePath(path).Path;
-        if (normalizedPath.Length == 0)
+        if (!IsSupportedPath(kind, normalizedPath))
         {
             return false;
         }
 
-        asset = new PreviewAsset(
-            new PreviewAsset.Key(GetSource(kind), normalizedPath),
-            normalizedPath,
-            objectCatalog.ResolvePreviewModels(kind, normalizedPath),
-            ResolveUntexturedDiffuseColor(kind));
+        asset = Create(kind, normalizedPath, objectCatalog.ResolvePreviewModels(kind, normalizedPath));
         return true;
+    }
+
+    public static bool IsSupportedPath(ObjectCatalogKind kind, string normalizedPath)
+        => normalizedPath.Length > 0 && (kind != ObjectCatalogKind.BgObject || ObjectAssetPathRules.IsCatalogModelPath(normalizedPath));
+
+    public static PreviewAsset Create(ObjectCatalogKind kind, string path, IReadOnlyList<PreviewModelInfo> models, ushort? materialVariant = null)
+    {
+        if (materialVariant is > 0)
+        {
+            models = models.Select(info => info.MaterialVariant.HasValue ? info with { MaterialVariant = materialVariant } : info).ToArray();
+        }
+
+        return new PreviewAsset(new PreviewAsset.Key(GetSource(kind), path), path, models, ResolveUntexturedDiffuseColor(kind));
     }
 
     private static string GetSource(ObjectCatalogKind kind)

@@ -34,11 +34,11 @@ internal sealed partial class SceneItemInspector
     private readonly SceneEditorCommands          _sceneCommands;
     private readonly EditorOverlayLayer           _editorOverlayLayer;
     private readonly SceneTransformEditor         _transformEditor;
-    private readonly IFurnitureStainService       _furnitureStainService;
+    private readonly FurnitureModelEditor         _furnitureEditor;
     private readonly SceneItemControls            _sceneItems;
     private readonly ObjectEditorCatalog          _catalogInfo;
+    private readonly EditorAssetSoundQuery        _assetSound;
     private InspectorMetadata? _inspectorMetadata;
-    private readonly FurnitureStainSelector _inspectorFurnitureStains = new();
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = true,
@@ -60,9 +60,10 @@ internal sealed partial class SceneItemInspector
         SceneEditorCommands sceneCommands,
         EditorOverlayLayer editorOverlayLayer,
         SceneTransformEditor transformEditor,
-        IFurnitureStainService furnitureStainService,
+        FurnitureModelEditor furnitureEditor,
         SceneItemControls sceneItems,
-        ObjectEditorCatalog catalogInfo)
+        ObjectEditorCatalog catalogInfo,
+        EditorAssetSoundQuery assetSound)
     {
         _sceneView               = sceneView;
         _sceneInputService       = sceneInputService;
@@ -78,9 +79,10 @@ internal sealed partial class SceneItemInspector
         _sceneCommands           = sceneCommands;
         _editorOverlayLayer      = editorOverlayLayer;
         _transformEditor         = transformEditor;
-        _furnitureStainService   = furnitureStainService;
+        _furnitureEditor         = furnitureEditor;
         _sceneItems              = sceneItems;
         _catalogInfo             = catalogInfo;
+        _assetSound              = assetSound;
     }
 
     internal sealed record InspectorMetadata(
@@ -663,7 +665,7 @@ internal sealed partial class SceneItemInspector
         ImGui.SetNextItemWidth(-1f);
         if (ImGui.InputText("##furnitureSharedGroupPath", ref sharedGroupPath, 512))
         {
-            furnitureModel = _catalogInfo.ResolveFurnitureCatalogVariant(furnitureModel with { SharedGroupPath = sharedGroupPath });
+            furnitureModel = _catalogInfo.ResolveFurnitureCatalogVariant(furnitureModel with { SharedGroupPath = sharedGroupPath, MaterialItem = null });
             ApplyInspectorModelEdit(
                 snapshot,
                 "FurnitureSharedGroupPath",
@@ -671,13 +673,12 @@ internal sealed partial class SceneItemInspector
                 furnitureModel);
         }
 
-        ObjectModelEditor.DrawFurnitureRows(
+        _furnitureEditor.Draw(
             "inspector",
             ref furnitureModel,
-            _furnitureStainService.GetStains(),
-            _inspectorFurnitureStains,
+            snapshot.CollectionId,
             onChanged: (editId, title, updatedModel, recordImmediately) =>
-                ApplyInspectorModelEdit(snapshot, editId, title, updatedModel, recordImmediately));
+                ApplyFurnitureInspectorEdit(snapshot, editId, title, updatedModel, recordImmediately));
     }
 
     private void DrawLightInspector(ObjectSnapshot snapshot)
@@ -710,8 +711,23 @@ internal sealed partial class SceneItemInspector
             "inspector",
             ref vfxModel,
             vfxInfo?.CanUseReplayLoop != false,
+            _assetSound.HasSound(vfxModel.VfxPath, snapshot.CollectionId),
             onChanged: (editId, title, updatedModel, recordImmediately) =>
                 ApplyInspectorModelEdit(snapshot, editId, title, updatedModel, recordImmediately));
+    }
+
+    private void ApplyFurnitureInspectorEdit(ObjectSnapshot snapshot, string editId, string title, FurnitureModel model, bool recordImmediately)
+    {
+        if (model.MaterialItem?.ItemId != ((FurnitureModel)snapshot.Model).MaterialItem?.ItemId)
+        {
+            ObjectSnapshot[] partitions = _sceneState.ResolveSelectedCurrentItems().OfType<ObjectSnapshot>()
+                .Where(item => !item.Locked && item.Model is FurnitureModel candidate && _furnitureEditor.SupportsWallpaper(candidate)).ToArray();
+            _historyCoordinator.TryApplySelectedSnapshotUpdate(SceneHistoryKind.Appearance, title, partitions,
+                item => item with { Model = ((FurnitureModel)item.Model) with { MaterialItem = model.MaterialItem } });
+            return;
+        }
+
+        ApplyInspectorModelEdit(snapshot, editId, title, model, recordImmediately);
     }
 
     private void ApplyInspectorModelEdit(ObjectSnapshot snapshot, string editId, string title, ObjectData model, bool recordImmediately = false)

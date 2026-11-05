@@ -1,3 +1,4 @@
+using Intoner.Objects.Assets;
 using Intoner.Objects.Catalog;
 using Intoner.Objects.Library;
 using Intoner.Objects.Models;
@@ -29,6 +30,37 @@ internal sealed class ObjectCreationDraft
         _browserSelection = browserSelection;
     }
 
+    internal bool CanSelectKind(ObjectKind kind)
+        => kind switch
+        {
+            ObjectKind.BgObject => _browserSelection.IsKindAvailable(DraftKind.BgObject),
+            ObjectKind.Vfx => _browserSelection.IsKindAvailable(DraftKind.Vfx),
+            ObjectKind.Furniture => _browserSelection.IsKindAvailable(DraftKind.Furniture),
+            _ => false,
+        };
+
+    internal bool SelectAssetPath(ObjectKind kind, string path)
+    {
+        if (!CanSelectKind(kind))
+        {
+            return false;
+        }
+
+        switch (kind)
+        {
+            case ObjectKind.BgObject when path.Length == 0 || ObjectAssetPathRules.IsCatalogModelPath(path):
+                _browserSelection.SetDraftKind(DraftKind.BgObject);
+                BgObject.Model = _catalogInfo.ApplyBgObjectDefaults(BgObject.Model with { ModelPath = path, ColliderDefinition = null });
+                return true;
+            case ObjectKind.Vfx when path.Length == 0 || GameAssetPathRules.IsFileKind(path, GameAssetFileKind.Avfx):
+                _browserSelection.SetDraftKind(DraftKind.Vfx);
+                Vfx.Model = Vfx.Model with { VfxPath = path };
+                return true;
+            default:
+                return false;
+        }
+    }
+
     internal static string ToggleCatalogSelectionPath(string currentPath, string nextPath)
         => string.Equals(currentPath, nextPath, StringComparison.OrdinalIgnoreCase)
             ? string.Empty
@@ -47,6 +79,12 @@ internal sealed class ObjectCreationDraft
             return;
         }
 
+        SelectFurnitureCatalogEntry(entry);
+    }
+
+    internal void SelectFurnitureCatalogEntry(ObjectCatalogFurnitureResult entry)
+    {
+        _browserSelection.SetDraftKind(DraftKind.Furniture);
         Furniture.Model = Furniture.Model with
         {
             SharedGroupPath = entry.Entry.PlacementPath,
@@ -152,7 +190,6 @@ internal sealed class ObjectCreationDraft
     internal sealed class FurnitureCreateState
     {
         public FurnitureModel Model = new();
-        public readonly FurnitureStainSelector StainSelector = new();
         public ObjectPreviewRenderer.PreviewState Preview = new();
         public Vector3 Scale = Vector3.One;
         public bool Visible = true;
@@ -185,23 +222,18 @@ internal sealed class ObjectCreationDraft
         => _browserSelection.Kind switch
         {
             DraftKind.BgObject => ObjectEditorCatalog.CreateLibraryPreset(
-                ObjectKind.BgObject,
                 BgObject.Model,
                 BgObject.Visible,
                 BgObject.Scale),
             DraftKind.Furniture => ObjectEditorCatalog.CreateLibraryPreset(
-                ObjectKind.Furniture,
-                _catalogInfo.ResolveFurnitureCatalogVariant(Furniture.Model),
+                _catalogInfo.ResolvePlacementModel(Furniture.Model),
                 Furniture.Visible,
                 Furniture.Scale),
             DraftKind.Vfx => ObjectEditorCatalog.CreateLibraryPreset(
-                ObjectKind.Vfx,
-                _catalogInfo.ResolveVfxCatalogInfo(Vfx.Model.VfxPath)?.CanUseReplayLoop == false
-                    ? Vfx.Model with { Loop = false }
-                    : Vfx.Model,
+                _catalogInfo.ResolvePlacementModel(Vfx.Model),
                 Vfx.Visible,
                 Vfx.Scale),
-            DraftKind.Light => ObjectEditorCatalog.CreateLibraryPreset(ObjectKind.Light, Light.Model, Light.Visible),
+            DraftKind.Light => ObjectEditorCatalog.CreateLibraryPreset(Light.Model, Light.Visible),
             _ => throw new InvalidOperationException($"unsupported draft kind {_browserSelection.Kind}"),
         };
 }

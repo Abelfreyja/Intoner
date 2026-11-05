@@ -40,19 +40,18 @@ internal static class SceneGeometryRaycaster
 
     public static bool TryRaycastNormalized(
         in SceneGeometryRaycastTarget target,
-        Vector3 rayOrigin,
-        Vector3 rayDirection,
+        ScenePointerRay ray,
         float maxDistance,
         out SceneSurfaceHit hit)
     {
         hit = SceneSurfaceHit.Empty;
-        if (!MayIntersectBounds(target, rayOrigin, rayDirection, maxDistance))
+        if (!SceneRaycastMath.MayIntersectSphere(ray, target.BoundsCenter, target.BoundsRadius, maxDistance))
         {
             return false;
         }
 
-        Vector3 localOrigin = Vector3.Transform(rayOrigin, target.InverseWorldTransform);
-        Vector3 localDirection = Vector3.TransformNormal(rayDirection, target.InverseWorldTransform);
+        Vector3 localOrigin = Vector3.Transform(ray.Origin, target.InverseWorldTransform);
+        Vector3 localDirection = Vector3.TransformNormal(ray.Direction, target.InverseWorldTransform);
         if (!NumericsUtility.HasLength(localDirection))
         {
             return false;
@@ -60,8 +59,7 @@ internal static class SceneGeometryRaycaster
 
         if (!TryRaycastLocal(
                 target.Geometry,
-                localOrigin,
-                localDirection,
+                new(localOrigin, localDirection),
                 maxDistance,
                 out float closestDistance,
                 out Vector3 localHitNormal))
@@ -70,41 +68,14 @@ internal static class SceneGeometryRaycaster
         }
 
         Vector3 worldHitNormal = Vector3.TransformNormal(localHitNormal, target.NormalTransform);
-        Vector3 orientedNormal = SceneRaycastMath.OrientSurfaceNormal(worldHitNormal, rayDirection);
+        Vector3 orientedNormal = SceneRaycastMath.OrientSurfaceNormal(worldHitNormal, ray.Direction);
         if (!NumericsUtility.HasLength(orientedNormal))
         {
             return false;
         }
 
-        hit = new SceneSurfaceHit(rayOrigin + (rayDirection * closestDistance), orientedNormal, Distance: closestDistance);
+        hit = new SceneSurfaceHit(ray.Origin + (ray.Direction * closestDistance), orientedNormal, Distance: closestDistance);
         return true;
-    }
-
-    private static bool MayIntersectBounds(
-        in SceneGeometryRaycastTarget target,
-        Vector3 rayOrigin,
-        Vector3 rayDirection,
-        float maxDistance)
-    {
-        float radius = target.BoundsRadius;
-        if (radius <= 0f)
-        {
-            return true;
-        }
-
-        Vector3 toCenter = target.BoundsCenter - rayOrigin;
-        float projection = Vector3.Dot(toCenter, rayDirection);
-        float closestDistanceSquared = Vector3.DistanceSquared(toCenter, rayDirection * projection);
-        float radiusSquared = radius * radius;
-        if (closestDistanceSquared > radiusSquared)
-        {
-            return false;
-        }
-
-        float halfChord = MathF.Sqrt(MathF.Max(0f, radiusSquared - closestDistanceSquared));
-        float nearDistance = projection - halfChord;
-        float farDistance = projection + halfChord;
-        return farDistance > SceneRaycastMath.MinimumHitDistance && nearDistance < maxDistance;
     }
 
     private static float ResolveBoundingScale(Matrix4x4 transform)
@@ -123,22 +94,9 @@ internal static class SceneGeometryRaycaster
         return MathF.Sqrt(scaleSquared);
     }
 
-    private static bool TryGetPosition(Vector3[] positions, int index, out Vector3 position)
-    {
-        if ((uint)index >= (uint)positions.Length)
-        {
-            position = Vector3.Zero;
-            return false;
-        }
-
-        position = positions[index];
-        return true;
-    }
-
     private static bool TryRaycastLocal(
         SceneSelectionGeometry geometry,
-        Vector3 rayOrigin,
-        Vector3 rayDirection,
+        ScenePointerRay ray,
         float maxDistance,
         out float closestDistance,
         out Vector3 localHitNormal)
@@ -147,8 +105,7 @@ internal static class SceneGeometryRaycaster
         {
             if (!acceleration.TryRaycast(
                     geometry,
-                    rayOrigin,
-                    rayDirection,
+                    ray,
                     maxDistance,
                     out int closestTriangle,
                     out closestDistance))
@@ -157,41 +114,35 @@ internal static class SceneGeometryRaycaster
                 return false;
             }
 
-            return TryResolveTriangleNormal(geometry.Positions, geometry.Indices, closestTriangle, out localHitNormal);
+            return TryResolveTriangleNormal(geometry, closestTriangle, out localHitNormal);
         }
 
         return TryRaycastLinear(
-            geometry.Positions,
-            geometry.Indices,
-            rayOrigin,
-            rayDirection,
+            geometry,
+            ray,
             maxDistance,
             out closestDistance,
             out localHitNormal);
     }
 
     private static bool TryRaycastLinear(
-        Vector3[] positions,
-        int[] indices,
-        Vector3 rayOrigin,
-        Vector3 rayDirection,
+        SceneSelectionGeometry geometry,
+        ScenePointerRay ray,
         float maxDistance,
         out float closestDistance,
         out Vector3 localHitNormal)
     {
         closestDistance = maxDistance;
         localHitNormal = Vector3.Zero;
-        for (int triangleIndex = 0; triangleIndex < indices.Length / 3; triangleIndex++)
+        for (int triangleIndex = 0; triangleIndex < geometry.Indices.Length / 3; triangleIndex++)
         {
             if (!TryRaycastTriangleDistance(
-                    positions,
-                    indices,
+                    geometry,
                     triangleIndex,
-                    rayOrigin,
-                    rayDirection,
+                    ray,
                     out float distance)
                 || distance >= closestDistance
-                || !TryResolveTriangleNormal(positions, indices, triangleIndex, out Vector3 normal))
+                || !TryResolveTriangleNormal(geometry, triangleIndex, out Vector3 normal))
             {
                 continue;
             }
@@ -204,27 +155,20 @@ internal static class SceneGeometryRaycaster
     }
 
     internal static bool TryRaycastTriangleDistance(
-        Vector3[] positions,
-        int[] indices,
+        SceneSelectionGeometry geometry,
         int triangleIndex,
-        Vector3 rayOrigin,
-        Vector3 rayDirection,
+        ScenePointerRay ray,
         out float distance)
     {
         distance = 0f;
-        int indexOffset = triangleIndex * 3;
-        if (indexOffset < 0
-            || indexOffset + 2 >= indices.Length
-            || !TryGetPosition(positions, indices[indexOffset], out Vector3 v0)
-            || !TryGetPosition(positions, indices[indexOffset + 1], out Vector3 v1)
-            || !TryGetPosition(positions, indices[indexOffset + 2], out Vector3 v2))
+        if (!geometry.TryGetTriangle(triangleIndex, out var triangle))
         {
             return false;
         }
 
-        Vector3 edge1 = v1 - v0;
-        Vector3 edge2 = v2 - v0;
-        Vector3 p = Vector3.Cross(rayDirection, edge2);
+        Vector3 edge1 = triangle.B - triangle.A;
+        Vector3 edge2 = triangle.C - triangle.A;
+        Vector3 p = Vector3.Cross(ray.Direction, edge2);
         float determinant = Vector3.Dot(edge1, p);
         if (MathF.Abs(determinant) < TriangleEpsilon)
         {
@@ -232,7 +176,7 @@ internal static class SceneGeometryRaycaster
         }
 
         float inverseDeterminant = 1f / determinant;
-        Vector3 originToVertex = rayOrigin - v0;
+        Vector3 originToVertex = ray.Origin - triangle.A;
         float u = Vector3.Dot(originToVertex, p) * inverseDeterminant;
         if (u is < 0f or > 1f)
         {
@@ -240,7 +184,7 @@ internal static class SceneGeometryRaycaster
         }
 
         Vector3 q = Vector3.Cross(originToVertex, edge1);
-        float v = Vector3.Dot(rayDirection, q) * inverseDeterminant;
+        float v = Vector3.Dot(ray.Direction, q) * inverseDeterminant;
         if (v < 0f || u + v > 1f)
         {
             return false;
@@ -252,22 +196,16 @@ internal static class SceneGeometryRaycaster
     }
 
     private static bool TryResolveTriangleNormal(
-        Vector3[] positions,
-        int[] indices,
+        SceneSelectionGeometry geometry,
         int triangleIndex,
         out Vector3 normal)
     {
-        int indexOffset = triangleIndex * 3;
-        if (indexOffset < 0
-            || indexOffset + 2 >= indices.Length
-            || !TryGetPosition(positions, indices[indexOffset], out Vector3 v0)
-            || !TryGetPosition(positions, indices[indexOffset + 1], out Vector3 v1)
-            || !TryGetPosition(positions, indices[indexOffset + 2], out Vector3 v2))
+        if (!geometry.TryGetTriangle(triangleIndex, out var triangle))
         {
             normal = Vector3.Zero;
             return false;
         }
 
-        return NumericsUtility.TryNormalize(Vector3.Cross(v1 - v0, v2 - v0), out normal);
+        return NumericsUtility.TryNormalize(Vector3.Cross(triangle.B - triangle.A, triangle.C - triangle.A), out normal);
     }
 }

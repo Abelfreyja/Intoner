@@ -127,7 +127,7 @@ internal static class ObjectSnapshotUtility
         return true;
     }
 
-    private static string GetDeclaredRootResourcePath(ObjectData model)
+    public static string GetDeclaredRootResourcePath(ObjectData model)
         => model switch
         {
             BgObjectModel bgObjectModel => bgObjectModel.ModelPath,
@@ -165,6 +165,7 @@ internal static class ObjectSnapshotUtility
         {
             SharedGroupPath = patch.SharedGroupPath ?? model.SharedGroupPath,
             CameraCollision = patch.CameraCollision ?? model.CameraCollision,
+            SoundEnabled = patch.SoundEnabled ?? model.SoundEnabled,
             Color = patch.Color is not null
                 ? ApplyFurnitureColorPatch(model.Color, patch.Color)
                 : model.Color,
@@ -187,6 +188,7 @@ internal static class ObjectSnapshotUtility
             Color = patch.Color ?? model.Color,
             Speed = patch.Speed.HasValue ? VfxModel.ClampSpeed(patch.Speed.Value) : model.Speed,
             Paused = patch.Paused ?? model.Paused,
+            SoundEnabled = patch.SoundEnabled ?? model.SoundEnabled,
             FadeInSeconds = patch.FadeInSeconds.HasValue
                 ? VfxModel.ClampFadeInSeconds(patch.FadeInSeconds.Value)
                 : model.FadeInSeconds,

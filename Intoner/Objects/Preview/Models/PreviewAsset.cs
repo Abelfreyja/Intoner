@@ -52,6 +52,11 @@ internal sealed class PreviewAsset
             return "empty";
         }
 
+        if (models.Count == 1 && models[0].Transform == Matrix4x4.Identity && models[0].MaterialVariant is null or 0)
+        {
+            return ObjectResolvedPath.FromGamePath(models[0].ModelPath).Path;
+        }
+
         StringBuilder builder = new();
         for (var i = 0; i < models.Count; i++)
         {
@@ -62,6 +67,12 @@ internal sealed class PreviewAsset
             }
 
             builder.Append(ObjectResolvedPath.FromGamePath(model.ModelPath).Path);
+            if (model.MaterialVariant is > 0)
+            {
+                builder.Append("#material=");
+                builder.Append(model.MaterialVariant.Value.ToString(CultureInfo.InvariantCulture));
+            }
+
             builder.Append('@');
             AppendMatrixKey(builder, model.Transform);
         }
@@ -98,7 +109,9 @@ internal sealed class PreviewAsset
 
     private static void AppendFloatKey(StringBuilder builder, float value)
     {
-        builder.Append(BitConverter.SingleToInt32Bits(value).ToString("X8", CultureInfo.InvariantCulture));
+        Span<char> bits = stackalloc char[8];
+        BitConverter.SingleToInt32Bits(value).TryFormat(bits, out int written, "X8", CultureInfo.InvariantCulture);
+        builder.Append(bits[..written]);
         builder.Append(',');
     }
 

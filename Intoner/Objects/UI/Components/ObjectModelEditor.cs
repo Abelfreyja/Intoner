@@ -105,68 +105,11 @@ internal static class ObjectModelEditor
         return definition.SourcePath.Length > 0 ? $"{kind} | {Path.GetFileName(definition.SourcePath)}" : kind;
     }
 
-    public static void DrawFurnitureRows(
-        string id,
-        ref FurnitureModel model,
-        IReadOnlyList<FurnitureStainOption> stains,
-        FurnitureStainSelector stainSelector,
-        Action<string, string, FurnitureModel, bool>? onChanged = null)
-    {
-        float transparency = model.Transparency;
-        if (EditorPropertyTable.SliderFloat($"FurnitureTransparency_{id}", "Transparency", ref transparency, 0f, 1f, "%.3f"))
-        {
-            model = model with { Transparency = transparency };
-            onChanged?.Invoke("FurnitureTransparency", "Change Furniture Transparency", model, false);
-        }
-
-        ObjectOutlineColor outlineColor = model.OutlineColor;
-        if (EditorPropertyTable.EnumRow($"FurnitureOutlineColor_{id}", "Outline Color", ref outlineColor))
-        {
-            model = model with { OutlineColor = outlineColor };
-            onChanged?.Invoke("FurnitureOutlineColor", "Change Furniture Outline Color", model, true);
-        }
-
-        bool useCustomColor = model.Color.UseCustomColor;
-        if (EditorPropertyTable.Checkbox($"{id}_furnitureCustomColor", "Custom Color", ref useCustomColor))
-        {
-            model = model with { Color = model.Color with { UseCustomColor = useCustomColor } };
-            onChanged?.Invoke("FurnitureCustomColor", "Toggle Furniture Custom Color", model, true);
-        }
-
-        if (useCustomColor)
-        {
-            Vector4 customColor = model.Color.CustomColor;
-            Vector3 rgbColor = new(customColor.X, customColor.Y, customColor.Z);
-            EditorPropertyTable.NextRow("Color");
-            ImGui.SetNextItemWidth(-1f);
-            if (ImGui.ColorEdit3($"##Color_{id}", ref rgbColor))
-            {
-                model = model with { Color = model.Color with { CustomColor = new Vector4(rgbColor, 1f) } };
-                onChanged?.Invoke("FurnitureColor", "Change Furniture Color", model, false);
-            }
-        }
-        else
-        {
-            byte stainId = model.Color.StainId;
-            if (stainSelector.Draw("Color", id, stains, ref stainId))
-            {
-                model = model with { Color = model.Color with { StainId = stainId } };
-                onChanged?.Invoke("FurnitureStain", "Change Furniture Stain", model, true);
-            }
-        }
-
-        bool cameraCollision = model.CameraCollision;
-        if (EditorPropertyTable.Checkbox($"FurnitureCameraCollision_{id}", "Camera Collision", ref cameraCollision))
-        {
-            model = model with { CameraCollision = cameraCollision };
-            onChanged?.Invoke("FurnitureCameraCollision", "Change Camera Collision", model, true);
-        }
-    }
-
     public static void DrawVfxRows(
         string id,
         ref VfxModel model,
         bool canUseReplayLoop,
+        bool hasSound,
         Action<string, string, VfxModel, bool>? onChanged = null)
     {
         string vfxPath = model.VfxPath;
@@ -184,6 +127,17 @@ internal static class ObjectModelEditor
         {
             model = model with { Color = color };
             onChanged?.Invoke("VfxColor", "Change VFX Tint", model, false);
+        }
+
+        if (hasSound)
+        {
+            bool soundEnabled = model.SoundEnabled;
+
+            if (EditorPropertyTable.Checkbox($"VfxSound_{id}", "Sound", ref soundEnabled))
+            {
+                model = model with { SoundEnabled = soundEnabled };
+                onChanged?.Invoke("VfxSound", "Change VFX Sound", model, true);
+            }
         }
 
         bool paused = model.Paused;

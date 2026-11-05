@@ -45,6 +45,19 @@ internal static class SceneViewportProjection
         return true;
     }
 
+    public static bool TryGetEditorCameraPosition(out Vector3 position)
+    {
+        position = default;
+        if (!TryGetEditorCameraProjection(out _, out Matrix4x4 view, out _)
+            || !Matrix4x4.Invert(view, out Matrix4x4 inverseView) || !NumericsUtility.IsFinite(inverseView))
+        {
+            return false;
+        }
+
+        position = inverseView.Translation;
+        return true;
+    }
+
     public static bool TryGetEditorCameraProjection(out Matrix4x4 viewProjection, out Matrix4x4 viewMatrix, out float nearPlane)
     {
         if (TryGetMainRenderViewProjection(out viewProjection, out viewMatrix, out _, out nearPlane, out _))

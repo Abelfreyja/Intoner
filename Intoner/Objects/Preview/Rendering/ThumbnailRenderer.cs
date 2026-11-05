@@ -61,18 +61,19 @@ internal static class ThumbnailRenderer
                         cancellationToken);
                 }
 
-                var transparentTriangles = new List<ThumbnailTriangle>(geometry.TriangleCount);
+                int transparentCount = 0;
                 for (var triangleIndex = 0; triangleIndex < geometry.TriangleCount; triangleIndex++)
                 {
                     var triangle = projectedTriangles[triangleIndex];
                     if (triangle.IsVisible && triangle.EnableTransparency)
                     {
-                        transparentTriangles.Add(triangle);
+                        projectedTriangles[transparentCount++] = triangle;
                     }
                 }
 
+                Span<ThumbnailTriangle> transparentTriangles = projectedTriangles.AsSpan(0, transparentCount);
                 transparentTriangles.Sort(static (left, right) => right.SortDepth.CompareTo(left.SortDepth));
-                for (var i = 0; i < transparentTriangles.Count; i++)
+                for (var i = 0; i < transparentTriangles.Length; i++)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     ThumbnailRasterizer.Rasterize(

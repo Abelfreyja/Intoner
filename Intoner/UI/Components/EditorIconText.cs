@@ -2,6 +2,7 @@ using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
+using Intoner.UI.Performance;
 using System.Numerics;
 using System.Runtime.InteropServices;
 
@@ -23,6 +24,35 @@ internal readonly record struct EditorIconTextOptions
 
 internal static class EditorIconText
 {
+    public static void DrawComboPreview(ImDrawListPtr drawList, Vector2 min, Vector2 max, string text, ImTextureID? itemIcon)
+    {
+        float height = max.Y - min.Y;
+        float padding = ImGui.GetStyle().FramePadding.X;
+        float contentX = min.X + padding;
+        float contentRight = max.X - height - padding;
+
+        if (contentRight <= contentX)
+        {
+            return;
+        }
+
+        if (itemIcon is { } texture)
+        {
+            float edge = MathF.Min(EditorIcon.ItemImageSize, height - 4f * ImGuiHelpers.GlobalScale);
+
+            if (edge <= contentRight - contentX)
+            {
+                Vector2 imageMin = new(contentX, min.Y + (height - edge) * 0.5f);
+                EditorIcon.DrawImage(drawList, texture, imageMin, imageMin + new Vector2(edge));
+                contentX += edge + 6f * ImGuiHelpers.GlobalScale;
+            }
+        }
+
+        float textWidth = MathF.Max(0f, contentRight - contentX);
+        drawList.AddText(new Vector2(contentX, min.Y + (height - ImGui.GetTextLineHeight()) * 0.5f),
+            ImGui.GetColorU32(ImGuiCol.Text), UiText.ClipToWidth(text, textWidth));
+    }
+
     public static float MeasureWidth(
         FontAwesomeIcon? icon,
         string title,

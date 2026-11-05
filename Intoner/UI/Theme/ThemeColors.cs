@@ -18,6 +18,7 @@ internal static class ThemeColors
     public static Vector4 TextDefault { get; } = FromBytes(255, 255, 255);
     public static Vector4 TextDisabledDefault { get; } = FromBytes(128, 128, 128);
     public static Vector4 AccentBlue { get; } = FromBytes(166, 194, 255);
+    public static Vector4 AccentCyan { get; } = FromBytes(102, 217, 232);
     public static Vector4 AccentYellow { get; } = FromBytes(255, 233, 122);
     public static Vector4 AccentGreen { get; } = FromBytes(124, 214, 138);
     public static Vector4 AccentOrange { get; } = FromBytes(255, 179, 102);

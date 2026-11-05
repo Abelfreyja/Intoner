@@ -1,3 +1,4 @@
+using FFXIVClientStructs.FFXIV.Client.LayoutEngine;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine.Group;
 
 namespace Intoner.Objects.Interop
@@ -6,6 +7,7 @@ namespace Intoner.Objects.Interop
     internal sealed unsafe class FurnitureNativeInstance : ObjectCollisionOwner
     {
         private nint _address;
+        internal ObjectSoundState Sound { get; } = new();
 
         internal FurnitureNativeInstance(CameraCollisionService collision, bool visible, bool cameraCollision)
             : base(collision, true, visible, cameraCollision)
@@ -19,6 +21,17 @@ namespace Intoner.Objects.Interop
 
         public void SetParticipation(bool visible, bool cameraCollision)
             => Collision.SetParticipation(this, visible, cameraCollision);
+
+        public void SetSoundEnabled(bool enabled)
+        {
+            if (Sound.Enabled == enabled)
+            {
+                return;
+            }
+
+            Sound.Enabled = enabled;
+            ObjectLayoutInterop.ApplyInstanceSound((ILayoutInstance*)Instance, enabled);
+        }
 
         protected override void Dispose(bool disposing)
         {

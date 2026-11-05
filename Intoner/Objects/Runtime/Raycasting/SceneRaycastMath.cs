@@ -7,6 +7,75 @@ internal static class SceneRaycastMath
 {
     public const float MinimumHitDistance = 0.001f;
 
+    public static bool MayIntersectSphere(ScenePointerRay ray, Vector3 center, float radius, float maxDistance = float.PositiveInfinity)
+    {
+        if (radius <= 0f)
+        {
+            return true;
+        }
+
+        Vector3 toCenter = center - ray.Origin;
+        float projection = Vector3.Dot(toCenter, ray.Direction);
+        float closestDistanceSquared = Vector3.DistanceSquared(toCenter, ray.Direction * projection);
+        float radiusSquared = radius * radius;
+        if (closestDistanceSquared > radiusSquared)
+        {
+            return false;
+        }
+
+        float halfChord = MathF.Sqrt(MathF.Max(0f, radiusSquared - closestDistanceSquared));
+        return projection + halfChord > MinimumHitDistance && projection - halfChord < maxDistance;
+    }
+
+    public static bool TryIntersectBounds(
+        ScenePointerRay ray,
+        Vector3 boundsMin,
+        Vector3 boundsMax,
+        float maxDistance,
+        out float nearDistance)
+    {
+        float near = 0f;
+        float far = maxDistance;
+
+        if (!TryIntersectAxis(ray.Origin.X, ray.Direction.X, boundsMin.X, boundsMax.X, ref near, ref far)
+            || !TryIntersectAxis(ray.Origin.Y, ray.Direction.Y, boundsMin.Y, boundsMax.Y, ref near, ref far)
+            || !TryIntersectAxis(ray.Origin.Z, ray.Direction.Z, boundsMin.Z, boundsMax.Z, ref near, ref far))
+        {
+            nearDistance = 0f;
+            return false;
+        }
+
+        nearDistance = near;
+        return far >= near && far > SceneRaycastMath.MinimumHitDistance;
+    }
+
+    private static bool TryIntersectAxis(
+        float origin,
+        float direction,
+        float min,
+        float max,
+        ref float near,
+        ref float far)
+    {
+        if (MathF.Abs(direction) <= float.Epsilon)
+        {
+            return origin >= min && origin <= max;
+        }
+
+        float inverseDirection = 1f / direction;
+        float first = (min - origin) * inverseDirection;
+        float second = (max - origin) * inverseDirection;
+
+        if (first > second)
+        {
+            (first, second) = (second, first);
+        }
+
+        near = MathF.Max(near, first);
+        far = MathF.Min(far, second);
+        return far >= near;
+    }
+
     public static Vector3 ResolveSurfaceNormal(
         Vector3 triangleV1,
         Vector3 triangleV2,

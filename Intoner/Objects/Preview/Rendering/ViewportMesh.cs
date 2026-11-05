@@ -24,8 +24,15 @@ internal sealed class ViewportMesh : IDisposable
         TransparentRanges  = transparentRanges;
         _ownedTextures     = ownedTextures;
         _lifetime          = new GpuLeasedResource<ViewportMesh>(this, static mesh => mesh.DisposeResources());
+        EstimatedByteCount = vertexBuffer.Description.SizeInBytes;
+        foreach (GpuTextureView texture in ownedTextures)
+        {
+            Texture2DDescription description = texture.Texture.Description;
+            EstimatedByteCount += (long)description.Width * description.Height * 4;
+        }
     }
 
+    public long EstimatedByteCount { get; }
     public Buffer VertexBuffer { get; }
     public IReadOnlyList<DrawRange> OpaqueRanges { get; }
     public IReadOnlyList<DrawRange> TransparentRanges { get; }

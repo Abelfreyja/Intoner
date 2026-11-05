@@ -103,9 +103,16 @@ namespace Intoner.Objects.UI.Components
                             TItem item = items[_filteredIndices[index]];
                             string itemId = _getId(item);
 
-                            if (drawItem(item, string.Equals(itemId, selectedId, _idComparison), accent, rowHeight))
+                            bool selected = string.Equals(itemId, selectedId, _idComparison);
+
+                            if (drawItem(item, selected, accent, rowHeight))
                             {
                                 selectedId = itemId;
+                            }
+
+                            if (revealSelected && selected)
+                            {
+                                ImGui.SetKeyboardFocusHere(-1);
                             }
 
                             rows.FinishItem(index);

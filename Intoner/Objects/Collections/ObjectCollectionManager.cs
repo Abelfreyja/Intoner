@@ -723,7 +723,7 @@ internal sealed class ObjectCollectionManager : IObjectCollectionManager
         return string.Join(
             "\n",
             snapshots
-                .Select(static snapshot => $"{snapshot.Id:N}|{snapshot.Kind}|{ObjectResourceRoots.FromModel(snapshot.Model)}")
+                .Select(static snapshot => $"{snapshot.Id:N}|{snapshot.Kind}|{ObjectResourceRoots.FromModel(snapshot.Model)}|{(snapshot.Model as FurnitureModel)?.MaterialItem?.ItemId ?? 0}")
                 .OrderBy(static signature => signature, StringComparer.OrdinalIgnoreCase));
     }
 
@@ -827,12 +827,10 @@ internal sealed class ObjectCollectionManager : IObjectCollectionManager
         }
         catch (Exception ex)
         {
-            ObjectCollectionResolveResult failure = new()
-            {
-                ResolveState = ObjectCollectionResolveState.ResolveFailed,
-                StatusText = $"object collection resolve failed: {ex.Message}",
-            };
-            if (TryApplyResolveResult(collectionId, usage, resolveCancellation, materializationStamp, failure, forceRuntimeRefresh: true))
+            ObjectCollectionResolveResult failure = ObjectCollectionResolveResult.Failed(
+                $"object collection resolve failed: {ex.Message}");
+
+            if (TryApplyResolveResult(collectionId, usage, resolveCancellation, materializationStamp, failure))
             {
                 DiagnosticLog.Write(() => _logger.LogWarning(ex, "object collection {CollectionId} resolve task failed", collectionId));
                 RaiseCollectionsChanged();
@@ -849,8 +847,7 @@ internal sealed class ObjectCollectionManager : IObjectCollectionManager
         CollectionUsage usage,
         CancellationTokenSource resolveCancellation,
         CollectionMaterializationStamp materializationStamp,
-        ObjectCollectionResolveResult resolveResult,
-        bool forceRuntimeRefresh = false)
+        ObjectCollectionResolveResult resolveResult)
     {
         lock (_stateLock)
         {
@@ -869,7 +866,7 @@ internal sealed class ObjectCollectionManager : IObjectCollectionManager
 
             state.CurrentMaterialization = materializationStamp;
             state.PendingMaterialization = CollectionMaterializationStamp.Empty;
-            forceRuntimeRefresh |= state.ForceNextRuntimeRefresh;
+            bool forceRuntimeRefresh = state.ForceNextRuntimeRefresh;
             state.ForceNextRuntimeRefresh = false;
             state.ResolveState = resolveResult.ResolveState;
             state.StatusText = resolveResult.StatusText;

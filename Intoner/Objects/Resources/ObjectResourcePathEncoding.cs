@@ -260,7 +260,7 @@ internal static class ObjectResourcePathEncoding
         return false;
     }
 
-    public static unsafe bool TryReadHandlePath(ResourceHandle* handle, out string resourcePath)
+    public static unsafe bool TryReadHandlePath(ResourceHandle* handle, out string resourcePath, string? previousPath = null)
     {
         resourcePath = string.Empty;
         if (handle == null || !PtrGuard.TryReadUnaligned((nint)handle, out ResourceHandle snapshot))
@@ -277,22 +277,28 @@ internal static class ObjectResourcePathEncoding
 
         int byteCount = (int)length;
 
+        Span<byte> pathBytes = byteCount <= StackByteLimit ? stackalloc byte[byteCount] : new byte[byteCount];
         if (fileName.Capacity < MinimumExternalStringCapacity)
         {
-            return TryDecodeUtf8(new ReadOnlySpan<byte>(fileName.Buffer, byteCount), out resourcePath);
+            new ReadOnlySpan<byte>(fileName.Buffer, byteCount).CopyTo(pathBytes);
         }
-
-        byte* path = fileName.BufferPtr;
-        if (path == null)
+        else if (fileName.BufferPtr == null || !PtrGuard.TryReadUnalignedBytes((nint)fileName.BufferPtr, pathBytes))
         {
             return false;
         }
 
-        Span<byte> pathBytes = byteCount <= StackByteLimit
-            ? stackalloc byte[byteCount]
-            : new byte[byteCount];
-        return PtrGuard.TryReadUnalignedBytes((nint)path, pathBytes)
-            && TryDecodeUtf8(pathBytes, out resourcePath);
+        if (previousPath is not null && StrictUtf8.GetByteCount(previousPath) == byteCount)
+        {
+            Span<byte> previousBytes = byteCount <= StackByteLimit ? stackalloc byte[byteCount] : new byte[byteCount];
+            StrictUtf8.GetBytes(previousPath, previousBytes);
+            if (pathBytes.SequenceEqual(previousBytes))
+            {
+                resourcePath = previousPath;
+                return true;
+            }
+        }
+
+        return TryDecodeUtf8(pathBytes, out resourcePath);
     }
 
     public static unsafe bool TryReadActualScopedHandlePath(ResourceHandle* handle, out string actualPath)

@@ -15,8 +15,11 @@ internal sealed record FurnitureColorModel
 
 internal sealed record FurnitureModel : ObjectData
 {
+    internal override ObjectKind Kind => ObjectKind.Furniture;
+
     public string SharedGroupPath { get; init; } = string.Empty;
     public bool CameraCollision { get; init; } = true;
+    public bool SoundEnabled { get; init; } = true;
     public FurnitureColorModel Color { get; init; } = new();
     public float Transparency { get; init; }
     public ObjectOutlineColor OutlineColor { get; init; }
@@ -27,15 +30,19 @@ internal sealed record FurnitureModel : ObjectData
 
     public bool NeedsVisualState(FurnitureModel? previousModel)
     {
-        if (Color.HasManualColor || !NumericsUtility.IsNearlyZero(Transparency) || OutlineColor != ObjectOutlineColor.None)
+        if (previousModel is null)
         {
-            return true;
+            return MaterialItem is not null || Color.HasManualColor
+                || !NumericsUtility.IsNearlyZero(Transparency) || OutlineColor != ObjectOutlineColor.None;
         }
 
-        return previousModel is not null
-            && (previousModel.Color.HasManualColor
-                || !NumericsUtility.IsNearlyEqual(previousModel.Transparency, Transparency)
-                || previousModel.OutlineColor != OutlineColor);
+        return MaterialItem?.ItemId != previousModel.MaterialItem?.ItemId
+            || Color.UseCustomColor != previousModel.Color.UseCustomColor
+            || (Color.UseCustomColor
+                ? !NumericsUtility.IsNearlyEqual(Color.CustomColor, previousModel.Color.CustomColor)
+                : Color.StainId != previousModel.Color.StainId)
+            || !NumericsUtility.IsNearlyEqual(previousModel.Transparency, Transparency)
+            || previousModel.OutlineColor != OutlineColor;
     }
 
     public bool RequiresRecreateToClearColor(FurnitureModel previousModel)

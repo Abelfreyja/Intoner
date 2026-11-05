@@ -1,5 +1,6 @@
 using Intoner.Objects.Utils;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 namespace Intoner.Scene;
@@ -62,6 +63,7 @@ internal sealed class SceneGeometryAcceleration
 
     private readonly int[] _triangleOrder;
     private Node[] _nodes;
+    internal long EstimatedBytes => (long)_triangleOrder.Length * sizeof(int) + (long)_nodes.Length * Unsafe.SizeOf<Node>();
 
     private SceneGeometryAcceleration(TriangleBuildData[] buildData, int[] triangleOrder, CancellationToken cancellationToken)
     {
@@ -124,17 +126,15 @@ internal sealed class SceneGeometryAcceleration
 
     public bool TryRaycast(
         SceneSelectionGeometry geometry,
-        Vector3 rayOrigin,
-        Vector3 rayDirection,
+        ScenePointerRay ray,
         float maxDistance,
         out int closestTriangle,
         out float closestDistance)
     {
         closestTriangle = -1;
         closestDistance = maxDistance;
-        if (!TryIntersectBounds(
-                rayOrigin,
-                rayDirection,
+        if (!SceneRaycastMath.TryIntersectBounds(
+                ray,
                 _nodes[0].BoundsMin,
                 _nodes[0].BoundsMax,
                 maxDistance,
@@ -162,11 +162,9 @@ internal sealed class SceneGeometryAcceleration
                 {
                     int triangleIndex = _triangleOrder[index];
                     if (!SceneGeometryRaycaster.TryRaycastTriangleDistance(
-                            geometry.Positions,
-                            geometry.Indices,
+                            geometry,
                             triangleIndex,
-                            rayOrigin,
-                            rayDirection,
+                            ray,
                             out float distance)
                         || distance >= maxDistance
                         || distance > closestDistance
@@ -186,16 +184,14 @@ internal sealed class SceneGeometryAcceleration
             int rightIndex = leftIndex + 1;
             ref readonly Node left = ref _nodes[leftIndex];
             ref readonly Node right = ref _nodes[rightIndex];
-            bool intersectsLeft = TryIntersectBounds(
-                rayOrigin,
-                rayDirection,
+            bool intersectsLeft = SceneRaycastMath.TryIntersectBounds(
+                ray,
                 left.BoundsMin,
                 left.BoundsMax,
                 closestDistance,
                 out float leftNearDistance);
-            bool intersectsRight = TryIntersectBounds(
-                rayOrigin,
-                rayDirection,
+            bool intersectsRight = SceneRaycastMath.TryIntersectBounds(
+                ray,
                 right.BoundsMin,
                 right.BoundsMax,
                 closestDistance,
@@ -243,20 +239,12 @@ internal sealed class SceneGeometryAcceleration
                 cancellationToken.ThrowIfCancellationRequested();
             }
 
-            int indexOffset = triangleIndex * 3;
-            int index0 = geometry.Indices[indexOffset];
-            int index1 = geometry.Indices[indexOffset + 1];
-            int index2 = geometry.Indices[indexOffset + 2];
-            if ((uint)index0 >= (uint)geometry.Positions.Length
-                || (uint)index1 >= (uint)geometry.Positions.Length
-                || (uint)index2 >= (uint)geometry.Positions.Length)
+            if (!geometry.TryGetTriangle(triangleIndex, out var triangle))
             {
                 continue;
             }
 
-            Vector3 v0 = geometry.Positions[index0];
-            Vector3 v1 = geometry.Positions[index1];
-            Vector3 v2 = geometry.Positions[index2];
+            (Vector3 v0, Vector3 v1, Vector3 v2) = triangle;
             Vector3 normal = Vector3.Cross(v1 - v0, v2 - v0);
             if (!NumericsUtility.IsFinite(v0)
                 || !NumericsUtility.IsFinite(v1)
@@ -353,54 +341,6 @@ internal sealed class SceneGeometryAcceleration
         int maximum = checked((_triangleOrder.Length * 2) - 1);
         int capacity = Math.Min(maximum, Math.Max(required, checked(_nodes.Length * 2)));
         Array.Resize(ref _nodes, capacity);
-    }
-
-    private static bool TryIntersectBounds(
-        Vector3 rayOrigin,
-        Vector3 rayDirection,
-        Vector3 boundsMin,
-        Vector3 boundsMax,
-        float maxDistance,
-        out float nearDistance)
-    {
-        float near = 0f;
-        float far = maxDistance;
-        if (!TryIntersectAxis(rayOrigin.X, rayDirection.X, boundsMin.X, boundsMax.X, ref near, ref far)
-            || !TryIntersectAxis(rayOrigin.Y, rayDirection.Y, boundsMin.Y, boundsMax.Y, ref near, ref far)
-            || !TryIntersectAxis(rayOrigin.Z, rayDirection.Z, boundsMin.Z, boundsMax.Z, ref near, ref far))
-        {
-            nearDistance = 0f;
-            return false;
-        }
-
-        nearDistance = near;
-        return far >= near && far > SceneRaycastMath.MinimumHitDistance;
-    }
-
-    private static bool TryIntersectAxis(
-        float origin,
-        float direction,
-        float min,
-        float max,
-        ref float near,
-        ref float far)
-    {
-        if (MathF.Abs(direction) <= float.Epsilon)
-        {
-            return origin >= min && origin <= max;
-        }
-
-        float inverseDirection = 1f / direction;
-        float first = (min - origin) * inverseDirection;
-        float second = (max - origin) * inverseDirection;
-        if (first > second)
-        {
-            (first, second) = (second, first);
-        }
-
-        near = MathF.Max(near, first);
-        far = MathF.Min(far, second);
-        return far >= near;
     }
 
     private static int LargestAxis(Vector3 extent)

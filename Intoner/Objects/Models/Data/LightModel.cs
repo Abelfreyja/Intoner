@@ -43,6 +43,8 @@ internal sealed record LightShadow
 
 internal sealed record LightModel : ObjectData
 {
+    internal override ObjectKind Kind => ObjectKind.Light;
+
     public Vector3 Color { get; init; } = new(20f, 20f, 20f);
     public LightType LightType { get; init; } = LightType.SpotLight;
     public LightFalloffType FalloffType { get; init; } = LightFalloffType.Quadratic;

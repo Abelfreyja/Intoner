@@ -11,7 +11,6 @@ namespace Intoner.Objects.Interop
     {
         private readonly ISigScanner _scanner;
 
-        public readonly nint LayoutInstanceInit;
         public readonly nint ColliderFinalizer;
         public readonly nint SceneManagerUpdateScenes;
         public readonly nint BGCollisionModuleShutdown;
@@ -28,10 +27,6 @@ namespace Intoner.Objects.Interop
         public readonly delegate* unmanaged<ILayoutInstance*, Vector3*, Vector3*, Vector3*, Transform*, AnalyticShapeData*, byte> GetAnalyticColliderTransform;
         public readonly delegate* unmanaged<ColliderMesh*, uint, uint, void> SetCylinderMeshMaterial;
         public readonly delegate* unmanaged<ColliderMesh*, Vector3*, void> SetCylinderMeshBounds;
-        public nint[] PrimaryCreators { get; } = [];
-        public nint SecondaryCreator { get; }
-        public nint[] Deinitializers { get; } = [];
-        public nint[] ActivitySetters { get; } = [];
         public bool IsAvailable { get; }
         public bool CanCreateBg { get; }
 
@@ -40,7 +35,6 @@ namespace Intoner.Objects.Interop
         {
             _scanner = scanner;
             ColliderFinalizer = Resolve(IntonerSignatures.ColliderFinalizer);
-            LayoutInstanceInit = ResolveJmpCall(IntonerSignatures.ILayoutInstanceInit);
             SceneManagerUpdateScenes = Resolve(IntonerSignatures.SceneManagerUpdateScenes);
             BGCollisionModuleShutdown = Resolve(IntonerSignatures.BGCollisionModuleShutdown);
             BGCollisionModuleDtor = ResolveJmpCall(IntonerSignatures.BGCollisionModuleDtor);
@@ -58,46 +52,19 @@ namespace Intoner.Objects.Interop
             SetCylinderMeshBounds = (delegate* unmanaged<ColliderMesh*, Vector3*, void>)ResolveJmpCall(IntonerSignatures.SetCylinderMeshBounds);
             CanCreateBg = TransformFromFile != null && TransformGetComponents != null && GetAnalyticColliderTransform != null
                 && SetCylinderMeshMaterial != null && SetCylinderMeshBounds != null;
-            ILayoutInstance.ILayoutInstanceVirtualTable* bgParts = ResolveVirtualTable(IntonerSignatures.BgPartsLayoutInstanceVirtualTable);
-            ILayoutInstance.ILayoutInstanceVirtualTable* vfx = ResolveVirtualTable(IntonerSignatures.VfxLayoutInstanceVirtualTable);
-            ILayoutInstance.ILayoutInstanceVirtualTable* envLocation = ResolveVirtualTable(IntonerSignatures.EnvLocationLayoutInstanceVirtualTable);
-            ILayoutInstance.ILayoutInstanceVirtualTable* sharedGroup = ResolveVirtualTable(IntonerSignatures.SharedGroupLayoutInstanceVirtualTable);
-            ILayoutInstance.ILayoutInstanceVirtualTable* triggerBox = ResolveVirtualTable(IntonerSignatures.TriggerBoxLayoutInstanceVirtualTable);
-            ILayoutInstance.ILayoutInstanceVirtualTable* collisionBox = ResolveVirtualTable(IntonerSignatures.CollisionBoxLayoutInstanceVirtualTable);
-            ILayoutInstance.ILayoutInstanceVirtualTable* housingObject = ResolveVirtualTable(IntonerSignatures.HousingObjectLayoutInstanceVirtualTable);
-            ILayoutInstance.ILayoutInstanceVirtualTable* waterRange = ResolveVirtualTable(IntonerSignatures.WaterRangeLayoutInstanceVirtualTable);
-            ILayoutInstance.ILayoutInstanceVirtualTable* mapRange = ResolveVirtualTable(IntonerSignatures.MapRangeLayoutInstanceVirtualTable);
             ReadOnlySpan<nint> required =
             [
-                LayoutInstanceInit, ColliderFinalizer, SceneManagerUpdateScenes, BGCollisionModuleShutdown, BGCollisionModuleDtor, CameraSweepSphere, LayoutWorldShutdown, LayoutWorldDeinitialize,
+                ColliderFinalizer, SceneManagerUpdateScenes, BGCollisionModuleShutdown, BGCollisionModuleDtor,
+                CameraSweepSphere, LayoutWorldShutdown, LayoutWorldDeinitialize,
                 (nint)SceneManagerCtor, (nint)SceneManagerInit, (nint)Vector3Normalize, (nint)RaycastHitGetNormal,
-                (nint)bgParts, (nint)sharedGroup, (nint)triggerBox, (nint)collisionBox,
-                (nint)housingObject, (nint)waterRange, (nint)mapRange, (nint)vfx, (nint)envLocation,
             ];
             IsAvailable = !required.Contains(0);
-            if (IsAvailable)
-            {
-                PrimaryCreators = new[] { (nint)triggerBox->CreatePrimary, (nint)collisionBox->CreatePrimary, (nint)housingObject->CreatePrimary }.Distinct().ToArray();
-                SecondaryCreator = (nint)bgParts->CreateSecondary;
-                Deinitializers = new[]
-                {
-                    (nint)bgParts->Deinit, (nint)sharedGroup->Deinit, (nint)triggerBox->Deinit,
-                    (nint)collisionBox->Deinit, (nint)housingObject->Deinit, (nint)waterRange->Deinit,
-                    (nint)mapRange->Deinit, (nint)vfx->Deinit, (nint)envLocation->Deinit,
-                }.Distinct().ToArray();
-                ActivitySetters = new[] { (nint)bgParts->SetActive, (nint)vfx->SetActive, (nint)envLocation->SetActive }.Distinct().ToArray();
-                IsAvailable = SecondaryCreator != 0 && !PrimaryCreators.Contains(0) && !Deinitializers.Contains(0) && !ActivitySetters.Contains(0);
-            }
 
             nint Resolve(NativeDirectSignatureTarget target)
                 => NativeAddressResolver.TryScanSingleTextMatch(logger, scanner, target.Signature, target.Label);
 
             nint ResolveJmpCall(NativeRelativeBranchTarget target)
                 => NativeAddressResolver.TryResolveJmpCallTarget(logger, scanner, target);
-
-            ILayoutInstance.ILayoutInstanceVirtualTable* ResolveVirtualTable(NativeStaticAddressTarget target)
-                => NativeAddressResolver.ReadVirtualTable(scanner,
-                    (ILayoutInstance.ILayoutInstanceVirtualTable*)NativeAddressResolver.TryResolveStaticAddress(logger, scanner, target));
         }
 
         public SceneWrapper.SceneWrapperVirtualTable* GetSceneVirtualTable(SceneWrapper* scene)

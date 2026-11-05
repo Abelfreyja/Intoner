@@ -58,7 +58,8 @@ internal sealed class ObjectKindService : IObjectKindService
     private readonly CameraCollisionService _cameraCollision;
     private readonly FurnitureEmoteGuard _emoteGuard;
 
-    public ObjectKindService(CameraCollisionService cameraCollision, FurnitureEmoteGuard emoteGuard, ISceneLocationService locationService)
+    public ObjectKindService(CameraCollisionService cameraCollision, FurnitureEmoteGuard emoteGuard,
+        ISceneLocationService locationService)
     {
         _cameraCollision = cameraCollision;
         _locationService = locationService;

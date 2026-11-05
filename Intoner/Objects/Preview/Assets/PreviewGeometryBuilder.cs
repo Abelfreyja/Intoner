@@ -10,14 +10,18 @@ internal sealed class PreviewGeometryBuilder(
     IDataManager gameData,
     PreviewMaterialResolver materialResolver)
 {
-    public ModelPreviewGeometryReader.PreviewGeometry? BuildMergedGeometry(
-        IReadOnlyList<PreviewModelInfo> previewModels,
-        out IReadOnlyList<PreviewAssetState.MaterialRequest> missingMaterials,
-        out IReadOnlySet<int> loadedModelIndices,
-        out string? error)
+    internal readonly record struct Result(
+        ModelPreviewGeometryReader.PreviewGeometry? Geometry,
+        IReadOnlyList<PreviewAssetState.MaterialRequest> MissingMaterials,
+        IReadOnlySet<int> LoadedModelIndices,
+        string? Error)
+    {
+        public bool IsInvalid { get; init; }
+    }
+
+    public Result BuildMergedGeometry(IReadOnlyList<PreviewModelInfo> previewModels)
     {
         HashSet<int> loadedIndices = [];
-        loadedModelIndices = loadedIndices;
         List<Vector3> mergedPositions = [];
         List<Vector2> mergedTexCoords = [];
         List<int> mergedIndices = [];
@@ -25,7 +29,7 @@ internal sealed class PreviewGeometryBuilder(
         List<ModelPreviewGeometryReader.PreviewMaterial> mergedMaterials = [];
         List<PreviewAssetState.MaterialRequest> mergedMissingMaterials = [];
         Dictionary<string, ModelPreviewGeometryReader.PreviewGeometry> loadedGeometry = new(StringComparer.OrdinalIgnoreCase);
-        Dictionary<string, PreviewMaterialResolver.Resolution> resolvedMaterialCache = new(StringComparer.OrdinalIgnoreCase);
+        Dictionary<(string Path, ushort? Variant), PreviewMaterialResolver.Resolution> resolvedMaterialCache = [];
         string? firstReason = null;
 
         for (int modelIndex = 0; modelIndex < previewModels.Count; ++modelIndex)
@@ -45,10 +49,15 @@ internal sealed class PreviewGeometryBuilder(
                 continue;
             }
 
-            if (!resolvedMaterialCache.TryGetValue(modelPath, out PreviewMaterialResolver.Resolution resolution))
+            if (!resolvedMaterialCache.TryGetValue((modelPath, previewModel.MaterialVariant), out PreviewMaterialResolver.Resolution resolution))
             {
-                resolution = materialResolver.Resolve(modelGeometry.Materials, modelPath);
-                resolvedMaterialCache[modelPath] = resolution;
+                resolution = materialResolver.Resolve(modelGeometry, previewModel);
+                resolvedMaterialCache[(modelPath, previewModel.MaterialVariant)] = resolution;
+            }
+
+            if (resolution.Error is { } materialError)
+            {
+                return new(null, [], loadedIndices, materialError) { IsInvalid = true };
             }
 
             int baseVertexIndex = mergedPositions.Count;
@@ -79,9 +88,7 @@ internal sealed class PreviewGeometryBuilder(
 
         if (mergedPositions.Count == 0 || mergedIndices.Count < 3)
         {
-            missingMaterials = [];
-            error = firstReason ?? "Preview geometry could not be loaded.";
-            return null;
+            return new(null, [], loadedIndices, firstReason ?? "Preview geometry could not be loaded.");
         }
 
         ModelPreviewGeometryReader.PreviewGeometry geometry = new(
@@ -93,14 +100,10 @@ internal sealed class PreviewGeometryBuilder(
 
         if (!NumericsUtility.IsFinite(geometry.Bounds.Center) || !float.IsFinite(geometry.Bounds.Radius))
         {
-            missingMaterials = [];
-            error = "Preview model transforms produce invalid bounds.";
-            return null;
+            return new(null, [], loadedIndices, "Preview model transforms produce invalid bounds.") { IsInvalid = true };
         }
 
-        missingMaterials = mergedMissingMaterials;
-        error = null;
-        return geometry;
+        return new(geometry, mergedMissingMaterials, loadedIndices, null);
     }
 
     private bool TryLoadPreviewGeometry(

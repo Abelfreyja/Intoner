@@ -7,6 +7,8 @@ internal sealed record ObjectPlacementOverrides
     public string? Name { get; init; }
     public bool? Visible { get; init; }
     public string? FolderPath { get; init; }
+    public Vector3? Position { get; init; }
+    public Vector3? RotationDegrees { get; init; }
     public Vector3? Scale { get; init; }
     public ObjectData? Model { get; init; }
 }

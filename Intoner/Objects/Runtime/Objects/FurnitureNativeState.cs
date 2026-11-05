@@ -141,7 +141,7 @@ internal sealed unsafe class FurnitureNativeState(ObjectFrameworkDiagnostics dia
 
         _hasPlacementMarker |= instance->Id.Type == InstanceType.SphereCastRange;
         ObserveBoundsInput(instance, parent);
-        if (instance->Id.Type != InstanceType.SharedGroup)
+        if (!ObjectLayoutInterop.IsSharedGroup(instance->Id.Type))
         {
             return;
         }
@@ -200,7 +200,7 @@ internal sealed unsafe class FurnitureNativeState(ObjectFrameworkDiagnostics dia
 
     private bool ObserveGeometry(ILayoutInstance* instance, ref BoundsInput input)
     {
-        if (instance->Id.Type == InstanceType.SharedGroup)
+        if (ObjectLayoutInterop.IsSharedGroup(instance->Id.Type))
         {
             SharedGroupLayoutInstance* group = (SharedGroupLayoutInstance*)instance;
             return input.Geometry.ObserveTransform(group->Transform.Translation, group->Transform.Rotation, group->Transform.Scale);

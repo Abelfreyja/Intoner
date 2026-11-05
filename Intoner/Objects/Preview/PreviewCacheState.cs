@@ -7,14 +7,21 @@ internal static class PreviewCacheState
 {
     internal sealed class Asset(PreviewAsset previewAsset)
     {
+        private string? _error;
+
         public object SyncRoot { get; } = new();
 
         public PreviewAsset PreviewAsset { get; set; } = previewAsset;
         public bool LoadQueued { get; set; }
         public bool LoadRunning { get; set; }
-        public bool HasLoadedGeometry => GeometryEntry is not null;
+        public bool HasLoadedGeometry => GeometryEntry is { Models.Error: null };
         public PreviewAssetState.GeometryEntry? GeometryEntry { get; set; }
-        public string? Error { get; set; }
+        public string? Error
+        {
+            get => GeometryEntry?.Models.Error ?? _error;
+            set => _error = value;
+        }
+
         public int LoadFailureCount { get; set; }
         public long NextLoadRetryAtMs { get; set; }
         public long LastDetailAccessAtMs { get; set; }

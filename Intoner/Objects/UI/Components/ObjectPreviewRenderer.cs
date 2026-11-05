@@ -1,30 +1,43 @@
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
+using Intoner.Objects.Assets;
 using Intoner.Objects.Catalog;
+using Intoner.Objects.Models;
 using Intoner.Objects.Preview;
 using Intoner.Objects.Preview.Rendering;
 using Intoner.Objects.Resources;
-using Intoner.Objects.UI.Components;
+using Intoner.Scene;
 using Intoner.UI;
 using System.Numerics;
 
-namespace Intoner.Objects.UI;
+namespace Intoner.Objects.UI.Components;
 
 internal sealed class ObjectPreviewRenderer
 {
-    private readonly IObjectCatalogService _objectCatalog;
-    private readonly ViewportService       _viewportService;
-    private readonly EditorOverlayLayer    _editorOverlayLayer;
+    private readonly IObjectCatalogService    _objectCatalog;
+    private readonly FurnitureMaterialService _materials;
+    private readonly ViewportService          _viewportService;
+    private readonly EditorOverlayLayer       _editorOverlayLayer;
+
+    private PreviewAsset? _previewAsset;
+    private IReadOnlyList<PreviewModelInfo>? _previewModels;
+    private ObjectCatalogKind _previewKind;
+    private ushort? _previewMaterialVariant;
+    private PreviewAsset? _tooltipAsset;
+    private string _tooltipTitle = string.Empty;
 
     public bool IsHovered { get; private set; }
 
     public ObjectPreviewRenderer(
         IObjectCatalogService objectCatalog,
+        FurnitureMaterialService materials,
         ViewportService viewportService,
         EditorOverlayLayer editorOverlayLayer)
     {
         _objectCatalog      = objectCatalog;
+        _materials          = materials;
         _viewportService    = viewportService;
         _editorOverlayLayer = editorOverlayLayer;
     }
@@ -37,18 +50,49 @@ internal sealed class ObjectPreviewRenderer
         PreviewState state)
     {
         state.SyncAsset(assetPath);
+        PreviewAsset? asset = ResolvePreviewAsset(kind, state.AssetPath);
+        DrawPreviewSection(id, controlsText, kind, asset, state);
+    }
 
+    internal void DrawPreviewSection(string id, string controlsText, FurnitureModel model, PreviewState state)
+    {
+        state.SyncAsset(model.SharedGroupPath);
+        PreviewAsset? asset = _materials.TryResolve(model, out FurnitureMaterialOption? material)
+            ? ResolvePreviewAsset(ObjectCatalogKind.Furniture, state.AssetPath, material?.Variant) : null;
+        DrawPreviewSection(id, controlsText, ObjectCatalogKind.Furniture, asset, state);
+    }
+
+    internal PreviewAsset? ResolvePreviewAsset(ObjectCatalogKind kind, string path, ushort? materialVariant = null)
+    {
+        if (!CatalogPreviewAssetFactory.IsSupportedPath(kind, path))
+        {
+            return null;
+        }
+
+        IReadOnlyList<PreviewModelInfo> models = _objectCatalog.ResolvePreviewModels(kind, path);
+        bool sameModels = ReferenceEquals(_previewModels, models) || _previewModels is not null && _previewModels.SequenceEqual(models);
+
+        if (_previewAsset is null || _previewKind != kind || _previewMaterialVariant != materialVariant
+            || !string.Equals(_previewAsset.AssetKey.Identifier, path, StringComparison.OrdinalIgnoreCase) || !sameModels)
+        {
+            _previewAsset = CatalogPreviewAssetFactory.Create(kind, path, models, materialVariant);
+            _previewKind = kind;
+            _previewMaterialVariant = materialVariant;
+        }
+
+        _previewModels = models;
+        return _previewAsset;
+    }
+
+    private void DrawPreviewSection(string id, string controlsText, ObjectCatalogKind kind, PreviewAsset? previewAsset, PreviewState state)
+    {
         var accent = EditorColors.CatalogAccent(kind);
-        var previewWidth  = ResolvePreviewHostWidth();
-        var previewHeight = MathF.Max(
-            180f * ImGuiHelpers.GlobalScale,
+        var previewWidth = ResolvePreviewHostWidth();
+        var previewHeight = MathF.Max(180f * ImGuiHelpers.GlobalScale,
             MathF.Min(260f * ImGuiHelpers.GlobalScale, previewWidth * 0.66f));
         var request = state.CreateRequest(
-            (int)MathF.Round(MathF.Max(96f, previewWidth - (24f * ImGuiHelpers.GlobalScale))),
-            (int)MathF.Round(MathF.Max(96f, previewHeight - (24f * ImGuiHelpers.GlobalScale))));
-        PreviewAsset? previewAsset = CatalogPreviewAssetFactory.TryCreate(_objectCatalog, kind, state.AssetPath, out PreviewAsset? resolvedAsset)
-            ? resolvedAsset
-            : null;
+            (int)MathF.Round(MathF.Max(96f, previewWidth - 24f * ImGuiHelpers.GlobalScale)),
+            (int)MathF.Round(MathF.Max(96f, previewHeight - 24f * ImGuiHelpers.GlobalScale)));
 
         DrawViewport(
             $"{id}-viewport",
@@ -58,6 +102,51 @@ internal sealed class ObjectPreviewRenderer
             previewAsset,
             request,
             state);
+    }
+
+    internal void DrawAssetTooltip(WorldAsset asset)
+    {
+        string path = asset.Path;
+        if (asset.Kind == ObjectKind.Vfx)
+        {
+            IntonerTooltipContent.Header(FontAwesomeIcon.Magic, Path.GetFileNameWithoutExtension(path));
+            ImGui.TextWrapped(path);
+            return;
+        }
+
+        if (_tooltipAsset is null || !string.Equals(_tooltipAsset.AssetKey.Identifier, path, StringComparison.Ordinal))
+        {
+            CatalogPreviewAssetFactory.TryCreate(_objectCatalog, ObjectCatalogKind.BgObject, path, out _tooltipAsset);
+            _tooltipTitle = Path.GetFileNameWithoutExtension(path);
+        }
+
+        IntonerTooltipContent.Header(FontAwesomeIcon.Cube, _tooltipTitle);
+        float edge = EditorLayout.Scaled(96f);
+        using var padding = ImRaii.PushStyle(ImGuiStyleVar.CellPadding, new Vector2(EditorLayout.Scaled(4f), 0f));
+        using var table = ImRaii.Table("asset-preview", 2, ImGuiTableFlags.SizingStretchProp | ImGuiTableFlags.NoPadOuterX);
+        if (!table)
+        {
+            return;
+        }
+
+        ImGui.TableSetupColumn("Preview", ImGuiTableColumnFlags.WidthFixed, edge);
+        ImGui.TableSetupColumn("Asset", ImGuiTableColumnFlags.WidthStretch);
+        ImGui.TableNextRow();
+        ImGui.TableNextColumn();
+        Vector2 min = ImGui.GetCursorScreenPos();
+        Vector2 max = min + new Vector2(edge);
+        PreviewRender.Request request = new((int)edge, (int)edge, -85, 34, 82, PreviewRender.BackgroundStyle.DarkBlue);
+        if (!_viewportService.TryDrawPreview(ImGui.GetWindowDrawList(), _tooltipAsset, request, min, max, EditorLayout.Scaled(4f), out PreviewRender.Result result))
+        {
+            ImGui.GetWindowDrawList().AddRectFilled(min, max, ImGui.GetColorU32(ThemeColors.ButtonDefault), EditorLayout.Scaled(4f));
+            DrawCenteredPreviewMessage(min, max, result.IsLoading ? "Loading..." : "Preview unavailable", ThemeColors.TextDisabled);
+        }
+
+        ImGui.Dummy(new Vector2(edge));
+        ImGui.TableNextColumn();
+        using var color = ImRaii.PushColor(ImGuiCol.Text, ThemeColors.TextDisabled);
+        using var wrap = ImRaii.TextWrapPos(ImGui.GetCursorPosX() + ImGui.GetContentRegionAvail().X);
+        ImGui.TextUnformatted(path);
     }
 
     private static float ResolvePreviewHostWidth()
@@ -288,6 +377,7 @@ internal sealed class ObjectPreviewRenderer
                 : min.X + MathF.Max(0f, ((max.X - min.X) - textSize.X) * 0.5f),
             min.Y + MathF.Max(0f, ((max.Y - min.Y) - textSize.Y) * 0.5f));
 
+        Vector2 cursor = ImGui.GetCursorScreenPos();
         ImGui.SetCursorScreenPos(position);
         using var color = ImRaii.PushColor(ImGuiCol.Text, accent with { W = 0.82f });
         if (useWrappedText)
@@ -300,7 +390,7 @@ internal sealed class ObjectPreviewRenderer
             ImGui.TextUnformatted(text);
         }
 
-        ImGui.SetCursorScreenPos(new Vector2(min.X, max.Y));
+        ImGui.SetCursorScreenPos(cursor);
     }
 
     internal sealed class PreviewState

@@ -39,9 +39,12 @@ internal sealed class CreateBrowserSelection
         _ = LibrarySelection.TryClear();
     }
 
+    internal bool IsKindAvailable(DraftKind kind)
+        => kind == DraftKind.Furniture || !_housingModePolicy.GetState().IsHousingMode;
+
     internal void NormalizeDraftKindForHousingMode()
     {
-        if (_housingModePolicy.GetState().IsHousingMode && Kind != DraftKind.Furniture)
+        if (!IsKindAvailable(Kind))
         {
             SetDraftKind(DraftKind.Furniture);
         }

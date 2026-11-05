@@ -20,19 +20,33 @@ internal sealed class PreviewMaterialResolver(
     [StructLayout(LayoutKind.Auto)]
     internal readonly record struct Resolution(
         ModelPreviewGeometryReader.PreviewMaterial[] Materials,
-        IReadOnlyList<PreviewAssetState.MaterialRequest> MissingMaterials);
+        IReadOnlyList<PreviewAssetState.MaterialRequest> MissingMaterials)
+    {
+        public string? Error { get; init; }
+    }
 
     public Resolution Resolve(
-        IReadOnlyList<ModelPreviewGeometryReader.PreviewMaterial> materials,
-        string modelPath)
+        ModelPreviewGeometryReader.PreviewGeometry geometry,
+        PreviewModelInfo model)
     {
+        IReadOnlyList<ModelPreviewGeometryReader.PreviewMaterial> materials = geometry.Materials;
+        string modelPath = model.ModelPath;
+        string? selectedMaterial = null;
+        if (model.MaterialVariant is { } variant && variant > 0
+            && (geometry.BgChangeMaterialIndex >= materials.Count
+                || !GameMaterialPathUtility.TryGetHousingMaterialPath(materials[geometry.BgChangeMaterialIndex].Name, variant, out selectedMaterial)))
+        {
+            return new Resolution([], []) { Error = $"Wallpaper material is unavailable for {modelPath}." };
+        }
+
         Dictionary<string, PenumbraMtrlFile> parsedMaterials = new(StringComparer.OrdinalIgnoreCase);
         ModelPreviewGeometryReader.PreviewMaterial[] resolvedMaterials = new ModelPreviewGeometryReader.PreviewMaterial[materials.Count];
         List<PreviewAssetState.MaterialRequest> missingMaterials = [];
 
         for (int index = 0; index < materials.Count; ++index)
         {
-            string materialName = materials[index].Name;
+            string materialName = index == geometry.BgChangeMaterialIndex && selectedMaterial is not null
+                ? selectedMaterial : materials[index].Name;
 
             if (GameMaterialPathUtility.TryNormalizeMaterialRequest(modelPath, materialName, out string normalizedModelPath, out string normalizedMaterialName))
             {

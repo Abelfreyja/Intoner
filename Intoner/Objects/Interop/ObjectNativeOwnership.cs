@@ -2,16 +2,17 @@ using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine;
 using FFXIVClientStructs.FFXIV.Common.Component.BGCollision;
 using Intoner.Services.Interop;
+using System.Collections.Concurrent;
 
 namespace Intoner.Objects.Interop
 {
-    /// <summary> tracks placed collider ownership across creation and furniture callbacks </summary>
-    internal sealed unsafe class ObjectCollisionOwnership(ISigScanner sigScanner) : IDisposable
+    internal sealed unsafe class ObjectNativeOwnership(ISigScanner sigScanner) : IDisposable
     {
         private readonly Lock _lock = new();
         private readonly HashSet<ObjectCollisionOwner> _owners = [];
         private readonly Dictionary<nint, FurnitureNativeInstance> _instances = [];
         private readonly Dictionary<nint, ObjectCollisionOwner> _colliders = [];
+        private readonly ConcurrentDictionary<nint, ObjectSoundState> _vfxListeners = new();
         private readonly HashSet<nint> _creators = [];
         private readonly ThreadLocal<ObjectCollisionOwner?> _current = new();
         private int _cameraColliders;
@@ -65,12 +66,7 @@ namespace Intoner.Objects.Interop
             => new(this, root.IsIsolated ? root : null);
 
         public Scope EnterInstance(ILayoutInstance* instance)
-        {
-            lock (_lock)
-            {
-                return new Scope(this, _instances.GetValueOrDefault((nint)instance));
-            }
-        }
+            => new(this, GetFurnitureOwner(instance));
 
         public void Register(ILayoutInstance* instance)
         {
@@ -89,8 +85,8 @@ namespace Intoner.Objects.Interop
 
         private bool BelongsToFurniture(ILayoutInstance* instance)
         {
-            if (instance->Id.Type is InstanceType.SharedGroup or InstanceType.HelperObject
-                or InstanceType.Light or InstanceType.Vfx or InstanceType.EnvSpace or InstanceType.EnvLocation)
+            if (ObjectLayoutInterop.IsSharedGroup(instance->Id.Type)
+                || instance->Id.Type is InstanceType.Light or InstanceType.Vfx or InstanceType.Sound or InstanceType.EnvSpace or InstanceType.EnvLocation)
             {
                 return true;
             }
@@ -109,6 +105,31 @@ namespace Intoner.Objects.Interop
                 return _instances.GetValueOrDefault((nint)instance) == root;
             }
         }
+
+        public FurnitureNativeInstance? GetFurnitureOwner(ILayoutInstance* instance)
+        {
+            lock (_lock)
+            {
+                return _instances.GetValueOrDefault((nint)instance);
+            }
+        }
+
+        public void RegisterVfxListener(nint listener, ObjectSoundState? sound)
+        {
+            if (sound is null)
+            {
+                RemoveVfxListener(listener);
+                return;
+            }
+
+            _vfxListeners[listener] = sound;
+        }
+
+        public ObjectSoundState? GetVfxOwner(nint listener)
+            => _vfxListeners.TryGetValue(listener, out ObjectSoundState? sound) ? sound : null;
+
+        public void RemoveVfxListener(nint listener)
+            => _vfxListeners.TryRemove(listener, out _);
 
         public bool IsHidden(ILayoutInstance* instance)
         {
@@ -205,6 +226,7 @@ namespace Intoner.Objects.Interop
             _current.Dispose();
             _owners.Clear();
             _instances.Clear();
+            _vfxListeners.Clear();
             _colliders.Clear();
             _creators.Clear();
             _cameraColliders = 0;
@@ -212,10 +234,10 @@ namespace Intoner.Objects.Interop
 
         public readonly struct Scope : IDisposable
         {
-            private readonly ObjectCollisionOwnership? _owner;
+            private readonly ObjectNativeOwnership? _owner;
             private readonly ObjectCollisionOwner? _previous;
 
-            internal Scope(ObjectCollisionOwnership owner, ObjectCollisionOwner? root)
+            internal Scope(ObjectNativeOwnership owner, ObjectCollisionOwner? root)
             {
                 _owner = owner;
                 _previous = owner._current.Value;

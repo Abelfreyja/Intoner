@@ -17,6 +17,7 @@ internal sealed unsafe class VfxObjectRuntime : DrawObjectRuntime
     private const byte SomeFlagsClearBit3Mask = 0xF7;
 
     private SceneVfxObject* _vfxObject;
+    private readonly ObjectSoundState _sound;
     private string _vfxPath;
     private readonly ObjectNativeBindings.VfxBinding _nativeBinding;
     private readonly ObjectResourceTracker _resourceTracker;
@@ -46,6 +47,7 @@ internal sealed unsafe class VfxObjectRuntime : DrawObjectRuntime
         ILogger logger,
         ObjectSnapshot snapshot,
         SceneVfxObject* vfxObject,
+        ObjectSoundState sound,
         string vfxPath,
         ObjectNativeBindings.VfxBinding nativeBinding,
         ObjectResourceTracker resourceTracker,
@@ -53,6 +55,8 @@ internal sealed unsafe class VfxObjectRuntime : DrawObjectRuntime
         : base(framework, logger, snapshot)
     {
         _vfxObject = vfxObject;
+        _sound = sound;
+        _sound.Enabled = ((VfxModel)snapshot.Model).SoundEnabled;
         _vfxPath = vfxPath;
         _nativeBinding = nativeBinding;
         _resourceTracker = resourceTracker;
@@ -137,7 +141,13 @@ internal sealed unsafe class VfxObjectRuntime : DrawObjectRuntime
                                 || vfxModel.NeedsVisualState(previousModel);
         var needsPlaybackApply = vfxModel.NeedsPlaybackState(previousModel);
 
-        ApplyRuntimeStateUnsafe(snapshot);
+        _sound.Enabled = vfxModel.SoundEnabled;
+
+        if (transformChanged || snapshot.Visible != previousSnapshot.Visible || _needsVisualReplay)
+        {
+            ApplyRuntimeStateUnsafe(snapshot);
+        }
+
         UpdateLoopScheduleUnsafe(vfxModel, previousModel);
 
         if (needsVisualReplay)
@@ -202,6 +212,7 @@ internal sealed unsafe class VfxObjectRuntime : DrawObjectRuntime
             vfxPath));
 
         _rootHandleRegistration.Clear(_resourceTracker);
+        _sound.Enabled = false;
         DestroyNative((DrawObject*)_vfxObject);
 
         _vfxObject = null;
@@ -335,21 +346,10 @@ internal sealed unsafe class VfxObjectRuntime : DrawObjectRuntime
             return;
         }
 
-        var currentRootHandle = ResolveRootHandleAddress(_vfxObject);
+        var currentRootHandle = (nint)ObjectSceneInterop.GetVfxResourceHandle(_vfxObject);
         _rootHandleRegistration.UpdateRootHandle(
             _resourceTracker,
             currentRootHandle,
             new ObjectResourceScope(_resourceCollectionId, _vfxPath));
-    }
-
-    private static nint ResolveRootHandleAddress(SceneVfxObject* vfxObject)
-    {
-        if (vfxObject == null || vfxObject->VfxResourceInstance == null
-         || vfxObject->VfxResourceInstance->VfxResourceObject == null)
-        {
-            return nint.Zero;
-        }
-
-        return (nint)vfxObject->VfxResourceInstance->VfxResourceObject->ApricotResourceHandle;
     }
 }

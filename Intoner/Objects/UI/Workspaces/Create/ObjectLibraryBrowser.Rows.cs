@@ -122,7 +122,7 @@ internal sealed partial class ObjectLibraryBrowser
             rightInset: depth == 0 ? 0f : metrics.ChildRightInset);
         if (result.Collapsed != collapsed)
         {
-            ToggleLibraryGroupCollapsed(group.Source.Id);
+            SetLibraryGroupExpanded(group.Source.Id, !result.Collapsed);
         }
 
         return result;
@@ -135,8 +135,7 @@ internal sealed partial class ObjectLibraryBrowser
         float itemHeight,
         int depth)
     {
-        bool collapsed = IsLibraryGroupCollapsed(group.Source.Id) && string.IsNullOrWhiteSpace(_libraryFilter);
-        SceneListRow.FolderResult row = DrawLibraryGroup(group, metrics, collapsed, depth);
+        SceneListRow.FolderResult row = DrawLibraryGroup(group, metrics, !group.Expanded, depth);
         if (!row.Collapsed && (group.VisibleEntries.Count > 0 || group.Children.Count > 0))
         {
             DrawLibraryGroupChildren(group, selectableOrder, metrics, itemHeight, depth);
@@ -156,7 +155,7 @@ internal sealed partial class ObjectLibraryBrowser
             static (entry, childDepth, context) => context.Browser.DrawLibraryEntry(entry, context.Order, context.Height,
                 context.Metrics.ChildInset * childDepth, context.Metrics.ChildRightInset),
             static (child, childDepth, context) => context.Browser.DrawLibraryGroup(child, context.Metrics,
-                context.Browser.IsLibraryGroupCollapsed(child.Source.Id) && string.IsNullOrWhiteSpace(context.Browser._libraryFilter), childDepth),
+                !child.Expanded, childDepth),
             static (child, childDepth, context) => context.Browser.DrawLibraryGroupChildren(child, context.Order, context.Metrics, context.Height, childDepth));
 
     private void HandleLibrarySelection(ObjectLibraryEntry entry, IReadOnlyList<Guid> selectableOrder)

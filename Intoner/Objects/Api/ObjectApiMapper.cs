@@ -743,6 +743,7 @@ internal static class ObjectApiMapper
         {
             SharedGroupPath = model.SharedGroupPath,
             CameraCollision = model.CameraCollision,
+            SoundEnabled = model.SoundEnabled,
             Color = ToPatch(model.Color),
             Transparency = model.Transparency,
             OutlineColor = ToOutlineColor(model.OutlineColor),
@@ -765,6 +766,7 @@ internal static class ObjectApiMapper
             Color = ToVector4(model.Color),
             Speed = model.Speed,
             Paused = model.Paused,
+            SoundEnabled = model.SoundEnabled,
             FadeInSeconds = model.FadeInSeconds,
             ReplayOnTransform = model.ReplayOnTransform,
             Loop = model.Loop,
@@ -840,7 +842,8 @@ internal static class ObjectApiMapper
             model.ItemRowId,
             model.AttachmentParentId,
             ToFurnitureMaterialItemDto(model.MaterialItem),
-            model.CameraCollision));
+            model.CameraCollision,
+            model.SoundEnabled));
 
     private static WorldObjectModelData ToVfxData(VfxModel model)
         => new(Vfx: new VfxModelData(
@@ -851,7 +854,8 @@ internal static class ObjectApiMapper
             model.FadeInSeconds,
             model.ReplayOnTransform,
             model.Loop,
-            model.LoopIntervalSeconds));
+            model.LoopIntervalSeconds,
+            model.SoundEnabled));
 
     private static WorldObjectModelData ToLightData(LightModel model)
         => new(Light: new LightModelData(
@@ -907,6 +911,7 @@ internal static class ObjectApiMapper
         {
             SharedGroupPath = model.SharedGroupPath ?? string.Empty,
             CameraCollision = model.CameraCollision ?? true,
+            SoundEnabled = model.SoundEnabled ?? true,
             Color = ToFurnitureColorModel(model.Color),
             Transparency = model.Transparency,
             OutlineColor = ToOutlineColor(model.OutlineColor),
@@ -973,6 +978,7 @@ internal static class ObjectApiMapper
             Color = ToVector4(model.Color),
             Speed = model.Speed,
             Paused = model.Paused,
+            SoundEnabled = model.SoundEnabled ?? true,
             FadeInSeconds = model.FadeInSeconds,
             ReplayOnTransform = model.ReplayOnTransform,
             Loop = model.Loop,

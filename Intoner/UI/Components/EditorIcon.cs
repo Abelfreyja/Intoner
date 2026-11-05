@@ -1,5 +1,6 @@
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
+using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using System.Numerics;
 using System.Runtime.InteropServices;
@@ -8,6 +9,16 @@ namespace Intoner.UI.Components;
 
 internal static class EditorIcon
 {
+    public static float ItemImageSize => 24f * ImGuiHelpers.GlobalScale;
+
+    public static void DrawImage(ImDrawListPtr drawList, ImTextureID texture, Vector2 min, Vector2 max, float alpha = 1f)
+    {
+        if (!texture.IsNull)
+        {
+            drawList.AddImage(texture, min, max, Vector2.Zero, Vector2.One, ImGui.GetColorU32(new Vector4(1f, 1f, 1f, alpha)));
+        }
+    }
+
     public static void DrawInline(FontAwesomeIcon icon, Vector4 color)
     {
         using (ImRaii.PushFont(UiBuilder.IconFont))

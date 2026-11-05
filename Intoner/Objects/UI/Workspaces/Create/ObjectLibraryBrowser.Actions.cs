@@ -124,7 +124,7 @@ internal sealed partial class ObjectLibraryBrowser
                 : _objectLibrary.TryDissolvePrefab(libraryGroup.Id);
             if (dissolved)
             {
-                _collapsedLibraryGroups.Remove(libraryGroup.Id);
+                SetLibraryGroupExpanded(libraryGroup.Id, false);
             }
         }
 
@@ -356,80 +356,39 @@ internal sealed partial class ObjectLibraryBrowser
         }
     }
 
-    internal void DrawLibraryEntryChoices(string idPrefix, IReadOnlyList<ObjectLibraryEntry> entries)
+    internal bool DrawLibraryEntryChoices(string idPrefix, IReadOnlyList<ObjectLibraryEntry> entries)
     {
-        IReadOnlyList<ObjectLibraryFolder> folders = OrderLibraryFolders(_objectLibrary.Current.Folders);
-        Dictionary<Guid, List<ObjectLibraryEntry>> entriesByFolder = [];
-        List<ObjectLibraryEntry> ungroupedEntries = [];
-        foreach (ObjectLibraryEntry entry in entries)
+        ObjectLibraryHierarchy hierarchy = ObjectLibraryHierarchy.Create(_objectLibrary.Current);
+        bool opened = false;
+        foreach (IGrouping<ObjectLibraryGroup?, ObjectLibraryEntry> location in entries.GroupBy(hierarchy.GetEntryGroup)
+                     .OrderBy(group => group.Key is null ? string.Empty : hierarchy.GetGroupPath(group.Key), StringComparer.OrdinalIgnoreCase))
         {
-            if (!entry.FolderId.HasValue)
+            ObjectLibraryGroup? group = location.Key;
+            FontAwesomeIcon icon = group switch
             {
-                ungroupedEntries.Add(entry);
-                continue;
-            }
+                ObjectLibraryPrefab => FontAwesomeIcon.Cubes,
+                ObjectLibraryFolder => FontAwesomeIcon.Folder,
+                _ => FontAwesomeIcon.TimesCircle,
+            };
+            string id = $"{idPrefix}:location:{group?.Id.ToString() ?? "ungrouped"}";
+            string label = group is null ? "Ungrouped" : hierarchy.GetGroupPath(group);
+            ObjectLibraryEntry[] copies = location.ToArray();
 
-            Guid folderId = entry.FolderId.Value;
-            if (!entriesByFolder.TryGetValue(folderId, out List<ObjectLibraryEntry>? folderEntries))
+            if (copies.Length == 1)
             {
-                folderEntries = [];
-                entriesByFolder.Add(folderId, folderEntries);
+                opened |= EditorContextMenu.DrawItem(icon, label, id: id) && OpenLibraryEntry(copies[0]);
             }
-
-            folderEntries.Add(entry);
+            else
+            {
+                using EditorContextMenu.SubMenuScope menu = EditorContextMenu.BeginSubMenu(id, icon, label);
+                opened |= menu && DrawLibraryPresetChoices(id, copies);
+            }
         }
 
-        DrawLibraryLocationChoice(
-            idPrefix,
-            "ungrouped",
-            FontAwesomeIcon.TimesCircle,
-            "Ungrouped",
-            ungroupedEntries);
-        foreach (ObjectLibraryFolder folder in folders)
-        {
-            if (entriesByFolder.TryGetValue(folder.Id, out List<ObjectLibraryEntry>? folderEntries))
-            {
-                DrawLibraryLocationChoice(
-                    idPrefix,
-                    folder.Id.ToString(),
-                    FontAwesomeIcon.Folder,
-                    folder.Name,
-                    folderEntries);
-            }
-        }
+        return opened;
     }
 
-    private void DrawLibraryLocationChoice(
-        string idPrefix,
-        string locationId,
-        FontAwesomeIcon icon,
-        string label,
-        IReadOnlyList<ObjectLibraryEntry> entries)
-    {
-        if (entries.Count == 0)
-        {
-            return;
-        }
-
-        string id = $"{idPrefix}:location:{locationId}";
-        if (entries.Count == 1)
-        {
-            if (EditorContextMenu.DrawItem(icon, label, id: id))
-            {
-                OpenLibraryEntry(entries[0]);
-            }
-
-            return;
-        }
-
-        using EditorContextMenu.SubMenuScope locationMenu = EditorContextMenu.BeginSubMenu(id, icon, label);
-        if (locationMenu)
-        {
-            DrawLibraryPresetChoices(id, entries);
-        }
-    }
-
-    private void DrawLibraryPresetChoices(string idPrefix, IReadOnlyList<ObjectLibraryEntry> entries)
+    private bool DrawLibraryPresetChoices(string idPrefix, IReadOnlyList<ObjectLibraryEntry> entries)
     {
         Dictionary<string, int> totals = new(StringComparer.OrdinalIgnoreCase);
         foreach (string name in entries.Select(static entry => entry.Name))
@@ -451,39 +410,35 @@ internal sealed partial class ObjectLibraryBrowser
                     label,
                     id: $"{idPrefix}:{entry.Id}"))
             {
-                OpenLibraryEntry(entry);
+                return OpenLibraryEntry(entry);
             }
         }
+
+        return false;
     }
 
-    internal void OpenLibraryEntry(ObjectLibraryEntry entry)
+    internal bool OpenLibraryEntry(ObjectLibraryEntry entry)
     {
         ObjectLibrarySnapshot library = _objectLibrary.Current;
         ObjectLibraryEntry? currentEntry = ObjectLibraryQuery.FindEntry(library, entry.Id);
         if (currentEntry is null || !_createActions.CanUseLibraryPreset(currentEntry.Preset))
         {
-            return;
+            return false;
         }
 
         _libraryFilter = string.Empty;
         _libraryKindFilter = string.Empty;
-        Guid? groupId = currentEntry.FolderId
-            ?? library.Prefabs.FirstOrDefault(prefab => prefab.EntryIds.Contains(currentEntry.Id))?.Id;
         ObjectLibraryHierarchy hierarchy = ObjectLibraryHierarchy.Create(library);
-        bool expanded = false;
+        Guid? groupId = hierarchy.GetEntryGroup(currentEntry)?.Id;
         while (groupId is { } currentGroupId && hierarchy.TryGetGroup(currentGroupId, out ObjectLibraryGroup group))
         {
-            expanded |= _collapsedLibraryGroups.Remove(currentGroupId);
+            SetLibraryGroupExpanded(currentGroupId, true);
             groupId = group.ParentFolderId;
-        }
-
-        if (expanded)
-        {
-            ++_libraryGroupStateRevision;
         }
 
         _draft.ApplyLibraryPreset(currentEntry.Preset);
         _ = _browserSelection.LibrarySelection.TryReplaceSelection([currentEntry.Id]);
         _browserSelection.Source = CreateBrowserSelection.CreateBrowserSource.Library;
+        return true;
     }
 }

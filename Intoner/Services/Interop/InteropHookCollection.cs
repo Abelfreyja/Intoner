@@ -1,4 +1,5 @@
 using Dalamud.Hooking;
+using Dalamud.Plugin.Services;
 using Intoner.Logging;
 using Microsoft.Extensions.Logging;
 using System.Diagnostics.CodeAnalysis;
@@ -12,6 +13,7 @@ namespace Intoner.Services.Interop
         private readonly List<(IDalamudHook Hook, Action Enable, Action Disable)> _hooks = [];
         private int _activeCallbacks;
         private bool _enabled;
+        private bool _disabling;
         private bool _activationFailed;
         private bool _disposed;
         private bool _hooksDisposed;
@@ -26,6 +28,11 @@ namespace Intoner.Services.Interop
                 }
             }
         }
+
+        public Hook<TDelegate> CreateRequired<TDelegate>(IGameInteropProvider interop, nint address, TDelegate detour, string label)
+            where TDelegate : Delegate
+            => Add(InteropHookUtility.CreateHookFromAddress(logger, interop, address, detour, label))
+                ?? throw new InvalidOperationException($"could not hook {label}");
 
         public Hook<TDelegate>? Add<TDelegate>(Hook<TDelegate>? hook) where TDelegate : Delegate
             => Add(hook, static value => value.Enable(), static value => value.Disable());
@@ -43,7 +50,7 @@ namespace Intoner.Services.Interop
                 {
                     ObjectDisposedException.ThrowIf(_disposed, this);
 
-                    if (_enabled || _activationFailed)
+                    if (_enabled || _disabling || _activationFailed)
                     {
                         throw new InvalidOperationException("hooks must be registered before activation");
                     }
@@ -63,7 +70,7 @@ namespace Intoner.Services.Interop
         {
             lock (_lock)
             {
-                if (_disposed || _activationFailed)
+                if (_disposed || _disabling || _activationFailed)
                 {
                     return false;
                 }
@@ -91,6 +98,42 @@ namespace Intoner.Services.Interop
             }
         }
 
+        public void Disable()
+        {
+            lock (_lock)
+            {
+                while (_disabling)
+                {
+                    Monitor.Wait(_lock);
+                }
+
+                if (_hooksDisposed)
+                {
+                    return;
+                }
+
+                _disabling = true;
+                try
+                {
+                    DrainCallbacks();
+                    bool disabled = DisableHooks();
+                    _enabled = false;
+                    DrainCallbacks();
+
+                    if (!disabled)
+                    {
+                        _activationFailed = true;
+                        throw new InvalidOperationException("hooks could not be disabled");
+                    }
+                }
+                finally
+                {
+                    _disabling = false;
+                    Monitor.PulseAll(_lock);
+                }
+            }
+        }
+
         public CallbackScope EnterCallback()
             => EnterScope(operation: false);
 
@@ -101,7 +144,7 @@ namespace Intoner.Services.Interop
         {
             lock (_lock)
             {
-                if (_hooksDisposed || operation && (_disposed || _activationFailed))
+                if (_hooksDisposed || operation && (_disposed || _disabling || _activationFailed))
                 {
                     return default;
                 }
@@ -123,17 +166,11 @@ namespace Intoner.Services.Interop
 
                 _disposed = true;
 
-                while (_activeCallbacks != 0)
-                {
-                    Monitor.Wait(_lock);
-                }
+                DrainCallbacks();
 
                 DisableHooks();
 
-                while (_activeCallbacks != 0)
-                {
-                    Monitor.Wait(_lock);
-                }
+                DrainCallbacks();
 
                 for (int index = _hooks.Count - 1; index >= 0; --index)
                 {
@@ -152,8 +189,17 @@ namespace Intoner.Services.Interop
             }
         }
 
-        private void DisableHooks()
+        private void DrainCallbacks()
         {
+            while (_activeCallbacks != 0)
+            {
+                Monitor.Wait(_lock);
+            }
+        }
+
+        private bool DisableHooks()
+        {
+            bool disabled = true;
             for (int index = _hooks.Count - 1; index >= 0; --index)
             {
                 try
@@ -162,9 +208,12 @@ namespace Intoner.Services.Interop
                 }
                 catch (Exception ex)
                 {
+                    disabled = false;
                     DiagnosticLog.Write(() => logger.LogError(ex, "failed to disable native hook"));
                 }
             }
+
+            return disabled;
         }
 
         private void ExitCallback()
@@ -173,7 +222,7 @@ namespace Intoner.Services.Interop
             {
                 --_activeCallbacks;
 
-                if (_disposed && _activeCallbacks == 0)
+                if ((_disposed || _disabling) && _activeCallbacks == 0)
                 {
                     Monitor.PulseAll(_lock);
                 }

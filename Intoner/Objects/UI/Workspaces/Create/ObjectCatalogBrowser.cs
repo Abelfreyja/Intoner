@@ -84,12 +84,8 @@ internal sealed class ObjectCatalogBrowser
                     ref _bgObjectFilter,
                     ref _bgObjectSourceFilter,
                     _draft.BgObject.Model.ModelPath,
-                    entry => _draft.BgObject.Model = _draft.BgObject.Model with
-                    {
-                        ModelPath = ObjectCreationDraft.ToggleCatalogSelectionPath(_draft.BgObject.Model.ModelPath, entry.PlacementPath),
-                        ColliderDefinition = string.Equals(_draft.BgObject.Model.ModelPath, entry.PlacementPath, StringComparison.OrdinalIgnoreCase)
-                            ? null : entry.BgObjectInfo?.DefaultColliderDefinition,
-                    },
+                    entry => _draft.SelectAssetPath(ObjectKind.BgObject,
+                        ObjectCreationDraft.ToggleCatalogSelectionPath(_draft.BgObject.Model.ModelPath, entry.PlacementPath)),
                     "No bgobject entries match the current filter.");
                 break;
             case DraftKind.Furniture:
@@ -110,10 +106,8 @@ internal sealed class ObjectCatalogBrowser
                     ref _vfxFilter,
                     ref _vfxSourceFilter,
                     _draft.Vfx.Model.VfxPath,
-                    entry => _draft.Vfx.Model = _draft.Vfx.Model with
-                    {
-                        VfxPath = ObjectCreationDraft.ToggleCatalogSelectionPath(_draft.Vfx.Model.VfxPath, entry.PlacementPath),
-                    },
+                    entry => _draft.SelectAssetPath(ObjectKind.Vfx,
+                        ObjectCreationDraft.ToggleCatalogSelectionPath(_draft.Vfx.Model.VfxPath, entry.PlacementPath)),
                     "No VFX entries match the current filter.");
                 break;
             case DraftKind.Light:

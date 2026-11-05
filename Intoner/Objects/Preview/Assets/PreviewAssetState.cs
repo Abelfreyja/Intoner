@@ -17,15 +17,49 @@ internal static class PreviewAssetState
     [StructLayout(LayoutKind.Auto)]
     internal readonly record struct MaterialRequest(int Index, string ModelPath, string Name);
 
+    internal sealed class ModelState(int count, IReadOnlySet<int> loadedIndices)
+    {
+        private volatile string? _error;
+
+        public object SyncRoot { get; } = new();
+        public int Count { get; } = count;
+        public IReadOnlySet<int> LoadedIndices { get; } = loadedIndices.ToFrozenSet();
+        public bool IsIncomplete => LoadedIndices.Count < Count;
+        public string? Error => _error;
+        public long NextRetryAtMs { get; set; } = loadedIndices.Count < count
+            ? Environment.TickCount64 + (long)ObjectAssetFileUtility.AssetReadRetryDelay.TotalMilliseconds
+            : 0;
+
+        public void Invalidate(string error)
+        {
+            lock (SyncRoot)
+            {
+                _error = error;
+            }
+        }
+
+        public bool NeedsRetry(long now)
+        {
+            if (!IsIncomplete)
+            {
+                return false;
+            }
+
+            lock (SyncRoot)
+            {
+                return now >= NextRetryAtMs;
+            }
+        }
+    }
+
     internal sealed class GeometryEntry(
         string cacheKey,
         ModelPreviewGeometryReader.PreviewGeometry geometry,
         IReadOnlyList<MaterialRequest>? missingMaterials,
-        int modelCount,
-        IReadOnlySet<int> loadedModelIndices)
+        ModelState models)
     {
-        public object SyncRoot { get; } = new();
-
+        public object SyncRoot => Models.SyncRoot;
+        public ModelState Models { get; } = models;
         public string CacheKey { get; } = cacheKey;
         public ModelPreviewGeometryReader.PreviewGeometry Geometry { get; } = geometry;
         public long GeometryByteCount { get; } = geometry.EstimatedByteCount;
@@ -33,29 +67,10 @@ internal static class PreviewAssetState
         public long NextMaterialRetryAtMs { get; set; } = missingMaterials is { Count: > 0 }
             ? Environment.TickCount64 + (long)ObjectAssetFileUtility.AssetReadRetryDelay.TotalMilliseconds
             : 0;
-        public int ModelCount { get; } = modelCount;
-        public IReadOnlySet<int> LoadedModelIndices { get; } = loadedModelIndices.ToFrozenSet();
-        public bool HasMissingModels => LoadedModelIndices.Count < ModelCount;
-        public long NextModelRetryAtMs { get; set; } = loadedModelIndices.Count < modelCount
-            ? Environment.TickCount64 + (long)ObjectAssetFileUtility.AssetReadRetryDelay.TotalMilliseconds
-            : 0;
         public long NextTextureRetryAtMs { get; set; }
         public long LastThumbnailAccessAtMs { get; set; }
         public long LastDetailAccessAtMs { get; set; }
         public int ActiveUseCount { get; set; }
-
-        public bool NeedsModelRetry(long now)
-        {
-            if (!HasMissingModels)
-            {
-                return false;
-            }
-
-            lock (SyncRoot)
-            {
-                return now >= NextModelRetryAtMs;
-            }
-        }
     }
 
     [StructLayout(LayoutKind.Auto)]

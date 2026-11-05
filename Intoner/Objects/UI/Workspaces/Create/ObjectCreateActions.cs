@@ -2,6 +2,7 @@ using Intoner.Objects.Library;
 using Intoner.Objects.Models;
 using Intoner.Objects.Runtime;
 using Intoner.Objects.UI.Services;
+using Intoner.Scene;
 
 namespace Intoner.Objects.UI;
 
@@ -43,25 +44,19 @@ internal sealed class ObjectCreateActions
         }
 
         resolved = normalized;
-        return CanUseLibraryPreset(resolved)
-            && (resolved.Model is not FurnitureModel furniture
-             || CanCreateFurnitureInHousingMode(furniture.SharedGroupPath));
+        return resolved.Model is FurnitureModel furniture
+            ? CanCreateFurnitureInHousingMode(furniture.SharedGroupPath)
+            : CanUseLibraryPreset(resolved);
     }
 
-    internal bool TryPlaceObjectPreset(ObjectLibraryPreset preset)
+    internal bool TryPlaceObjectPreset(ObjectLibraryPreset preset, SceneTransform? transform = null)
     {
         if (!TryResolvePlaceablePreset(preset, out ObjectLibraryPreset resolved))
         {
             return false;
         }
 
-        ObjectData model = resolved.Model switch
-        {
-            FurnitureModel furniture => _catalogInfo.ResolveFurnitureCatalogVariant(furniture),
-            VfxModel vfx when _catalogInfo.ResolveVfxCatalogInfo(vfx.VfxPath)?.CanUseReplayLoop == false
-                => vfx with { Loop = false },
-            _ => resolved.Model,
-        };
+        ObjectData model = _catalogInfo.ResolvePlacementModel(resolved.Model);
         Guid? layoutId = _sceneView.GetCreationLayoutId();
         string folderPath = _draft.ResolveCreatePlacementFolderPath(layoutId, _sceneView.GetPlacedFolders(layoutId));
         ObjectPlacementOverrides overrides = new()
@@ -69,7 +64,9 @@ internal sealed class ObjectCreateActions
             Name = _catalogInfo.ResolveObjectName(model),
             Visible = resolved.Visible,
             FolderPath = folderPath,
-            Scale = resolved.Scale,
+            Position = transform?.Position,
+            RotationDegrees = transform?.RotationDegrees,
+            Scale = transform?.Scale ?? resolved.Scale,
             Model = model,
         };
         return _historyCoordinator.TryCreateObject(

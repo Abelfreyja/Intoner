@@ -69,20 +69,12 @@ internal static class ObjectLibraryQuery
         ObjectLibraryGroup group,
         bool includeDescendants)
     {
+        ObjectLibraryHierarchy hierarchy = ObjectLibraryHierarchy.Create(library);
         HashSet<Guid> groupIds = includeDescendants
-            ? ObjectLibraryHierarchy.Create(library).GetSubtree(group.Id).Select(static item => item.Id).ToHashSet()
+            ? hierarchy.GetSubtree(group.Id).Select(static item => item.Id).ToHashSet()
             : [group.Id];
-        HashSet<Guid> folderIds = library.Folders
-            .Where(folder => groupIds.Contains(folder.Id))
-            .Select(static folder => folder.Id)
-            .ToHashSet();
-        HashSet<Guid> entryIds = library.Prefabs
-            .Where(prefab => groupIds.Contains(prefab.Id))
-            .SelectMany(static prefab => prefab.EntryIds)
-            .ToHashSet();
         return library.Entries
-            .Where(entry => entryIds.Contains(entry.Id)
-                || entry.FolderId is { } folderId && folderIds.Contains(folderId))
+            .Where(entry => hierarchy.GetEntryGroup(entry) is { } parent && groupIds.Contains(parent.Id))
             .ToArray();
     }
 

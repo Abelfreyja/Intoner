@@ -52,10 +52,8 @@ internal static class ObjectLibraryRules
         ObjectData? model = preset.Model switch
         {
             BgObjectModel bgObject when preset.Kind == ObjectKind.BgObject => bgObject,
-            FurnitureModel furniture when preset.Kind == ObjectKind.Furniture => furniture with
-            {
-                AttachmentParentId = null,
-            },
+            FurnitureModel furniture when preset.Kind == ObjectKind.Furniture
+                => furniture.AttachmentParentId is null ? furniture : furniture with { AttachmentParentId = null },
             VfxModel vfx when preset.Kind == ObjectKind.Vfx => vfx,
             LightModel light when preset.Kind == ObjectKind.Light => light,
             _ => null,
@@ -70,7 +68,7 @@ internal static class ObjectLibraryRules
             return false;
         }
 
-        normalizedPreset = preset with { Model = normalizedModel };
+        normalizedPreset = ReferenceEquals(preset.Model, normalizedModel) ? preset : preset with { Model = normalizedModel };
         return true;
     }
 

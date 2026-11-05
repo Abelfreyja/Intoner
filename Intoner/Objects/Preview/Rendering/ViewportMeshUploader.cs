@@ -2,6 +2,7 @@ using Intoner.Objects.Assets;
 using Intoner.Services.Gpu;
 using SharpDX.Direct3D11;
 using System.Numerics;
+using System.Runtime.InteropServices;
 using Buffer = SharpDX.Direct3D11.Buffer;
 using Device = SharpDX.Direct3D11.Device;
 
@@ -15,7 +16,7 @@ internal static class ViewportMeshUploader
         Vector3 untexturedDiffuseColor,
         GpuTextureView whiteTexture)
     {
-        List<ViewportMesh.Vertex> vertices = [];
+        List<ViewportMesh.Vertex> vertices = new(checked(geometry.TriangleCount * 3));
         List<ViewportMesh.DrawRange> opaqueRanges = [];
         List<ViewportMesh.DrawRange> transparentRanges = [];
         Dictionary<int, List<int>> trianglesByMaterial = BuildTriangleGroups(geometry);
@@ -56,7 +57,8 @@ internal static class ViewportMeshUploader
                 throw new InvalidOperationException("preview mesh did not contain drawable vertices");
             }
 
-            vertexBuffer = Buffer.Create(device, BindFlags.VertexBuffer, vertices.ToArray());
+            vertexBuffer = Buffer.Create(device, BindFlags.VertexBuffer,
+                ref MemoryMarshal.GetReference(CollectionsMarshal.AsSpan(vertices)), checked(vertices.Count * ViewportMesh.VertexStride));
             ViewportMesh mesh = new(vertexBuffer, opaqueRanges, transparentRanges, ownedTextures);
             transferred = true;
             return mesh;

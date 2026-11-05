@@ -1,4 +1,5 @@
 using Intoner.Objects.Resources;
+using Lumina.Data.Files;
 using System.Collections.Immutable;
 
 namespace Intoner.Objects.Assets;
@@ -13,10 +14,50 @@ internal sealed class ObjectAssetDependencyResolver(IObjectAssetGameData gameDat
 {
     private readonly IObjectAssetGameData _gameData = gameData;
 
+    public bool? HasSound(string rootPath, ObjectCollectionResolveData? collection, CancellationToken cancellationToken)
+    {
+        string root = ObjectResolvedPath.FromGamePath(rootPath).Path;
+
+        if (GameAssetPathRules.ClassifyNormalizedFilePath(root) is not (GameAssetFileKind.Sgb or GameAssetFileKind.Avfx))
+        {
+            return false;
+        }
+
+        HashSet<string> visited = new(StringComparer.OrdinalIgnoreCase) { root };
+        Queue<string> pending = new();
+        pending.Enqueue(root);
+        bool complete = true;
+        while (pending.TryDequeue(out string? path))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ObjectResolvedPath resolved = collection is not null && collection.TryResolvePath(path, out ObjectResolvedPath replacement)
+                ? replacement : ObjectResolvedPath.FromGamePath(path);
+            AssetDependencyPaths dependencies = GetCollectionPathDependencies(path, resolved, cancellationToken);
+            complete &= dependencies.IsComplete;
+            foreach (string dependency in dependencies.Paths)
+            {
+                GameAssetFileKind kind = GameAssetPathRules.ClassifyNormalizedFilePath(dependency);
+
+                if (kind == GameAssetFileKind.Scd)
+                {
+                    return true;
+                }
+
+                if (kind is GameAssetFileKind.Sgb or GameAssetFileKind.Avfx && visited.Add(dependency))
+                {
+                    pending.Enqueue(dependency);
+                }
+            }
+        }
+
+        return complete ? false : null;
+    }
+
     public AssetDependencyPaths GetCollectionPathDependencies(
         string requestedPath,
         ObjectResolvedPath effectivePath,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IReadOnlySet<ushort>? materialVariants = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -30,7 +71,7 @@ internal sealed class ObjectAssetDependencyResolver(IObjectAssetGameData gameDat
         {
             collected = GameAssetPathRules.ClassifyNormalizedFilePath(normalizedRequestedPath) switch
             {
-                GameAssetFileKind.Mdl => CollectModelDependencies(normalizedRequestedPath, effectivePath, cancellationToken),
+                GameAssetFileKind.Mdl => CollectModelDependencies(normalizedRequestedPath, effectivePath, cancellationToken, materialVariants),
                 GameAssetFileKind.Sgb => SharedGroupAssetResolver.AnalyzeSharedGroupDependencies(_gameData, normalizedRequestedPath, effectivePath, cancellationToken),
                 GameAssetFileKind.Avfx => effectivePath.Kind switch
                 {
@@ -68,12 +109,25 @@ internal sealed class ObjectAssetDependencyResolver(IObjectAssetGameData gameDat
         return new(paths.OrderBy(static path => path, StringComparer.OrdinalIgnoreCase).ToImmutableArray(), collected.IsComplete);
     }
 
-    private AssetDependencyPaths CollectModelDependencies(string requestedPath, ObjectResolvedPath effectivePath, CancellationToken cancellationToken)
+    public string GetWallpaperModelPath(string requestedPath, ObjectResolvedPath effectivePath, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        SgbFile? file = effectivePath.Kind switch
+        {
+            ObjectResolvedPathKind.LocalFile => _gameData.GetFileFromDisk<SgbFile>(effectivePath.Path, requestedPath),
+            ObjectResolvedPathKind.GamePath => _gameData.GetFile<SgbFile>(effectivePath.Path),
+            _ => null,
+        };
+        cancellationToken.ThrowIfCancellationRequested();
+        return file is not null ? HousingMaterialUtility.GetWallpaperModelPath(file) : string.Empty;
+    }
+
+    private AssetDependencyPaths CollectModelDependencies(string requestedPath, ObjectResolvedPath effectivePath, CancellationToken cancellationToken, IReadOnlySet<ushort>? materialVariants)
     {
         AssetDependencyPaths materials = effectivePath.Kind switch
         {
-            ObjectResolvedPathKind.GamePath => ObjectMaterialPathUtility.CollectGameModelMaterialPaths(_gameData, effectivePath.Path, cancellationToken),
-            ObjectResolvedPathKind.LocalFile => ObjectMaterialPathUtility.CollectLocalModelMaterialPaths(_gameData, requestedPath, effectivePath.Path, cancellationToken),
+            ObjectResolvedPathKind.GamePath => ObjectMaterialPathUtility.CollectGameModelMaterialPaths(_gameData, effectivePath.Path, cancellationToken, materialVariants),
+            ObjectResolvedPathKind.LocalFile => ObjectMaterialPathUtility.CollectLocalModelMaterialPaths(_gameData, requestedPath, effectivePath.Path, cancellationToken, materialVariants),
             _ => AssetDependencyPaths.Incomplete,
         };
         string modelPath = effectivePath.Kind == ObjectResolvedPathKind.GamePath ? effectivePath.Path : requestedPath;

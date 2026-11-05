@@ -17,6 +17,7 @@ namespace Intoner.Objects.UI;
 
 internal sealed class EditorSceneOverlay
 {
+    private readonly EditorWorldPicker _worldPicker;
     private readonly EditorSceneSelection _sceneSelection;
     private readonly IViewportMouseInputService _viewportMouseInput;
     private readonly ISceneInputService _sceneInputService;
@@ -46,8 +47,10 @@ internal sealed class EditorSceneOverlay
         EditorInteraction interaction,
         EditorSceneState sceneState,
         IObjectSceneView sceneView,
-        ISceneItemService sceneItemService)
+        ISceneItemService sceneItemService,
+        EditorWorldPicker worldPicker)
     {
+        _worldPicker           = worldPicker;
         _sceneSelection        = new EditorSceneSelection(sceneSelectionService, interaction);
         _viewportMouseInput    = viewportMouseInput;
         _sceneInputService     = sceneInputService;
@@ -142,10 +145,13 @@ internal sealed class EditorSceneOverlay
 
     private void DrawCurrentWindowLayer(
         IReadOnlyList<ObjectBoundsSnapshot> boundsSnapshots,
-        IReadOnlyDictionary<Guid, PlacementEvaluation> placementEvaluations)
+        IReadOnlyDictionary<Guid, PlacementEvaluation>? placementEvaluations)
     {
         _boundsAnnotations.Clear();
-        _placementBoundsAnnotationProvider.Append(placementEvaluations, _boundsAnnotations);
+        if (placementEvaluations is not null)
+        {
+            _placementBoundsAnnotationProvider.Append(placementEvaluations, _boundsAnnotations);
+        }
 
         if (!_drawManager.HasPendingLayer(DrawLayer.CurrentWindow) && _boundsAnnotations.Count == 0 && !_sceneSelection.IsDragging)
         {
@@ -263,13 +269,21 @@ internal sealed class EditorSceneOverlay
         }
     }
 
-    public bool IsSelecting => _sceneSelection.IsActive || _viewportMouseInput.IsCapturing;
+    public bool IsWorldPicking => _worldPicker.BlocksSceneInput;
+    public bool HasWorldPickerBounds => IsWorldPicking || (_worldPicker.IsOpen && (_worldPicker.State.LiveSelection is { HasBounds: true } || _worldPicker.BrowserHover is { HasBounds: true }));
+    public bool IsSelecting => IsWorldPicking || _sceneSelection.IsActive || _viewportMouseInput.IsCapturing;
 
     public EditorSceneFrame PrepareFrame(bool allowSceneInteraction, bool processPointer = true)
     {
         EditorSceneFrame frame = CaptureFrame();
 
-        if (processPointer)
+        if (IsWorldPicking)
+        {
+            _sceneSelection.Cancel();
+            _gizmo.CancelInteractions();
+            _sceneInputService.Deactivate();
+        }
+        else if (processPointer)
         {
             ScenePointerButtons pointerButtons = EditorInputUtility.CaptureScenePointerButtons(includeAuxiliaryButtons: true);
             bool inputActive = ProcessScenePointerInput(pointerButtons, allowSceneInteraction && !IsSelecting);
@@ -312,9 +326,56 @@ internal sealed class EditorSceneOverlay
 
     public void DrawFrame(EditorSceneFrame frame, EditorScreenArea? obscuredArea, bool drawGizmo)
     {
+        if (IsWorldPicking)
+        {
+            DrawWorldPicker();
+            return;
+        }
+
         frame = RefreshFrame(frame);
         DrawSceneTools(frame.ActiveSelection, frame.SceneBounds, frame.ObjectBounds, _sceneState.PlacementEvaluations,
             drawGizmo ? CreateGizmoDrawOptions(obscuredArea) : null);
+    }
+
+    public void DrawWorldPicker()
+    {
+        _drawManager.BeginFrame();
+        SubmitWorldPickerBounds();
+        DrawCurrentWindowLayer([], null);
+    }
+
+    private void SubmitWorldPickerBounds()
+    {
+        if (!_worldPicker.IsOpen)
+        {
+            return;
+        }
+
+        WorldAssetPickState state = _worldPicker.State;
+        WorldAsset? hover = _worldPicker.IsPointerInScene && state.IsPicking && state.Hover.Status == WorldAssetPickStatus.Hit
+            ? state.Hover.Asset : _worldPicker.BrowserHover;
+        if (state.LiveSelection is not { HasBounds: true } && hover is not { HasBounds: true })
+        {
+            return;
+        }
+
+        DrawBatch batch = _drawManager.BeginPass(DrawPassKind.Bounds, "World Picker", DrawLayer.CurrentWindow);
+        if (state.LiveSelection is { HasBounds: true } selected)
+        {
+            DrawBounds(selected, ThemeColors.AccentCyan);
+        }
+
+        if (hover is { HasBounds: true } && hover.InstanceId != state.LiveSelection?.InstanceId)
+        {
+            DrawBounds(hover, ThemeColors.WithAlpha(ThemeColors.AccentCyan, _worldPicker.BrowserHover is not null ? 0.35f : 0.7f));
+        }
+
+        void DrawBounds(WorldAsset asset, Vector4 color)
+        {
+            Span<Vector3> corners = stackalloc Vector3[BoundsOverlayGeometry.BoxCornerCount];
+            ObjectShapeMath.CopyOrientedBoxCorners(asset.Bounds, corners);
+            ShapeBuilder.AddBox(batch, corners, color, MathF.Max(1f, 1.5f * ImGuiHelpers.GlobalScale));
+        }
     }
 
     public void Deactivate()
@@ -327,7 +388,10 @@ internal sealed class EditorSceneOverlay
     private void CancelSceneSelection()
     {
         _sceneSelection.Cancel();
-        _viewportMouseInput.Cancel();
+        if (!IsWorldPicking)
+        {
+            _viewportMouseInput.Cancel();
+        }
     }
 
     private void DrawSceneTools(
@@ -339,6 +403,7 @@ internal sealed class EditorSceneOverlay
     {
         _drawManager.BeginFrame();
         SubmitBoundsOverlay(_editorOverlayBoundsSnapshots);
+        SubmitWorldPickerBounds();
         SubmitHousingPlacementOverlay(objectBoundsSnapshots, placementEvaluations);
         DrawCurrentWindowLayer(objectBoundsSnapshots, placementEvaluations);
         if (gizmoOptions.HasValue)
@@ -373,7 +438,8 @@ internal sealed class EditorSceneOverlay
             _sceneSelection.Cancel();
         }
 
-        _viewportMouseInput.Configure(viewport.Pos, viewport.Size, !IsSceneSelectionBlockedByUi(), boxSelectionEnabled);
+        _viewportMouseInput.Configure(viewport.Pos, viewport.Size, !IsSceneSelectionBlockedByUi(),
+            boxSelectionEnabled ? ViewportMouseCapture.Viewport : ViewportMouseCapture.None);
         for (int sample = 0; sample < 2 && _viewportMouseInput.TryRead(out ViewportMouseInput input); ++sample)
         {
             if (input.Pressed && (IsSceneSelectionBlockedByUi()

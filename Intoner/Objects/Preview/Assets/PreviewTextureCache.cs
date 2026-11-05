@@ -15,15 +15,14 @@ internal sealed class PreviewTextureCache(ILogger logger, IDataManager gameData)
 
     private static readonly TimeSpan PreviewTextureCacheRetention = TimeSpan.FromSeconds(45);
 
-    private sealed class Entry(
-        ModelPreviewGeometryReader.PreviewTexture? texture,
-        long byteCount,
-        long lastAccessAtMs)
+    private sealed class Entry(Func<ModelPreviewGeometryReader.PreviewTexture?> load, long now)
     {
-        public ModelPreviewGeometryReader.PreviewTexture? Texture { get; } = texture;
-        public long ByteCount { get; } = byteCount;
-        public long LastLoadAttemptAtMs { get; } = lastAccessAtMs;
-        public long LastAccessAtMs { get; set; } = lastAccessAtMs;
+        public Lazy<ModelPreviewGeometryReader.PreviewTexture?> Load { get; } = new(load);
+        public bool IsLoading => !Load.IsValueCreated;
+        public ModelPreviewGeometryReader.PreviewTexture? Texture => Load.IsValueCreated ? Load.Value : null;
+        public long ByteCount => Texture?.RgbaPixels.LongLength ?? 0;
+        public long LastLoadAttemptAtMs { get; } = now;
+        public long LastAccessAtMs { get; set; } = now;
     }
 
     private readonly Lock _lock = new();
@@ -44,40 +43,49 @@ internal sealed class PreviewTextureCache(ILogger logger, IDataManager gameData)
             return null;
         }
 
+        Entry entry;
         lock (_lock)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            if (_entries.TryGetValue(normalizedTexturePath, out Entry? entry))
-            {
-                entry.LastAccessAtMs = now;
 
-                if (entry.Texture is not null
-                 || !PreviewCachePolicy.IsExpired(entry.LastLoadAttemptAtMs, now, ObjectAssetFileUtility.AssetReadRetryDelay))
+            if (!_entries.TryGetValue(normalizedTexturePath, out entry!)
+                || !entry.IsLoading && entry.Texture is null
+                    && PreviewCachePolicy.IsExpired(entry.LastLoadAttemptAtMs, now, ObjectAssetFileUtility.AssetReadRetryDelay))
+            {
+                entry = new Entry(() => LoadTexture(normalizedTexturePath), now);
+                _entries[normalizedTexturePath] = entry;
+            }
+
+            entry.LastAccessAtMs = now;
+
+            if (!entry.IsLoading)
+            {
+                return entry.Texture;
+            }
+        }
+
+        try
+        {
+            ModelPreviewGeometryReader.PreviewTexture? texture = entry.Load.Value;
+            lock (_lock)
+            {
+                ObjectDisposedException.ThrowIf(_disposed, this);
+            }
+
+            return texture;
+        }
+        catch
+        {
+            lock (_lock)
+            {
+                if (_entries.TryGetValue(normalizedTexturePath, out Entry? current) && ReferenceEquals(current, entry))
                 {
-                    return entry.Texture;
+                    _entries.Remove(normalizedTexturePath);
                 }
-
-                _entries.Remove(normalizedTexturePath);
-            }
-        }
-
-        ModelPreviewGeometryReader.PreviewTexture? previewTexture = LoadTexture(normalizedTexturePath);
-        lock (_lock)
-        {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            if (_entries.TryGetValue(normalizedTexturePath, out Entry? existing) && existing.Texture is not null)
-            {
-                existing.LastAccessAtMs = now;
-                return existing.Texture;
             }
 
-            _entries[normalizedTexturePath] = new Entry(
-                previewTexture,
-                previewTexture?.RgbaPixels.LongLength ?? 0,
-                now);
+            throw;
         }
-
-        return previewTexture;
     }
 
     public long GetNextRetryAtMs(string texturePath, long now)
@@ -134,6 +142,11 @@ internal sealed class PreviewTextureCache(ILogger logger, IDataManager gameData)
 
             foreach ((string key, Entry entry) in candidates)
             {
+                if (entry.IsLoading)
+                {
+                    continue;
+                }
+
                 long retainedAtMs = entry.Texture is null ? entry.LastLoadAttemptAtMs : entry.LastAccessAtMs;
                 TimeSpan retention = entry.Texture is null ? ObjectAssetFileUtility.AssetReadRetryDelay : PreviewTextureCacheRetention;
                 bool shouldRemove = PreviewCachePolicy.IsExpired(retainedAtMs, now, retention)
@@ -176,18 +189,20 @@ internal sealed class PreviewTextureCache(ILogger logger, IDataManager gameData)
                 return null;
             }
 
-            byte[] pixels = texFile.GetRgbaImageData();
+            bool needsDownscale = Math.Max(width, height) > MaxPreviewTextureDimension;
+            byte[] pixels = needsDownscale ? texFile.ImageData : texFile.GetRgbaImageData();
+
             if (pixels.LongLength < requiredBytes)
             {
                 return null;
             }
 
-            if (Math.Max(width, height) > MaxPreviewTextureDimension)
+            if (needsDownscale)
             {
                 float scale = MaxPreviewTextureDimension / (float)Math.Max(width, height);
                 int targetWidth = Math.Max(1, (int)MathF.Round(width * scale));
                 int targetHeight = Math.Max(1, (int)MathF.Round(height * scale));
-                pixels = DownscaleRgba(pixels, width, height, targetWidth, targetHeight);
+                pixels = DownscaleBgraToRgba(pixels, width, height, targetWidth, targetHeight);
                 width = targetWidth;
                 height = targetHeight;
             }
@@ -201,13 +216,8 @@ internal sealed class PreviewTextureCache(ILogger logger, IDataManager gameData)
         }
     }
 
-    private static byte[] DownscaleRgba(byte[] sourcePixels, int sourceWidth, int sourceHeight, int targetWidth, int targetHeight)
+    private static byte[] DownscaleBgraToRgba(byte[] sourcePixels, int sourceWidth, int sourceHeight, int targetWidth, int targetHeight)
     {
-        if (targetWidth == sourceWidth && targetHeight == sourceHeight)
-        {
-            return sourcePixels;
-        }
-
         byte[] scaledPixels = new byte[targetWidth * targetHeight * 4];
         for (int y = 0; y < targetHeight; y++)
         {
@@ -217,9 +227,9 @@ internal sealed class PreviewTextureCache(ILogger logger, IDataManager gameData)
                 int sourceX = Math.Min(sourceWidth - 1, (int)MathF.Floor(x * sourceWidth / (float)targetWidth));
                 int sourceIndex = ((sourceY * sourceWidth) + sourceX) * 4;
                 int targetIndex = ((y * targetWidth) + x) * 4;
-                scaledPixels[targetIndex] = sourcePixels[sourceIndex];
+                scaledPixels[targetIndex] = sourcePixels[sourceIndex + 2];
                 scaledPixels[targetIndex + 1] = sourcePixels[sourceIndex + 1];
-                scaledPixels[targetIndex + 2] = sourcePixels[sourceIndex + 2];
+                scaledPixels[targetIndex + 2] = sourcePixels[sourceIndex];
                 scaledPixels[targetIndex + 3] = sourcePixels[sourceIndex + 3];
             }
         }

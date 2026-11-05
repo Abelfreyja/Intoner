@@ -4,6 +4,27 @@ namespace Intoner.Objects.Assets;
 
 internal static class GameMaterialPathUtility
 {
+    public static bool TryGetHousingMaterialPath(string path, ushort variant, out string materialPath)
+    {
+        materialPath = string.Empty;
+        path = ObjectResolvedPath.FromGamePath(path).Path;
+        int separator = path.IndexOf("/material/", StringComparison.Ordinal);
+        if (variant > 9999 || separator < 4 || path.Length - ".mtrl".Length < separator + 22
+            || !GameAssetPathRules.IsFileKind(path, GameAssetFileKind.Mtrl)
+            || path.AsSpan(separator - 4, 4).Contains('/') || path.AsSpan(separator + 18, 4).Contains('/'))
+        {
+            return false;
+        }
+
+        materialPath = string.Create(path.Length, (Path: path, Separator: separator, Variant: variant), static (buffer, state) =>
+        {
+            state.Path.AsSpan().CopyTo(buffer);
+            state.Variant.TryFormat(buffer.Slice(state.Separator - 4, 4), out _, "D4", System.Globalization.CultureInfo.InvariantCulture);
+            buffer.Slice(state.Separator - 4, 4).CopyTo(buffer.Slice(state.Separator + 18, 4));
+        });
+        return true;
+    }
+
     public static bool TryResolveMaterialPath(
         Func<string, bool> fileExists,
         string modelPath,

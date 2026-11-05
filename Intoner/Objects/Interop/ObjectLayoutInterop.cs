@@ -1,7 +1,9 @@
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine.Group;
+using FFXIVClientStructs.FFXIV.Client.LayoutEngine.Layer;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine.Node;
 using FFXIVClientStructs.FFXIV.Common.Component.BGCollision;
+using InteropGenerator.Runtime;
 using Intoner.Objects.Models;
 using Intoner.Objects.Utils;
 using Intoner.Scene;
@@ -38,6 +40,9 @@ internal static unsafe class ObjectLayoutInterop
     private const ushort SharedGroupTabletopPlacementFlag = 0x0400;
     private const ushort SharedGroupWallPlacementFlag = 0x0800;
 
+    public static bool IsSharedGroup(InstanceType type)
+        => type is InstanceType.SharedGroup or InstanceType.HelperObject;
+
     /// <summary>
     /// Creates a native layout transform from one object transform snapshot.
     /// </summary>
@@ -60,6 +65,20 @@ internal static unsafe class ObjectLayoutInterop
     {
         var layoutTransform = CreateTransform(transform);
         instance->SetTransformImpl(&layoutTransform);
+
+        if (IsSharedGroup(instance->Id.Type))
+        {
+            SharedGroupLayoutInstance* group = (SharedGroupLayoutInstance*)instance;
+
+            if (UsesControllerTransform(group))
+            {
+                ApplyChildTransforms(group);
+            }
+            else
+            {
+                RefreshControlledChildren(group);
+            }
+        }
     }
 
     /// <summary>
@@ -73,22 +92,6 @@ internal static unsafe class ObjectLayoutInterop
         ILayoutInstance* layout = (ILayoutInstance*)instance;
         return layout != null && layout->VirtualTable != null
             && layout->VirtualTable->IsPrimaryLoaded != null && layout->IsPrimaryLoaded();
-    }
-
-    /// <summary>
-    /// Refreshes visual children after the sgb's primary resource loads.
-    /// </summary>
-    /// <param name="instance">The sgb layout instance to refresh.</param>
-    /// <returns><see langword="true"/> when the instance was refreshed.</returns>
-    public static bool TryRefreshSharedGroupTransforms(SharedGroupLayoutInstance* instance)
-    {
-        if (!IsPrimaryLoaded(instance))
-        {
-            return false;
-        }
-
-        RefreshSharedGroupTransforms(instance);
-        return true;
     }
 
     /// <summary>
@@ -257,6 +260,61 @@ internal static unsafe class ObjectLayoutInterop
         return support;
     }
 
+    public static void ApplyInstanceSound(ILayoutInstance* instance, bool enabled)
+    {
+        if (instance == null)
+        {
+            return;
+        }
+
+        if (instance->Id.Type == InstanceType.Sound)
+        {
+            SoundLayoutInstance* sound = (SoundLayoutInstance*)instance;
+
+            if (sound->PathCrc == 0)
+            {
+                return;
+            }
+
+            if (!enabled)
+            {
+                if (sound->SoundData != null)
+                {
+                    sound->SoundData->Stop(0);
+                }
+
+                if (sound->SoundData != null || sound->ResourceHandle != null)
+                {
+                    instance->DestroyPrimary();
+                }
+            }
+            else if (sound->ResourceHandle == null)
+            {
+                CStringPointer path = instance->GetPrimaryPath();
+
+                if (path.HasValue && *path.Value != 0)
+                {
+                    instance->CreatePrimary(&sound->Transform, &path);
+                }
+            }
+
+            return;
+        }
+
+        if (!IsSharedGroup(instance->Id.Type))
+        {
+            return;
+        }
+
+        foreach (var child in ((SharedGroupLayoutInstance*)instance)->Instances.Instances.AsSpan())
+        {
+            if (child.Value != null)
+            {
+                ApplyInstanceSound(child.Value->Instance, enabled);
+            }
+        }
+    }
+
     public static void ApplySharedGroupVisibility(SharedGroupLayoutInstance* instance, bool visible)
     {
         if (instance != null)
@@ -293,7 +351,7 @@ internal static unsafe class ObjectLayoutInterop
             return;
         }
 
-        if (instance->Id.Type is not (InstanceType.SharedGroup or InstanceType.HelperObject))
+        if (!IsSharedGroup(instance->Id.Type))
         {
             return;
         }
@@ -307,6 +365,38 @@ internal static unsafe class ObjectLayoutInterop
         }
     }
 
+    public static void AppendGraphicsObjects(ILayoutInstance* instance, HashSet<nint> graphics)
+    {
+        if (instance == null)
+        {
+            return;
+        }
+
+        SceneObject* primary = instance->GetGraphics();
+        SceneObject* secondary = instance->GetGraphics2();
+
+        if (primary != null)
+        {
+            graphics.Add((nint)primary);
+        }
+
+        if (secondary != null)
+        {
+            graphics.Add((nint)secondary);
+        }
+
+        if (IsSharedGroup(instance->Id.Type))
+        {
+            foreach (var child in ((SharedGroupLayoutInstance*)instance)->Instances.Instances.AsSpan())
+            {
+                if (child.Value != null)
+                {
+                    AppendGraphicsObjects(child.Value->Instance, graphics);
+                }
+            }
+        }
+    }
+
     private static void ApplyGraphicsVisibility(SceneObject* graphics, bool visible)
     {
         if (ObjectSceneInterop.TryGetDrawObject(graphics, out var drawObject))
@@ -315,22 +405,38 @@ internal static unsafe class ObjectLayoutInterop
         }
     }
 
-    private static void RefreshSharedGroupTransforms(SharedGroupLayoutInstance* instance)
+    public static void ApplyChildTransforms(SharedGroupLayoutInstance* instance)
     {
         instance->Instances.ApplyTransforms();
+        RefreshControlledChildren(instance);
+    }
+
+    private static bool UsesControllerTransform(SharedGroupLayoutInstance* instance)
+    {
+        SGActionController* controller = instance->ActionController1;
+        return controller != null
+            && ((delegate* unmanaged<SGActionController*, byte>)((nint*)controller->VirtualTable)[5])(controller) != 0;
+    }
+
+    private static void RefreshControlledChildren(SharedGroupLayoutInstance* instance)
+    {
         foreach (var child in instance->Instances.Instances.AsSpan())
         {
-            var node = child.Value;
-            if (node == null || node->Instance == null || node->Instance->Id.Type != InstanceType.SharedGroup)
+            ILayoutInstance* layout = child.Value != null ? child.Value->Instance : null;
+
+            if (layout == null || !IsSharedGroup(layout->Id.Type))
             {
                 continue;
             }
 
-            SharedGroupLayoutInstance* group = (SharedGroupLayoutInstance*)node->Instance;
-            if (IsPrimaryLoaded(group))
+            SharedGroupLayoutInstance* group = (SharedGroupLayoutInstance*)layout;
+
+            if (UsesControllerTransform(group))
             {
-                RefreshSharedGroupTransforms(group);
+                group->Instances.ApplyTransforms();
             }
+
+            RefreshControlledChildren(group);
         }
     }
 
@@ -399,7 +505,7 @@ internal static unsafe class ObjectLayoutInterop
             return true;
         }
 
-        return instance->Id.Type == InstanceType.SharedGroup
+        return IsSharedGroup(instance->Id.Type)
             && ChildContainerContainsCollider(&((SharedGroupLayoutInstance*)instance)->Instances, collider);
     }
 
@@ -471,7 +577,7 @@ internal static unsafe class ObjectLayoutInterop
             return true;
         }
 
-        return instance->Id.Type == InstanceType.SharedGroup
+        return IsSharedGroup(instance->Id.Type)
             && ChildContainerContainsInstance(&((SharedGroupLayoutInstance*)instance)->Instances, target);
     }
 
@@ -534,7 +640,7 @@ internal static unsafe class ObjectLayoutInterop
             AccumulateGraphicsLocalBounds(secondaryGraphics, inverseRootTransform, ref hasLocalBounds, ref localMin, ref localMax);
         }
 
-        if (instance->Id.Type == InstanceType.SharedGroup)
+        if (IsSharedGroup(instance->Id.Type))
         {
             var childGroup = (SharedGroupLayoutInstance*)instance;
             AccumulateSharedGroupLocalBounds(&childGroup->Instances, inverseRootTransform, ref hasLocalBounds, ref localMin, ref localMax);

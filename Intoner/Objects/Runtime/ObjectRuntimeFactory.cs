@@ -4,6 +4,7 @@ using FFXIVClientStructs.FFXIV.Client.LayoutEngine;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine.Group;
 using Intoner.Logging;
 using Intoner.Objects.Assets;
+using Intoner.Objects.Catalog;
 using Intoner.Objects.Interop;
 using Intoner.Objects.Models;
 using Intoner.Objects.Resources;
@@ -51,7 +52,11 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
     private readonly IFramework _framework;
     private readonly IDataManager _gameData;
     private readonly ObjectNativeBindings _nativeBindings;
+    private readonly ObjectLayoutService _layouts;
+    private readonly FurnitureMaterialService _materials;
     private readonly FurnitureEmoteGuard _emoteGuard;
+    private readonly ObjectSoundService _sound;
+    private readonly IObjectKindService _objectKindService;
     private readonly CameraCollisionService _cameraCollision;
     private readonly ObjectResourceTracker _resourceTracker;
     private readonly IObjectResourceLoader _resourceLoader;
@@ -64,7 +69,11 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
         IFramework framework,
         IDataManager gameData,
         ObjectNativeBindings nativeBindings,
+        ObjectLayoutService layouts,
+        FurnitureMaterialService materials,
         FurnitureEmoteGuard emoteGuard,
+        ObjectSoundService sound,
+        IObjectKindService objectKindService,
         CameraCollisionService cameraCollision,
         ObjectResourceTracker resourceTracker,
         IObjectResourceLoader resourceLoader,
@@ -75,7 +84,11 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
         _framework = framework;
         _gameData = gameData;
         _nativeBindings = nativeBindings;
+        _layouts = layouts;
+        _materials = materials;
         _emoteGuard = emoteGuard;
+        _sound = sound;
+        _objectKindService = objectKindService;
         _cameraCollision = cameraCollision;
         _resourceTracker = resourceTracker;
         _resourceLoader = resourceLoader;
@@ -201,12 +214,22 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
 
     private ObjectRuntimeCreateResult TryCreateFurnitureUnsafe(ObjectSnapshot snapshot, ObjectCollectionResolveData? collection)
     {
-        if (!_cameraCollision.IsFurnitureAvailable || !_emoteGuard.IsAvailable)
+        if (!_objectKindService.CanCreate(ObjectKind.Furniture))
         {
             return ObjectRuntimeCreateResult.Failed(ObjectRuntimeFailureCodes.ServiceMissing);
         }
 
         var furnitureModel = (FurnitureModel)snapshot.Model;
+        if (!_materials.TryResolve(furnitureModel, out FurnitureMaterialOption? material))
+        {
+            return ObjectRuntimeCreateResult.Failed(ObjectRuntimeFailureCodes.InvalidObject);
+        }
+
+        if (material is not null && !_layouts.CanSetMaterial)
+        {
+            return ObjectRuntimeCreateResult.Failed(ObjectRuntimeFailureCodes.ServiceMissing);
+        }
+
         if (string.IsNullOrWhiteSpace(furnitureModel.SharedGroupPath))
         {
             _furnitureLogger.LogDebug("skipping furniture create because shared group path is empty");
@@ -233,9 +256,10 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
         var layoutTransform = ObjectLayoutInterop.CreateTransform(snapshot.Transform);
         var pathBytes = Encoding.UTF8.GetBytes(resolvedResource.CreatePath + '\0');
         FurnitureNativeInstance native = _cameraCollision.CreateRoot(snapshot.Visible, furnitureModel.CameraCollision);
+        native.Sound.Enabled = furnitureModel.SoundEnabled;
         try
         {
-            using ObjectCollisionOwnership.Scope collisionScope = _cameraCollision.EnterCreation(native);
+            using ObjectNativeOwnership.Scope collisionScope = _cameraCollision.EnterCreation(native);
             SharedGroupLayoutInstance* instance;
             fixed (byte* pathPtr = pathBytes)
             {
@@ -279,13 +303,15 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
                 () => new FurnitureObjectRuntime(
                     _framework,
                     _furnitureLogger,
-                    snapshot with { Model = new FurnitureModel { SharedGroupPath = furnitureModel.SharedGroupPath, CameraCollision = furnitureModel.CameraCollision } },
+                    snapshot with { Model = new FurnitureModel { SharedGroupPath = furnitureModel.SharedGroupPath, CameraCollision = furnitureModel.CameraCollision, SoundEnabled = furnitureModel.SoundEnabled } },
                     native,
                     resolvedResource.ResolvedPath,
                     _resourceTracker,
                     _emoteGuard,
                     _frameworkDiagnostics,
-                    resolvedResource.ResourceCollectionId),
+                    resolvedResource.ResourceCollectionId,
+                    _layouts,
+                    _materials),
                 native.Dispose,
                 snapshot,
                 createdObject => LogCreatedRootResource(
@@ -391,6 +417,8 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
         Encoding.UTF8.GetBytes(resolvedResource.CreatePath, pathBytes);
         pathBytes[^1] = 0;
 
+        ObjectSoundState sound = new(vfxModel.SoundEnabled);
+        using ObjectSoundService.CreationScope soundScope = _sound.EnterCreation(sound);
         VfxObject* vfxObject;
         using var cacheIsolationScope = EnterVfxCacheIsolationScope(resolvedResource);
         using var vfxRewriteScope = _vfxResourceRewriteService.EnterRewriteScope(resolvedResource, cacheIsolationScope.ResourceHash);
@@ -410,8 +438,9 @@ internal sealed unsafe class ObjectRuntimeFactory : IObjectRuntimeFactory
             () => new VfxObjectRuntime(
                 _framework,
                 _vfxLogger,
-                snapshot with { Model = new VfxModel { VfxPath = vfxModel.VfxPath } },
+                snapshot with { Model = new VfxModel { VfxPath = vfxModel.VfxPath, SoundEnabled = vfxModel.SoundEnabled } },
                 vfxObject,
+                sound,
                 resolvedResource.ResolvedPath,
                 _nativeBindings.Vfx,
                 _resourceTracker,

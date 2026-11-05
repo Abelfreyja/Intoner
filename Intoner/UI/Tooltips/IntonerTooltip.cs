@@ -284,7 +284,7 @@ internal static class IntonerTooltip
     }
 
     internal static Vector4 ResolveBackground()
-        => Vector4.Lerp(ThemeColors.WindowBg, ThemeColors.ButtonDefault, 0.48f) with { W = 0.99f };
+        => ThemeColors.FromBytes(24, 24, 24) with { W = 0.99f };
 
     internal static Vector4 ResolveHeaderBackground(Vector4 background)
         => Vector4.Lerp(background, ThemeColors.TextDefault, 0.04f);

@@ -18,6 +18,7 @@ internal enum EditorToggleIconButtonStyle
     Subtle,
     Outlined,
     MutedOutline,
+    Borderless,
 }
 
 internal static class EditorIconButton
@@ -198,7 +199,7 @@ internal static class EditorIconButton
     {
         Vector4 accent = selected ? selectedAccent : inactiveAccent;
         ResolveToggleColors(selected, enabled, accent, style, out Vector4 fill, out Vector4 hoverFill, out Vector4 activeFill, out Vector4 border);
-        bool subtle = style == EditorToggleIconButtonStyle.Subtle;
+        bool subtle = style is EditorToggleIconButtonStyle.Subtle or EditorToggleIconButtonStyle.Borderless;
         float rounding = Scaled(subtle ? 4f : 7f);
         float borderThickness = MathF.Max(1f, Scaled(subtle ? 0.75f : 1f));
         float borderInset = subtle ? borderThickness * 0.5f : 0f;
@@ -290,6 +291,15 @@ internal static class EditorIconButton
             hoverFill = fill;
             activeFill = fill;
             border = ThemeColors.Border with { W = 0.26f };
+            return;
+        }
+
+        if (style == EditorToggleIconButtonStyle.Borderless)
+        {
+            fill = Vector4.Zero;
+            hoverFill = accent with { W = 0.16f };
+            activeFill = accent with { W = 0.24f };
+            border = Vector4.Zero;
             return;
         }
 

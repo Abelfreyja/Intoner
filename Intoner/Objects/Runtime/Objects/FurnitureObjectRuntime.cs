@@ -1,6 +1,7 @@
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine.Group;
+using Intoner.Objects.Catalog;
 using Intoner.Objects.Interop;
 using Intoner.Objects.Models;
 using Intoner.Objects.Resources;
@@ -19,6 +20,10 @@ internal sealed unsafe class FurnitureObjectRuntime : LayoutObjectRuntime
     private readonly nint _rootAddress;
     private readonly ObjectResourceTracker _resourceTracker;
     private readonly ObjectFrameworkDiagnostics _frameworkDiagnostics;
+    private readonly ObjectLayoutService _layouts;
+    private readonly FurnitureMaterialService _materials;
+    private ushort _materialVariant;
+    private bool _materialApplied;
 
     private SharedGroupLayoutInstance* Instance => _native.Instance;
     private DeferredVisualState _deferredVisualState;
@@ -52,10 +57,14 @@ internal sealed unsafe class FurnitureObjectRuntime : LayoutObjectRuntime
         ObjectResourceTracker resourceTracker,
         FurnitureEmoteGuard emoteGuard,
         ObjectFrameworkDiagnostics frameworkDiagnostics,
-        string resourceCollectionId)
+        string resourceCollectionId,
+        ObjectLayoutService layouts,
+        FurnitureMaterialService materials)
         : base(framework, logger, snapshot)
     {
         _native = native;
+        _layouts = layouts;
+        _materials = materials;
         _rootAddress = (nint)native.Instance;
         _sharedGroupPath = sharedGroupPath;
         _resourceTracker = resourceTracker;
@@ -142,6 +151,12 @@ internal sealed unsafe class FurnitureObjectRuntime : LayoutObjectRuntime
             return ObjectRuntimeUpdateResult.Rejected;
         }
 
+        if (!_materials.TryResolve(furnitureModel, out FurnitureMaterialOption? material)
+            || material is not null && !_layouts.CanSetMaterial)
+        {
+            return ObjectRuntimeUpdateResult.Rejected;
+        }
+
         if (Instance == null)
         {
             return ObjectRuntimeUpdateResult.RequiresRecreate;
@@ -218,7 +233,31 @@ internal sealed unsafe class FurnitureObjectRuntime : LayoutObjectRuntime
     }
 
     private bool TryApplyVisualStateUnsafe(FurnitureModel model)
-        => FurnitureSceneInterop.TryApplyVisualState(Logger, Instance, model);
+    {
+        if (!FurnitureSceneInterop.TryApplyVisualState(Logger, Instance, model))
+        {
+            return false;
+        }
+
+        if (!_materials.TryResolve(model, out FurnitureMaterialOption? material))
+        {
+            return false;
+        }
+
+        ushort variant = material?.Variant ?? 0;
+        if ((variant != 0 || _materialVariant != 0) && (!_materialApplied || variant != _materialVariant))
+        {
+            if (!_layouts.TrySetWallpaper(_native, variant))
+            {
+                return false;
+            }
+
+            _materialVariant = variant;
+            _materialApplied = true;
+        }
+
+        return true;
+    }
 
     private void RefreshNativeState(bool childReady)
     {
@@ -244,6 +283,7 @@ internal sealed unsafe class FurnitureObjectRuntime : LayoutObjectRuntime
 
         if (_nativeState.VisualsChanged || childReady != _visualChildReady)
         {
+            _materialApplied = false;
             _deferredVisualState.RequestReplay();
         }
 

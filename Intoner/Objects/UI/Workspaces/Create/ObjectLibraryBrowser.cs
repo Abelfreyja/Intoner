@@ -34,14 +34,14 @@ internal sealed partial class ObjectLibraryBrowser
     private readonly ObjectCreateActions _createActions;
     private readonly ObjectBrowserPanel _browserPanel;
     private readonly CatalogLibraryStatus _libraryStatus;
-    private readonly HashSet<Guid> _collapsedLibraryGroups = [];
+    private readonly HashSet<Guid> _expandedLibraryGroups = [];
     private string _libraryFilter = string.Empty;
     private string _libraryKindFilter = string.Empty;
     private long _librarySelectionRevision = -1;
-    private int _libraryGroupStateRevision;
     private LibraryViewCache? _libraryViewCache;
     private LibraryKindCountsCache? _libraryKindCountsCache;
-    private LibraryPresetMatchesCache? _libraryPresetMatchesCache;
+    private readonly Dictionary<ObjectLibraryPreset, IReadOnlyList<ObjectLibraryEntry>> _libraryPresetMatches = [];
+    private long _libraryPresetMatchesRevision = -1;
 
     public ObjectLibraryBrowser(
         IObjectFolderService objectFolderService,
@@ -81,6 +81,74 @@ internal sealed partial class ObjectLibraryBrowser
         _createActions         = createActions;
         _browserPanel          = browserPanel;
         _libraryStatus         = libraryStatus;
+    }
+
+    internal bool DrawPresetLibraryButton(string name, ObjectLibraryPreset? preset, float edge,
+        string addTooltip = "Save these settings to the Library")
+    {
+        IReadOnlyList<ObjectLibraryEntry> exactEntries = preset is not null
+            ? ResolveLibraryPresetMatches(preset)
+            : [];
+        bool saved = exactEntries.Count > 0;
+        string tooltip = exactEntries.Count switch
+        {
+            0 => addTooltip,
+            1 => "Open this preset in the Library",
+            _ => "Choose which saved copy to open in the Library",
+        };
+        bool clicked = EditorIconButton.DrawToggle(
+            "presetLibrary",
+            saved ? FontAwesomeIcon.LayerGroup : FontAwesomeIcon.FolderPlus,
+            new Vector2(edge),
+            saved,
+            ThemeColors.AccentPrimary,
+            ThemeColors.AccentOrange,
+            tooltip,
+            enabled: preset is not null);
+
+        bool opened = false;
+        using (EditorContextMenu.PopupScope entriesMenu = EditorContextMenu.BeginDropdownForLastItem(
+                   "##presetLibraryEntries", clicked && exactEntries.Count > 1))
+        {
+            if (entriesMenu)
+            {
+                opened = DrawLibraryEntryChoices("presetLibrary", exactEntries);
+            }
+        }
+
+        return opened || (clicked && preset is not null && OpenOrSavePreset(name, preset, exactEntries));
+    }
+
+    internal bool DrawPresetLibraryMenuItem(string label, string name, ObjectLibraryPreset preset)
+    {
+        IReadOnlyList<ObjectLibraryEntry> entries = ResolveLibraryPresetMatches(preset);
+        FontAwesomeIcon icon = SceneItemPresentation.ResolveObjectKindIcon(preset.Kind);
+
+        if (entries.Count > 1)
+        {
+            using EditorContextMenu.SubMenuScope menu = EditorContextMenu.BeginSubMenu("savedCopies", icon, label,
+                tooltip: "Choose which saved copy to open in the Library");
+            return menu && DrawLibraryEntryChoices("savedCopies", entries);
+        }
+
+        return EditorContextMenu.DrawItem(icon, label,
+                tooltip: entries.Count == 0 ? "Add to Library" : "Open this preset in the Library")
+            && OpenOrSavePreset(name, preset, entries);
+    }
+
+    private bool OpenOrSavePreset(string name, ObjectLibraryPreset preset, IReadOnlyList<ObjectLibraryEntry> entries)
+    {
+        if (entries.Count == 1)
+        {
+            return OpenLibraryEntry(entries[0]);
+        }
+
+        if (entries.Count == 0)
+        {
+            _ = _objectLibrary.TryAdd(name, preset, null, out _);
+        }
+
+        return false;
     }
 
     internal void DrawCatalogEntryLibraryContext(string id, string name, ObjectLibraryPreset preset)
@@ -193,7 +261,6 @@ internal sealed partial class ObjectLibraryBrowser
 
     internal sealed record LibraryViewCache(
         long Revision,
-        int GroupStateRevision,
         string Filter,
         string KindFilter,
         LibraryBrowserView View);
@@ -201,11 +268,6 @@ internal sealed partial class ObjectLibraryBrowser
     internal sealed record LibraryKindCountsCache(
         long Revision,
         IReadOnlyList<ObjectCatalogFilterCount> Counts);
-
-    internal sealed record LibraryPresetMatchesCache(
-        long Revision,
-        ObjectLibraryPreset Preset,
-        IReadOnlyList<ObjectLibraryEntry> Entries);
 
     internal void DrawObjectLibraryBrowser(int catalogCount)
     {
@@ -281,10 +343,7 @@ internal sealed partial class ObjectLibraryBrowser
 
         _libraryFilter = string.Empty;
         _libraryKindFilter = string.Empty;
-        if (_collapsedLibraryGroups.Remove(result.Group.Id))
-        {
-            ++_libraryGroupStateRevision;
-        }
+        SetLibraryGroupExpanded(result.Group.Id, true);
 
         _ = result.EntryIds.Count > 0
             ? _browserSelection.LibrarySelection.TryReplaceSelection(result.EntryIds)
@@ -297,17 +356,15 @@ internal sealed partial class ObjectLibraryBrowser
         string normalizedKind = TextUtility.TrimOrEmpty(kindFilter);
         if (_libraryViewCache is { } cache
          && cache.Revision == library.Revision
-         && cache.GroupStateRevision == _libraryGroupStateRevision
          && string.Equals(cache.Filter, normalizedFilter, StringComparison.Ordinal)
          && string.Equals(cache.KindFilter, normalizedKind, StringComparison.Ordinal))
         {
             return cache.View;
         }
 
-        LibraryBrowserView view = LibraryBrowserView.Create(library, normalizedFilter, normalizedKind, _collapsedLibraryGroups, ObjectEditorCatalog.BuildLibraryEntrySearchText);
+        LibraryBrowserView view = LibraryBrowserView.Create(library, normalizedFilter, normalizedKind, _expandedLibraryGroups, ObjectEditorCatalog.BuildLibraryEntrySearchText);
         _libraryViewCache = new LibraryViewCache(
             library.Revision,
-            _libraryGroupStateRevision,
             normalizedFilter,
             normalizedKind,
             view);
@@ -335,9 +392,6 @@ internal sealed partial class ObjectLibraryBrowser
             .Where(static count => count.Count > 0)
             .ToArray();
 
-    private bool IsLibraryGroupCollapsed(Guid groupId)
-        => _collapsedLibraryGroups.Contains(groupId);
-
     private void PruneLibrarySelection(ObjectLibrarySnapshot library)
     {
         if (_librarySelectionRevision == library.Revision)
@@ -350,35 +404,41 @@ internal sealed partial class ObjectLibraryBrowser
         HashSet<Guid> groupIds = library.Folders.Select(static folder => folder.Id)
             .Concat(library.Prefabs.Select(static prefab => prefab.Id))
             .ToHashSet();
-        if (_collapsedLibraryGroups.RemoveWhere(groupId => !groupIds.Contains(groupId)) > 0)
+        if (_expandedLibraryGroups.RemoveWhere(groupId => !groupIds.Contains(groupId)) > 0)
         {
-            ++_libraryGroupStateRevision;
+            _libraryViewCache = null;
         }
     }
 
-    private void ToggleLibraryGroupCollapsed(Guid groupId)
+    private void SetLibraryGroupExpanded(Guid groupId, bool expanded)
     {
-        if (!_collapsedLibraryGroups.Add(groupId))
+        if (expanded ? _expandedLibraryGroups.Add(groupId) : _expandedLibraryGroups.Remove(groupId))
         {
-            _collapsedLibraryGroups.Remove(groupId);
+            _libraryViewCache = null;
         }
-
-        ++_libraryGroupStateRevision;
     }
 
-    internal IReadOnlyList<ObjectLibraryEntry> ResolveLibraryPresetMatches(
-        ObjectLibrarySnapshot library,
-        ObjectLibraryPreset preset)
+    internal IReadOnlyList<ObjectLibraryEntry> ResolveLibraryPresetMatches(ObjectLibraryPreset preset)
     {
-        if (_libraryPresetMatchesCache is { } cache
-         && cache.Revision == library.Revision
-         && cache.Preset == preset)
+        ObjectLibrarySnapshot library = _objectLibrary.Current;
+
+        if (_libraryPresetMatchesRevision != library.Revision)
         {
-            return cache.Entries;
+            _libraryPresetMatches.Clear();
+            _libraryPresetMatchesRevision = library.Revision;
         }
 
-        IReadOnlyList<ObjectLibraryEntry> entries = ObjectLibraryQuery.FindEntries(library, preset);
-        _libraryPresetMatchesCache = new LibraryPresetMatchesCache(library.Revision, preset, entries);
+        if (!_libraryPresetMatches.TryGetValue(preset, out IReadOnlyList<ObjectLibraryEntry>? entries))
+        {
+            if (_libraryPresetMatches.Count >= 128)
+            {
+                _libraryPresetMatches.Clear();
+            }
+
+            entries = ObjectLibraryQuery.FindEntries(library, preset);
+            _libraryPresetMatches.Add(preset, entries);
+        }
+
         return entries;
     }
 }

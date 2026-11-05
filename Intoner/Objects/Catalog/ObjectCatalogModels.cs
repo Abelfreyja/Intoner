@@ -553,6 +553,8 @@ internal sealed class ObjectCatalogSection
     private string _cachedFurnitureFilterText = string.Empty;
     private string _cachedFurnitureCategory = string.Empty;
     private ObjectCatalogFurnitureResult[]? _cachedFurnitureResults;
+    private string? _cachedFurnitureModelPath;
+    private ObjectCatalogFurnitureResult[] _cachedFurnitureModelResults = [];
 
     public ObjectCatalogSection(ObjectCatalogKind kind, string displayName, IReadOnlyList<ObjectCatalogEntry> entries)
     {
@@ -584,6 +586,37 @@ internal sealed class ObjectCatalogSection
 
     public bool TryResolveEntry(string placementPath, [NotNullWhen(true)] out ObjectCatalogEntry? entry)
         => _entriesByPlacementPath.TryGetValue(GameAssetPathRules.NormalizeGamePath(placementPath), out entry);
+
+    public IReadOnlyList<ObjectCatalogFurnitureResult> FindFurnitureByModel(string modelPath)
+    {
+        string path = GameAssetPathRules.NormalizeGamePath(modelPath);
+        lock (_cacheLock)
+        {
+            if (string.Equals(path, _cachedFurnitureModelPath, StringComparison.OrdinalIgnoreCase))
+            {
+                return _cachedFurnitureModelResults;
+            }
+
+            List<ObjectCatalogFurnitureResult> matches = [];
+            foreach (ObjectCatalogEntry entry in _entries)
+            {
+                if (entry.FurnitureInfo is not { } furniture
+                 || !entry.PreviewModelPaths.Contains(path, StringComparer.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                foreach (ObjectCatalogFurnitureVariant variant in furniture.Variants)
+                {
+                    matches.Add(new(entry, variant));
+                }
+            }
+
+            _cachedFurnitureModelResults = matches.OrderBy(static match => match.Variant.Name, StringComparer.OrdinalIgnoreCase).ToArray();
+            _cachedFurnitureModelPath = path;
+            return _cachedFurnitureModelResults;
+        }
+    }
 
     internal void PrepareSearchIndex(LoadProgress progress)
     {

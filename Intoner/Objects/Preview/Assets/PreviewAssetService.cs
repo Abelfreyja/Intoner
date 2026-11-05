@@ -41,25 +41,28 @@ internal sealed class PreviewAssetService : IDisposable
         long now = Environment.TickCount64;
         string cacheKey = asset.ModelSignature;
 
-        if (!_geometryCache.TryGet(cacheKey, out entry) || entry is null || entry.NeedsModelRetry(now))
+        if (!_geometryCache.TryGet(cacheKey, out entry) || entry is null || entry.Models.NeedsRetry(now))
         {
             if (entry is not null)
             {
                 lock (entry.SyncRoot)
                 {
-                    entry.NextModelRetryAtMs = now + (long)ObjectAssetFileUtility.AssetReadRetryDelay.TotalMilliseconds;
+                    entry.Models.NextRetryAtMs = now + (long)ObjectAssetFileUtility.AssetReadRetryDelay.TotalMilliseconds;
                 }
             }
 
             try
             {
-                ModelPreviewGeometryReader.PreviewGeometry? geometry = _geometryBuilder.BuildMergedGeometry(asset.Models,
-                    out IReadOnlyList<PreviewAssetState.MaterialRequest> missingMaterials,
-                    out IReadOnlySet<int> loadedModelIndices, out error);
+                PreviewGeometryBuilder.Result result = _geometryBuilder.BuildMergedGeometry(asset.Models);
+                error = result.Error;
 
-                if (geometry is not null)
+                if (result.Geometry is { } geometry)
                 {
-                    entry = _geometryCache.GetOrCreate(cacheKey, geometry, missingMaterials, asset.Models.Count, loadedModelIndices);
+                    entry = _geometryCache.GetOrCreate(cacheKey, geometry, result.MissingMaterials, asset.Models.Count, result.LoadedModelIndices);
+                }
+                else if (result.IsInvalid && entry is not null)
+                {
+                    entry = _geometryCache.Invalidate(entry, result.Error!);
                 }
             }
             catch (Exception ex) when (entry is not null && ObjectAssetFileUtility.IsReadFailure(ex))
@@ -78,7 +81,17 @@ internal sealed class PreviewAssetService : IDisposable
             entry = _geometryCache.RefreshResources(entry, now);
         }
 
-        error = null;
+        lock (entry.SyncRoot)
+        {
+            error = entry.Models.Error;
+        }
+
+        if (error is not null)
+        {
+            entry = null;
+            return false;
+        }
+
         return true;
     }
 
@@ -100,7 +113,7 @@ internal sealed class PreviewAssetService : IDisposable
 
     private static long GetNextAssetRetryAtMs(PreviewAssetState.GeometryEntry entry)
     {
-        long retryAtMs = entry.HasMissingModels ? entry.NextModelRetryAtMs : 0;
+        long retryAtMs = entry.Models.IsIncomplete ? entry.Models.NextRetryAtMs : 0;
 
         if (entry.NextMaterialRetryAtMs > 0 && (retryAtMs == 0 || entry.NextMaterialRetryAtMs < retryAtMs))
         {

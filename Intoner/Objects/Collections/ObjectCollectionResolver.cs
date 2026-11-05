@@ -1,4 +1,5 @@
 using Intoner.Objects.Models;
+using Intoner.Objects.Catalog;
 using Intoner.Objects.Resources;
 using Intoner.Objects.Assets;
 using Intoner.Objects.Utils;
@@ -15,6 +16,16 @@ internal sealed record ObjectCollectionResolveResult
     public IReadOnlyList<string> Warnings { get; init; } = [];
     public IReadOnlyList<ObjectPathRedirection> Redirects { get; init; } = [];
     public IReadOnlyList<CollectionResourceView> ResourceViews { get; init; } = [];
+
+    public static ObjectCollectionResolveResult Failed(string message, IReadOnlyList<string>? warnings = null)
+        => new()
+        {
+            IsComplete = false,
+            ResolveState = ObjectCollectionResolveState.ResolveFailed,
+            StatusText = message,
+            KeepLastGoodSnapshot = true,
+            Warnings = [.. warnings ?? [], message],
+        };
 }
 
 /// <summary> resolves authored object collections into runtime resource snapshots </summary>
@@ -41,11 +52,13 @@ internal sealed class ObjectCollectionResolver : IObjectCollectionResolver
 
     private readonly IObjectModDataSource _modDataSource;
     private readonly ObjectAssetDependencyResolver _dependencyResolver;
+    private readonly FurnitureMaterialService _materials;
 
-    public ObjectCollectionResolver(IObjectModDataSource modDataSource, ObjectAssetDependencyResolver dependencyResolver)
+    public ObjectCollectionResolver(IObjectModDataSource modDataSource, ObjectAssetDependencyResolver dependencyResolver, FurnitureMaterialService materials)
     {
         _modDataSource = modDataSource;
         _dependencyResolver = dependencyResolver;
+        _materials = materials;
     }
 
     public async Task<ObjectCollectionResolveResult> ResolveAsync(
@@ -67,6 +80,29 @@ internal sealed class ObjectCollectionResolver : IObjectCollectionResolver
         Dictionary<string, ObjectPathRedirection> redirectsByPath = new(StringComparer.OrdinalIgnoreCase);
         Dictionary<string, IReadOnlyList<string>> dependenciesByPath = new(StringComparer.OrdinalIgnoreCase);
         Dictionary<DependencySource, AssetDependencyPaths> dependenciesBySource = [];
+        Dictionary<string, HashSet<ushort>> variantsByRoot = new(StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, HashSet<ushort>> variantsByModel = new(StringComparer.OrdinalIgnoreCase);
+        foreach (ObjectSnapshot snapshot in usageSnapshots)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (snapshot.Model is not FurnitureModel furniture)
+            {
+                continue;
+            }
+
+            if (!_materials.TryResolve(furniture, out FurnitureMaterialOption? material))
+            {
+                string message = $"unknown wallpaper item {furniture.MaterialItem!.ItemId} for {furniture.SharedGroupPath}";
+                return ObjectCollectionResolveResult.Failed(message);
+            }
+
+            if (material is not null)
+            {
+                AddMaterialVariant(variantsByRoot, furniture.SharedGroupPath, material.Variant);
+            }
+        }
+
         HashSet<string> rootPaths = CreateUsageRootPaths(usageSnapshots, cancellationToken);
         HashSet<string> reachablePaths = new(rootPaths, StringComparer.OrdinalIgnoreCase);
         Queue<string> pendingPaths = new(rootPaths);
@@ -97,6 +133,33 @@ internal sealed class ObjectCollectionResolver : IObjectCollectionResolver
             };
         }
 
+        foreach ((string path, HashSet<ushort> variants) in variantsByRoot)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ObjectResolvedPath effective = modResult.Redirects.TryResolvePath(path, out ObjectResolvedPath replacement, cancellationToken)
+                ? replacement : ObjectResolvedPath.FromGamePath(path);
+            string modelPath;
+            try
+            {
+                modelPath = _dependencyResolver.GetWallpaperModelPath(path, effective, cancellationToken);
+            }
+            catch (Exception ex) when (ObjectAssetFileUtility.IsReadFailure(ex))
+            {
+                modelPath = string.Empty;
+            }
+
+            if (modelPath.Length == 0)
+            {
+                string message = $"could not resolve the wallpaper surface for {path}";
+                return ObjectCollectionResolveResult.Failed(message, modResult.Warnings);
+            }
+
+            foreach (ushort variant in variants)
+            {
+                AddMaterialVariant(variantsByModel, modelPath, variant);
+            }
+        }
+
         while (pendingPaths.Count > 0)
         {
             string requestedPath = pendingPaths.Dequeue();
@@ -125,7 +188,13 @@ internal sealed class ObjectCollectionResolver : IObjectCollectionResolver
                     ? requestedPath.ToLowerInvariant()
                     : string.Empty);
 
-            if (!dependenciesBySource.TryGetValue(source, out AssetDependencyPaths dependencies))
+            variantsByModel.TryGetValue(requestedPath, out HashSet<ushort>? materialVariants);
+            AssetDependencyPaths dependencies;
+            if (materialVariants is not null)
+            {
+                dependencies = _dependencyResolver.GetCollectionPathDependencies(requestedPath, effectivePath, cancellationToken, materialVariants);
+            }
+            else if (!dependenciesBySource.TryGetValue(source, out dependencies))
             {
                 dependencies = _dependencyResolver.GetCollectionPathDependencies(requestedPath, effectivePath, cancellationToken);
                 dependenciesBySource.Add(source, dependencies);
@@ -134,14 +203,7 @@ internal sealed class ObjectCollectionResolver : IObjectCollectionResolver
             if (!dependencies.IsComplete)
             {
                 string message = $"could not read dependencies for {requestedPath}";
-                return new ObjectCollectionResolveResult
-                {
-                    IsComplete = false,
-                    ResolveState = ObjectCollectionResolveState.ResolveFailed,
-                    StatusText = message,
-                    KeepLastGoodSnapshot = true,
-                    Warnings = [.. modResult.Warnings, message],
-                };
+                return ObjectCollectionResolveResult.Failed(message, modResult.Warnings);
             }
 
             dependenciesByPath[requestedPath] = dependencies.Paths;
@@ -177,6 +239,23 @@ internal sealed class ObjectCollectionResolver : IObjectCollectionResolver
             Redirects = redirectBuilder.ToImmutable(),
             ResourceViews = resourceViews,
         };
+    }
+
+    private static void AddMaterialVariant(Dictionary<string, HashSet<ushort>> variants, string path, ushort variant)
+    {
+        string normalized = ObjectResolvedPath.FromGamePath(path).Path;
+        if (normalized.Length == 0)
+        {
+            return;
+        }
+
+        if (!variants.TryGetValue(normalized, out HashSet<ushort>? values))
+        {
+            values = [];
+            variants.Add(normalized, values);
+        }
+
+        values.Add(variant);
     }
 
     private static HashSet<string> CreateUsageRootPaths(

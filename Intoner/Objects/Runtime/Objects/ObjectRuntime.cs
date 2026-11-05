@@ -60,6 +60,9 @@ internal interface IObjectRuntime : ISceneSelectableRuntime, IDisposable
     /// </summary>
     nint Address { get; }
 
+    /// <summary> Adds owned graphics addresses on the framework thread. </summary>
+    void AppendGraphicsObjects(HashSet<nint> graphics);
+
     /// <summary>
     /// Gets whether the object runtime needs framework updates.
     /// </summary>
@@ -243,6 +246,9 @@ internal abstract class ObjectRuntime : IObjectRuntime
 
     public abstract void AppendSelectionDraws(SceneSelectionCollector collector);
 
+    public virtual void AppendGraphicsObjects(HashSet<nint> graphics)
+    { }
+
     public virtual (bool World, bool Oriented) GetBounds(out AxisAlignedBounds worldBounds, out OrientedBounds orientedBounds)
         => (TryGetBounds(out worldBounds), TryGetOrientedBounds(out orientedBounds));
 
@@ -353,6 +359,9 @@ internal abstract unsafe class LayoutObjectRuntime : ObjectRuntime
 {
     protected abstract ILayoutInstance* LayoutInstance { get; }
 
+    public override void AppendGraphicsObjects(HashSet<nint> graphics)
+        => ObjectLayoutInterop.AppendGraphicsObjects(LayoutInstance, graphics);
+
     public override nint Address
         => (nint)LayoutInstance;
 
@@ -378,6 +387,14 @@ internal abstract unsafe class DrawObjectRuntime : ObjectRuntime
 
     protected abstract DrawObject* DrawObjectPointer { get; }
 
+    public override void AppendGraphicsObjects(HashSet<nint> graphics)
+    {
+        if (DrawObjectPointer != null)
+        {
+            graphics.Add((nint)DrawObjectPointer);
+        }
+    }
+
     protected DrawObjectRuntime(IFramework framework, ILogger logger, ObjectSnapshot snapshot)
         : base(framework, logger, snapshot)
     {
@@ -402,6 +419,14 @@ internal abstract unsafe class DrawObjectRuntime : ObjectRuntime
 internal abstract unsafe class LayoutDrawObjectRuntime : LayoutObjectRuntime
 {
     protected abstract DrawObject* DrawObjectPointer { get; }
+
+    public override void AppendGraphicsObjects(HashSet<nint> graphics)
+    {
+        if (DrawObjectPointer != null)
+        {
+            graphics.Add((nint)DrawObjectPointer);
+        }
+    }
 
     protected LayoutDrawObjectRuntime(IFramework framework, ILogger logger, ObjectSnapshot snapshot)
         : base(framework, logger, snapshot)

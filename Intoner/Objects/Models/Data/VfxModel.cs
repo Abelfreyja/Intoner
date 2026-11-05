@@ -5,6 +5,8 @@ namespace Intoner.Objects.Models;
 
 internal sealed record VfxModel : ObjectData
 {
+    internal override ObjectKind Kind => ObjectKind.Vfx;
+
     public const float DefaultSpeed = 1f;
     public const float MinSpeed = 0f;
     public const float MaxSpeed = 4f;
@@ -18,6 +20,7 @@ internal sealed record VfxModel : ObjectData
     public Vector4 Color { get; init; } = Vector4.One;
     public float Speed { get; init; } = DefaultSpeed;
     public bool Paused { get; init; }
+    public bool SoundEnabled { get; init; } = true;
     public float FadeInSeconds { get; init; }
     public bool ReplayOnTransform { get; init; }
     public bool Loop { get; init; }

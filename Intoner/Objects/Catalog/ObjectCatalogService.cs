@@ -6,6 +6,7 @@ using Intoner.Utils;
 using Microsoft.Extensions.Logging;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
+using System.Numerics;
 
 namespace Intoner.Objects.Catalog;
 
@@ -134,6 +135,19 @@ internal sealed class ObjectCatalogService : IObjectCatalogService, IDisposable
         if (!TryNormalizeCatalogPath(path, out string normalizedPath))
         {
             return [];
+        }
+
+        if (kind == ObjectCatalogKind.BgObject)
+        {
+            if (!ObjectAssetPathRules.IsCatalogModelPath(normalizedPath))
+            {
+                return [];
+            }
+
+            return TryGetCatalog(out ObjectCatalogData? catalog)
+                && catalog.TryResolveEntry(kind, normalizedPath, out ObjectCatalogEntry? entry)
+                    ? entry.PreviewModels
+                    : [new PreviewModelInfo(normalizedPath, Matrix4x4.Identity)];
         }
 
         return GetCatalog().ResolvePreviewModels(kind, normalizedPath);

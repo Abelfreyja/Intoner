@@ -24,6 +24,13 @@ internal sealed class ObjectEditorCatalog
         _objectCatalog = objectCatalog;
     }
 
+    internal bool IsReady => _objectCatalog.TryGetCatalog(out _);
+
+    internal IReadOnlyList<ObjectCatalogFurnitureResult> FindFurnitureByModel(string modelPath)
+        => _objectCatalog.TryGetCatalog(out ObjectCatalogData? catalog)
+            ? catalog.Furniture.FindFurnitureByModel(modelPath)
+            : [];
+
     internal static string ResolveLightTypeName(LightType type)
         => FindLightCatalogEntry(type)?.Name ?? type.ToString();
 
@@ -51,17 +58,14 @@ internal sealed class ObjectEditorCatalog
         => entry.Kind switch
         {
             ObjectCatalogKind.BgObject => CreateLibraryPreset(
-                ObjectKind.BgObject,
                 new BgObjectModel { ModelPath = entry.PlacementPath, ColliderDefinition = entry.BgObjectInfo?.DefaultColliderDefinition }),
             ObjectCatalogKind.Vfx => CreateLibraryPreset(
-                ObjectKind.Vfx,
                 new VfxModel { VfxPath = entry.PlacementPath }),
             _ => throw new ArgumentOutOfRangeException(nameof(entry), entry.Kind, null),
         };
 
     internal static ObjectLibraryPreset CreateCatalogLibraryPreset(ObjectCatalogFurnitureResult result)
         => CreateLibraryPreset(
-            ObjectKind.Furniture,
             new FurnitureModel
             {
                 SharedGroupPath = result.Entry.PlacementPath,
@@ -71,17 +75,15 @@ internal sealed class ObjectEditorCatalog
 
     internal static ObjectLibraryPreset CreateCatalogLibraryPreset(LightCatalogEntry entry)
         => CreateLibraryPreset(
-            ObjectKind.Light,
             new LightModel { LightType = entry.Type });
 
     internal static ObjectLibraryPreset CreateLibraryPreset(
-        ObjectKind kind,
         ObjectData model,
         bool visible = true,
         Vector3? scale = null)
         => new()
         {
-            Kind = kind,
+            Kind = model.Kind,
             Visible = visible,
             Scale = scale ?? Vector3.One,
             Model = model,
@@ -170,6 +172,15 @@ internal sealed class ObjectEditorCatalog
             _                    => throw new ArgumentOutOfRangeException(nameof(kind), kind, null),
         };
 
+    internal ObjectData ResolvePlacementModel(ObjectData model)
+        => model switch
+        {
+            BgObjectModel bgObject => ApplyBgObjectDefaults(bgObject),
+            FurnitureModel furniture => ResolveFurnitureCatalogVariant(furniture),
+            VfxModel vfx when ResolveVfxCatalogInfo(vfx.VfxPath)?.CanUseReplayLoop == false => vfx with { Loop = false },
+            _ => model,
+        };
+
     internal FurnitureModel ResolveFurnitureCatalogVariant(FurnitureModel model)
     {
         if (!_objectCatalog.TryResolveFurnitureVariant(
@@ -225,7 +236,8 @@ internal sealed class ObjectEditorCatalog
 
     internal string ResolveCatalogName(ObjectCatalogKind kind, string path, string fallback)
     {
-        if (_objectCatalog.TryResolveEntry(kind, path, out ObjectCatalogEntry? entry)
+        if (_objectCatalog.TryGetCatalog(out ObjectCatalogData? catalog)
+         && catalog.TryResolveEntry(kind, path, out ObjectCatalogEntry? entry)
          && !string.IsNullOrWhiteSpace(entry.Name))
         {
             return entry.Name;

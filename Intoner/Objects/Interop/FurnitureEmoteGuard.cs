@@ -62,13 +62,14 @@ namespace Intoner.Objects.Interop
         {
             try
             {
-                _executeEmoteHook = Hooks.Add(InteropHookUtility.CreateHookFromAddress<EmoteManager.Delegates.ExecuteEmote>(
-                    _logger, _gameInteropProvider, IntonerSignatures.FurnitureExecuteEmote, ExecuteEmoteDetour));
-                _snapVariantZeroHook = Hooks.Add(InteropHookUtility.CreateHookFromAddress<ResolveSnapDelegate>(
-                    _logger, _gameInteropProvider, _snapVariantZeroAddress, ResolveSnapVariantZeroDetour, IntonerSignatures.FurnitureSnapZero));
-                _snapVariantOneHook = Hooks.Add(InteropHookUtility.CreateHookFromAddress<ResolveSnapDelegate>(
-                    _logger, _gameInteropProvider, _snapVariantOneAddress, ResolveSnapVariantOneDetour, IntonerSignatures.FurnitureSnapOne));
-                if (_executeEmoteHook is null || _snapVariantZeroHook is null || _snapVariantOneHook is null || !Hooks.Enable())
+                _executeEmoteHook = Hooks.CreateRequired<EmoteManager.Delegates.ExecuteEmote>(
+                    _gameInteropProvider, IntonerSignatures.FurnitureExecuteEmote.Address, ExecuteEmoteDetour, IntonerSignatures.FurnitureExecuteEmote.Label);
+                _snapVariantZeroHook = Hooks.CreateRequired<ResolveSnapDelegate>(
+                    _gameInteropProvider, _snapVariantZeroAddress, ResolveSnapVariantZeroDetour, IntonerSignatures.FurnitureSnapZero.Label);
+                _snapVariantOneHook = Hooks.CreateRequired<ResolveSnapDelegate>(
+                    _gameInteropProvider, _snapVariantOneAddress, ResolveSnapVariantOneDetour, IntonerSignatures.FurnitureSnapOne.Label);
+
+                if (!Hooks.Enable())
                 {
                     throw new InvalidOperationException("required furniture emote hooks are unavailable");
                 }

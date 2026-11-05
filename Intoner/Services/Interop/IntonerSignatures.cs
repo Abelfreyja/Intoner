@@ -65,6 +65,9 @@ internal static unsafe class IntonerSignatures
     public const string FurnitureSnapVariantOne =
         "E8 ?? ?? ?? ?? 84 C0 0F 84 ?? ?? ?? ?? 4C 8D 74 24";
 
+    public static readonly NativeRelativeBranchTarget SharedGroupLayoutInstanceSetMaterial =
+        new("E8 ?? ?? ?? ?? 48 8B 95 ?? ?? ?? ?? 40 0F B6 F6", "SharedGroupLayoutInstance.SetMaterial");
+
     public const string FurnitureCreate =
         "E8 ?? ?? ?? ?? 48 89 04 ?? C6 44 ";
 
@@ -85,8 +88,6 @@ internal static unsafe class IntonerSignatures
         "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 41 56 41 57 48 81 EC D0 00 00 00 F3 0F 10 01 4C 8D 44 24 30 F3 0F 10 49 04 48 8D 54 24 40 48 8B 05 ?? ?? ?? ?? 41 B9 08 00 00 00 F3 0F 11 44 24 30 F3 0F 10 41 08 F3 0F 11 44 24 38 F3 0F 11 4C 24 34 48 8B 88 58 2B 00 00 E8 ?? ?? ?? ?? 84 C0 0F 84 ?? ?? ?? ?? 44 8B B4 24 C0 00 00 00 33 DB 45 85 F6 74 ?? 4C 8B 3D ?? ?? ?? ?? 49 8B 6F 20 48 85 ED 74 ?? 48 8B 4C DC 40 81 79 50 00 30 00 00 75 ?? 48 8B 71 58 B2 2B 48 8B FE C6 44 24 20 00 48 C1 EF 20 44 8B C6 44 8B CF 48 8B CD E8 ?? ?? ?? ?? 48 85 C0 75 ?? 49 8B 4F 18 44 8B CF 44 8B C6 88 44 24 20 B2 2B E8 ?? ?? ?? ?? 48 85 C0 74 ?? F6 80 97 00 00 00 20 74 ?? F6 80 96 00 00 00 0F 74";
 
     // layout and collision targets
-    public static readonly NativeRelativeBranchTarget ILayoutInstanceInit =
-        new("E8 ?? ?? ?? ?? EB ?? 41 FF D1 48 8B 4D", "ILayoutInstance.Init");
     public static readonly NativeDirectSignatureTarget SceneManagerCtor =
         new("48 8D 05 ?? ?? ?? ?? C7 41 ?? 00 00 C8 42", "SceneManager.Ctor");
     public static readonly NativeDirectSignatureTarget SceneManagerInit =
@@ -105,6 +106,21 @@ internal static unsafe class IntonerSignatures
         new("E8 ?? ?? ?? ?? F3 44 0F 10 65 ?? F3 0F 10 75", "camera sphere sweep");
     public static readonly NativeStaticAddressTarget BgPartsLayoutInstanceVirtualTable =
         new("48 83 C0 10 48 8D 0D ?? ?? ?? ?? 0F 1F 44 00 ?? 4C 89 70", 7, "BgPartsLayoutInstance virtual table");
+    public static readonly NativeRelativeBranchTarget SoundLayoutInstanceLoadResources =
+        new("E8 ?? ?? ?? ?? 48 8B 06 48 89 43 ?? 48 8B 4D", "SoundLayoutInstance.LoadResources");
+
+    public static readonly NativeRelativeBranchTarget VfxObjectCtor =
+        new("E8 ?? ?? ?? ?? EB ?? 48 8B C6 33 D2 48 89 43", "VfxObject.Ctor");
+    public static readonly NativeStaticAddressTarget VfxObjectVirtualTable =
+        new("48 8D 05 ?? ?? ?? ?? 48 89 01 48 81 C1 90 00 00 00", 3, "VfxObject virtual table");
+    public static readonly NativeDirectSignatureTarget EmitterInstanceUpdateSound =
+        new("4C 8B DC 56 48 81 EC E0 00 00 00 F3 0F 10 89", "EmitterInstance.UpdateSound");
+    public static readonly NativeStaticAddressTarget SoundDataVirtualTable =
+        new("4C 8D 2D ?? ?? ?? ?? 48 8B DD 90 48 8D 4B", 3, "SoundData virtual table");
+    public static readonly NativeRelativeBranchTarget SoundControllerSetVolume =
+        new("E8 ?? ?? ?? ?? B2 01 8B CB E8 ?? ?? ?? ?? 44 8B C6", "SoundController.SetVolume");
+    public static readonly NativeStaticAddressTarget SoundLayoutInstanceVirtualTable =
+        new("48 8D 05 ?? ?? ?? ?? 48 89 07 48 8D 05 ?? ?? ?? ?? 89 77", 3, "SoundLayoutInstance virtual table");
     public static readonly NativeStaticAddressTarget VfxLayoutInstanceVirtualTable =
         new("48 8D 05 ?? ?? ?? ?? 48 89 01 33 D2 48 89 51 ?? 48 89 51", 3, "VfxLayoutInstance virtual table");
     public static readonly NativeStaticAddressTarget EnvLocationLayoutInstanceVirtualTable =
@@ -269,6 +285,7 @@ internal static unsafe class IntonerSignatures
 
         // vfx playback
         NativeVfxSetSpeed,
+        EmitterInstanceUpdateSound,
 
         // furniture and housing delegates
         NativeHousingPlacementRaycast,
@@ -297,6 +314,9 @@ internal static unsafe class IntonerSignatures
         // furniture and housing
         NativeFurnitureCreate,
         NativeFurnitureDestroy,
+        SoundLayoutInstanceLoadResources,
+        VfxObjectCtor,
+        SoundControllerSetVolume,
     ];
 
     private static readonly NativeResolvedAddressTarget[] ResolvedAddressTargets =
@@ -330,6 +350,9 @@ internal static unsafe class IntonerSignatures
     private static readonly NativeStaticAddressTarget[] NativeStaticAddressTargets =
     [
         ResourceLodConfig,
+        SoundLayoutInstanceVirtualTable,
+        SoundDataVirtualTable,
+        VfxObjectVirtualTable,
     ];
 
     [Conditional("DEBUG")]

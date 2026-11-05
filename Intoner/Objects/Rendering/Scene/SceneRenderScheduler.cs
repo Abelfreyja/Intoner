@@ -79,46 +79,47 @@ internal sealed unsafe class SceneRenderScheduler : IDisposable
                 return true;
             }
 
-            if (IntonerSignatures.SceneRenderAllocateCommand.Address == nint.Zero
-                || IntonerSignatures.SceneRenderPushBackCommand.Address == nint.Zero)
-            {
-                _startFailed = true;
-                DiagnosticLog.Write(() => _logger.LogWarning("scene rendering disabled because required render command functions were unavailable"));
-                return false;
-            }
-
-            InteropHookCollection hooks = new(_logger);
-            _hooks = hooks;
-            Hook<Context.Delegates.SetRenderTargets>? setRenderTargetsHook = null;
-            Hook<ImmediateContext.Delegates.DoSetTargetCommand>? setTargetCommandHook = null;
-            setRenderTargetsHook = hooks.Add(InteropHookUtility.CreateHookFromAddress<Context.Delegates.SetRenderTargets>(
-                _logger, _gameInteropProvider, IntonerSignatures.SceneRenderSetRenderTargets,
-                (context, count, slots, depth, left, top, right, bottom) =>
-                    SetRenderTargetsDetour(hooks, setRenderTargetsHook!, context, count, slots, depth, left, top, right, bottom)));
-            setTargetCommandHook = hooks.Add(InteropHookUtility.CreateHookFromAddress<ImmediateContext.Delegates.DoSetTargetCommand>(
-                _logger, _gameInteropProvider, IntonerSignatures.SceneRenderSetTargetCommand,
-                (context, command) => SetTargetCommandDetour(hooks, setTargetCommandHook!, context, command)));
-
-            if (setRenderTargetsHook is null || setTargetCommandHook is null)
-            {
-                Stop();
-                _startFailed = true;
-                DiagnosticLog.Write(() => _logger.LogWarning("scene rendering disabled because required final target hooks were unavailable"));
-                return false;
-            }
-
-            _setRenderTargetsOriginal = (context, count, slots, depth, left, top, right, bottom)
-                => setRenderTargetsHook.OriginalDisposeSafe(context, count, slots, depth, left, top, right, bottom);
-            _callbackId = RegisterCallback();
             try
             {
-                hooks.Enable();
+                if (_hooks is null)
+                {
+                    if (IntonerSignatures.SceneRenderAllocateCommand.Address == nint.Zero
+                        || IntonerSignatures.SceneRenderPushBackCommand.Address == nint.Zero)
+                    {
+                        _startFailed = true;
+                        DiagnosticLog.Write(() => _logger.LogWarning("scene rendering disabled because required render command functions were unavailable"));
+                        return false;
+                    }
+
+                    InteropHookCollection hooks = new(_logger);
+                    _hooks = hooks;
+                    Hook<Context.Delegates.SetRenderTargets>? setRenderTargetsHook = null;
+                    Hook<ImmediateContext.Delegates.DoSetTargetCommand>? setTargetCommandHook = null;
+                    setRenderTargetsHook = hooks.CreateRequired<Context.Delegates.SetRenderTargets>(
+                        _gameInteropProvider, IntonerSignatures.SceneRenderSetRenderTargets.Address,
+                        (context, count, slots, depth, left, top, right, bottom) =>
+                            SetRenderTargetsDetour(hooks, setRenderTargetsHook!, context, count, slots, depth, left, top, right, bottom),
+                        IntonerSignatures.SceneRenderSetRenderTargets.Label);
+                    setTargetCommandHook = hooks.CreateRequired<ImmediateContext.Delegates.DoSetTargetCommand>(
+                        _gameInteropProvider, IntonerSignatures.SceneRenderSetTargetCommand.Address,
+                        (context, command) => SetTargetCommandDetour(hooks, setTargetCommandHook!, context, command),
+                        IntonerSignatures.SceneRenderSetTargetCommand.Label);
+                    _setRenderTargetsOriginal = (context, count, slots, depth, left, top, right, bottom)
+                        => setRenderTargetsHook.OriginalDisposeSafe(context, count, slots, depth, left, top, right, bottom);
+                }
+
+                _callbackId = RegisterCallback();
+
+                if (!_hooks.Enable())
+                {
+                    throw new InvalidOperationException("scene render hooks could not be enabled");
+                }
             }
             catch (Exception ex)
             {
-                Stop();
                 _startFailed = true;
-                DiagnosticLog.Write(() => _logger.LogWarning(ex, "scene rendering disabled because final target hooks could not be enabled"));
+                Dispose();
+                DiagnosticLog.Write(() => _logger.LogWarning(ex, "scene rendering disabled because final target hooks could not be started"));
                 return false;
             }
 
@@ -143,29 +144,41 @@ internal sealed unsafe class SceneRenderScheduler : IDisposable
 
             try
             {
-                _hooks?.Dispose();
+                _hooks?.Disable();
             }
             catch
             {
                 _startFailed = true;
                 throw;
             }
-
-            _hooks = null;
-            _setRenderTargetsOriginal = null;
-            lock (_queueLock)
+            finally
             {
-                _pendingBeforeGameUi3DCommand = default;
-            }
+                lock (_queueLock)
+                {
+                    _pendingBeforeGameUi3DCommand = default;
+                }
 
-            _trackedCommands.Clear();
+                _trackedCommands.Clear();
+            }
         }
     }
 
     public void Dispose()
     {
-        _disposeState.TryBeginDispose();
-        Stop();
+        lock (_lifecycleLock)
+        {
+            _disposeState.TryBeginDispose();
+            try
+            {
+                Stop();
+            }
+            finally
+            {
+                _hooks?.Dispose();
+                _hooks = null;
+                _setRenderTargetsOriginal = null;
+            }
+        }
     }
 
     private nint RegisterCallback()

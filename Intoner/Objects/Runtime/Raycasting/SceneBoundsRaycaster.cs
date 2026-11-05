@@ -115,6 +115,23 @@ internal static class SceneBoundsRaycaster
             ? TryRaycastOrientedBounds(rayOrigin, rayDirection, orientedBounds, out hit, maxDistance)
             : TryRaycastAxisAlignedBounds(rayOrigin, rayDirection, bounds.Min, bounds.Max, out hit, maxDistance);
 
+    internal static bool TryIntersectOrientedBoundsNormalized(ScenePointerRay ray, SceneOrientedBounds bounds, out float entryDistance)
+    {
+        entryDistance = 0f;
+
+        if (!NumericsUtility.IsFinite(bounds.Transform) || !NumericsUtility.IsFinite(bounds.HalfExtents)
+            || !Matrix4x4.Invert(bounds.Transform, out Matrix4x4 inverse) || !NumericsUtility.IsFinite(inverse))
+        {
+            return false;
+        }
+
+        Vector3 origin = Vector3.Transform(ray.Origin, inverse);
+        Vector3 direction = Vector3.TransformNormal(ray.Direction, inverse);
+        Vector3 halfExtents = NumericsUtility.Abs(bounds.HalfExtents);
+        return NumericsUtility.HasLength(direction)
+            && SceneRaycastMath.TryIntersectBounds(new(origin, direction), -halfExtents, halfExtents, float.PositiveInfinity, out entryDistance);
+    }
+
     private static bool TryRaycastOrientedBounds(
         Vector3 rayOrigin,
         Vector3 rayDirection,

@@ -7,69 +7,6 @@ internal static class CatalogLibraryTooltip
 {
     private const int VisibleEntryLimit = 5;
 
-    internal sealed class LocationIndex
-    {
-        private readonly ObjectLibraryHierarchy _hierarchy;
-        private readonly IReadOnlyDictionary<Guid, ObjectLibraryPrefab> _prefabsByEntry;
-
-        private LocationIndex(
-            ObjectLibraryHierarchy hierarchy,
-            IReadOnlyDictionary<Guid, ObjectLibraryPrefab> prefabsByEntry)
-        {
-            _hierarchy = hierarchy;
-            _prefabsByEntry = prefabsByEntry;
-        }
-
-        public static LocationIndex Create(ObjectLibrarySnapshot library)
-        {
-            Dictionary<Guid, ObjectLibraryPrefab> prefabsByEntry = [];
-            foreach (ObjectLibraryPrefab prefab in library.Prefabs)
-            {
-                foreach (Guid entryId in prefab.EntryIds)
-                {
-                    prefabsByEntry.TryAdd(entryId, prefab);
-                }
-            }
-
-            return new LocationIndex(ObjectLibraryHierarchy.Create(library), prefabsByEntry);
-        }
-
-        public Location Resolve(ObjectLibraryEntry entry)
-        {
-            if (_prefabsByEntry.TryGetValue(entry.Id, out ObjectLibraryPrefab? prefab))
-            {
-                return new Location(entry.Name, LocationKind.Prefab, BuildGroupPath(prefab, _hierarchy));
-            }
-
-            return entry.FolderId is { } folderId
-                && _hierarchy.TryGetGroup(folderId, out ObjectLibraryGroup? folder)
-                    ? new Location(entry.Name, LocationKind.Folder, BuildGroupPath(folder, _hierarchy))
-                    : new Location(entry.Name, LocationKind.Ungrouped, string.Empty);
-        }
-
-        private static string BuildGroupPath(
-            ObjectLibraryGroup group,
-            ObjectLibraryHierarchy hierarchy)
-        {
-            List<string> segments = [];
-            ObjectLibraryGroup current = group;
-            while (true)
-            {
-                segments.Add(current.Name);
-                if (current.ParentFolderId is not { } parentId
-                 || !hierarchy.TryGetGroup(parentId, out ObjectLibraryGroup? parent))
-                {
-                    break;
-                }
-
-                current = parent;
-            }
-
-            segments.Reverse();
-            return string.Join(" / ", segments);
-        }
-    }
-
     internal sealed record Data(int TotalCount, IReadOnlyList<Location> Locations);
 
     internal sealed record Location(string Name, LocationKind Kind, string GroupPath);
@@ -82,17 +19,25 @@ internal static class CatalogLibraryTooltip
     }
 
     public static Data Build(
-        LocationIndex locationIndex,
+        ObjectLibraryHierarchy hierarchy,
         IReadOnlyList<ObjectLibraryEntry> entries)
     {
-        ArgumentNullException.ThrowIfNull(locationIndex);
+        ArgumentNullException.ThrowIfNull(hierarchy);
         ArgumentNullException.ThrowIfNull(entries);
 
         int visibleCount = Math.Min(entries.Count, VisibleEntryLimit);
         List<Location> resolvedLocations = new(visibleCount);
         for (int index = 0; index < visibleCount; ++index)
         {
-            resolvedLocations.Add(locationIndex.Resolve(entries[index]));
+            ObjectLibraryEntry entry = entries[index];
+            ObjectLibraryGroup? group = hierarchy.GetEntryGroup(entry);
+            LocationKind kind = group switch
+            {
+                ObjectLibraryPrefab => LocationKind.Prefab,
+                ObjectLibraryFolder => LocationKind.Folder,
+                _ => LocationKind.Ungrouped,
+            };
+            resolvedLocations.Add(new Location(entry.Name, kind, group is null ? string.Empty : hierarchy.GetGroupPath(group)));
         }
 
         return new Data(entries.Count, resolvedLocations);

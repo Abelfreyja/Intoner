@@ -78,7 +78,6 @@ internal sealed class ViewportRenderer : IDisposable
                 return false;
             }
 
-            _meshCache.Trim(now);
             _renderTargetCache.Trim(now);
             frame = new ViewportFrame(
                 renderTargetLease,

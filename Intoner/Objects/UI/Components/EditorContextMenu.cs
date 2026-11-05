@@ -149,14 +149,14 @@ internal static class EditorContextMenu
     }
 
     public static bool DrawChoice(string id, string label, bool? selected, Vector4 accent,
-        string? count = null, float? height = null, bool closeOnActivation = true)
+        string? count = null, float? height = null, bool closeOnActivation = true, ImTextureID? itemIcon = null)
     {
         FontAwesomeIcon icon = ResolveChoiceIcon(selected);
         EditorBadge? countBadge = string.IsNullOrEmpty(count) ? null : new EditorBadge(count, EditorBadgeStyle.Muted);
         RowInteraction interaction = DrawRow(id, icon,
             label, selected is not false, enabled: true, hasSubMenu: false, color: null, tooltip: null,
             constrainWidth: true, accent: accent, height: height,
-            choice: closeOnActivation ? ChoiceMode.Single : ChoiceMode.Multiple, trailingBadge: countBadge);
+            choice: closeOnActivation ? ChoiceMode.Single : ChoiceMode.Multiple, trailingBadge: countBadge, itemIcon: itemIcon);
 
         return closeOnActivation ? CloseOnActivation(interaction.Activated) : interaction.Activated;
     }
@@ -313,7 +313,8 @@ internal static class EditorContextMenu
         float? height = null,
         ChoiceMode choice = ChoiceMode.None,
         EditorBadge? trailingBadge = null,
-        bool? expanded = null)
+        bool? expanded = null,
+        ImTextureID? itemIcon = null)
     {
         label ??= string.Empty;
         float scale = ImGuiHelpers.GlobalScale;
@@ -347,8 +348,11 @@ internal static class EditorContextMenu
             RowHeight * scale,
             MathF.Max(labelSize.Y, MathF.Max(iconMetrics.Size.Y, trailingMetrics.Size.Y)) + (10f * scale));
         float leadingWidth = multiple && !expanded.HasValue ? 0f : iconColumnWidth + gap;
+        float imageEdge = itemIcon.HasValue ? MathF.Min(EditorIcon.ItemImageSize, rowHeight - 4f * scale) : 0f;
+        float imageWidth = itemIcon.HasValue ? imageEdge + gap : 0f;
         float naturalWidth = padding
             + leadingWidth
+            + imageWidth
             + labelSize.X
             + gap
             + iconColumnWidth
@@ -369,11 +373,6 @@ internal static class EditorContextMenu
                     .Push(ImGuiCol.HeaderActive, Vector4.Zero);
 
                 activated = ImGui.Selectable($"##editorContextMenuItem:{id}", false, ImGuiSelectableFlags.DontClosePopups, new Vector2(rowWidth, rowHeight));
-
-                if (selected && choice == ChoiceMode.Single && ImGui.IsWindowAppearing())
-                {
-                    ImGui.SetKeyboardFocusHere(-1);
-                }
             }
             else
             {
@@ -407,7 +406,7 @@ internal static class EditorContextMenu
             min.X + padding + ((iconColumnWidth - iconMetrics.Size.X) * 0.5f),
             min.Y + ((contentHeight - iconMetrics.Size.Y) * 0.5f));
         Vector2 labelPosition = new(
-            min.X + padding + leadingWidth,
+            min.X + padding + leadingWidth + imageWidth,
             min.Y + ((contentHeight - labelSize.Y) * 0.5f));
         float trailingRight = max.X - padding;
         Vector2 trailingPosition = new(
@@ -433,6 +432,13 @@ internal static class EditorContextMenu
         if (!accent.HasValue && !color.HasValue && enabled && (hovered || selected))
         {
             iconColor = ThemeColors.AccentBlue;
+        }
+
+        if (itemIcon.HasValue)
+        {
+            Vector2 imageMin = new(min.X + padding + leadingWidth, min.Y + (contentHeight - imageEdge) * 0.5f);
+            Vector2 imageMax = imageMin + new Vector2(imageEdge);
+            EditorIcon.DrawImage(drawList, itemIcon.Value, imageMin, imageMax, textColor.W);
         }
 
         if ((!multiple || expanded.HasValue) && leadingIcon != FontAwesomeIcon.None)

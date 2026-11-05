@@ -159,7 +159,7 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
     private readonly ObjectFileReadService _fileReadService;
     private readonly ObjectResourceTracker _resourceTracker;
     private readonly ObjectResourceLoadScope _loadScope;
-    private readonly ObjectCollisionOwnership _collisionOwnership;
+    private readonly ObjectNativeOwnership _ownership;
     private readonly ObjectResourceIncRefGuard _incRefGuard;
     private readonly ResolveResourceHandleTypeDelegate? _resolveResourceHandleType;
     private readonly ObjectResourceHooks _hooks;
@@ -171,7 +171,7 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         ObjectFileReadService fileReadService,
         ObjectResourceTracker resourceTracker,
         ObjectResourceLoadScope loadScope,
-        ObjectCollisionOwnership collisionOwnership,
+        ObjectNativeOwnership ownership,
         IGameInteropProvider gameInteropProvider,
         ISigScanner sigScanner)
     {
@@ -180,7 +180,7 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         _fileReadService = fileReadService;
         _resourceTracker = resourceTracker;
         _loadScope = loadScope;
-        _collisionOwnership = collisionOwnership;
+        _ownership = ownership;
         _incRefGuard = new ObjectResourceIncRefGuard(_logger);
         try
         {
@@ -427,13 +427,13 @@ internal sealed unsafe class ObjectResourceLoader : IObjectResourceLoader
         }
 
         SharedGroupLayoutInstance* sharedGroup = ResolveSharedGroupInstance(listener);
-        using ObjectCollisionOwnership.Scope collisionScope = _collisionOwnership.EnterInstance((ILayoutInstance*)sharedGroup);
+        using ObjectNativeOwnership.Scope ownershipScope = _ownership.EnterInstance((ILayoutInstance*)sharedGroup);
         using ObjectResourceLog.WriteScope logWrites = ObjectResourceLog.DeferNativeWrites();
         bool nativeCallStarted = false;
         bool canForward = false;
         try
         {
-            canForward = _collisionOwnership.CurrentOwner is null && !IsOwnedSharedGroupResource(sharedGroup, handle);
+            canForward = _ownership.CurrentOwner is null && !IsOwnedSharedGroupResource(sharedGroup, handle);
             using ObjectResourceLoadScopeToken scope = EnterSharedGroupResourceLoadScopeToken(sharedGroup, handle, out bool canLoad);
             if (!canLoad)
             {

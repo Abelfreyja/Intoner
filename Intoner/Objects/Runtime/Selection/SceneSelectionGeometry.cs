@@ -22,6 +22,31 @@ internal sealed class SceneSelectionGeometry
     public int[] Indices { get; }
     public Vector3 BoundsCenter { get; }
     public float BoundsRadius { get; }
+    internal long EstimatedBytes => (long)Positions.Length * 3 * sizeof(float) + (long)Indices.Length * sizeof(int)
+        + (Volatile.Read(ref _acceleration)?.EstimatedBytes ?? 0);
+
+    internal bool TryGetTriangle(int triangleIndex, out (Vector3 A, Vector3 B, Vector3 C) triangle)
+    {
+        triangle = default;
+
+        if ((uint)triangleIndex >= (uint)(Indices.Length / 3))
+        {
+            return false;
+        }
+
+        int offset = triangleIndex * 3;
+        int a = Indices[offset];
+        int b = Indices[offset + 1];
+        int c = Indices[offset + 2];
+
+        if ((uint)a >= (uint)Positions.Length || (uint)b >= (uint)Positions.Length || (uint)c >= (uint)Positions.Length)
+        {
+            return false;
+        }
+
+        triangle = (Positions[a], Positions[b], Positions[c]);
+        return true;
+    }
 
     internal bool TryGetAcceleration([NotNullWhen(true)] out SceneGeometryAcceleration? acceleration)
     {
@@ -86,6 +111,13 @@ internal sealed class SceneSelectionGeometry
     }
 }
 
+internal enum SceneGeometryAvailability
+{
+    Unavailable,
+    Loading,
+    Ready,
+}
+
 /// <summary> resolves model geometry required by the shared scene selection pass </summary>
 internal interface ISceneSelectionGeometryProvider
 {
@@ -94,6 +126,9 @@ internal interface ISceneSelectionGeometryProvider
 
     /// <summary> resolves triangle geometry and schedules acceleration for repeated raycasts </summary>
     bool TryGetRaycastGeometry(string modelPath, out SceneSelectionGeometry geometry);
+
+    /// <summary> starts background preparation and reports readiness without waiting for file reads or acceleration </summary>
+    SceneGeometryAvailability RequestRaycastGeometry(string modelPath, out SceneSelectionGeometry geometry);
 
     /// <summary> keeps one model geometry entry warm after a successful selection </summary>
     void Touch(string modelPath);

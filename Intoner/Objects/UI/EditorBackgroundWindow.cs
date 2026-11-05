@@ -34,7 +34,7 @@ internal sealed class EditorBackgroundWindow : IntonerWindow
         => _editor.UpdateShortcutsWithoutEditor();
 
     public override bool DrawConditions()
-        => _editor.ShouldDrawSceneToolsWithoutEditor;
+        => _editor.ShouldDrawBackgroundOverlay;
 
     public override void PreDraw()
     {
@@ -46,5 +46,5 @@ internal sealed class EditorBackgroundWindow : IntonerWindow
     }
 
     protected override void DrawContent()
-        => _editor.DrawSceneToolsWithoutEditor();
+        => _editor.DrawBackgroundOverlay();
 }

@@ -18,7 +18,14 @@ namespace Intoner.Services.Input;
 [StructLayout(LayoutKind.Auto)]
 internal readonly record struct ViewportMouseInput(Vector2 Position, ScenePointerButtons Buttons, bool Pressed, bool Control, bool Cancelled);
 
-/// <summary> observes editor left mouse inputs and optionally captures drags before viewport handling </summary>
+internal enum ViewportMouseCapture
+{
+    None,
+    LeftButton,
+    Viewport,
+}
+
+/// <summary> observes editor left mouse inputs and optionally captures them before viewport handling </summary>
 internal interface IViewportMouseInputService
 {
     /// <summary> installs input observation once and awaits framework initialization </summary>
@@ -31,8 +38,8 @@ internal interface IViewportMouseInputService
     /// <param name="viewportPosition"> the screen position of the game client viewport </param>
     /// <param name="viewportSize"> the client viewport size in pixels </param>
     /// <param name="canStart"> whether the editor permits a new input at the current pointer </param>
-    /// <param name="captureDrag"> whether new inputs suppress viewport input for box selection </param>
-    void Configure(Vector2 viewportPosition, Vector2 viewportSize, bool canStart, bool captureDrag);
+    /// <param name="captureMode"> which game input to suppress for a captured press </param>
+    void Configure(Vector2 viewportPosition, Vector2 viewportSize, bool canStart, ViewportMouseCapture captureMode);
 
     /// <summary> reads the initial press before the latest motion or release; haflway motion is not queued </summary>
     /// <param name="input"> the next viewport sample in screen coordinates </param>
@@ -46,13 +53,6 @@ internal interface IViewportMouseInputService
 /// <summary> tracks one editor input and optionally filters input after game UI processing, before camera processing </summary>
 internal sealed unsafe class ViewportMouseInputService : FrameworkNativeService, IViewportMouseInputService
 {
-    internal enum InputFilter
-    {
-        None,
-        LeftButton,
-        Viewport,
-    }
-
     private readonly IUiBuilder _uiBuilder;
     private readonly IGameInteropProvider? _gameInteropProvider;
     private Hook<AtkModule.Delegates.HandleInput>? _handleInputHook;
@@ -62,8 +62,8 @@ internal sealed unsafe class ViewportMouseInputService : FrameworkNativeService,
     private ViewportMouseInput? _press;
     private ViewportMouseInput? _latest;
     private bool _canStart;
-    private bool _captureDrag;
-    private bool _capturedLeft;
+    private ViewportMouseCapture _captureMode;
+    private ViewportMouseCapture _capturedMode;
     private bool _ownsLeft;
     private bool _cancelled;
     private bool _disposed;
@@ -103,16 +103,16 @@ internal sealed unsafe class ViewportMouseInputService : FrameworkNativeService,
         {
             lock (_stateLock)
             {
-                return _capturedLeft && (_ownsLeft || _press.HasValue || _latest.HasValue);
+                return _capturedMode != ViewportMouseCapture.None && (_ownsLeft || _press.HasValue || _latest.HasValue);
             }
         }
     }
 
-    public void Configure(Vector2 viewportPosition, Vector2 viewportSize, bool canStart, bool captureDrag)
+    public void Configure(Vector2 viewportPosition, Vector2 viewportSize, bool canStart, ViewportMouseCapture captureMode)
     {
         lock (_stateLock)
         {
-            if (_viewportPosition != viewportPosition || _viewportSize != viewportSize || _captureDrag != captureDrag)
+            if (_viewportPosition != viewportPosition || _viewportSize != viewportSize || _captureMode != captureMode)
             {
                 CancelUnsafe();
                 if (_ownsLeft)
@@ -123,7 +123,7 @@ internal sealed unsafe class ViewportMouseInputService : FrameworkNativeService,
 
             _viewportPosition = viewportPosition;
             _viewportSize = viewportSize;
-            _captureDrag = captureDrag;
+            _captureMode = captureMode;
             _canStart = !_disposed && canStart && NumericsUtility.IsFinite(viewportPosition)
                 && NumericsUtility.IsFinite(viewportSize) && viewportSize.X > 0 && viewportSize.Y > 0;
         }
@@ -200,15 +200,15 @@ internal sealed unsafe class ViewportMouseInputService : FrameworkNativeService,
             return result;
         }
 
-        InputFilter filter = ProcessInput(in *inputData);
-        if (filter == InputFilter.Viewport)
+        ViewportMouseCapture filter = ProcessInput(in *inputData);
+        if (filter == ViewportMouseCapture.Viewport)
         {
             inputData->FilterUICursorInputs(MouseButtonFlags.LBUTTON);
             inputData->FilterDragInputs();
             return 1;
         }
 
-        if (filter == InputFilter.LeftButton)
+        if (filter == ViewportMouseCapture.LeftButton)
         {
             FilterLeftButton(ref *inputData);
         }
@@ -227,13 +227,13 @@ internal sealed unsafe class ViewportMouseInputService : FrameworkNativeService,
         inputData.CurrentMouseDragButtons &= unchecked((byte)~MouseButtonFlags.LBUTTON);
     }
 
-    internal InputFilter ProcessInput(in UIInputData inputData)
+    internal ViewportMouseCapture ProcessInput(in UIInputData inputData)
     {
         lock (_stateLock)
         {
             if (IsDisposing || _disposed || (!_canStart && !_ownsLeft))
             {
-                return InputFilter.None;
+                return ViewportMouseCapture.None;
             }
 
             CursorInputData cursor = inputData.CursorInputs;
@@ -254,14 +254,14 @@ internal sealed unsafe class ViewportMouseInputService : FrameworkNativeService,
                     || (inputData.UIFilteredCursorInputs.MouseButtonPressedFlags & MouseButtonFlags.LBUTTON) == MouseButtonFlags.None
                     || position.X < 0 || position.Y < 0 || position.X >= _viewportSize.X || position.Y >= _viewportSize.Y)
                 {
-                    return InputFilter.None;
+                    return ViewportMouseCapture.None;
                 }
 
                 _ownsLeft = true;
-                _capturedLeft = _captureDrag;
+                _capturedMode = _captureMode;
                 _cancelled = false;
                 _press = new(position + _viewportPosition, sceneButtons, true, control, false);
-                return _capturedLeft ? InputFilter.Viewport : InputFilter.None;
+                return _capturedMode;
             }
 
             if (!_cancelled)
@@ -271,12 +271,12 @@ internal sealed unsafe class ViewportMouseInputService : FrameworkNativeService,
             }
 
             _ownsLeft = leftDown;
-            if (!_capturedLeft)
+            if (_capturedMode == ViewportMouseCapture.None)
             {
-                return InputFilter.None;
+                return ViewportMouseCapture.None;
             }
 
-            return _cancelled ? InputFilter.LeftButton : InputFilter.Viewport;
+            return _cancelled ? ViewportMouseCapture.LeftButton : _capturedMode;
         }
     }
 }

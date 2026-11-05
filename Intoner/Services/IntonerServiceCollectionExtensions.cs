@@ -168,6 +168,7 @@ internal static class IntonerServiceCollectionExtensions
         services.AddSingleton<PreviewAssetService>();
         services.AddScoped<FurnitureCatalogResolver>();
         services.AddScoped<IFurnitureStainService, FurnitureStainService>();
+        services.AddSingleton<FurnitureMaterialService>();
         services.AddScoped<EditorLoadCoordinator>();
         services.AddSingleton<ObjectPathResolver>();
         return services;
@@ -232,7 +233,10 @@ internal static class IntonerServiceCollectionExtensions
     {
         services.AddSingleton<ObjectNativeBindings>();
         services.AddSingleton<FurnitureEmoteGuard>();
-        services.AddSingleton<ObjectCollisionOwnership>();
+        services.AddSingleton<ObjectSoundService>();
+        services.AddSingleton<ObjectNativeOwnership>();
+        services.AddSingleton<ObjectLayoutBindings>();
+        services.AddSingleton<ObjectLayoutService>();
         services.AddSingleton<CameraCollisionBindings>();
         services.AddSingleton<CameraCollisionService>();
         services.AddScoped<ObjectHousingRuntimeContextResolver>();
@@ -252,6 +256,8 @@ internal static class IntonerServiceCollectionExtensions
         services.AddScoped<IObjectWorkspaceHistoryReplay, ObjectWorkspaceHistoryReplay>();
         services.AddScoped<IObjectWorkspaceHistory, ObjectWorkspaceHistory>();
         services.AddScoped<ISceneSelectionService, SceneSelectionService>();
+        services.AddScoped<IWorldAssetSource, WorldAssetSource>();
+        services.AddScoped<WorldAssetPicker>();
         services.AddScoped<ISceneInputService, SceneInputService>();
         services.AddScoped<ISceneInputRegistry, SceneInputRegistry>();
         return services;
@@ -368,6 +374,7 @@ internal static class IntonerServiceCollectionExtensions
         services.AddScoped<EditorChatCommands>();
         services.AddScoped<EditorSceneState>();
         services.AddScoped<EditorSceneOverlay>();
+        services.AddScoped<EditorWorldPicker>();
         services.AddScoped<EditorShortcutHandler>();
         services.AddScoped<EditorStartupView>();
         services.AddScoped<EditorWorkspaceHost>();
@@ -382,8 +389,10 @@ internal static class IntonerServiceCollectionExtensions
         services.AddScoped<EditorFilterBar>();
         services.AddScoped<SceneTransformEditor>();
         services.AddScoped<ObjectEditorCatalog>();
+        services.AddScoped<EditorAssetSoundQuery>();
         services.AddScoped<ObjectBrowserRowRenderer>();
         services.AddScoped<SceneItemControls>();
+        services.AddTransient<FurnitureModelEditor>();
         services.AddScoped<SceneItemInspector>();
         services.AddScoped<CreateWorkspace>();
         services.AddScoped<CreateBrowserSelection>();
@@ -417,6 +426,9 @@ internal static class IntonerServiceCollectionExtensions
         services.AddScoped<TitleBarWindowMetrics>();
         services.AddScoped<EditorWindow>();
         services.AddScoped<EditorBackgroundWindow>();
+        services.AddScoped<WorldAssetActions>();
+        services.AddScoped<WorldAssetPickerToolbar>();
+        services.AddScoped<WorldAssetPickerWindow>();
         return services;
     }
 }

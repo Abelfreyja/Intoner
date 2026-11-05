@@ -10,7 +10,8 @@ internal static class ObjectMaterialPathUtility
     public static AssetDependencyPaths CollectGameModelMaterialPaths(
         IObjectAssetGameData gameData,
         string modelPath,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IReadOnlySet<ushort>? materialVariants = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         string normalizedModelPath = ObjectResolvedPath.FromGamePath(modelPath).Path;
@@ -22,15 +23,17 @@ internal static class ObjectMaterialPathUtility
 
         ObjectAssetFileData file = ObjectAssetFileUtility.ReadGameFile(gameData, normalizedModelPath, cancellationToken);
         PenumbraMdlFile? model = TryLoadModel(file.Data, cancellationToken);
-        return new(CollectModelMaterialPaths(normalizedModelPath, model, gameData.FileExists, cancellationToken),
-            model is not null || file.Data is null && file.IsComplete);
+        return model is not null
+            ? CollectModelMaterialPaths(normalizedModelPath, model, gameData.FileExists, cancellationToken, materialVariants)
+            : new([], file.Data is null && file.IsComplete && materialVariants is not { Count: > 0 });
     }
 
     public static AssetDependencyPaths CollectLocalModelMaterialPaths(
         IObjectAssetGameData gameData,
         string requestedModelPath,
         string localModelPath,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IReadOnlySet<ushort>? materialVariants = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         string normalizedRequestedModelPath = ObjectResolvedPath.FromGamePath(requestedModelPath).Path;
@@ -43,8 +46,9 @@ internal static class ObjectMaterialPathUtility
         PenumbraMdlFile? model = TryLoadModel(
             ObjectAssetFileUtility.TryReadLocalFileBytes(localModelPath, cancellationToken),
             cancellationToken);
-        return new(CollectModelMaterialPaths(normalizedRequestedModelPath, model, gameData.FileExists, cancellationToken),
-            model is not null);
+        return model is not null
+            ? CollectModelMaterialPaths(normalizedRequestedModelPath, model, gameData.FileExists, cancellationToken, materialVariants)
+            : AssetDependencyPaths.Incomplete;
     }
 
     public static AssetDependencyPaths CollectMaterialDependencyPaths(
@@ -80,17 +84,13 @@ internal static class ObjectMaterialPathUtility
         return new(dependencyPaths, material is not null);
     }
 
-    private static IReadOnlyList<string> CollectModelMaterialPaths(
+    private static AssetDependencyPaths CollectModelMaterialPaths(
         string normalizedModelPath,
-        PenumbraMdlFile? model,
+        PenumbraMdlFile model,
         Func<string, bool> fileExists,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IReadOnlySet<ushort>? materialVariants)
     {
-        if (model is null)
-        {
-            return [];
-        }
-
         List<string> materialPaths = [];
         HashSet<string> seenPaths = new(StringComparer.OrdinalIgnoreCase);
         HashSet<string> seenMaterialNames = new(StringComparer.OrdinalIgnoreCase);
@@ -107,8 +107,27 @@ internal static class ObjectMaterialPathUtility
             }
         }
 
+        if (materialVariants is { Count: > 0 })
+        {
+            if (model.BgChangeMaterialIndex >= model.Materials.Length)
+            {
+                return new(materialPaths, false);
+            }
+
+            foreach (ushort variant in materialVariants)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!GameMaterialPathUtility.TryGetHousingMaterialPath(model.Materials[model.BgChangeMaterialIndex], variant, out string path))
+                {
+                    return new(materialPaths, false);
+                }
+
+                AddCandidatePath(materialPaths, seenPaths, path);
+            }
+        }
+
         cancellationToken.ThrowIfCancellationRequested();
-        return materialPaths;
+        return new(materialPaths);
     }
 
     private static void CollectMaterialDependencyPaths(

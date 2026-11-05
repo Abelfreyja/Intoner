@@ -8,12 +8,15 @@ namespace Intoner.Objects.Preview.Rendering;
 
 internal sealed class ViewportMeshCache(ILogger logger) : IDisposable
 {
+    private const int MaxMeshCount = 24;
+    private const long MaxMeshBytes = 192L * 1024 * 1024;
     private static readonly TimeSpan MeshCacheRetention = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan MeshCacheTrimInterval = TimeSpan.FromSeconds(1);
 
-    private readonly Dictionary<string, Entry> _entries = new(StringComparer.Ordinal);
+    private readonly Dictionary<(string Geometry, string Material), Entry> _entries = [];
 
     private long _nextTrimAtMs;
+    private long _byteCount;
 
     public bool TryGetOrUpload(
         Device device,
@@ -28,13 +31,14 @@ internal sealed class ViewportMeshCache(ILogger logger) : IDisposable
 
         lock (geometryEntry.SyncRoot)
         {
-            string meshKey = BuildMeshKey(geometryEntry, asset);
+            var meshKey = (geometryEntry.CacheKey, asset.MaterialSignature);
             ModelPreviewGeometryReader.PreviewGeometry geometry = geometryEntry.Geometry;
 
             if (_entries.TryGetValue(meshKey, out Entry? cachedEntry) && cachedEntry.Matches(geometry))
             {
                 cachedEntry.LastAccessAtMs = Environment.TickCount64;
                 lease = cachedEntry.Mesh.Acquire();
+                Trim();
                 return true;
             }
 
@@ -50,6 +54,7 @@ internal sealed class ViewportMeshCache(ILogger logger) : IDisposable
                 Entry replacement = new(mesh, geometry, Environment.TickCount64);
                 lease = mesh.Acquire();
                 _entries[meshKey] = replacement;
+                _byteCount += mesh.EstimatedByteCount - (cachedEntry?.Mesh.EstimatedByteCount ?? 0);
             }
             catch (Exception ex)
             {
@@ -62,27 +67,35 @@ internal sealed class ViewportMeshCache(ILogger logger) : IDisposable
             }
 
             cachedEntry?.Mesh.Dispose();
+            Trim();
             return true;
         }
     }
 
-    public void Trim(long now)
+    private void Trim()
     {
+        long now = Environment.TickCount64;
+
         if (now < _nextTrimAtMs)
         {
             return;
         }
 
         _nextTrimAtMs = now + (long)MeshCacheTrimInterval.TotalMilliseconds;
-        foreach ((string cacheKey, Entry entry) in _entries.ToArray())
+        foreach (var pair in _entries.OrderBy(static pair => pair.Value.LastAccessAtMs).ToArray())
         {
-            if (now - entry.LastAccessAtMs < MeshCacheRetention.TotalMilliseconds)
+            Entry entry = pair.Value;
+
+            if (now - entry.LastAccessAtMs < MeshCacheTrimInterval.TotalMilliseconds
+                || now - entry.LastAccessAtMs < MeshCacheRetention.TotalMilliseconds
+                    && _entries.Count <= MaxMeshCount && _byteCount <= MaxMeshBytes)
             {
                 continue;
             }
 
             entry.Mesh.Dispose();
-            _entries.Remove(cacheKey);
+            _entries.Remove(pair.Key);
+            _byteCount -= entry.Mesh.EstimatedByteCount;
         }
     }
 
@@ -97,10 +110,8 @@ internal sealed class ViewportMeshCache(ILogger logger) : IDisposable
         }
 
         _entries.Clear();
+        _byteCount = 0;
     }
-
-    private static string BuildMeshKey(PreviewAssetState.GeometryEntry geometryEntry, PreviewAsset asset)
-        => $"{geometryEntry.CacheKey}:{asset.MaterialSignature}";
 
     private sealed class Entry
     {

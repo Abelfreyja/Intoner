@@ -33,10 +33,13 @@ internal sealed class IntonerSessionHost : IAsyncDisposable
             {
                 _ = scopedProvider.GetRequiredService<IObjectLayoutRecoveryService>().TryPrepareSession();
                 _ = scopedProvider.GetRequiredService<FurnitureEmoteGuard>();
+                _ = scopedProvider.GetRequiredService<ObjectSoundService>();
                 _ = scopedProvider.GetRequiredService<CameraCollisionService>();
             }).ConfigureAwait(false);
             await scopedProvider.GetRequiredService<FurnitureEmoteGuard>().StartAsync().ConfigureAwait(false);
+            await scopedProvider.GetRequiredService<ObjectLayoutService>().StartAsync().ConfigureAwait(false);
             await scopedProvider.GetRequiredService<CameraCollisionService>().StartAsync().ConfigureAwait(false);
+            await scopedProvider.GetRequiredService<ObjectSoundService>().StartAsync().ConfigureAwait(false);
             IntonerSession session = await Task.Run(() => scopedProvider.GetRequiredService<IntonerSession>()).ConfigureAwait(false);
             EditorChatCommands commands = scopedProvider.GetRequiredService<EditorChatCommands>();
             session.Start();
@@ -62,6 +65,7 @@ internal sealed class IntonerSession : IDisposable
     private readonly IntonerWindowService    _windows;
     private readonly EditorWindow            _editor;
     private readonly EditorBackgroundWindow  _background;
+    private readonly WorldAssetPickerWindow  _worldPicker;
     private readonly IntonerIpcHost          _ipc;
     private readonly ObjectSceneHost         _sceneHost;
     private bool _started;
@@ -72,15 +76,17 @@ internal sealed class IntonerSession : IDisposable
         IntonerWindowService windows,
         EditorWindow editor,
         EditorBackgroundWindow background,
+        WorldAssetPickerWindow worldPicker,
         IntonerIpcHost ipc,
         ObjectSceneHost sceneHost)
     {
-        _logger     = logger;
-        _windows    = windows;
-        _editor     = editor;
-        _background = background;
-        _ipc        = ipc;
-        _sceneHost  = sceneHost;
+        _logger      = logger;
+        _windows     = windows;
+        _editor      = editor;
+        _background  = background;
+        _worldPicker = worldPicker;
+        _ipc         = ipc;
+        _sceneHost   = sceneHost;
     }
 
     public void Start()
@@ -93,6 +99,7 @@ internal sealed class IntonerSession : IDisposable
         }
 
         _sceneHost.Start();
+        _windows.AddWindow(_worldPicker);
         _windows.AddWindow(_editor);
         _windows.AddWindow(_background);
         _ipc.Start();

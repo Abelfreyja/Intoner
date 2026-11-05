@@ -1,5 +1,4 @@
 using System.Buffers.Binary;
-using System.Globalization;
 using System.Text;
 
 namespace Intoner.Objects.Assets;
@@ -85,7 +84,7 @@ internal sealed class SqpackIndexFile
     public static SqpackIndexFile Read(string path, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        int indexId = ParseIndexId(path);
+        int indexId = SqpackIndexFileSystem.ParseIndexId(path);
         using FileStream stream = File.OpenRead(path);
         SqpackByteOrder byteOrder = ResolveByteOrder(stream);
         using SqpackBinaryReader reader = new(stream, byteOrder);
@@ -131,18 +130,6 @@ internal sealed class SqpackIndexFile
         return platformId == 1
             ? SqpackByteOrder.BigEndian
             : SqpackByteOrder.LittleEndian;
-    }
-
-    private static int ParseIndexId(string path)
-    {
-        string fileName = Path.GetFileName(path);
-        int separatorIndex = fileName.IndexOf('.');
-        string idText = separatorIndex < 0
-            ? fileName
-            : fileName[..separatorIndex];
-        return int.TryParse(idText, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out int indexId)
-            ? indexId
-            : -1;
     }
 
     private static IReadOnlyList<SqpackIndex1EntryKey> ReadIndex1Entries(
@@ -242,10 +229,10 @@ internal sealed class SqpackIndexFile
     {
         public static VersionInfo Read(SqpackBinaryReader reader)
         {
-            string magic = Encoding.ASCII.GetString(ReadExactBytes(reader, 6));
-            if (!string.Equals(magic, "SqPack", StringComparison.Ordinal))
+            byte[] magic = ReadExactBytes(reader, 6);
+            if (!magic.AsSpan().SequenceEqual("SqPack"u8))
             {
-                throw new InvalidDataException("not an sqpack index file");
+                throw new InvalidDataException($"invalid sqpack signature {Convert.ToHexString(magic)} (file length {reader.BaseStream.Length})");
             }
 
             reader.BaseStream.Seek(2, SeekOrigin.Current);

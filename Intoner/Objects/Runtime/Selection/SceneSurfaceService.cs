@@ -88,8 +88,7 @@ internal sealed class SceneSurfaceService : ISceneSurfaceService
         {
             if (!SceneGeometryRaycaster.TryRaycastNormalized(
                     target.RaycastTarget,
-                    rayOrigin,
-                    normalizedDirection,
+                    new(rayOrigin, normalizedDirection),
                     closestDistance,
                     out SceneSurfaceHit candidate))
             {

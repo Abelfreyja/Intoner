@@ -3,9 +3,7 @@ using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game.Control;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine.Group;
-using FFXIVClientStructs.FFXIV.Client.LayoutEngine.Layer;
 using FFXIVClientStructs.FFXIV.Common.Component.BGCollision;
-using FFXIVClientStructs.Interop;
 using Intoner.Logging;
 using Intoner.Objects.Models;
 using Intoner.Objects.Resources;
@@ -15,7 +13,6 @@ using Intoner.Utils;
 using Microsoft.Extensions.Logging;
 using System.Numerics;
 using Camera = FFXIVClientStructs.FFXIV.Client.Game.Camera;
-using LayoutColliderType = FFXIVClientStructs.FFXIV.Client.LayoutEngine.Layer.ColliderType;
 
 namespace Intoner.Objects.Interop
 {
@@ -37,16 +34,14 @@ namespace Intoner.Objects.Interop
         private readonly IGameInteropProvider            _interop;
         private readonly CameraCollisionBindings         _bindings;
         private readonly ObjectNativeBindings            _nativeBindings;
-        private readonly IObjectResourceLoader           _resourceLoader;
+        private readonly ObjectLayoutService             _layouts;
         private readonly ObjectResourceLoadScope         _resourceLoadScope;
-        private readonly ObjectCollisionOwnership        _ownership;
+        private readonly ObjectNativeOwnership           _ownership;
 
         private ObjectCollisionScene? _scene;
         private BGCollisionModule* _module;
 
-        private Hook<ILayoutInstance.Delegates.Init>? _initHook;
         private Hook<ColliderFinalizerDelegate>? _colliderFinalizerHook;
-        private Hook<ILayoutInstance.Delegates.CreateSecondary>? _secondaryHook;
         private Hook<SceneWrapper.Delegates.AddColliderMesh>? _meshHook;
         private Hook<SceneManagerUpdateScenesDelegate>? _updateHook;
         private Hook<BGCollisionModuleShutdownDelegate>? _moduleShutdownHook;
@@ -62,7 +57,7 @@ namespace Intoner.Objects.Interop
         protected override bool RequiresFrameworkDisposal => Volatile.Read(ref _scene) is not null;
 
         public bool IsAvailable => Volatile.Read(ref _acceptingRoots) != 0;
-        public bool IsFurnitureAvailable => IsAvailable && _nativeBindings.Furniture.IsAvailable;
+        public bool IsFurnitureAvailable => IsAvailable && _layouts.IsAvailable && _nativeBindings.Furniture.IsAvailable;
         public bool IsBgAvailable => IsAvailable && _scene is { CanCreateBg: true };
 
         public CameraCollisionService(
@@ -71,9 +66,9 @@ namespace Intoner.Objects.Interop
             IGameInteropProvider interop,
             CameraCollisionBindings bindings,
             ObjectNativeBindings nativeBindings,
-            IObjectResourceLoader resourceLoader,
+            ObjectLayoutService layouts,
             ObjectResourceLoadScope resourceLoadScope,
-            ObjectCollisionOwnership ownership)
+            ObjectNativeOwnership ownership)
             : base(framework, logger)
         {
             _logger            = logger;
@@ -81,7 +76,7 @@ namespace Intoner.Objects.Interop
             _interop           = interop;
             _bindings          = bindings;
             _nativeBindings    = nativeBindings;
-            _resourceLoader    = resourceLoader;
+            _layouts           = layouts;
             _resourceLoadScope = resourceLoadScope;
             _ownership         = ownership;
         }
@@ -90,7 +85,7 @@ namespace Intoner.Objects.Interop
         {
             try
             {
-                if (!_bindings.IsAvailable || !_resourceLoader.EnableSharedGroupLoads() || !ObjectCollisionSceneQuery.TryResolveScene(out BGCollisionModule* module, out SceneWrapper* world))
+                if (!_bindings.IsAvailable || !_layouts.IsAvailable || !ObjectCollisionSceneQuery.TryResolveScene(out BGCollisionModule* module, out SceneWrapper* world))
                 {
                     _logger.LogWarning("camera collision is unavailable");
                     return;
@@ -105,26 +100,8 @@ namespace Intoner.Objects.Interop
 
                 _module = module;
                 _scene = new ObjectCollisionScene(_bindings, module);
-                _colliderFinalizerHook = AddHook(_bindings.ColliderFinalizer, (ColliderFinalizerDelegate)FinalizeCollider, "camera collider destruction");
-                _ownership.SetCreators(_bindings.PrimaryCreators, _bindings.SecondaryCreator);
-                _initHook = AddHook(_bindings.LayoutInstanceInit, (ILayoutInstance.Delegates.Init)InitializeInstance, "layout initialization");
-                foreach (nint deinit in _bindings.Deinitializers)
-                {
-                    AddDeinitHook(deinit);
-                }
-
-                foreach (nint setter in _bindings.ActivitySetters)
-                {
-                    AddActivityHook(setter);
-                }
-
-                foreach (nint primary in _bindings.PrimaryCreators)
-                {
-                    AddPrimaryHook(primary);
-                }
-
-                _secondaryHook = AddHook(_bindings.SecondaryCreator, (ILayoutInstance.Delegates.CreateSecondary)CreateSecondary, "furniture secondary creation");
-                _meshHook = AddHook((nint)factories->AddColliderMesh, (SceneWrapper.Delegates.AddColliderMesh)CreateMesh, "mesh collider creation");
+                _colliderFinalizerHook = Hooks.CreateRequired(_interop, _bindings.ColliderFinalizer, (ColliderFinalizerDelegate)FinalizeCollider, "camera collider destruction");
+                _meshHook = Hooks.CreateRequired(_interop, (nint)factories->AddColliderMesh, (SceneWrapper.Delegates.AddColliderMesh)CreateMesh, "mesh collider creation");
                 ReadOnlySpan<nint> primitiveFactories =
                 [
                     (nint)factories->AddColliderMeshCylinder,
@@ -139,12 +116,12 @@ namespace Intoner.Objects.Interop
                     AddPrimitiveHook(factory);
                 }
 
-                _updateHook = AddHook(_bindings.SceneManagerUpdateScenes, (SceneManagerUpdateScenesDelegate)UpdateScenes, "collision scene update");
-                _layoutShutdownHook = AddHook(_bindings.LayoutWorldShutdown, (LayoutWorldShutdownDelegate)ShutdownLayout, "layout shutdown");
-                _layoutDeinitializeHook = AddHook(_bindings.LayoutWorldDeinitialize, (LayoutWorldDeinitializeDelegate)DeinitializeLayoutWorld, "layout deinitialization");
-                _moduleShutdownHook = AddHook(_bindings.BGCollisionModuleShutdown, (BGCollisionModuleShutdownDelegate)ShutdownModule, "collision module shutdown");
-                _moduleDestroyHook = AddHook(_bindings.BGCollisionModuleDtor, (BGCollisionModuleDtorDelegate)DestroyModule, "collision module destruction");
-                _cameraHook = AddHook(_bindings.CameraSweepSphere, (CameraSweepSphereDelegate)CameraSweepSphere, "camera collision sweep");
+                _updateHook = Hooks.CreateRequired(_interop, _bindings.SceneManagerUpdateScenes, (SceneManagerUpdateScenesDelegate)UpdateScenes, "collision scene update");
+                _layoutShutdownHook = Hooks.CreateRequired(_interop, _bindings.LayoutWorldShutdown, (LayoutWorldShutdownDelegate)ShutdownLayout, "layout shutdown");
+                _layoutDeinitializeHook = Hooks.CreateRequired(_interop, _bindings.LayoutWorldDeinitialize, (LayoutWorldDeinitializeDelegate)DeinitializeLayoutWorld, "layout deinitialization");
+                _moduleShutdownHook = Hooks.CreateRequired(_interop, _bindings.BGCollisionModuleShutdown, (BGCollisionModuleShutdownDelegate)ShutdownModule, "collision module shutdown");
+                _moduleDestroyHook = Hooks.CreateRequired(_interop, _bindings.BGCollisionModuleDtor, (BGCollisionModuleDtorDelegate)DestroyModule, "collision module destruction");
+                _cameraHook = Hooks.CreateRequired(_interop, _bindings.CameraSweepSphere, (CameraSweepSphereDelegate)CameraSweepSphere, "camera collision sweep");
                 if (!Hooks.Enable())
                 {
                     throw new InvalidOperationException("camera collision hooks could not be enabled");
@@ -177,7 +154,7 @@ namespace Intoner.Objects.Interop
             return root;
         }
 
-        public ObjectCollisionOwnership.Scope EnterCreation(FurnitureNativeInstance root)
+        public ObjectNativeOwnership.Scope EnterCreation(FurnitureNativeInstance root)
             => _ownership.EnterCreation(root);
 
         internal void AttachRoot(FurnitureNativeInstance root, SharedGroupLayoutInstance* instance)
@@ -282,7 +259,7 @@ namespace Intoner.Objects.Interop
 
             if (create)
             {
-                using ObjectCollisionOwnership.Scope ownership = _ownership.EnterCreation(instance);
+                using ObjectNativeOwnership.Scope ownership = _ownership.EnterCreation(instance);
                 replacement = _scene.CreateBgCollider(definition!, transform);
 
                 if (replacement == null)
@@ -351,7 +328,7 @@ namespace Intoner.Objects.Interop
                 return;
             }
 
-            using ObjectCollisionOwnership.Scope scope = _ownership.EnterInstance((ILayoutInstance*)instance);
+            using ObjectNativeOwnership.Scope scope = _ownership.EnterInstance((ILayoutInstance*)instance);
             _nativeBindings.Furniture.Destroy(instance);
         }
 
@@ -371,117 +348,6 @@ namespace Intoner.Objects.Interop
             {
                 owner.Dispose();
             }
-        }
-
-        private Hook<TDelegate> AddHook<TDelegate>(nint address, TDelegate detour, string label) where TDelegate : Delegate
-            => Hooks.Add(InteropHookUtility.CreateHookFromAddress(_logger, _interop, address, detour, label))
-                ?? throw new InvalidOperationException($"could not hook {label}");
-
-        private void InitializeInstance(ILayoutInstance* instance, void* creator, byte* path)
-        {
-            using InteropHookCollection.CallbackScope callback = Hooks.EnterCallback();
-            _initHook!.OriginalDisposeSafe(instance, creator, path);
-
-            if (callback.IsActive)
-            {
-                _ownership.Register(instance);
-            }
-        }
-
-        private void AddDeinitHook(nint address)
-        {
-            Hook<ILayoutInstance.Delegates.Deinit>? hook = null;
-            hook = AddHook(address, (ILayoutInstance.Delegates.Deinit)(instance =>
-            {
-                using InteropHookCollection.CallbackScope callback = Hooks.EnterCallback();
-                using ObjectCollisionOwnership.Scope scope = callback.IsActive ? _ownership.EnterInstance(instance) : default;
-                try
-                {
-                    hook!.OriginalDisposeSafe(instance);
-                }
-                finally
-                {
-                    if (callback.IsActive)
-                    {
-                        _ownership.Remove(instance);
-                    }
-                }
-            }), "layout cleanup");
-        }
-
-        private void AddActivityHook(nint address)
-        {
-            Hook<ILayoutInstance.Delegates.SetActive>? hook = null;
-            hook = AddHook(address, (ILayoutInstance.Delegates.SetActive)((instance, active) =>
-            {
-                using InteropHookCollection.CallbackScope callback = Hooks.EnterCallback();
-                hook!.OriginalDisposeSafe(instance, active);
-
-                if (callback.IsActive && active && _ownership.IsHidden(instance))
-                {
-                    ObjectLayoutInterop.ApplyInstanceGraphicsVisibility(instance, false);
-                }
-            }), "layout activity");
-        }
-
-        private void AddPrimaryHook(nint address)
-        {
-            Hook<ILayoutInstance.Delegates.CreatePrimary>? hook = null;
-            hook = AddHook(address, (ILayoutInstance.Delegates.CreatePrimary)((instance, transform, pathOrType) =>
-            {
-                using InteropHookCollection.CallbackScope callback = Hooks.EnterCallback();
-                using ObjectCollisionOwnership.Scope scope = callback.IsActive ? _ownership.EnterInstance(instance) : default;
-
-                FurnitureNativeInstance? owner = callback.IsActive ? _ownership.CurrentOwner as FurnitureNativeInstance : null;
-                bool ownedMesh = owner is not null && _ownership.ContainsOwner(owner) && instance->Id.Type == InstanceType.CollisionBox
-                    && (pathOrType == null || *(LayoutColliderType*)pathOrType == LayoutColliderType.Mesh);
-                bool canLoad = true;
-                using ObjectResourceLoadScopeToken resources = ownedMesh ? EnterFurnitureResourceScope(owner!, out canLoad) : default;
-
-                if (ownedMesh && (pathOrType == null || !canLoad || !HasValidCollisionBoxPath((CollisionBoxLayoutInstance*)instance)))
-                {
-                    return;
-                }
-
-                hook!.OriginalDisposeSafe(instance, transform, pathOrType);
-            }), "furniture primary creation");
-        }
-
-        private static bool HasValidCollisionBoxPath(CollisionBoxLayoutInstance* instance)
-        {
-            LayoutManager* layout = instance->Layout;
-            if (layout == null || !layout->CrcToPath.TryGetValue(instance->PcbPathCrc,
-                    out Pointer<RefCountedString> path, copyCtor: false) || path.Value == null)
-            {
-                return false;
-            }
-
-            fixed (byte* bytes = path.Value->Data)
-            {
-                return ObjectResourcePathEncoding.TryReadPcbPath(bytes, out _);
-            }
-        }
-
-        private void CreateSecondary(ILayoutInstance* instance)
-        {
-            using InteropHookCollection.CallbackScope callback = Hooks.EnterCallback();
-            using ObjectCollisionOwnership.Scope scope = callback.IsActive ? _ownership.EnterInstance(instance) : default;
-            FurnitureNativeInstance? owner = callback.IsActive ? _ownership.CurrentOwner as FurnitureNativeInstance : null;
-            bool canLoad = true;
-            using ObjectResourceLoadScopeToken resources = owner is not null && _ownership.ContainsOwner(owner)
-                ? EnterFurnitureResourceScope(owner, out canLoad) : default;
-
-            if (canLoad)
-            {
-                _secondaryHook!.OriginalDisposeSafe(instance);
-            }
-        }
-
-        private ObjectResourceLoadScopeToken EnterFurnitureResourceScope(FurnitureNativeInstance owner, out bool canLoad)
-        {
-            canLoad = true;
-            SharedGroupLayoutInstance* instance = owner.Instance;
-            return instance == null ? default : _resourceLoader.EnterSharedGroupLoadScope(instance, out canLoad);
         }
 
         private SceneWrapper* FactoryScene(SceneWrapper* scene)
@@ -540,7 +406,7 @@ namespace Intoner.Objects.Interop
         private void AddPrimitiveHook(nint address)
         {
             Hook<PrimitiveFactoryDelegate>? hook = null;
-            hook = AddHook(address, (PrimitiveFactoryDelegate)((scene, layer, position, rotation, scale) =>
+            hook = Hooks.CreateRequired(_interop, address, (PrimitiveFactoryDelegate)((scene, layer, position, rotation, scale) =>
             {
                 using InteropHookCollection.CallbackScope callback = Hooks.EnterCallback();
                 SceneWrapper* target = callback.IsActive ? FactoryScene(scene) : scene;

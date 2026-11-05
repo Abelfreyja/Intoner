@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Text.Json.Serialization;
 
 namespace Intoner.Objects.Models;
@@ -18,4 +19,8 @@ internal enum ObjectKind
     JsonDerivedType(typeof(FurnitureModel), typeDiscriminator: "furniture"),
     JsonDerivedType(typeof(VfxModel), typeDiscriminator: "vfx"),
 ]
-internal abstract record ObjectData;
+[SuppressMessage("Minor Code Smell", "S1694", Justification = "object models share record equality and a polymorphic JSON contract")]
+internal abstract record ObjectData
+{
+    internal abstract ObjectKind Kind { get; }
+}

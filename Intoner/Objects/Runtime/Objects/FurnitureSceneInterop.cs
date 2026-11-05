@@ -29,9 +29,12 @@ internal static unsafe class FurnitureSceneInterop
     {
         SharedGroupLayoutInstance* instance = native.Instance;
         ObjectLayoutInterop.ApplyTransform((ILayoutInstance*)instance, snapshot.Transform);
-        native.SetParticipation(snapshot.Visible, ((FurnitureModel)snapshot.Model).CameraCollision);
+        FurnitureModel model = (FurnitureModel)snapshot.Model;
+        native.SetParticipation(snapshot.Visible, model.CameraCollision);
+        native.SetSoundEnabled(model.SoundEnabled);
 
-        return RefreshVisualState(native);
+        ObjectLayoutInterop.ApplySharedGroupVisibility(instance, native.Visible);
+        return ObjectLayoutInterop.IsPrimaryLoaded(instance);
     }
 
     public static bool RefreshVisualState(FurnitureNativeInstance native)
@@ -42,15 +45,10 @@ internal static unsafe class FurnitureSceneInterop
             return false;
         }
 
-        bool ready = ObjectLayoutInterop.TryRefreshSharedGroupTransforms(instance);
-        if (!ready)
-        {
-            instance->Instances.ApplyTransforms();
-        }
-
+        ObjectLayoutInterop.ApplyChildTransforms(instance);
         ObjectLayoutInterop.ApplySharedGroupVisibility(instance, native.Visible);
 
-        return ready;
+        return ObjectLayoutInterop.IsPrimaryLoaded(instance);
     }
 
     public static bool TryApplyVisualState(ILogger logger, SharedGroupLayoutInstance* instance, FurnitureModel furnitureModel)
@@ -70,7 +68,7 @@ internal static unsafe class FurnitureSceneInterop
         if (furnitureModel.Color.UseCustomColor)
         {
             ByteColor stainColor = ColorUtility.ToOpaqueByteColor(furnitureModel.Color.CustomColor);
-            ApplyCustomStainColor(&instance->Instances, &stainColor);
+            instance->ApplyStain(&stainColor);
             return true;
         }
 
@@ -126,7 +124,7 @@ internal static unsafe class FurnitureSceneInterop
             "falling back to manual furniture dye apply for shared group 0x{Address:X}; shared group children {ChildCount}",
             (ulong)(nint)instance,
             sharedGroupChildCount);
-        ApplyCustomStainColor(&instance->Instances, &stainColor);
+        instance->ApplyStain(&stainColor);
         return true;
     }
 
@@ -159,26 +157,6 @@ internal static unsafe class FurnitureSceneInterop
         return true;
     }
 
-    private static void ApplyCustomStainColor(ChildNodeContainer* container, ByteColor* stainColor)
-    {
-        foreach (var child in container->Instances.AsSpan())
-        {
-            var node = child.Value;
-            if (node == null || node->Instance == null)
-            {
-                continue;
-            }
-
-            node->Instance->ApplyStain(stainColor);
-
-            if (node->Instance->Id.Type == InstanceType.SharedGroup)
-            {
-                var childGroup = (SharedGroupLayoutInstance*)node->Instance;
-                ApplyCustomStainColor(&childGroup->Instances, stainColor);
-            }
-        }
-    }
-
     private static void AppendSelectionDraws(ChildNodeContainer* container, ObjectSnapshot snapshot, SceneSelectionCollector collector)
     {
         foreach (var child in container->Instances.AsSpan())
@@ -205,7 +183,7 @@ internal static unsafe class FurnitureSceneInterop
                 }
             }
 
-            if (instance->Id.Type == InstanceType.SharedGroup)
+            if (ObjectLayoutInterop.IsSharedGroup(instance->Id.Type))
             {
                 var childGroup = (SharedGroupLayoutInstance*)instance;
                 AppendSelectionDraws(&childGroup->Instances, snapshot, collector);
@@ -233,7 +211,7 @@ internal static unsafe class FurnitureSceneInterop
                 applied &= TryApplyChildTransparency(secondaryGraphics, transparency);
             }
 
-            if (node->Instance->Id.Type == InstanceType.SharedGroup)
+            if (ObjectLayoutInterop.IsSharedGroup(node->Instance->Id.Type))
             {
                 var childGroup = (SharedGroupLayoutInstance*)node->Instance;
                 applied &= TryApplyChildTransparency(&childGroup->Instances, transparency);
@@ -273,7 +251,7 @@ internal static unsafe class FurnitureSceneInterop
                 ObjectSceneInterop.ApplyOutlineColor(secondaryGraphics, (ObjectHighlightColor)outlineColor);
             }
 
-            if (node->Instance->Id.Type == InstanceType.SharedGroup)
+            if (ObjectLayoutInterop.IsSharedGroup(node->Instance->Id.Type))
             {
                 var childGroup = (SharedGroupLayoutInstance*)node->Instance;
                 ApplyOutlineColor(&childGroup->Instances, outlineColor);

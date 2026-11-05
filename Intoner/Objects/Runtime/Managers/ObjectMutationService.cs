@@ -1860,7 +1860,12 @@ internal sealed class ObjectMutationService : IObjectMutationService, IObjectSce
             Name = TextUtility.TrimOrFallback(overrides.Name, snapshot.Name),
             Visible = overrides.Visible ?? snapshot.Visible,
             FolderPath = overrides.FolderPath ?? snapshot.FolderPath,
-            Transform = overrides.Scale.HasValue ? snapshot.Transform with { Scale = overrides.Scale.Value } : snapshot.Transform,
+            Transform = snapshot.Transform with
+            {
+                Position = overrides.Position ?? snapshot.Transform.Position,
+                RotationDegrees = overrides.RotationDegrees ?? snapshot.Transform.RotationDegrees,
+                Scale = overrides.Scale ?? snapshot.Transform.Scale,
+            },
             Model = model,
         };
     }

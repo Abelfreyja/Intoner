@@ -10,30 +10,33 @@ namespace Intoner.Objects.Runtime;
 internal sealed class ObjectModelSelectionGeometryCache : ISceneSelectionGeometryProvider, IDisposable
 {
     private const int BuildShutdownWaitMilliseconds = 2000;
+    private const int MaxEntries = 256;
+    private const long MaxGeometryBytes = 192L * 1024 * 1024;
     private static readonly TimeSpan EntryTtl = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan TrimInterval = TimeSpan.FromSeconds(30);
 
-    private sealed class CacheEntry
+    private sealed class CacheEntry(Task<SceneSelectionGeometry?> geometry)
     {
-        public SceneSelectionGeometry? Geometry { get; init; }
-        public DateTime LastTouchedUtc { get; set; }
-        public bool AccelerationRequested { get; set; }
+        public Task<SceneSelectionGeometry?> Geometry { get; } = geometry;
+        public Task<bool>? Acceleration { get; set; }
+        public bool GeometrySizeChecked { get; set; }
+        public bool IsPending => !Geometry.IsCompleted || Acceleration?.IsCompleted == false;
+        public long EstimatedBytes => Geometry.IsCompletedSuccessfully ? Geometry.Result?.EstimatedBytes ?? 0 : 0;
+        public DateTime CreatedUtc { get; } = DateTime.UtcNow;
+        public DateTime LastTouchedUtc { get; set; } = DateTime.UtcNow;
     }
 
     private readonly ILogger<ObjectModelSelectionGeometryCache> _logger;
     private readonly IDataManager _gameData;
     private readonly Lock _cacheLock = new();
     private readonly Dictionary<string, CacheEntry> _cache = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentExclusiveSchedulerPair _accelerationBuildScheduler = new(
-        TaskScheduler.Default,
-        maxConcurrencyLevel: 1);
+    private readonly ConcurrentExclusiveSchedulerPair _buildScheduler = new(TaskScheduler.Default, maxConcurrencyLevel: 1);
     private readonly CancellationTokenSource _disposeCancellation = new();
     private readonly CancellationToken _disposeToken;
+    private DateTime _nextTrimUtc;
+    private bool _disposed;
 
-    private int _disposed;
-
-    public ObjectModelSelectionGeometryCache(
-        ILogger<ObjectModelSelectionGeometryCache> logger,
-        IDataManager gameData)
+    public ObjectModelSelectionGeometryCache(ILogger<ObjectModelSelectionGeometryCache> logger, IDataManager gameData)
     {
         _logger = logger;
         _gameData = gameData;
@@ -41,248 +44,284 @@ internal sealed class ObjectModelSelectionGeometryCache : ISceneSelectionGeometr
     }
 
     public bool TryGetGeometry(string modelPath, out SceneSelectionGeometry geometry)
-        => TryGetGeometryCore(modelPath, requestAcceleration: false, out geometry);
+        => TryGetGeometryCore(modelPath, false, out geometry);
 
     public bool TryGetRaycastGeometry(string modelPath, out SceneSelectionGeometry geometry)
-        => TryGetGeometryCore(modelPath, requestAcceleration: true, out geometry);
+        => TryGetGeometryCore(modelPath, true, out geometry);
 
-    private bool TryGetGeometryCore(
-        string modelPath,
-        bool requestAcceleration,
-        out SceneSelectionGeometry geometry)
+    public SceneGeometryAvailability RequestRaycastGeometry(string modelPath, out SceneSelectionGeometry geometry)
     {
         geometry = null!;
-        if (Volatile.Read(ref _disposed) != 0
-            || !ObjectResourcePathUtility.TryNormalizeTrackedPath(modelPath, out var normalizedPath))
+        if (!ObjectResourcePathUtility.TryNormalizeTrackedPath(modelPath, out string normalizedPath))
+        {
+            return SceneGeometryAvailability.Unavailable;
+        }
+
+        CacheEntry? entry;
+        lock (_cacheLock)
+        {
+            if (_disposed)
+            {
+                return SceneGeometryAvailability.Unavailable;
+            }
+
+            if (!_cache.ContainsKey(normalizedPath) && _cache.Values.Any(static item => item.IsPending))
+            {
+                return SceneGeometryAvailability.Loading;
+            }
+
+            entry = GetEntry(normalizedPath, true);
+        }
+
+        if (entry is null)
+        {
+            return SceneGeometryAvailability.Unavailable;
+        }
+
+        if (!entry.Geometry.IsCompleted || entry.Acceleration?.IsCompleted != true)
+        {
+            return SceneGeometryAvailability.Loading;
+        }
+
+        if (!entry.Geometry.IsCompletedSuccessfully || !entry.Acceleration.IsCompletedSuccessfully)
+        {
+            return SceneGeometryAvailability.Unavailable;
+        }
+
+        geometry = entry.Geometry.Result!;
+        return geometry is not null && entry.Acceleration.Result
+            ? SceneGeometryAvailability.Ready
+            : SceneGeometryAvailability.Unavailable;
+    }
+
+    private bool TryGetGeometryCore(string modelPath, bool requestAcceleration, out SceneSelectionGeometry geometry)
+    {
+        geometry = null!;
+        if (!ObjectResourcePathUtility.TryNormalizeTrackedPath(modelPath, out string normalizedPath))
         {
             return false;
         }
 
-        CacheEntry cacheEntry = TryGetCachedEntry(normalizedPath, out CacheEntry cachedEntry)
-            ? cachedEntry
-            : StoreEntry(normalizedPath, LoadGeometryEntry(normalizedPath, DateTime.UtcNow));
-        if (requestAcceleration)
+        CacheEntry? entry;
+        lock (_cacheLock)
         {
-            RequestAcceleration(normalizedPath, cacheEntry);
+            entry = GetEntry(normalizedPath, requestAcceleration);
         }
 
-        geometry = cacheEntry.Geometry!;
-        return geometry != null;
+        if (entry is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            geometry = entry.Geometry.GetAwaiter().GetResult()!;
+            if (!entry.GeometrySizeChecked)
+            {
+                lock (_cacheLock)
+                {
+                    entry.GeometrySizeChecked = true;
+                    TrimToBudget(entry);
+                }
+            }
+
+            return geometry is not null;
+        }
+        catch (OperationCanceledException) when (_disposeToken.IsCancellationRequested)
+        {
+            return false;
+        }
+    }
+
+    private CacheEntry? GetEntry(string normalizedPath, bool requestAcceleration)
+    {
+        if (_disposed)
+        {
+            return null;
+        }
+
+        DateTime now = DateTime.UtcNow;
+        TrimExpired(now);
+
+        if (_cache.TryGetValue(normalizedPath, out CacheEntry? entry)
+            && entry.Geometry.IsCompletedSuccessfully && entry.Geometry.Result is null
+            && now - entry.CreatedUtc >= ObjectAssetFileUtility.AssetReadRetryDelay)
+        {
+            _cache.Remove(normalizedPath);
+            entry = null;
+        }
+
+        if (entry is null)
+        {
+            entry = new CacheEntry(Task.Factory.StartNew(() => LoadGeometry(normalizedPath),
+                _disposeToken, TaskCreationOptions.DenyChildAttach, _buildScheduler.ConcurrentScheduler));
+            _cache.Add(normalizedPath, entry);
+            TrimToBudget(entry);
+        }
+
+        entry.LastTouchedUtc = now;
+
+        if (requestAcceleration)
+        {
+            entry.Acceleration ??= BuildAccelerationAsync(entry.Geometry, normalizedPath);
+        }
+
+        return entry;
+    }
+
+    private void TrimToBudget(CacheEntry? keep = null)
+    {
+        long bytes = 0;
+        foreach (CacheEntry entry in _cache.Values)
+        {
+            bytes += entry.EstimatedBytes;
+        }
+
+        if (_cache.Count <= MaxEntries && bytes <= MaxGeometryBytes)
+        {
+            return;
+        }
+
+        foreach (var candidate in _cache.Where(pair => !pair.Value.IsPending && !ReferenceEquals(pair.Value, keep)).OrderBy(static pair => pair.Value.LastTouchedUtc).ToArray())
+        {
+            _cache.Remove(candidate.Key);
+            bytes -= candidate.Value.EstimatedBytes;
+            if (_cache.Count <= MaxEntries && bytes <= MaxGeometryBytes)
+            {
+                break;
+            }
+        }
     }
 
     public void Touch(string modelPath)
     {
-        if (Volatile.Read(ref _disposed) != 0
-            || !ObjectResourcePathUtility.TryNormalizeTrackedPath(modelPath, out var normalizedPath))
+        if (!ObjectResourcePathUtility.TryNormalizeTrackedPath(modelPath, out string normalizedPath))
         {
             return;
         }
 
         lock (_cacheLock)
         {
-            var now = DateTime.UtcNow;
-            TrimExpiredUnsafe(now);
-            if (_cache.TryGetValue(normalizedPath, out var entry))
+            if (_cache.TryGetValue(normalizedPath, out CacheEntry? entry))
             {
-                entry.LastTouchedUtc = now;
+                entry.LastTouchedUtc = DateTime.UtcNow;
             }
         }
     }
 
-    private bool TryGetCachedEntry(string normalizedPath, out CacheEntry cacheEntry)
+    private async Task<bool> BuildAccelerationAsync(Task<SceneSelectionGeometry?> load, string modelPath)
     {
-        var now = DateTime.UtcNow;
-        lock (_cacheLock)
+        try
         {
-            TrimExpiredUnsafe(now);
-            if (_cache.TryGetValue(normalizedPath, out var cachedEntry))
-            {
-                cacheEntry = cachedEntry;
-                return true;
-            }
-        }
+            SceneSelectionGeometry? geometry = await load.ConfigureAwait(false);
 
-        cacheEntry = null!;
-        return false;
+            if (geometry is null)
+            {
+                return false;
+            }
+
+            Task build;
+            lock (_cacheLock)
+            {
+                _disposeToken.ThrowIfCancellationRequested();
+
+                if (_disposed)
+                {
+                    return false;
+                }
+
+                build = Task.Factory.StartNew(() => geometry.BuildAcceleration(_disposeToken),
+                    _disposeToken, TaskCreationOptions.DenyChildAttach, _buildScheduler.ConcurrentScheduler);
+            }
+
+            await build.ConfigureAwait(false);
+            lock (_cacheLock)
+            {
+                TrimToBudget();
+            }
+
+            return true;
+        }
+        catch (OperationCanceledException) when (_disposeToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "object selection geometry acceleration failed for {ModelPath}", modelPath);
+            return false;
+        }
     }
 
-    private CacheEntry StoreEntry(string normalizedPath, CacheEntry cacheEntry)
+    private SceneSelectionGeometry? LoadGeometry(string modelPath)
     {
-        lock (_cacheLock)
+        try
         {
-            if (_cache.TryGetValue(normalizedPath, out CacheEntry? storedEntry))
+            _disposeToken.ThrowIfCancellationRequested();
+            byte[]? data = ObjectLocalFilePathUtility.IsLocalFilePath(modelPath)
+                ? ObjectAssetFileUtility.TryReadLocalFileBytes(modelPath, _disposeToken)
+                : _gameData.GetFile(modelPath)?.Data;
+            _disposeToken.ThrowIfCancellationRequested();
+
+            if (data is null)
             {
-                return storedEntry;
+                _logger.LogDebug("object selection geometry missing file {ModelPath}", modelPath);
+                return null;
             }
 
-            _cache[normalizedPath] = cacheEntry;
-            return cacheEntry;
+            if (!ModelPreviewGeometryReader.TryLoad(data, out var previewGeometry, out string? reason))
+            {
+                _logger.LogDebug("object selection geometry decode failed for {ModelPath}: {Reason}", modelPath, reason);
+                return null;
+            }
+
+            _disposeToken.ThrowIfCancellationRequested();
+            return new SceneSelectionGeometry(previewGeometry.Positions, previewGeometry.Indices);
+        }
+        catch (OperationCanceledException) when (_disposeToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "object selection geometry load failed for {ModelPath}", modelPath);
+            return null;
         }
     }
 
-    private void RequestAcceleration(string normalizedPath, CacheEntry cacheEntry)
+    private void TrimExpired(DateTime now)
     {
-        SceneSelectionGeometry geometry;
-        lock (_cacheLock)
+        if (now < _nextTrimUtc)
         {
-            if (cacheEntry.AccelerationRequested || cacheEntry.Geometry is not { } cachedGeometry)
-            {
-                return;
-            }
-
-            cacheEntry.AccelerationRequested = true;
-            geometry = cachedGeometry;
+            return;
         }
 
-        QueueAccelerationBuild(normalizedPath, geometry);
+        _nextTrimUtc = now + TrimInterval;
+
+        foreach (string path in _cache.Where(pair => pair.Value.Geometry.IsCompleted
+                     && pair.Value.Acceleration?.IsCompleted != false
+                     && now - pair.Value.LastTouchedUtc >= EntryTtl).Select(pair => pair.Key).ToArray())
+        {
+            _cache.Remove(path);
+        }
     }
 
     public void Dispose()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        lock (_cacheLock)
         {
-            return;
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            _cache.Clear();
+            _buildScheduler.Complete();
         }
 
         _disposeCancellation.Cancel();
-        _accelerationBuildScheduler.Complete();
-        try
-        {
-            _accelerationBuildScheduler.Completion.Wait(BuildShutdownWaitMilliseconds);
-        }
-        catch (AggregateException ex) when (ex.InnerExceptions.All(
-                   static inner => inner is OperationCanceledException))
-        {
-            // cancellation is expected during disposal
-        }
-
+        _buildScheduler.Completion.Wait(BuildShutdownWaitMilliseconds, CancellationToken.None);
         _disposeCancellation.Dispose();
-    }
-
-    private void QueueAccelerationBuild(string normalizedPath, SceneSelectionGeometry geometry)
-    {
-        CancellationToken cancellationToken = _disposeToken;
-        if (cancellationToken.IsCancellationRequested)
-        {
-            return;
-        }
-
-        try
-        {
-            _ = Task.Factory.StartNew(
-                () =>
-                {
-                    try
-                    {
-                        geometry.BuildAcceleration(cancellationToken);
-                    }
-                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-                    {
-                        // cancellation is expected during disposal
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "object selection geometry acceleration failed for {ModelPath}", normalizedPath);
-                    }
-                },
-                cancellationToken,
-                TaskCreationOptions.DenyChildAttach,
-                _accelerationBuildScheduler.ConcurrentScheduler);
-        }
-        catch (TaskSchedulerException) when (Volatile.Read(ref _disposed) != 0)
-        {
-            // disposal completed the scheduler before this work could be queued
-        }
-    }
-
-    private CacheEntry LoadGeometryEntry(string normalizedPath, DateTime touchedUtc)
-    {
-        try
-        {
-            if (ObjectLocalFilePathUtility.IsLocalFilePath(normalizedPath))
-            {
-                return LoadLocalGeometryEntry(normalizedPath, touchedUtc);
-            }
-
-            var file = _gameData.GetFile(normalizedPath);
-            if (file is null)
-            {
-                _logger.LogDebug("object selection geometry missing file {ModelPath}", normalizedPath);
-                return new CacheEntry
-                {
-                    LastTouchedUtc = touchedUtc,
-                };
-            }
-
-            if (!ModelPreviewGeometryReader.TryLoad(file.Data, out var previewGeometry, out var reason))
-            {
-                return CreateDecodeFailedEntry(normalizedPath, reason, touchedUtc);
-            }
-
-            return CreateGeometryEntry(previewGeometry, touchedUtc);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "object selection geometry load failed for {ModelPath}", normalizedPath);
-            return new CacheEntry
-            {
-                LastTouchedUtc = touchedUtc,
-            };
-        }
-    }
-
-    private CacheEntry LoadLocalGeometryEntry(string normalizedPath, DateTime touchedUtc)
-    {
-        string fileSystemPath = ObjectLocalFilePathUtility.ToFileSystemPath(normalizedPath);
-        if (!File.Exists(fileSystemPath))
-        {
-            _logger.LogDebug("object selection geometry missing local file {ModelPath}", normalizedPath);
-            return new CacheEntry
-            {
-                LastTouchedUtc = touchedUtc,
-            };
-        }
-
-        var data = File.ReadAllBytes(fileSystemPath);
-        return ModelPreviewGeometryReader.TryLoad(data, out var previewGeometry, out var reason)
-            ? CreateGeometryEntry(previewGeometry, touchedUtc)
-            : CreateDecodeFailedEntry(normalizedPath, reason, touchedUtc);
-    }
-
-    private CacheEntry CreateDecodeFailedEntry(string normalizedPath, string? reason, DateTime touchedUtc)
-    {
-        _logger.LogDebug(
-            "object selection geometry decode failed for {ModelPath}: {Reason}",
-            normalizedPath,
-            reason ?? "unknown reason");
-        return new CacheEntry
-        {
-            LastTouchedUtc = touchedUtc,
-        };
-    }
-
-    private static CacheEntry CreateGeometryEntry(ModelPreviewGeometryReader.PreviewGeometry previewGeometry, DateTime touchedUtc)
-        => new()
-        {
-            Geometry = new SceneSelectionGeometry(
-                previewGeometry.Positions,
-                previewGeometry.Indices),
-            LastTouchedUtc = touchedUtc,
-        };
-
-    private void TrimExpiredUnsafe(DateTime nowUtc)
-    {
-        if (_cache.Count == 0)
-        {
-            return;
-        }
-
-        foreach (var (path, entry) in _cache.ToArray())
-        {
-            if (nowUtc - entry.LastTouchedUtc >= EntryTtl)
-            {
-                _cache.Remove(path);
-            }
-        }
     }
 }

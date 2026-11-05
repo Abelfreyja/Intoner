@@ -12,14 +12,16 @@ internal sealed class LibraryBrowserView(
         ObjectLibraryGroup source,
         IReadOnlyList<ObjectLibraryEntry> allEntries,
         IReadOnlyList<ObjectLibraryEntry> visibleEntries,
-        IReadOnlyList<Group> children)
+        IReadOnlyList<Group> children,
+        bool expanded)
     {
+        public bool Expanded { get; } = expanded;
         public ObjectLibraryGroup Source { get; } = source;
         public IReadOnlyList<ObjectLibraryEntry> AllEntries { get; } = allEntries;
         public IReadOnlyList<ObjectLibraryEntry> VisibleEntries { get; } = visibleEntries;
         public IReadOnlyList<Group> Children { get; } = children;
         public int VisibleEntryCount { get; } = visibleEntries.Count + children.Sum(static child => child.VisibleEntryCount);
-        public int VisibleRowCount { get; } = 1 + visibleEntries.Count + children.Sum(static child => child.VisibleRowCount);
+        public int VisibleRowCount { get; } = expanded ? 1 + visibleEntries.Count + children.Sum(static child => child.VisibleRowCount) : 1;
     }
 
     public IReadOnlyList<ObjectLibraryEntry> RootEntries { get; } = rootEntries;
@@ -32,15 +34,11 @@ internal sealed class LibraryBrowserView(
         ObjectLibrarySnapshot library,
         string filter,
         string kindFilter,
-        IReadOnlySet<Guid> collapsedGroups,
+        IReadOnlySet<Guid> expandedGroups,
         Func<ObjectLibraryEntry, string> getSearchText)
     {
         string[] searchTokens = SearchTermUtility.BuildSearchTokens(filter);
-        HashSet<Guid> prefabEntryIds = [];
-        foreach (ObjectLibraryPrefab prefab in library.Prefabs)
-        {
-            prefabEntryIds.UnionWith(prefab.EntryIds);
-        }
+        ObjectLibraryHierarchy hierarchy = ObjectLibraryHierarchy.Create(library);
 
         List<ObjectLibraryEntry> rootEntries = [];
         Dictionary<Guid, List<ObjectLibraryEntry>> entriesByFolder = [];
@@ -48,23 +46,24 @@ internal sealed class LibraryBrowserView(
         foreach (ObjectLibraryEntry entry in library.Entries.OrderBy(static entry => entry.CreatedAtUtc))
         {
             entriesById.Add(entry.Id, entry);
-            if (entry.FolderId is { } folderId)
+            ObjectLibraryGroup? group = hierarchy.GetEntryGroup(entry);
+
+            if (group is ObjectLibraryFolder folder)
             {
-                if (!entriesByFolder.TryGetValue(folderId, out List<ObjectLibraryEntry>? folderEntries))
+                if (!entriesByFolder.TryGetValue(folder.Id, out List<ObjectLibraryEntry>? folderEntries))
                 {
                     folderEntries = [];
-                    entriesByFolder.Add(folderId, folderEntries);
+                    entriesByFolder.Add(folder.Id, folderEntries);
                 }
 
                 folderEntries.Add(entry);
             }
-            else if (!prefabEntryIds.Contains(entry.Id) && MatchesKind(entry) && MatchesSearch(entry))
+            else if (group is null && MatchesKind(entry) && MatchesSearch(entry))
             {
                 rootEntries.Add(entry);
             }
         }
 
-        ObjectLibraryHierarchy hierarchy = ObjectLibraryHierarchy.Create(library);
         IReadOnlyDictionary<Guid, IReadOnlyList<ObjectLibraryEntry>> subtreeEntries = hierarchy.CollectSubtreeValues(DirectEntries);
         List<Group> groups = BuildGroups(hierarchy.Roots, ancestorMatchesSearch: false);
         List<Guid> selectableOrder = rootEntries.Select(static entry => entry.Id).ToList();
@@ -111,7 +110,8 @@ internal sealed class LibraryBrowserView(
                 List<Group> children = BuildGroups(hierarchy.GetChildren(source.Id), groupMatches);
                 if (visibleEntries.Count > 0 || children.Count > 0 || groupMatches && kindFilter.Length == 0)
                 {
-                    result.Add(new Group(source, subtreeEntries[source.Id], visibleEntries, children));
+                    result.Add(new Group(source, subtreeEntries[source.Id], visibleEntries, children,
+                        filter.Length > 0 || expandedGroups.Contains(source.Id)));
                 }
             }
 
@@ -120,7 +120,7 @@ internal sealed class LibraryBrowserView(
 
         void AddSelectableEntries(Group group)
         {
-            if (filter.Length == 0 && collapsedGroups.Contains(group.Source.Id))
+            if (!group.Expanded)
             {
                 return;
             }

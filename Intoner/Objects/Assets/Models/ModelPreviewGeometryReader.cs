@@ -81,6 +81,7 @@ internal static class ModelPreviewGeometryReader
         public int[] Indices { get; }
         public int[] TriangleMaterialIndices { get; }
         public PreviewMaterial[] Materials { get; }
+        public byte BgChangeMaterialIndex { get; init; } = byte.MaxValue;
         public PreviewBounds Bounds { get; }
         public int TriangleCount => Math.Min(Indices.Length / 3, TriangleMaterialIndices.Length);
         public long EstimatedByteCount { get; }
@@ -90,7 +91,7 @@ internal static class ModelPreviewGeometryReader
                 Array.ConvertAll(Materials, static material => new PreviewMaterial(
                     material.Name, material.DiffuseTexturePath, material.DiffuseTexture,
                     material.ApplyAlphaClip, material.EnableTransparency, material.Transparency)),
-                Bounds, EstimatedByteCount);
+                Bounds, EstimatedByteCount) { BgChangeMaterialIndex = BgChangeMaterialIndex };
 
         private static PreviewBounds BuildPreviewBounds(IReadOnlyList<Vector3> positions)
         {
@@ -252,7 +253,7 @@ internal static class ModelPreviewGeometryReader
             texCoords.ToArray(),
             indices.ToArray(),
             triangleMaterialIndices.ToArray(),
-            materials);
+            materials) { BgChangeMaterialIndex = mdl.BgChangeMaterialIndex };
 
         if (!NumericsUtility.IsFinite(previewGeometry.Bounds.Center) || !float.IsFinite(previewGeometry.Bounds.Radius))
         {

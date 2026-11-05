@@ -111,7 +111,9 @@ internal static class EditorSearchField
     {
         EditorIcon.Metrics searchIconMetrics = EditorIcon.Measure(FontAwesomeIcon.Search);
         Vector2 searchIconPos = new(
-            fieldMin.X + Scaled(SearchInset),
+            fieldMin.X + (options.CenterSearchIcon
+                ? (fieldSize.Y - searchIconMetrics.Size.X) * 0.5f
+                : Scaled(SearchInset)),
             EditorLayout.CenterY(fieldMin.Y, fieldSize.Y, searchIconMetrics.Size.Y));
         EditorIcon.Draw(
             drawList,
@@ -197,4 +199,5 @@ internal readonly record struct EditorSearchFieldOptions(
     bool StatusIsWarning = false,
     int MaxLength = 128,
     float Width = 0f,
-    float Height = 0f);
+    float Height = 0f,
+    bool CenterSearchIcon = false);

@@ -142,6 +142,7 @@ internal static class SharedGroupAssetResolver
                 return;
             }
 
+            byte wallpaperInstanceId = _collectCatalogAssets && _recursionStack.Count == 1 ? HousingMaterialUtility.GetWallpaperInstanceId(file) : (byte)0;
             foreach (var layerGroup in file.LayerGroups)
             {
                 _cancellationToken.ThrowIfCancellationRequested();
@@ -154,18 +155,18 @@ internal static class SharedGroupAssetResolver
                         Matrix4x4 worldTransform = _collectCatalogAssets
                             ? BuildPreviewTransform(instanceObject.Transform) * parentTransform
                             : Matrix4x4.Identity;
-                        CollectInstanceObject(instanceObject.Object, worldTransform);
+                        CollectInstanceObject(instanceObject.Object, worldTransform, wallpaperInstanceId != 0 && instanceObject.InstanceId == wallpaperInstanceId);
                     }
                 }
             }
         }
 
-        private void CollectInstanceObject(object instanceObject, Matrix4x4 worldTransform)
+        private void CollectInstanceObject(object instanceObject, Matrix4x4 worldTransform, bool wallpaperSurface)
         {
             switch (instanceObject)
             {
                 case LayerCommon.BGInstanceObject bgInstance:
-                    CollectBgObject(bgInstance, worldTransform);
+                    CollectBgObject(bgInstance, worldTransform, wallpaperSurface);
                     break;
                 case LayerCommon.VFXInstanceObject vfxInstance:
                     CollectVfx(vfxInstance);
@@ -192,7 +193,7 @@ internal static class SharedGroupAssetResolver
             }
         }
 
-        private void CollectBgObject(LayerCommon.BGInstanceObject bgInstance, Matrix4x4 worldTransform)
+        private void CollectBgObject(LayerCommon.BGInstanceObject bgInstance, Matrix4x4 worldTransform, bool wallpaperSurface)
         {
             string modelPath = ObjectResolvedPath.FromGamePath(bgInstance.AssetPath).Path;
 
@@ -203,7 +204,7 @@ internal static class SharedGroupAssetResolver
 
             if (_collectCatalogAssets)
             {
-                _previewModels.Add(new PreviewModelInfo(modelPath, worldTransform));
+                _previewModels.Add(new PreviewModelInfo(modelPath, worldTransform, wallpaperSurface ? (ushort)0 : null));
             }
 
             if (_collectCatalogAssets && !ObjectAssetPathRules.IsBgObjectModelPath(modelPath))
