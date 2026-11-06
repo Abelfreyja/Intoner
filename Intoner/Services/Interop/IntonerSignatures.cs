@@ -168,12 +168,6 @@ internal static unsafe class IntonerSignatures
     public static readonly NativeResolvedAddressTarget SceneRenderSetRenderTargets = new(
         (nint)GraphicsContext.MemberFunctionPointers.SetRenderTargets,
         "Context.SetRenderTargets");
-    public static readonly NativeResolvedAddressTarget SceneRenderAllocateCommand = new(
-        (nint)GraphicsContext.MemberFunctionPointers.AllocateCommand,
-        "Context.AllocateCommand");
-    public static readonly NativeResolvedAddressTarget SceneRenderPushBackCommand = new(
-        (nint)GraphicsContext.MemberFunctionPointers.PushBackCommand,
-        "Context.PushBackCommand");
     public static readonly NativeResolvedAddressTarget SceneRenderSetTargetCommand = new(
         (nint)ImmediateContext.MemberFunctionPointers.DoSetTargetCommand,
         "ImmediateContext.DoSetTargetCommand");
@@ -323,8 +317,6 @@ internal static unsafe class IntonerSignatures
     [
         // scene rendering
         SceneRenderSetRenderTargets,
-        SceneRenderAllocateCommand,
-        SceneRenderPushBackCommand,
         SceneRenderSetTargetCommand,
 
         // resource

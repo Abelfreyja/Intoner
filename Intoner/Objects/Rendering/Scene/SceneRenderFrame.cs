@@ -1,3 +1,4 @@
+using FFXIVClientStructs.FFXIV.Client.Graphics.Kernel;
 using FFXIVClientStructs.FFXIV.Client.Graphics.Render;
 using Intoner.Services.Gpu;
 using SharpDX.Direct3D11;
@@ -17,35 +18,19 @@ internal readonly record struct SceneRenderFrame(
     ShaderResourceView? SceneDepthView,
     SceneTextureSize SceneDepthSize)
 {
-    public static bool TryCapture(
-        SceneDepthViewCache sceneDepth,
-        SceneRenderFeatures features,
-        SceneProjection? submittedProjection,
-        out SceneRenderFrame frame)
+    public static SceneRenderFrame Capture(in SceneRenderCommand command, SceneDepthViewCache sceneDepth, SceneRenderFeatures features)
     {
-        ArgumentNullException.ThrowIfNull(sceneDepth);
-        frame = default;
-        if (!SceneRenderTarget.TryResolveViewport(out RawViewportF viewport, out SceneTextureSize targetSize))
-        {
-            return false;
-        }
-
-        bool hasProjection = submittedProjection.HasValue;
-        SceneProjection projection = submittedProjection.GetValueOrDefault() with { Viewport = viewport };
-        ShaderResourceView? sceneDepthView = null;
-        SceneTextureSize sceneDepthSize = SceneTextureSize.Empty;
-        if ((features & SceneRenderFeatures.SceneDepth) != SceneRenderFeatures.None)
-        {
-            _ = sceneDepth.TryGet(out sceneDepthView, out sceneDepthSize);
-        }
-        frame = new SceneRenderFrame(
-            viewport,
-            targetSize,
-            projection,
-            hasProjection,
-            sceneDepthView,
-            sceneDepthSize);
-        return true;
+        SceneTextureSize depthSize = default;
+        ShaderResourceView? depthView = (features & SceneRenderFeatures.SceneDepth) != SceneRenderFeatures.None
+            ? sceneDepth.Get(command.Target.DepthViewAddress, out depthSize)
+            : null;
+        return new SceneRenderFrame(
+            command.Target.Viewport,
+            command.Target.Size,
+            command.Projection.GetValueOrDefault(),
+            command.Projection.HasValue,
+            depthView,
+            depthSize);
     }
 }
 
@@ -59,11 +44,9 @@ internal readonly record struct SceneProjection(
     bool ForwardPositive,
     RawViewportF Viewport)
 {
-    public static bool TryCapture(out SceneProjection projection)
+    public static SceneProjection? Capture(RawViewportF viewport)
     {
-        projection = default;
-        if (!SceneRenderTarget.TryResolveViewport(out RawViewportF viewport, out _)
-            || !SceneViewportProjection.TryGetMainRenderViewProjection(
+        if (!SceneViewportProjection.TryGetMainRenderViewProjection(
                 out Matrix4x4 viewProjection,
                 out Matrix4x4 viewMatrix,
                 out Matrix4x4 projectionMatrix,
@@ -76,10 +59,10 @@ internal readonly record struct SceneProjection(
                 reverseDepth,
                 out bool forwardPositive))
         {
-            return false;
+            return null;
         }
 
-        projection = new SceneProjection(
+        return new SceneProjection(
             viewProjection,
             viewMatrix,
             nearPlane,
@@ -87,7 +70,6 @@ internal readonly record struct SceneProjection(
             reverseDepth,
             forwardPositive,
             viewport);
-        return true;
     }
 }
 
@@ -98,76 +80,84 @@ internal readonly record struct SceneTextureSize(
     uint AllocatedWidth,
     uint AllocatedHeight)
 {
-    public static readonly SceneTextureSize Empty = new(0, 0, 0, 0);
+    public static readonly SceneTextureSize Empty = default;
 }
 
-internal static unsafe class SceneRenderTarget
+[StructLayout(LayoutKind.Auto)]
+internal readonly record struct SceneRenderTarget(
+    nint Address,
+    SceneTextureSize Size,
+    (uint Width, uint Height) ViewportSize,
+    nint DepthViewAddress)
 {
-    public static bool IsFinalTargetBind(nint targetSlots)
-        => TryGetBoundTexture(targetSlots, out KernelTexture* boundTarget)
-           && IsFinalTarget(boundTarget);
-
-    public static bool IsFinalTarget(KernelTexture* texture)
-        => texture != null && texture == GetFinalTargetOrNull();
-
-    public static bool TryResolveViewport(out RawViewportF viewport, out SceneTextureSize targetSize)
+    public RawViewportF Viewport => new()
     {
-        targetSize = SceneTextureSize.Empty;
-        KernelTexture* finalTarget = GetFinalTargetOrNull();
-        if (!TryGetTextureSize(finalTarget, out targetSize))
+        X = 0.5f,
+        Y = 0.5f,
+        Width = ViewportSize.Width,
+        Height = ViewportSize.Height,
+        MinDepth = 0f,
+        MaxDepth = 1f,
+    };
+}
+
+internal static unsafe class SceneRenderTargets
+{
+    private const int ColorMipOffset = 0x38;
+    private const int ColorSliceOffset = 0x3C;
+
+    public static bool TryCaptureFinal(KernelTexture* texture, out SceneRenderTarget target)
+    {
+        target = default;
+        RenderTargetManager* manager = RenderTargetManager.Instance();
+        if (manager == null || texture != manager->SwapChainBackBuffer || !TryGetSize(texture, out SceneTextureSize size)
+            || texture->Width3 == 0 || texture->Height3 == 0)
         {
-            viewport = default;
             return false;
         }
 
-        viewport = new RawViewportF
-        {
-            X = 0.5f,
-            Y = 0.5f,
-            Width = targetSize.ActualWidth,
-            Height = targetSize.ActualHeight,
-            MinDepth = 0f,
-            MaxDepth = 1f,
-        };
+        target = new SceneRenderTarget((nint)texture, size, (texture->Width3, texture->Height3),
+            GetDepthViewAddress(manager->DepthStencil));
         return true;
     }
 
-    public static bool TryResolveDepthView(out nint depthViewPointer, out SceneTextureSize depthSize)
+    public static bool Matches(in SceneRenderTarget target, RenderCommandSetTarget* command)
     {
-        depthViewPointer = nint.Zero;
-        depthSize = SceneTextureSize.Empty;
-        RenderTargetManager* renderTargetManager = RenderTargetManager.Instance();
-        if (renderTargetManager == null)
+        if (target.Address == nint.Zero || command == null
+            || command->Type != RenderCommandType.SetTarget
+            || command->RenderTargetCount != 1 || command->DepthBuffer != null
+            || *(ushort*)((byte*)command + ColorMipOffset) != 0
+            || *(ushort*)((byte*)command + ColorSliceOffset) != 0)
         {
             return false;
         }
 
-        KernelTexture* depthTexture = renderTargetManager->DepthStencil;
-        depthViewPointer = depthTexture != null
-            ? (nint)depthTexture->D3D11ShaderResourceView
-            : nint.Zero;
-        return depthViewPointer != nint.Zero && TryGetTextureSize(depthTexture, out depthSize);
+        KernelTexture* texture = command->RenderTargets[0].Value;
+        return (nint)texture == target.Address
+            && texture->Width3 == target.ViewportSize.Width
+            && texture->Height3 == target.ViewportSize.Height;
     }
 
-    private static KernelTexture* GetFinalTargetOrNull()
+    public static nint GetDepthView(out SceneTextureSize size)
     {
-        RenderTargetManager* renderTargetManager = RenderTargetManager.Instance();
-        return renderTargetManager != null
-            ? renderTargetManager->SwapChainBackBuffer
-            : null;
+        RenderTargetManager* manager = RenderTargetManager.Instance();
+        KernelTexture* depth = manager != null ? manager->DepthStencil : null;
+        nint view = GetDepthViewAddress(depth);
+        if (view != nint.Zero && TryGetSize(depth, out size))
+        {
+            return view;
+        }
+
+        size = default;
+        return nint.Zero;
     }
 
-    private static bool TryGetBoundTexture(nint targetSlots, out KernelTexture* texture)
-    {
-        texture = targetSlots != nint.Zero
-            ? *(KernelTexture**)targetSlots
-            : null;
-        return texture != null;
-    }
+    private static nint GetDepthViewAddress(KernelTexture* depth)
+        => depth != null ? (nint)depth->D3D11ShaderResourceView : nint.Zero;
 
-    private static bool TryGetTextureSize(KernelTexture* texture, out SceneTextureSize size)
+    private static bool TryGetSize(KernelTexture* texture, out SceneTextureSize size)
     {
-        size = SceneTextureSize.Empty;
+        size = default;
         if (texture == null || texture->ActualWidth == 0 || texture->ActualHeight == 0)
         {
             return false;
@@ -188,13 +178,14 @@ internal sealed class SceneDepthViewCache : IDisposable
     private ShaderResourceView? _view;
     private nint _viewPointer;
 
-    public bool TryGet(out ShaderResourceView? view, out SceneTextureSize size)
+    public ShaderResourceView? Get(nint recordedView, out SceneTextureSize size)
     {
-        if (!SceneRenderTarget.TryResolveDepthView(out nint viewPointer, out size))
+        nint viewPointer = SceneRenderTargets.GetDepthView(out size);
+        if (viewPointer == nint.Zero || viewPointer != recordedView)
         {
+            size = default;
             Clear();
-            view = null;
-            return false;
+            return null;
         }
 
         if (_viewPointer != viewPointer)
@@ -204,8 +195,7 @@ internal sealed class SceneDepthViewCache : IDisposable
             _viewPointer = viewPointer;
         }
 
-        view = _view;
-        return view != null;
+        return _view;
     }
 
     public void Dispose()

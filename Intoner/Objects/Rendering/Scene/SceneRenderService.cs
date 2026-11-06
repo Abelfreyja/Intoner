@@ -16,8 +16,6 @@ internal sealed class SceneRenderService : IDisposable
     private readonly HashSet<Type> _loggedPassFailures = [];
 
     private bool _schedulerStopInProgress;
-    private int _loggedFrameFailure;
-    private int _loggedCallbackFailure;
 
     public SceneRenderService(
         ILogger<SceneRenderService> logger,
@@ -89,17 +87,14 @@ internal sealed class SceneRenderService : IDisposable
 
     private void Unregister(ISceneRenderPass pass)
     {
-        bool stopScheduler;
         lock (_stateLock)
         {
-            RemovePass(pass);
-            stopScheduler = _passes.Count == 0;
-            _schedulerStopInProgress = stopScheduler;
-        }
+            if (_disposeState.IsDisposing || !RemovePass(pass) || _passes.Count != 0)
+            {
+                return;
+            }
 
-        if (!stopScheduler)
-        {
-            return;
+            _schedulerStopInProgress = true;
         }
 
         try
@@ -145,22 +140,7 @@ internal sealed class SceneRenderService : IDisposable
         }
     }
 
-    private void ExecuteDrawCommand(SceneRenderCommand command)
-    {
-        try
-        {
-            ExecuteDrawCommandUnsafe(command);
-        }
-        catch (Exception ex)
-        {
-            if (Interlocked.Exchange(ref _loggedCallbackFailure, 1) == 0)
-            {
-                _logger.LogWarning(ex, "scene render callback failed");
-            }
-        }
-    }
-
-    private void ExecuteDrawCommandUnsafe(SceneRenderCommand command)
+    private void ExecuteDrawCommand(in SceneRenderCommand command)
     {
         if (_disposeState.IsDisposing)
         {
@@ -192,21 +172,7 @@ internal sealed class SceneRenderService : IDisposable
                     return;
                 }
 
-                if (!SceneRenderFrame.TryCapture(
-                        _sceneDepth,
-                        features,
-                        command.Projection,
-                        out SceneRenderFrame frame))
-                {
-                    if (Interlocked.Exchange(ref _loggedFrameFailure, 1) == 0)
-                    {
-                        _logger.LogWarning("scene render callback skipped because the final scene target was unavailable");
-                    }
-
-                    return;
-                }
-
-                _loggedFrameFailure = 0;
+                SceneRenderFrame frame = SceneRenderFrame.Capture(command, _sceneDepth, features);
                 foreach (ISceneRenderPass pass in _activePasses)
                 {
                     try
@@ -266,16 +232,18 @@ internal sealed class SceneRenderService : IDisposable
         _passes.Insert(index, pass);
     }
 
-    private void RemovePass(ISceneRenderPass pass)
+    private bool RemovePass(ISceneRenderPass pass)
     {
         for (int index = 0; index < _passes.Count; ++index)
         {
             if (ReferenceEquals(_passes[index], pass))
             {
                 _passes.RemoveAt(index);
-                return;
+                return true;
             }
         }
+
+        return false;
     }
 
     internal sealed class Registration : IDisposable

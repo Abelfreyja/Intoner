@@ -3,7 +3,16 @@ using System.Runtime.InteropServices;
 namespace Intoner.Scene.Rendering;
 
 [StructLayout(LayoutKind.Auto)]
-internal readonly record struct SceneRenderCommand(SceneRenderPhase Phase, SceneProjection? Projection);
+internal readonly record struct SceneRenderCommand(
+    nint Address,
+    uint FrameNumber,
+    SceneRenderPhase Phase,
+    SceneRenderTarget Target,
+    SceneProjection? Projection = null)
+{
+    public bool IsFromActiveFrame(uint frameNumber)
+        => unchecked(frameNumber - FrameNumber) <= 1;
+}
 
 /// <summary> tracks the exact native target commands assigned to scene phases </summary>
 internal sealed class SceneRenderCommandTracker
@@ -15,60 +24,50 @@ internal sealed class SceneRenderCommandTracker
     private readonly Dictionary<nint, SceneRenderCommand> _commands = new(8);
 
     private long _bucketMask;
+    private uint _newestFrame;
 
     /// <summary> records or updates a command and reports whether stale entries had to be discarded </summary>
-    public bool Track(nint command, SceneRenderCommand frame)
+    public bool Track(in SceneRenderCommand command)
     {
         lock (_stateLock)
         {
-            bool reset = _commands.Count >= MaximumCommandCount && !_commands.ContainsKey(command);
+            if (_newestFrame != command.FrameNumber)
+            {
+                _newestFrame = command.FrameNumber;
+                RemoveExpiredCommands();
+            }
+
+            bool reset = _commands.Count >= MaximumCommandCount && !_commands.ContainsKey(command.Address);
             if (reset)
             {
-                ClearLocked();
+                _commands.Clear();
+                _bucketMask = 0;
             }
 
-            if (_commands.TryAdd(command, frame))
-            {
-                int bucket = GetBucket(command);
-                Volatile.Write(
-                    ref _bucketMask,
-                    Volatile.Read(ref _bucketMask) | GetBit(bucket));
-            }
-            else
-            {
-                _commands[command] = frame;
-            }
-
+            _commands[command.Address] = command;
+            Volatile.Write(ref _bucketMask, _bucketMask | GetBucketBit(command.Address));
             return reset;
         }
     }
 
-    /// <summary> removes a command when its native storage is reused before execution </summary>
-    public void Remove(nint command)
-    {
-        if (!MayContain(command))
-        {
-            return;
-        }
-
-        lock (_stateLock)
-        {
-            _ = RemoveLocked(command, out _);
-        }
-    }
-
     /// <summary> removes a command and returns its retained scene state </summary>
-    public bool TryTake(nint command, out SceneRenderCommand frame)
+    public bool TryTake(nint address, out SceneRenderCommand command)
     {
-        if (!MayContain(command))
+        if ((Volatile.Read(ref _bucketMask) & GetBucketBit(address)) == 0)
         {
-            frame = default;
+            command = default;
             return false;
         }
 
         lock (_stateLock)
         {
-            return RemoveLocked(command, out frame);
+            if (!_commands.Remove(address, out command))
+            {
+                return false;
+            }
+
+            RebuildBucketMask();
+            return true;
         }
     }
 
@@ -76,50 +75,44 @@ internal sealed class SceneRenderCommandTracker
     {
         lock (_stateLock)
         {
-            ClearLocked();
+            _commands.Clear();
+            Volatile.Write(ref _bucketMask, 0);
         }
     }
 
-    private bool RemoveLocked(nint command, out SceneRenderCommand frame)
-    {
-        if (!_commands.Remove(command, out frame))
-        {
-            return false;
-        }
-
-        RebuildBucketMaskLocked();
-        return true;
-    }
-
-    private void ClearLocked()
-    {
-        _commands.Clear();
-        Volatile.Write(ref _bucketMask, 0);
-    }
-
-    private void RebuildBucketMaskLocked()
+    private void RemoveExpiredCommands()
     {
         long mask = 0;
-        foreach (nint command in _commands.Keys)
+        foreach (KeyValuePair<nint, SceneRenderCommand> entry in _commands)
         {
-            mask |= GetBit(GetBucket(command));
+            if (entry.Value.IsFromActiveFrame(_newestFrame))
+            {
+                mask |= GetBucketBit(entry.Key);
+            }
+            else
+            {
+                _commands.Remove(entry.Key);
+            }
         }
 
         Volatile.Write(ref _bucketMask, mask);
     }
 
-    private bool MayContain(nint command)
+    private void RebuildBucketMask()
     {
-        int bucket = GetBucket(command);
-        return (Volatile.Read(ref _bucketMask) & GetBit(bucket)) != 0;
+        long mask = 0;
+        foreach (nint address in _commands.Keys)
+        {
+            mask |= GetBucketBit(address);
+        }
+
+        Volatile.Write(ref _bucketMask, mask);
     }
 
-    private static int GetBucket(nint command)
+    private static long GetBucketBit(nint command)
     {
         ulong address = (ulong)command;
-        return (int)(((address >> 4) ^ (address >> 13)) & (BucketCount - 1));
+        int bucket = (int)(((address >> 4) ^ (address >> 13)) & (BucketCount - 1));
+        return 1L << bucket;
     }
-
-    private static long GetBit(int bucket)
-        => 1L << bucket;
 }
