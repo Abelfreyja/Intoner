@@ -179,6 +179,7 @@ internal sealed class BackgroundLoad<TValue> : ILoadOperation, IDisposable
 
     public TValue Get(CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         EnsureLoaded();
 
         while (true)

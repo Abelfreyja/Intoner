@@ -33,7 +33,7 @@ internal sealed unsafe class SceneRenderScheduler : IDisposable
     private readonly InteropHookCollection _hooks;
     private Hook<Context.Delegates.SetRenderTargets>? _recordTargetHook;
     private Hook<ImmediateContext.Delegates.DoSetTargetCommand>? _bindTargetHook;
-    private bool _startFailed;
+    private bool _stopFailed;
     private int _active;
     private int _loggedDetourFailure;
     private int _loggedDispatchFailure;
@@ -61,7 +61,7 @@ internal sealed unsafe class SceneRenderScheduler : IDisposable
     {
         lock (_lifecycleLock)
         {
-            if (_disposeState.IsDisposing || _startFailed)
+            if (_disposeState.IsDisposing || _stopFailed)
             {
                 return false;
             }
@@ -118,7 +118,7 @@ internal sealed unsafe class SceneRenderScheduler : IDisposable
     {
         lock (_lifecycleLock)
         {
-            if (Interlocked.Exchange(ref _active, 0) == 0)
+            if (Interlocked.Exchange(ref _active, 0) == 0 && !_stopFailed)
             {
                 return;
             }
@@ -129,7 +129,7 @@ internal sealed unsafe class SceneRenderScheduler : IDisposable
             }
             catch
             {
-                _startFailed = true;
+                _stopFailed = true;
                 throw;
             }
             finally

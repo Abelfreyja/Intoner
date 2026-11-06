@@ -31,13 +31,26 @@ internal sealed class SceneRenderCommandTracker
     {
         lock (_stateLock)
         {
-            if (_newestFrame != command.FrameNumber)
+            if (_commands.Count == 0 || unchecked((int)(command.FrameNumber - _newestFrame)) > 0)
             {
                 _newestFrame = command.FrameNumber;
                 RemoveExpiredCommands();
             }
 
-            bool reset = _commands.Count >= MaximumCommandCount && !_commands.ContainsKey(command.Address);
+            if (!command.IsFromActiveFrame(_newestFrame))
+            {
+                return false;
+            }
+
+            bool hasPrevious = _commands.TryGetValue(command.Address, out SceneRenderCommand previous);
+
+            if (hasPrevious && unchecked((int)(command.FrameNumber - previous.FrameNumber)) < 0)
+            {
+                return false;
+            }
+
+            bool reset = _commands.Count >= MaximumCommandCount && !hasPrevious;
+
             if (reset)
             {
                 _commands.Clear();

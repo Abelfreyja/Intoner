@@ -286,7 +286,7 @@ internal sealed class ObjectCatalogService : IObjectCatalogService, IDisposable
 
     private void ScheduleProjectionUpdate()
     {
-        if (IsDisposing)
+        if (IsDisposing || _load.Status.Phase is not (LoadPhase.Running or LoadPhase.Ready))
         {
             return;
         }
